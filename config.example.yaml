@@ -1,0 +1,12 @@
+# Copy to ~/.config/po/config.yaml (or $XDG_CONFIG_HOME/po/config.yaml).
+
+# A bundled theme (main, moon, dawn) or a path to a theme .yaml/.json file,
+# relative to this folder. PO_THEME overrides it.
+theme: main
+
+# Every key is optional; omitted fonts use the system defaults.
+font:
+  family: Adwaita Sans
+  size: 14
+  mono_family: Noto Sans Mono
+  mono_size: 13
