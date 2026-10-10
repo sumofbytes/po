@@ -1593,6 +1593,7 @@ impl Render for Reader {
                         .child(
                             resizable_panel()
                                 .visible(left_open)
+                                .flex_none()
                                 .size(px(260.0))
                                 .size_range(px(160.0)..px(520.0))
                                 .child(self.explorer(cx)),
@@ -1604,6 +1605,7 @@ impl Render for Reader {
                         .child(
                             resizable_panel()
                                 .visible(right_open)
+                                .flex_none()
                                 .size(px(460.0))
                                 .size_range(px(300.0)..px(760.0))
                                 .child(self.agent_panel(cx)),
