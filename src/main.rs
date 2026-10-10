@@ -320,6 +320,8 @@ struct Reader {
     right_open: bool,
     /// Whether diffs show old and new side by side instead of inline.
     split: bool,
+    /// Keeps the shortcuts routed to the reader when no input is focused.
+    focus: gpui::FocusHandle,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -406,8 +408,10 @@ impl Reader {
             left_open: true,
             right_open: true,
             split: false,
+            focus: cx.focus_handle(),
             _subscriptions: subscriptions,
         };
+        reader.focus.focus(window, cx);
         reader.refresh_tree(cx);
         if let Some(command) = command {
             reader.connect(&command, window, cx);
@@ -1177,12 +1181,12 @@ impl Reader {
         } else if self.split {
             let pairs = diff::split(&rows);
             let count = pairs.len();
-            gpui::uniform_list("diff-split", count, move |range, _, _| {
-                range
+            div().id("diff-split").size_full().overflow_y_scroll().children(
+                (0..count)
                     .map(|ix| {
-                        let line = div().flex().w_full().h(px(20.0)).items_center().font_family(font.clone()).text_sm();
+                        let line = div().flex().w_full().min_h(px(20.0)).items_start().font_family(font.clone()).text_sm();
                         let cell = |cell: &Option<diff::Cell>, first: bool| {
-                            let half = div().flex_1().min_w_0().h_full().flex().items_center().gap_2().overflow_hidden();
+                            let half = div().flex_1().min_w_0().self_stretch().flex().items_start().gap_2();
                             let half = if first { half.border_r_1().border_color(border) } else { half };
                             let Some(cell) = cell else { return half.bg(muted.opacity(0.06)) };
                             let tint = match cell.kind {
@@ -1195,23 +1199,20 @@ impl Reader {
                                 None => half,
                             };
                             half.child(div().w(px(44.0)).flex_none().text_right().text_color(muted).child(cell.number.to_string()))
-                                .child(div().flex_1().min_w_0().whitespace_nowrap().child(cell.text.clone()))
+                                .child(div().flex_1().min_w_0().child(cell.text.clone()))
                         };
                         match &pairs[ix] {
                             Pair::Hunk(text) => line.px_2().bg(muted.opacity(0.12)).text_color(muted).child(text.clone()),
                             Pair::Line(old, new) => line.child(cell(old, true)).child(cell(new, false)),
                         }
                     })
-                    .collect()
-            })
-            .size_full()
+                    .collect::<Vec<_>>(),
+            )
             .into_any_element()
         } else {
             let count = rows.len();
-            // The list sizes itself from one row, so measure the widest.
-            let widest = (0..count).max_by_key(|&ix| rows[ix].text.chars().count());
-            gpui::uniform_list("diff-rows", count, move |range, _, _| {
-                range
+            div().id("diff-rows").size_full().overflow_y_scroll().children(
+                (0..count)
                     .map(|ix| {
                         let row = &rows[ix];
                         let number = |n: Option<u32>| {
@@ -1223,7 +1224,7 @@ impl Reader {
                             Kind::Hunk => (Some(muted.opacity(0.12)), ""),
                             Kind::Context => (None, " "),
                         };
-                        let line = div().flex().min_w_full().h(px(20.0)).items_center().gap_2().font_family(font.clone()).text_sm();
+                        let line = div().flex().w_full().min_h(px(20.0)).items_start().gap_2().font_family(font.clone()).text_sm();
                         let line = match tint {
                             Some(tint) => line.bg(tint),
                             None => line,
@@ -1234,13 +1235,10 @@ impl Reader {
                         line.child(number(row.old))
                             .child(number(row.new))
                             .child(div().w(px(10.0)).flex_none().text_color(muted).child(sign))
-                            .child(div().flex_1().min_w_0().whitespace_nowrap().child(row.text.clone()))
+                            .child(div().flex_1().min_w_0().child(row.text.clone()))
                     })
-                    .collect()
-            })
-            .with_horizontal_sizing_behavior(gpui::ListHorizontalSizingBehavior::Unconstrained)
-            .with_width_from_item(widest)
-            .size_full()
+                    .collect::<Vec<_>>(),
+            )
             .into_any_element()
         };
         let right = div()
@@ -1586,6 +1584,7 @@ impl Render for Reader {
             .flex_col()
             .bg(background)
             .text_color(foreground)
+            .track_focus(&self.focus)
             .on_action(cx.listener(|reader, _: &ToggleLeft, _, cx| reader.toggle_left(cx)))
             .on_action(cx.listener(|reader, _: &ToggleRight, _, cx| reader.toggle_right(cx)))
             .child(
