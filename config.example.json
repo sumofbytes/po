@@ -5,5 +5,9 @@
     "size": 14,
     "mono_family": "Noto Sans Mono",
     "mono_size": 13
-  }
+  },
+  "agents": [
+    { "id": "opencode", "name": "OpenCode", "command": "opencode acp" },
+    { "id": "mine", "name": "My agent", "command": "my-agent --acp" }
+  ]
 }

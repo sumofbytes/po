@@ -1,5 +1,6 @@
 #![recursion_limit = "1024"]
 mod acp;
+mod config;
 mod theme;
 
 use std::collections::{BTreeMap, HashSet};
@@ -238,7 +239,7 @@ struct Reader {
     status: String,
     client: Option<Client>,
     agent: Option<String>,
-    agents: Vec<(String, String)>,
+    agents: Vec<config::Agent>,
     generation: u64,
     scroll: ScrollHandle,
     _subscriptions: Vec<Subscription>,
@@ -270,12 +271,9 @@ impl Reader {
                 }
             }),
         ];
-        let mut agents: Vec<(String, String)> = [("opencode", "OpenCode"), ("dex", "dex"), ("exsa", "exsa"), ("claude", "Claude")]
-            .iter()
-            .map(|(key, label)| (key.to_string(), label.to_string()))
-            .collect();
-        if let Some(command) = command.as_ref().filter(|c| !agents.iter().any(|(key, _)| key == *c)) {
-            agents.push((command.clone(), "Custom".into()));
+        let mut agents = config::agents(&config::load());
+        if let Some(command) = command.as_ref().filter(|c| !agents.iter().any(|agent| agent.id == **c)) {
+            agents.push(config::Agent { id: command.clone(), name: "Custom".into(), command: command.clone() });
         }
         let mut reader = Self {
             root,
@@ -402,7 +400,7 @@ impl Reader {
         self.thread.clear();
         self.busy = false;
         self.ready = false;
-        let command = agent_command(key);
+        let command = self.agents.iter().find(|agent| agent.id == key).map_or(key.to_string(), |agent| agent.command.clone());
         self.status = "starting…".into();
         match Client::spawn(&command, &self.root) {
             Ok((client, mut events)) => {
@@ -442,7 +440,7 @@ impl Reader {
 
     fn agent_label(&self) -> Option<&str> {
         let key = self.agent.as_ref()?;
-        self.agents.iter().find(|(k, _)| k == key).map(|(_, label)| label.as_str())
+        self.agents.iter().find(|agent| agent.id == *key).map(|agent| agent.name.as_str())
     }
 
     fn fail(&mut self, text: String) {
@@ -782,9 +780,9 @@ impl Reader {
                             .outline()
                             .dropdown_caret(true)
                             .dropdown_menu(move |menu, _, _| {
-                                agents.iter().fold(menu, |menu, (key, label)| {
-                                    let (picker, key) = (picker.clone(), key.clone());
-                                    menu.item(PopupMenuItem::new(label.clone()).on_click(move |_, window, cx| {
+                                agents.iter().fold(menu, |menu, agent| {
+                                    let (picker, key) = (picker.clone(), agent.id.clone());
+                                    menu.item(PopupMenuItem::new(agent.name.clone()).on_click(move |_, window, cx| {
                                         picker.update(cx, |reader, cx| reader.new_thread(&key, window, cx))
                                     }))
                                 })
@@ -988,22 +986,6 @@ impl Render for Reader {
                 .child(resizable_panel().child(self.viewer(cx)))
                 .child(resizable_panel().size(px(460.0)).size_range(px(300.0)..px(760.0)).child(self.agent_panel(cx))),
         )
-    }
-}
-
-/// Resolves a preset name to its command; anything else is a command as given.
-fn agent_command(name: &str) -> String {
-    let sibling = |dir: &str| Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join(dir);
-    match name {
-        "opencode" => "opencode acp".into(),
-        "dex" => {
-            let release = sibling("dex/target/release/dex");
-            let binary = if release.exists() { release } else { sibling("dex/target/debug/dex") };
-            format!("{} acp", binary.display())
-        }
-        "exsa" => "exsa-acp".into(),
-        "claude" => "npx -y @agentclientprotocol/claude-agent-acp".into(),
-        other => other.to_string(),
     }
 }
 

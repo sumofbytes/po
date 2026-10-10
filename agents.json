@@ -1,0 +1,6 @@
+[
+  { "id": "opencode", "name": "OpenCode", "command": "opencode acp" },
+  { "id": "dex", "name": "dex", "command": "dex acp" },
+  { "id": "exsa", "name": "exsa", "command": "exsa-acp" },
+  { "id": "claude", "name": "Claude", "command": "npx -y @agentclientprotocol/claude-agent-acp" }
+]
