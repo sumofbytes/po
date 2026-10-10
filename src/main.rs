@@ -118,12 +118,37 @@ fn folders(files: &[String]) -> HashSet<SharedString> {
     out
 }
 
-/// The explorer's tree; `marks` puts a status letter in front of the files it names.
-fn explorer_items(
-    files: &[String],
-    expanded: &HashSet<SharedString>,
-    marks: &HashMap<&str, char>,
-) -> Vec<TreeItem> {
+/// A colour family per file kind, drawn as a small square rather than a glyph so it
+/// looks the same whatever fonts are installed.
+#[derive(Clone, Copy)]
+enum FileKind {
+    Code,
+    Data,
+    Doc,
+    Web,
+    Image,
+    Other,
+}
+
+fn file_kind(name: &str) -> FileKind {
+    let Some((stem, ext)) = name.rsplit_once('.') else { return FileKind::Other };
+    if stem.is_empty() {
+        return FileKind::Other;
+    }
+    match ext.to_ascii_lowercase().as_str() {
+        "rs" | "go" | "js" | "mjs" | "cjs" | "ts" | "tsx" | "jsx" | "py" | "rb" | "java" | "kt" | "c" | "h" | "cc"
+        | "cpp" | "hpp" | "cs" | "php" | "swift" | "lua" | "ex" | "exs" | "scala" | "dart" | "sh" | "bash" | "zsh"
+        | "sql" => FileKind::Code,
+        "json" | "yaml" | "yml" | "toml" | "ini" | "xml" | "csv" | "env" | "lock" | "mod" | "sum" => FileKind::Data,
+        "md" | "markdown" | "txt" | "rst" | "adoc" => FileKind::Doc,
+        "html" | "htm" | "css" | "scss" | "less" | "svg" | "vue" => FileKind::Web,
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "ico" | "avif" => FileKind::Image,
+        _ => FileKind::Other,
+    }
+}
+
+/// The explorer's tree.
+fn explorer_items(files: &[String], expanded: &HashSet<SharedString>) -> Vec<TreeItem> {
     let mut root = Dir::default();
     for file in files {
         let mut dir = &mut root;
@@ -140,25 +165,20 @@ fn explorer_items(
         dir: &Dir,
         prefix: &str,
         expanded: &HashSet<SharedString>,
-        marks: &HashMap<&str, char>,
     ) -> Vec<TreeItem> {
         let folders = dir.dirs.iter().map(|(name, child)| {
             let id = format!("{prefix}{name}");
             let open = expanded.contains(id.as_str());
-            let children = items(child, &format!("{id}/"), expanded, marks);
+            let children = items(child, &format!("{id}/"), expanded);
             TreeItem::new(id, name.clone()).children(children).expanded(open)
         });
         let files = dir.files.iter().map(|path| {
             let name = path.rsplit('/').next().unwrap_or(path);
-            let label = match marks.get(path.as_str()) {
-                Some(mark) => format!("{mark}  {name}"),
-                None => name.to_string(),
-            };
-            TreeItem::new(path.clone(), label)
+            TreeItem::new(path.clone(), name.to_string())
         });
         folders.chain(files).collect()
     }
-    items(&root, "", expanded, marks)
+    items(&root, "", expanded)
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -362,7 +382,7 @@ impl Reader {
 
     /// Rebuilds the explorer from `files`, keeping folders open and the current file selected.
     fn refresh_tree(&mut self, cx: &mut Context<Self>) {
-        let items = explorer_items(&self.files, &self.expanded, &HashMap::new());
+        let items = explorer_items(&self.files, &self.expanded);
         let current = self.current.clone().map(SharedString::from);
         self.tree.update(cx, |tree, cx| {
             tree.set_items(items, cx);
@@ -381,10 +401,9 @@ impl Reader {
         }
         if listed {
             let paths: Vec<String> = self.changes.iter().map(|c| c.path.clone()).collect();
-            let marks: HashMap<&str, char> = self.changes.iter().map(|c| (c.path.as_str(), c.status)).collect();
             let mut expanded = folders(&paths);
             expanded.retain(|id| !self.collapsed.contains(id));
-            let items = explorer_items(&paths, &expanded, &marks);
+            let items = explorer_items(&paths, &expanded);
             self.changes_tree.update(cx, |tree, cx| tree.set_items(items, cx));
         }
         let keep = self.picked.clone().filter(|path| self.changes.iter().any(|c| &c.path == path));
@@ -848,17 +867,52 @@ impl Reader {
             Mode::Diff => "Changes",
         };
         let state = if mode == Mode::Diff { &self.changes_tree } else { &self.tree };
+        let marks: HashMap<String, char> = self.changes.iter().map(|c| (c.path.clone(), c.status)).collect();
+        let marks = if mode == Mode::Diff { marks } else { HashMap::new() };
+        // Themes may lack a green (Rosé Pine's success is teal), so added files get their own.
+        let (muted, danger) = (colors.muted_foreground, colors.danger);
+        let kinds = [colors.primary, colors.warning, colors.info, gpui::hsla(0.37, 0.5, 0.5, 1.0)];
         let body: AnyElement = if mode == Mode::Diff && self.changes.is_empty() {
             centered("No changes".into(), cx)
         } else {
             tree(state, move |ix, entry, selected, _, _| {
                 let item = entry.item();
                 let path = item.id.clone();
-                let label = if entry.is_folder() {
-                    format!("{} {}", if entry.is_expanded() { "▾" } else { "▸" }, item.label)
+                let name = item.label.to_string();
+                let lead: AnyElement = if entry.is_folder() {
+                    div()
+                        .w(px(10.0))
+                        .flex_none()
+                        .text_xs()
+                        .text_color(muted)
+                        .child(if entry.is_expanded() { "▾" } else { "▸" })
+                        .into_any_element()
                 } else {
-                    item.label.to_string()
+                    let tint = match file_kind(&name) {
+                        FileKind::Code => kinds[0],
+                        FileKind::Data => kinds[1],
+                        FileKind::Doc => muted,
+                        FileKind::Web => kinds[2],
+                        FileKind::Image => kinds[3],
+                        FileKind::Other => muted.opacity(0.6),
+                    };
+                    div().w(px(7.0)).h(px(7.0)).flex_none().rounded(px(2.0)).bg(tint).into_any_element()
                 };
+                let mark = marks.get(path.as_ref()).map(|status| {
+                    let color = match status {
+                        'A' | 'U' => kinds[3],
+                        'D' => danger,
+                        _ => kinds[1],
+                    };
+                    div().w(px(10.0)).flex_none().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(color).child(status.to_string())
+                });
+                let label = div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(lead)
+                    .child(div().flex_1().min_w_0().truncate().child(name))
+                    .children(mark);
                 let folder = entry.is_folder();
                 let this = this.clone();
                 ListItem::new(ix)
