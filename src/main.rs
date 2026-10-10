@@ -595,6 +595,18 @@ impl Reader {
         let too_big = std::fs::metadata(&full).map_or(false, |m| m.len() > 4 * 1024 * 1024);
         match std::fs::read_to_string(&full) {
             Ok(_) if too_big => self.notice = Some(format!("{path} is too large to show")),
+            Ok(text) if self.current.as_deref() == Some(path) && self.editor.is_some() => {
+                // Same file: swap the text in place so the scroll position survives.
+                if let Some(editor) = &self.editor {
+                    editor.update(cx, |state, cx| {
+                        let (offset, cursor) = (state.scroll_offset(), state.cursor_position());
+                        state.set_value(text, window, cx);
+                        state.set_cursor_position(cursor, window, cx);
+                        state.set_scroll_offset(offset, cx);
+                    });
+                }
+                self.notice = None;
+            }
             Ok(text) => {
                 self.editor = Some(cx.new(|cx| {
                     EditorState::new(window, cx)
