@@ -28,8 +28,10 @@ use gpui_kit::component::{
 use gpui::{
     AnyElement, App, Bounds, Context, Entity, FontWeight, ScrollHandle, IntoElement, ParentElement,
     Render, SharedString, Styled, Subscription, Window, WindowBounds, WindowOptions, div, prelude::*,
-    px, size,
+    px, size, KeyBinding,
 };
+
+gpui::actions!(po, [ToggleLeft, ToggleRight]);
 
 const SKIP: [&str; 5] = ["target", "node_modules", "dist", "build", "__pycache__"];
 const MAX_FILES: usize = 5000;
@@ -314,6 +316,8 @@ struct Reader {
     agents: Vec<config::Agent>,
     generation: u64,
     scroll: ScrollHandle,
+    left_open: bool,
+    right_open: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -397,6 +401,8 @@ impl Reader {
             agents,
             generation: 0,
             scroll: ScrollHandle::new(),
+            left_open: true,
+            right_open: true,
             _subscriptions: subscriptions,
         };
         reader.refresh_tree(cx);
@@ -532,6 +538,16 @@ impl Reader {
         }
         let fresh = diff::changes(&self.root, &self.base);
         self.apply_changes(fresh, true, cx);
+        cx.notify();
+    }
+
+    fn toggle_left(&mut self, cx: &mut Context<Self>) {
+        self.left_open = !self.left_open;
+        cx.notify();
+    }
+
+    fn toggle_right(&mut self, cx: &mut Context<Self>) {
+        self.right_open = !self.right_open;
         cx.notify();
     }
 
@@ -1469,16 +1485,67 @@ fn centered(text: String, cx: &App) -> AnyElement {
 impl Render for Reader {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = &cx.theme().colors;
-        let (background, foreground) = (colors.background, colors.foreground);
-        div().size_full().bg(background).text_color(foreground).child(
-            h_resizable("shell")
-                .child(resizable_panel().size(px(260.0)).size_range(px(160.0)..px(520.0)).child(self.explorer(cx)))
-                .child(resizable_panel().child(match self.mode {
-                    Mode::Source => self.viewer(cx).into_any_element(),
-                    Mode::Diff => self.diff_viewer(cx).into_any_element(),
-                }))
-                .child(resizable_panel().size(px(460.0)).size_range(px(300.0)..px(760.0)).child(self.agent_panel(cx))),
-        )
+        let (background, foreground, border, sidebar) = (colors.background, colors.foreground, colors.border, colors.sidebar);
+        let (left, right) = (cx.entity(), cx.entity());
+        let (left_open, right_open) = (self.left_open, self.right_open);
+        let bar = div()
+            .h_8()
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_between()
+            .px_2()
+            .border_t_1()
+            .border_color(border)
+            .bg(sidebar)
+            .child(
+                Button::new("toggle-left")
+                    .icon(if left_open { IconName::PanelLeftClose } else { IconName::PanelLeftOpen })
+                    .ghost()
+                    .small()
+                    .tooltip("Toggle left sidebar (Ctrl+B)")
+                    .on_click(move |_, _, cx| left.update(cx, |reader, cx| reader.toggle_left(cx))),
+            )
+            .child(
+                Button::new("toggle-right")
+                    .icon(if right_open { IconName::PanelRightClose } else { IconName::PanelRightOpen })
+                    .ghost()
+                    .small()
+                    .tooltip("Toggle right sidebar (Ctrl+Shift+B)")
+                    .on_click(move |_, _, cx| right.update(cx, |reader, cx| reader.toggle_right(cx))),
+            );
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .bg(background)
+            .text_color(foreground)
+            .on_action(cx.listener(|reader, _: &ToggleLeft, _, cx| reader.toggle_left(cx)))
+            .on_action(cx.listener(|reader, _: &ToggleRight, _, cx| reader.toggle_right(cx)))
+            .child(
+                div().flex_1().min_h_0().child(
+                    h_resizable("shell")
+                        .child(
+                            resizable_panel()
+                                .visible(left_open)
+                                .size(px(260.0))
+                                .size_range(px(160.0)..px(520.0))
+                                .child(self.explorer(cx)),
+                        )
+                        .child(resizable_panel().child(match self.mode {
+                            Mode::Source => self.viewer(cx).into_any_element(),
+                            Mode::Diff => self.diff_viewer(cx).into_any_element(),
+                        }))
+                        .child(
+                            resizable_panel()
+                                .visible(right_open)
+                                .size(px(460.0))
+                                .size_range(px(300.0)..px(760.0))
+                                .child(self.agent_panel(cx)),
+                        ),
+                ),
+            )
+            .child(bar)
     }
 }
 
@@ -1575,6 +1642,10 @@ fn main() {
     gpui_platform::application().with_assets(gpui_kit::assets::Assets).run(move |cx: &mut App| {
         gpui_kit::init(cx);
         theme::apply(cx);
+        cx.bind_keys([
+            KeyBinding::new("ctrl-b", ToggleLeft, None),
+            KeyBinding::new("ctrl-shift-b", ToggleRight, None),
+        ]);
         let bounds = Bounds::centered(None, size(px(1360.0), px(840.0)), cx);
         gpui_kit::open_window(
             WindowOptions { window_bounds: Some(WindowBounds::Windowed(bounds)), ..Default::default() },
