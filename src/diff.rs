@@ -33,8 +33,35 @@ fn git(root: &Path, args: &[&str]) -> Option<String> {
         .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
-/// Files changed against `HEAD`, including untracked ones. Empty outside a git repository.
-pub fn changes(root: &Path) -> Vec<Change> {
+/// Files changed against `base`, including untracked ones. Empty outside a git repository.
+/// `base` is `HEAD` for local work, or a PR's merge-base when reviewing.
+pub fn changes(root: &Path, base: &str) -> Vec<Change> {
+    let mut out = if base == "HEAD" { status(root) } else { against(root, base) };
+    // Folders before files at every level, as the explorer lists them.
+    out.sort_by_cached_key(|change| {
+        let parts: Vec<&str> = change.path.split('/').collect();
+        let last = parts.len() - 1;
+        parts.iter().enumerate().map(|(ix, part)| (ix == last, part.to_string())).collect::<Vec<_>>()
+    });
+    out
+}
+
+/// Files that differ from an arbitrary commit, plus untracked ones. Renames show as a delete and an add.
+fn against(root: &Path, base: &str) -> Vec<Change> {
+    let Some(text) = git(root, &["diff", "--name-status", "-z", "--no-renames", base]) else { return vec![] };
+    let mut parts = text.split('\0').filter(|part| !part.is_empty());
+    let mut out = Vec::new();
+    while let (Some(status), Some(path)) = (parts.next(), parts.next()) {
+        let status = status.chars().next().unwrap_or('M');
+        out.push(Change { path: path.to_string(), status: if status == 'T' { 'M' } else { status } });
+    }
+    if let Some(text) = git(root, &["ls-files", "--others", "--exclude-standard", "-z"]) {
+        out.extend(text.split('\0').filter(|p| !p.is_empty()).map(|p| Change { path: p.to_string(), status: 'U' }));
+    }
+    out
+}
+
+fn status(root: &Path) -> Vec<Change> {
     let Some(text) = git(root, &["status", "--porcelain=v1", "-z", "-uall"]) else { return vec![] };
     let mut parts = text.split('\0').filter(|part| !part.is_empty());
     let mut out = Vec::new();
@@ -52,21 +79,15 @@ pub fn changes(root: &Path) -> Vec<Change> {
         };
         out.push(Change { path: path.to_string(), status: if status == 'C' { 'A' } else { status } });
     }
-    // Folders before files at every level, as the explorer lists them.
-    out.sort_by_cached_key(|change| {
-        let parts: Vec<&str> = change.path.split('/').collect();
-        let last = parts.len() - 1;
-        parts.iter().enumerate().map(|(ix, part)| (ix == last, part.to_string())).collect::<Vec<_>>()
-    });
     out
 }
 
-/// The diff of `change` against `HEAD`, as rows.
-pub fn file_diff(root: &Path, change: &Change) -> Vec<Row> {
+/// The diff of `change` against `base`, as rows.
+pub fn file_diff(root: &Path, base: &str, change: &Change) -> Vec<Row> {
     let text = if change.status == 'U' {
         git(root, &["diff", "--no-index", "--no-color", "--", "/dev/null", &change.path])
     } else {
-        git(root, &["diff", "HEAD", "--no-color", "-U4", "--", &change.path])
+        git(root, &["diff", base, "--no-color", "-U4", "--", &change.path])
     };
     text.map(|text| parse(&text)).unwrap_or_default()
 }

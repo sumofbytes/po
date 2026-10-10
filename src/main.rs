@@ -2,6 +2,7 @@
 mod acp;
 mod config;
 mod diff;
+mod pr;
 mod theme;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -286,6 +287,16 @@ struct Reader {
     picked: Option<String>,
     rows: Rc<Vec<Row>>,
     root: PathBuf,
+    /// What Changes mode diffs against: `HEAD`, or a PR's merge-base when reviewing.
+    base: String,
+    pr: Option<pr::Pr>,
+    /// The directory `po` was started in: where PRs are checked out from and where Close returns to.
+    home: PathBuf,
+    pr_input: Entity<TextareaState>,
+    /// Progress or failure of the last attempt to open a PR.
+    pr_status: Option<String>,
+    opening: bool,
+    watching: Option<gpui::Task<()>>,
     files: Vec<String>,
     current: Option<String>,
     stamp: Option<Stamp>,
@@ -307,9 +318,13 @@ struct Reader {
 }
 
 impl Reader {
-    fn new(root: PathBuf, command: Option<String>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    fn new(home: PathBuf, pr: Option<pr::Pr>, command: Option<String>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let root = pr.as_ref().map_or_else(|| home.clone(), |pr| pr.worktree.clone());
         let mut files = Vec::new();
         walk(&root, &root, &mut files);
+        let pr_input = cx.new(|cx| {
+            TextareaState::new(window, cx).auto_grow(1, 1).submit_on_enter(true).placeholder("PR number or URL")
+        });
         let draft = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .auto_grow(1, 6)
@@ -335,6 +350,11 @@ impl Reader {
                     reader.collapsed.insert(id.clone());
                 }
             }),
+            cx.subscribe_in(&pr_input, window, |reader, _, event: &InputEvent, window, cx| {
+                if matches!(event, InputEvent::PressEnter { shift: false, .. }) {
+                    reader.open_pr(window, cx);
+                }
+            }),
             cx.subscribe_in(&draft, window, |reader, _, event: &InputEvent, window, cx| {
                 if matches!(event, InputEvent::PressEnter { shift: false, .. }) {
                     reader.send(window, cx);
@@ -353,6 +373,13 @@ impl Reader {
             picked: None,
             rows: Rc::new(vec![]),
             root,
+            base: pr.as_ref().map_or_else(|| "HEAD".to_string(), |pr| pr.base.clone()),
+            pr,
+            home,
+            pr_input,
+            pr_status: None,
+            opening: false,
+            watching: None,
             files,
             current: None,
             stamp: None,
@@ -420,7 +447,7 @@ impl Reader {
     /// Shows `path`'s diff in the viewer.
     fn pick(&mut self, path: &str, cx: &mut Context<Self>) {
         let Some(change) = self.changes.iter().find(|c| c.path == path) else { return };
-        self.rows = Rc::new(diff::file_diff(&self.root, change));
+        self.rows = Rc::new(diff::file_diff(&self.root, &self.base, change));
         if self.picked.as_deref() != Some(path) {
             self.picked = Some(path.to_string());
             let id = SharedString::from(path.to_string());
@@ -433,13 +460,88 @@ impl Reader {
         cx.notify();
     }
 
+    /// Starts checking out the PR typed into the strip; the window switches to it when that finishes.
+    fn open_pr(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let spec = self.pr_input.read(cx).value().trim().to_string();
+        if spec.is_empty() || self.opening {
+            return;
+        }
+        self.opening = true;
+        self.pr_status = Some(format!("Checking out {spec}…"));
+        cx.notify();
+        let home = self.home.clone();
+        let handle = window.window_handle();
+        cx.spawn(async move |this, cx| {
+            let result = cx.background_executor().spawn(async move { pr::Pr::open(&home, &spec) }).await;
+            handle
+                .update(cx, |_, window, cx| {
+                    this.update(cx, |reader, cx| {
+                        reader.opening = false;
+                        match result {
+                            Ok(pr) => {
+                                reader.pr_status = None;
+                                reader.pr_input.update(cx, |input, cx| input.set_value("", window, cx));
+                                let root = pr.worktree.clone();
+                                reader.switch_root(root, Some(pr), window, cx);
+                            }
+                            Err(error) => {
+                                log::warn!("open PR: {error}");
+                                reader.pr_status = Some(error);
+                                cx.notify();
+                            }
+                        }
+                    })
+                })
+                .ok();
+        })
+        .detach();
+    }
+
+    /// Leaves the PR review and goes back to the directory `po` started in.
+    fn close_pr(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let home = self.home.clone();
+        self.switch_root(home, None, window, cx);
+    }
+
+    /// Points the whole window (explorer, viewer, watcher, agent) at `root`, which is
+    /// `pr`'s worktree when reviewing one. The previous PR's worktree is removed.
+    fn switch_root(&mut self, root: PathBuf, pr: Option<pr::Pr>, window: &mut Window, cx: &mut Context<Self>) {
+        // Stop watching the old tree before it can be deleted.
+        self.watching = None;
+        self.base = pr.as_ref().map_or_else(|| "HEAD".to_string(), |pr| pr.base.clone());
+        self.root = root;
+        drop(std::mem::replace(&mut self.pr, pr));
+        self.files.clear();
+        walk(&self.root, &self.root, &mut self.files);
+        self.expanded.clear();
+        self.collapsed.clear();
+        self.current = None;
+        self.stamp = None;
+        self.editor = None;
+        self.notice = None;
+        self.picked = None;
+        self.rows = Rc::new(vec![]);
+        self.refresh_tree(cx);
+        // The agent works in the old directory, so it restarts in the new one.
+        if let Some(agent) = self.agent.clone() {
+            self.connect(&agent, window, cx);
+        }
+        self.watch(window, cx);
+        if self.pr.is_some() {
+            self.mode = Mode::Diff;
+        }
+        let fresh = diff::changes(&self.root, &self.base);
+        self.apply_changes(fresh, true, cx);
+        cx.notify();
+    }
+
     fn set_mode(&mut self, mode: Mode, cx: &mut Context<Self>) {
         if self.mode == mode {
             return;
         }
         self.mode = mode;
         if mode == Mode::Diff {
-            let fresh = diff::changes(&self.root);
+            let fresh = diff::changes(&self.root, &self.base);
             self.apply_changes(fresh, true, cx);
         }
         cx.notify();
@@ -447,7 +549,7 @@ impl Reader {
 
     /// Watches the workspace: refreshes the explorer when files come or go, and
     /// reloads the open file when it changes on disk.
-    fn watch(&self, window: &Window, cx: &mut Context<Self>) {
+    fn watch(&mut self, window: &Window, cx: &mut Context<Self>) {
         use notify::Watcher;
         let (tx, mut rx) = futures::channel::mpsc::unbounded();
         let mut watcher = match notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
@@ -461,7 +563,8 @@ impl Reader {
         let root = self.root.clone();
         watch_dirs(&mut watcher, &root, &root);
         let handle = window.window_handle();
-        cx.spawn(async move |this, cx| {
+        // Kept so the watcher stops when the root changes.
+        self.watching = Some(cx.spawn(async move |this, cx| {
             // Moved in so the watcher lives as long as this task.
             let mut watcher = watcher;
             while let Some(first) = rx.next().await {
@@ -487,13 +590,14 @@ impl Reader {
                 }
                 let Ok(current) = this.read_with(cx, |reader, _| reader.current.clone()) else { break };
                 let scan_root = root.clone();
+                let Ok(base) = this.read_with(cx, |reader, _| reader.base.clone()) else { break };
                 let (files, seen, changes) = cx
                     .background_executor()
                     .spawn(async move {
                         let mut files = Vec::new();
                         walk(&scan_root, &scan_root, &mut files);
                         let seen = current.as_ref().and_then(|path| stamp(&scan_root.join(path)));
-                        (files, seen, diff::changes(&scan_root))
+                        (files, seen, diff::changes(&scan_root, &base))
                     })
                     .await;
                 let alive = handle.update(cx, |_, window, cx| {
@@ -517,8 +621,7 @@ impl Reader {
                 }
             }
             drop(watcher.unwatch(&root));
-        })
-        .detach();
+        }));
     }
 
     /// Replaces the running agent with `key`'s, with a fresh thread.
@@ -721,7 +824,7 @@ impl Reader {
             self.open(&relative, window, cx);
         }
         if self.mode == Mode::Diff {
-            let fresh = diff::changes(&self.root);
+            let fresh = diff::changes(&self.root, &self.base);
             self.apply_changes(fresh, false, cx);
             self.pick(&relative, cx);
         }
@@ -834,6 +937,73 @@ impl Reader {
         cx.notify();
     }
 
+    /// The strip under the explorer header in Changes mode: an input to open a PR for
+    /// review, or the open PR's summary with a way out.
+    fn pr_strip(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let colors = &cx.theme().colors;
+        let (border, muted, danger) = (colors.border, colors.muted_foreground, colors.danger);
+        let this = cx.entity();
+        let body: AnyElement = match &self.pr {
+            Some(pr) => div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_xs()
+                        .text_color(muted)
+                        .child(format!("PR #{} · {} files", pr.number, self.changes.len())),
+                )
+                .child(
+                    Button::new("pr-close")
+                        .label("Close")
+                        .ghost()
+                        .small()
+                        .on_click(move |_, window, cx| this.update(cx, |reader, cx| reader.close_pr(window, cx))),
+                )
+                .into_any_element(),
+            None => {
+                let open = Button::new("pr-open")
+                    .label(if self.opening { "…" } else { "Open" })
+                    .small()
+                    .outline()
+                    .on_click(move |_, window, cx| this.update(cx, |reader, cx| reader.open_pr(window, cx)));
+                let status = self.pr_status.as_ref().map(|text| {
+                    let failed = !self.opening;
+                    div()
+                        .text_xs()
+                        .text_color(if failed { danger } else { muted })
+                        .max_h(px(72.0))
+                        .overflow_hidden()
+                        .child(text.clone())
+                });
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .child(Textarea::new(&self.pr_input).appearance(false).bordered(false)),
+                            )
+                            .child(open),
+                    )
+                    .children(status)
+                    .into_any_element()
+            }
+        };
+        div().flex_none().px_3().py_2().border_b_1().border_color(border).child(body)
+    }
+
     fn explorer(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = &cx.theme().colors;
         let this = cx.entity();
@@ -943,10 +1113,17 @@ impl Reader {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .child(status_text(self.root.file_name().map_or(String::new(), |n| n.to_string_lossy().to_string()), cx))
+                    .child(status_text(
+                        match &self.pr {
+                            Some(pr) => format!("PR #{} {}", pr.number, pr.title),
+                            None => self.root.file_name().map_or(String::new(), |n| n.to_string_lossy().to_string()),
+                        },
+                        cx,
+                    ))
                     .child(modes),
                 cx,
             ))
+            .children((mode == Mode::Diff).then(|| self.pr_strip(cx)))
             .child(div().flex_1().min_h_0().p_1().child(body))
     }
 
@@ -1307,7 +1484,7 @@ impl Render for Reader {
 
 /// Relaunch ourselves in its own process group with output going to a log file,
 /// so the shell gets its prompt back (like `code .`).
-fn detach(root: &Path, command: &Option<String>) -> std::io::Result<()> {
+fn detach(root: &Path, command: &Option<String>, pr: &Option<pr::Pr>) -> std::io::Result<()> {
     use std::os::unix::process::CommandExt;
     use std::process::{Command, Stdio};
     let log_dir = std::env::var_os("XDG_CACHE_HOME")
@@ -1321,6 +1498,21 @@ fn detach(root: &Path, command: &Option<String>) -> std::io::Result<()> {
     child.arg("--foreground");
     if let Some(command) = command {
         child.arg("--agent").arg(command);
+    }
+    if let Some(pr) = pr {
+        // The parent did the checkout so its errors reach the terminal; the child owns the cleanup.
+        child
+            .arg("--pr-worktree")
+            .arg(&pr.worktree)
+            .arg("--pr-base")
+            .arg(&pr.base)
+            .arg("--pr-number")
+            .arg(pr.number.to_string())
+            .arg("--pr-title")
+            .arg(&pr.title);
+        if let Some(source) = pr.source() {
+            child.arg("--pr-source").arg(source);
+        }
     }
     child
         .arg(root)
@@ -1337,18 +1529,45 @@ fn main() {
     let mut path = None;
     let mut foreground = false;
     let mut command = std::env::var("PO_AGENT").ok();
+    let mut spec = None;
+    // Set only by a parent that already checked the PR out.
+    let (mut worktree, mut base, mut number, mut title, mut source) = (None, None, 0, String::new(), None);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--foreground" | "-f" => foreground = true,
             "--agent" => command = Some(args.next().expect("--agent needs a command")),
+            "--pr" => spec = Some(args.next().expect("--pr needs a PR number or URL")),
+            "--pr-worktree" => worktree = args.next().map(PathBuf::from),
+            "--pr-base" => base = args.next(),
+            "--pr-number" => number = args.next().and_then(|n| n.parse().ok()).unwrap_or(0),
+            "--pr-title" => title = args.next().unwrap_or_default(),
+            "--pr-source" => source = args.next().map(PathBuf::from),
             _ => path = Some(PathBuf::from(arg)),
         }
     }
     let root = path.unwrap_or_else(|| std::env::current_dir().expect("cwd"));
     let root = root.canonicalize().expect("project path");
+    let pr = match (worktree, base, spec) {
+        (Some(worktree), Some(base), _) => Some(pr::Pr::adopt(worktree, base, number, title, source)),
+        (_, _, Some(spec)) => {
+            eprintln!("po: checking out PR {spec}…");
+            match pr::Pr::open(&root, &spec) {
+                Ok(pr) => Some(pr),
+                Err(err) => {
+                    eprintln!("po: could not open PR {spec}: {err}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        _ => None,
+    };
     if !foreground {
-        match detach(&root, &command) {
-            Ok(()) => return,
+        match detach(&root, &command, &pr) {
+            Ok(()) => {
+                // The detached process owns the worktree now.
+                std::mem::forget(pr);
+                return;
+            }
             Err(err) => eprintln!("po: could not detach ({err}), running in foreground"),
         }
     }
@@ -1360,7 +1579,9 @@ fn main() {
         gpui_kit::open_window(
             WindowOptions { window_bounds: Some(WindowBounds::Windowed(bounds)), ..Default::default() },
             cx,
-            |window, cx| cx.new(|cx| Reader::new(root, command, window, cx)),
+            |window, cx| {
+                cx.new(|cx| Reader::new(root, pr, command, window, cx))
+            },
         )
         .expect("window");
         cx.activate(true);
