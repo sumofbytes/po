@@ -407,6 +407,21 @@ impl Reader {
                 self.client = Some(client);
                 let handle = window.window_handle();
                 cx.spawn(async move |this, cx| {
+                    // An agent that never answers the handshake would leave the thread on "starting…".
+                    let watchdog = this.clone();
+                    cx.spawn(async move |cx| {
+                        cx.background_executor().timer(Duration::from_secs(20)).await;
+                        watchdog
+                            .update(cx, |reader, cx| {
+                                if reader.generation == generation && !reader.ready && reader.client.is_some() {
+                                    reader.status = "not responding".into();
+                                    reader.fail("The agent did not answer the handshake. Check that its command speaks ACP.".into());
+                                    cx.notify();
+                                }
+                            })
+                            .ok();
+                    })
+                    .detach();
                     while let Some(event) = events.next().await {
                         let done = handle.update(cx, |_, window, cx| {
                             this.update(cx, |reader, cx| {
