@@ -1,18 +1,21 @@
 #![recursion_limit = "1024"]
 mod acp;
 mod config;
+mod diff;
 mod theme;
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::time::{Duration, SystemTime};
 
 use acp::{Client, Event, PermissionOption};
+use diff::{Change, Kind, Row};
 use futures::StreamExt;
 use serde_json::Value;
 
 use gpui_kit::component::{
-    ActiveTheme, IconName, Sizable,
+    ActiveTheme, IconName, Selectable, Sizable,
     button::{Button, ButtonVariants},
     input::{Editor, EditorState, InputEvent, Textarea, TextareaState},
     list::ListItem,
@@ -104,7 +107,23 @@ struct Dir {
     files: Vec<String>,
 }
 
-fn explorer_items(files: &[String], expanded: &HashSet<SharedString>) -> Vec<TreeItem> {
+/// Every folder that holds one of `files`.
+fn folders(files: &[String]) -> HashSet<SharedString> {
+    let mut out = HashSet::new();
+    for file in files {
+        for (ix, _) in file.match_indices('/') {
+            out.insert(SharedString::from(file[..ix].to_string()));
+        }
+    }
+    out
+}
+
+/// The explorer's tree; `marks` puts a status letter in front of the files it names.
+fn explorer_items(
+    files: &[String],
+    expanded: &HashSet<SharedString>,
+    marks: &HashMap<&str, char>,
+) -> Vec<TreeItem> {
     let mut root = Dir::default();
     for file in files {
         let mut dir = &mut root;
@@ -117,20 +136,29 @@ fn explorer_items(files: &[String], expanded: &HashSet<SharedString>) -> Vec<Tre
             }
         }
     }
-    fn items(dir: &Dir, prefix: &str, expanded: &HashSet<SharedString>) -> Vec<TreeItem> {
+    fn items(
+        dir: &Dir,
+        prefix: &str,
+        expanded: &HashSet<SharedString>,
+        marks: &HashMap<&str, char>,
+    ) -> Vec<TreeItem> {
         let folders = dir.dirs.iter().map(|(name, child)| {
             let id = format!("{prefix}{name}");
             let open = expanded.contains(id.as_str());
-            let children = items(child, &format!("{id}/"), expanded);
+            let children = items(child, &format!("{id}/"), expanded, marks);
             TreeItem::new(id, name.clone()).children(children).expanded(open)
         });
         let files = dir.files.iter().map(|path| {
             let name = path.rsplit('/').next().unwrap_or(path);
-            TreeItem::new(path.clone(), name.to_string())
+            let label = match marks.get(path.as_str()) {
+                Some(mark) => format!("{mark}  {name}"),
+                None => name.to_string(),
+            };
+            TreeItem::new(path.clone(), label)
         });
         folders.chain(files).collect()
     }
-    items(&root, "", expanded)
+    items(&root, "", expanded, marks)
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -223,7 +251,20 @@ fn tool_result(update: &Value) -> String {
     out.join("\n")
 }
 
+/// What the sidebar lists and the viewer shows.
+#[derive(Clone, Copy, PartialEq)]
+enum Mode {
+    Source,
+    Diff,
+}
+
 struct Reader {
+    mode: Mode,
+    changes: Vec<Change>,
+    changes_tree: Entity<TreeState>,
+    collapsed: HashSet<SharedString>,
+    picked: Option<String>,
+    rows: Rc<Vec<Row>>,
     root: PathBuf,
     files: Vec<String>,
     current: Option<String>,
@@ -256,6 +297,7 @@ impl Reader {
                 .placeholder("Message the agent")
         });
         let tree = cx.new(|cx| TreeState::new(cx));
+        let changes_tree = cx.new(|cx| TreeState::new(cx));
         let subscriptions = vec![
             cx.subscribe(&tree, |reader, _, event: &TreeEvent, _| match event {
                 TreeEvent::Expanded(id) => {
@@ -263,6 +305,14 @@ impl Reader {
                 }
                 TreeEvent::Collapsed(id) => {
                     reader.expanded.remove(id);
+                }
+            }),
+            cx.subscribe(&changes_tree, |reader, _, event: &TreeEvent, _| match event {
+                TreeEvent::Expanded(id) => {
+                    reader.collapsed.remove(id);
+                }
+                TreeEvent::Collapsed(id) => {
+                    reader.collapsed.insert(id.clone());
                 }
             }),
             cx.subscribe_in(&draft, window, |reader, _, event: &InputEvent, window, cx| {
@@ -276,6 +326,12 @@ impl Reader {
             agents.push(config::Agent { id: command.clone(), name: "Custom".into(), command: command.clone() });
         }
         let mut reader = Self {
+            mode: Mode::Source,
+            changes: vec![],
+            changes_tree,
+            collapsed: HashSet::new(),
+            picked: None,
+            rows: Rc::new(vec![]),
             root,
             files,
             current: None,
@@ -306,7 +362,7 @@ impl Reader {
 
     /// Rebuilds the explorer from `files`, keeping folders open and the current file selected.
     fn refresh_tree(&mut self, cx: &mut Context<Self>) {
-        let items = explorer_items(&self.files, &self.expanded);
+        let items = explorer_items(&self.files, &self.expanded, &HashMap::new());
         let current = self.current.clone().map(SharedString::from);
         self.tree.update(cx, |tree, cx| {
             tree.set_items(items, cx);
@@ -314,6 +370,60 @@ impl Reader {
                 tree.set_selected_index(Some(ix), cx);
             }
         });
+    }
+
+    /// Takes a fresh list of changed files; in diff mode it also reloads the picked file's diff.
+    fn apply_changes(&mut self, changes: Vec<Change>, rebuild: bool, cx: &mut Context<Self>) {
+        let listed = rebuild || self.changes != changes;
+        self.changes = changes;
+        if self.mode != Mode::Diff {
+            return;
+        }
+        if listed {
+            let paths: Vec<String> = self.changes.iter().map(|c| c.path.clone()).collect();
+            let marks: HashMap<&str, char> = self.changes.iter().map(|c| (c.path.as_str(), c.status)).collect();
+            let mut expanded = folders(&paths);
+            expanded.retain(|id| !self.collapsed.contains(id));
+            let items = explorer_items(&paths, &expanded, &marks);
+            self.changes_tree.update(cx, |tree, cx| tree.set_items(items, cx));
+        }
+        let keep = self.picked.clone().filter(|path| self.changes.iter().any(|c| &c.path == path));
+        match keep.or_else(|| self.changes.first().map(|c| c.path.clone())) {
+            Some(path) => self.pick(&path, cx),
+            None => {
+                self.picked = None;
+                self.rows = Rc::new(vec![]);
+            }
+        }
+        cx.notify();
+    }
+
+    /// Shows `path`'s diff in the viewer.
+    fn pick(&mut self, path: &str, cx: &mut Context<Self>) {
+        let Some(change) = self.changes.iter().find(|c| c.path == path) else { return };
+        self.rows = Rc::new(diff::file_diff(&self.root, change));
+        if self.picked.as_deref() != Some(path) {
+            self.picked = Some(path.to_string());
+            let id = SharedString::from(path.to_string());
+            self.changes_tree.update(cx, |tree, cx| {
+                if let Some(ix) = tree.index_of(&id) {
+                    tree.set_selected_index(Some(ix), cx);
+                }
+            });
+        }
+        cx.notify();
+    }
+
+    fn set_mode(&mut self, mode: Mode, cx: &mut Context<Self>) {
+        if self.mode == mode {
+            return;
+        }
+        self.mode = mode;
+        if mode == Mode::Diff {
+            let fresh = diff::changes(&self.root);
+            self.apply_changes(fresh, true, cx);
+        }
+        cx.notify();
     }
 
     /// Watches the workspace: refreshes the explorer when files come or go, and
@@ -358,13 +468,13 @@ impl Reader {
                 }
                 let Ok(current) = this.read_with(cx, |reader, _| reader.current.clone()) else { break };
                 let scan_root = root.clone();
-                let (files, seen) = cx
+                let (files, seen, changes) = cx
                     .background_executor()
                     .spawn(async move {
                         let mut files = Vec::new();
                         walk(&scan_root, &scan_root, &mut files);
                         let seen = current.as_ref().and_then(|path| stamp(&scan_root.join(path)));
-                        (files, seen)
+                        (files, seen, diff::changes(&scan_root))
                     })
                     .await;
                 let alive = handle.update(cx, |_, window, cx| {
@@ -374,6 +484,7 @@ impl Reader {
                             reader.refresh_tree(cx);
                             cx.notify();
                         }
+                        reader.apply_changes(changes, false, cx);
                         if let (Some(path), Some(seen)) = (reader.current.clone(), seen) {
                             if reader.stamp != Some(seen) {
                                 log::info!("reloading {path}");
@@ -590,6 +701,11 @@ impl Reader {
             log::info!("agent: showing {relative}");
             self.open(&relative, window, cx);
         }
+        if self.mode == Mode::Diff {
+            let fresh = diff::changes(&self.root);
+            self.apply_changes(fresh, false, cx);
+            self.pick(&relative, cx);
+        }
     }
 
     fn answer(&mut self, msg: usize, block: usize, option: usize, cx: &mut Context<Self>) {
@@ -662,7 +778,11 @@ impl Reader {
             Some(file) => format!("[The user has `{file}` open in the viewer.]\n\n{prompt}"),
             None => prompt.clone(),
         };
-        client.prompt(&context);
+        if !client.prompt(&context) {
+            self.fail("The agent has no session yet.".into());
+            cx.notify();
+            return;
+        }
         self.draft.update(cx, |input, cx| input.set_value("", window, cx));
         self.busy = true;
         self.thread.push(Msg::User(prompt));
@@ -698,13 +818,40 @@ impl Reader {
     fn explorer(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = &cx.theme().colors;
         let this = cx.entity();
-        div()
-            .size_full()
+        let mode = self.mode;
+        let (source, changes) = (cx.entity(), cx.entity());
+        let modes = div()
+            .flex_none()
             .flex()
-            .flex_col()
-            .bg(colors.sidebar)
-            .child(header("Explorer", self.root.file_name().map_or(String::new(), |n| n.to_string_lossy().to_string()), cx))
-            .child(div().flex_1().min_h_0().p_1().child(tree(&self.tree, move |ix, entry, selected, _, _| {
+            .items_center()
+            .gap_1()
+            .child(
+                Button::new("mode-source")
+                    .icon(IconName::Folder)
+                    .ghost()
+                    .small()
+                    .tooltip("Source")
+                    .selected(mode == Mode::Source)
+                    .on_click(move |_, _, cx| source.update(cx, |reader, cx| reader.set_mode(Mode::Source, cx))),
+            )
+            .child(
+                Button::new("mode-diff")
+                    .icon(IconName::Replace)
+                    .ghost()
+                    .small()
+                    .tooltip("Changes")
+                    .selected(mode == Mode::Diff)
+                    .on_click(move |_, _, cx| changes.update(cx, |reader, cx| reader.set_mode(Mode::Diff, cx))),
+            );
+        let title = match mode {
+            Mode::Source => "Explorer",
+            Mode::Diff => "Changes",
+        };
+        let state = if mode == Mode::Diff { &self.changes_tree } else { &self.tree };
+        let body: AnyElement = if mode == Mode::Diff && self.changes.is_empty() {
+            centered("No changes".into(), cx)
+        } else {
+            tree(state, move |ix, entry, selected, _, _| {
                 let item = entry.item();
                 let path = item.id.clone();
                 let label = if entry.is_folder() {
@@ -720,11 +867,108 @@ impl Reader {
                     .text_sm()
                     .child(label)
                     .on_click(move |_, window, cx| {
-                        if !folder {
-                            this.update(cx, |reader, cx| reader.open(&path, window, cx));
+                        if folder {
+                            return;
                         }
+                        this.update(cx, |reader, cx| match mode {
+                            Mode::Source => reader.open(&path, window, cx),
+                            Mode::Diff => reader.pick(&path, cx),
+                        });
                     })
-            })))
+            })
+            .into_any_element()
+        };
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .bg(colors.sidebar)
+            .child(header_with(
+                title,
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(status_text(self.root.file_name().map_or(String::new(), |n| n.to_string_lossy().to_string()), cx))
+                    .child(modes),
+                cx,
+            ))
+            .child(div().flex_1().min_h_0().p_1().child(body))
+    }
+
+    fn diff_viewer(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let colors = &cx.theme().colors;
+        let Some(path) = self.picked.clone() else {
+            return div()
+                .size_full()
+                .flex()
+                .flex_col()
+                .bg(colors.background)
+                .child(header("Changes", String::new(), cx))
+                .child(div().flex_1().min_h_0().child(centered("Pick a changed file".into(), cx)));
+        };
+        let rows = self.rows.clone();
+        let (added, removed) = rows.iter().fold((0, 0), |(a, r), row| match row.kind {
+            Kind::Added => (a + 1, r),
+            Kind::Removed => (a, r + 1),
+            _ => (a, r),
+        });
+        // Themes may lack a green (Rosé Pine's success is teal), so added lines get their own.
+        let (success, danger, muted, border) =
+            (gpui::hsla(0.37, 0.5, 0.5, 1.0), colors.danger, colors.muted_foreground, colors.border);
+        let font = cx.theme().mono_font_family.clone();
+        let body: AnyElement = if rows.is_empty() {
+            centered("No textual changes".into(), cx)
+        } else {
+            let count = rows.len();
+            // The list sizes itself from one row, so measure the widest.
+            let widest = (0..count).max_by_key(|&ix| rows[ix].text.chars().count());
+            gpui::uniform_list("diff-rows", count, move |range, _, _| {
+                range
+                    .map(|ix| {
+                        let row = &rows[ix];
+                        let number = |n: Option<u32>| {
+                            div().w(px(44.0)).flex_none().text_right().text_color(muted).child(n.map_or(String::new(), |n| n.to_string()))
+                        };
+                        let (tint, sign) = match row.kind {
+                            Kind::Added => (Some(success.opacity(0.16)), "+"),
+                            Kind::Removed => (Some(danger.opacity(0.16)), "-"),
+                            Kind::Hunk => (Some(muted.opacity(0.12)), ""),
+                            Kind::Context => (None, " "),
+                        };
+                        let line = div().flex().min_w_full().h(px(20.0)).items_center().gap_2().font_family(font.clone()).text_sm();
+                        let line = match tint {
+                            Some(tint) => line.bg(tint),
+                            None => line,
+                        };
+                        if row.kind == Kind::Hunk {
+                            return line.px_2().text_color(muted).child(row.text.clone());
+                        }
+                        line.child(number(row.old))
+                            .child(number(row.new))
+                            .child(div().w(px(10.0)).flex_none().text_color(muted).child(sign))
+                            .child(div().flex_1().min_w_0().whitespace_nowrap().child(row.text.clone()))
+                    })
+                    .collect()
+            })
+            .with_horizontal_sizing_behavior(gpui::ListHorizontalSizingBehavior::Unconstrained)
+            .with_width_from_item(widest)
+            .size_full()
+            .into_any_element()
+        };
+        let right = div()
+            .flex()
+            .gap_2()
+            .text_xs()
+            .child(div().text_color(success).child(format!("+{added}")))
+            .child(div().text_color(danger).child(format!("-{removed}")));
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .bg(colors.background)
+            .child(header_with(&path, right, cx))
+            .child(div().flex_1().min_h_0().border_color(border).child(body))
     }
 
     fn viewer(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -998,7 +1242,10 @@ impl Render for Reader {
         div().size_full().bg(background).text_color(foreground).child(
             h_resizable("shell")
                 .child(resizable_panel().size(px(260.0)).size_range(px(160.0)..px(520.0)).child(self.explorer(cx)))
-                .child(resizable_panel().child(self.viewer(cx)))
+                .child(resizable_panel().child(match self.mode {
+                    Mode::Source => self.viewer(cx).into_any_element(),
+                    Mode::Diff => self.diff_viewer(cx).into_any_element(),
+                }))
                 .child(resizable_panel().size(px(460.0)).size_range(px(300.0)..px(760.0)).child(self.agent_panel(cx))),
         )
     }
