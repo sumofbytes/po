@@ -1,0 +1,9 @@
+{
+  "theme": "main",
+  "font": {
+    "family": "Adwaita Sans",
+    "size": 14,
+    "mono_family": "Noto Sans Mono",
+    "mono_size": 13
+  }
+}

@@ -1,0 +1,139 @@
+{
+  "name": "Rose Pine moon",
+  "mode": "dark",
+  "is_default": false,
+  "highlight": {
+    "editor.foreground": "#e0def4",
+    "editor.background": "#232136",
+    "editor.active_line.background": "#6e6a861f",
+    "editor.line_number": "#6e6a86",
+    "editor.active_line_number": "#908caa",
+    "editor.invisible": "#6e6a8666",
+    "syntax": {
+      "keyword": {
+        "color": "#3e8fb0"
+      },
+      "string": {
+        "color": "#f6c177"
+      },
+      "string.escape": {
+        "color": "#3e8fb0"
+      },
+      "number": {
+        "color": "#ea9a97"
+      },
+      "boolean": {
+        "color": "#ea9a97"
+      },
+      "comment": {
+        "color": "#6e6a86"
+      },
+      "comment.doc": {
+        "color": "#908caa"
+      },
+      "function": {
+        "color": "#ea9a97"
+      },
+      "constructor": {
+        "color": "#9ccfd8"
+      },
+      "type": {
+        "color": "#9ccfd8"
+      },
+      "constant": {
+        "color": "#ea9a97"
+      },
+      "property": {
+        "color": "#c4a7e7"
+      },
+      "tag": {
+        "color": "#9ccfd8"
+      },
+      "attribute": {
+        "color": "#c4a7e7"
+      },
+      "operator": {
+        "color": "#908caa"
+      },
+      "punctuation": {
+        "color": "#908caa"
+      },
+      "variable": {
+        "color": "#e0def4"
+      },
+      "title": {
+        "color": "#ea9a97"
+      },
+      "link_text": {
+        "color": "#9ccfd8"
+      },
+      "link_uri": {
+        "color": "#c4a7e7"
+      }
+    }
+  },
+  "colors": {
+    "background": "#232136",
+    "foreground": "#e0def4",
+    "border": "#393552",
+    "input.border": "#393552",
+    "ring": "#56526e",
+    "caret": "#ea9a97",
+    "link": "#9ccfd8",
+    "link.hover": "#ea9a97",
+    "link.active": "#c4a7e7",
+    "selection.background": "#6e6a8666",
+    "muted.background": "#2a273f",
+    "muted.foreground": "#908caa",
+    "accent.background": "#393552",
+    "accent.foreground": "#e0def4",
+    "popover.background": "#2a273f",
+    "popover.foreground": "#e0def4",
+    "primary.background": "#c4a7e7",
+    "primary.hover.background": "#ea9a97",
+    "primary.active.background": "#ea9a97",
+    "primary.foreground": "#232136",
+    "secondary.background": "#393552",
+    "secondary.hover.background": "#44415a",
+    "secondary.active.background": "#44415a",
+    "secondary.foreground": "#e0def4",
+    "button.background": "#393552",
+    "button.hover.background": "#44415a",
+    "button.active.background": "#44415a",
+    "button.foreground": "#e0def4",
+    "button.primary.background": "#c4a7e7",
+    "button.primary.hover.background": "#ea9a97",
+    "button.primary.active.background": "#ea9a97",
+    "button.primary.foreground": "#232136",
+    "danger.background": "#eb6f92",
+    "danger.foreground": "#232136",
+    "success.background": "#9ccfd8",
+    "success.foreground": "#232136",
+    "warning.background": "#f6c177",
+    "warning.foreground": "#232136",
+    "info.background": "#3e8fb0",
+    "info.foreground": "#e0def4",
+    "list.background": "#2a273f",
+    "list.hover.background": "#2a283e",
+    "list.active.background": "#c4a7e726",
+    "list.active.border": "#c4a7e7",
+    "list.even.background": "#2a273f",
+    "list.head.background": "#2a273f",
+    "sidebar.background": "#2a273f",
+    "sidebar.foreground": "#e0def4",
+    "sidebar.border": "#393552",
+    "sidebar.accent.background": "#393552",
+    "sidebar.accent.foreground": "#e0def4",
+    "title_bar.background": "#2a273f",
+    "title_bar.border": "#393552",
+    "scrollbar.background": "#00000000",
+    "scrollbar.thumb.background": "#6e6a8680",
+    "scrollbar.thumb.hover.background": "#908caa",
+    "tab.background": "#2a273f",
+    "tab.active.background": "#232136",
+    "tab.foreground": "#908caa",
+    "tab.active.foreground": "#e0def4",
+    "tab_bar.background": "#2a273f",
+    "overlay": "#232136b8"
+  }
+}

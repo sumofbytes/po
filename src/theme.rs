@@ -11,22 +11,22 @@ const MONO_FONT_SIZE: f64 = 13.0;
 
 /// Themes shipped in the binary, by name.
 const BUNDLED: [(&str, &str); 3] = [
-    ("main", include_str!("../themes/main.yaml")),
-    ("moon", include_str!("../themes/moon.yaml")),
-    ("dawn", include_str!("../themes/dawn.yaml")),
+    ("main", include_str!("../themes/main.json")),
+    ("moon", include_str!("../themes/moon.json")),
+    ("dawn", include_str!("../themes/dawn.json")),
 ];
 
-/// `$XDG_CONFIG_HOME/po/config.yaml`, or `~/.config/po/config.yaml`.
+/// `$XDG_CONFIG_HOME/po/config.json`, or `~/.config/po/config.json`.
 fn config_path() -> Option<PathBuf> {
     let base = std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))?;
-    Some(base.join("po").join("config.yaml"))
+    Some(base.join("po").join("config.json"))
 }
 
-fn read_yaml(path: &Path) -> Option<Value> {
+fn read_json(path: &Path) -> Option<Value> {
     let text = std::fs::read_to_string(path).ok()?;
-    match serde_yaml::from_str(&text) {
+    match serde_json::from_str(&text) {
         Ok(value) => Some(value),
         Err(error) => {
             log::error!("{}: {error}", path.display());
@@ -35,20 +35,20 @@ fn read_yaml(path: &Path) -> Option<Value> {
     }
 }
 
-/// The theme `name` asks for: a bundled one, or a YAML/JSON file (relative paths
+/// The theme `name` asks for: a bundled one, or a JSON file (relative paths
 /// resolve against the config folder).
 fn load_theme(name: &str, config_dir: Option<&Path>) -> Option<Value> {
     if let Some((_, source)) = BUNDLED.iter().find(|(key, _)| *key == name) {
-        return serde_yaml::from_str(source).ok();
+        return serde_json::from_str(source).ok();
     }
     let path = config_dir.map_or_else(|| PathBuf::from(name), |dir| dir.join(name));
-    read_yaml(&path)
+    read_json(&path)
 }
 
 /// Applies the user's config (`theme`, `font.*`) over the bundled defaults.
 pub fn apply(cx: &mut App) {
     let path = config_path();
-    let config = path.as_deref().and_then(read_yaml).unwrap_or(Value::Null);
+    let config = path.as_deref().and_then(read_json).unwrap_or(Value::Null);
     let name = std::env::var("PO_THEME")
         .ok()
         .or_else(|| config["theme"].as_str().map(String::from))
