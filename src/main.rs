@@ -747,18 +747,21 @@ impl Reader {
         let action = if self.busy {
             Button::new("stop")
                 .icon(IconName::Square)
+                .ghost()
                 .rounded(gpui::px(999.0))
                 .small()
                 .tooltip("Stop")
                 .on_click(move |_, _, cx| stop.update(cx, |reader, cx| reader.stop(cx)))
         } else {
-            Button::new("send")
+            let send = Button::new("send")
                 .icon(IconName::ArrowUp)
-                .primary()
+                .ghost()
                 .rounded(gpui::px(999.0))
                 .small()
                 .tooltip("Send")
-                .on_click(move |_, window, cx| send.update(cx, |reader, cx| reader.send(window, cx)))
+                .on_click(move |_, window, cx| send.update(cx, |reader, cx| reader.send(window, cx)));
+            // Quiet until there is something to send.
+            if self.draft.read(cx).value().trim().is_empty() { send } else { send.primary() }
         };
         div()
             .size_full()
@@ -813,10 +816,9 @@ impl Reader {
                         .flex_col()
                         .gap_1()
                         .p_2()
-                        .rounded_xl()
+                        .rounded_lg()
                         .border_1()
-                        .border_color(colors.border)
-                        .bg(colors.background)
+                        .border_color(colors.border.opacity(0.6))
                         .child(Textarea::new(&self.draft).appearance(false).bordered(false))
                         .child(div().flex().justify_end().child(action)),
                 ),
