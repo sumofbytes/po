@@ -358,6 +358,19 @@ impl Reader {
                     reader.collapsed.insert(id.clone());
                 }
             }),
+            // Moving the selection with the keyboard opens the file too, like a click.
+            cx.observe_in(&tree, window, |reader, tree, window, cx| {
+                let path = tree.read(cx).selected_entry().filter(|e| !e.is_folder()).map(|e| e.item().id.to_string());
+                if let Some(path) = path.filter(|p| reader.mode == Mode::Source && reader.current.as_deref() != Some(p)) {
+                    reader.open(&path, window, cx);
+                }
+            }),
+            cx.observe(&changes_tree, |reader, tree, cx| {
+                let path = tree.read(cx).selected_entry().filter(|e| !e.is_folder()).map(|e| e.item().id.to_string());
+                if let Some(path) = path.filter(|p| reader.mode == Mode::Diff && reader.picked.as_deref() != Some(p)) {
+                    reader.pick(&path, cx);
+                }
+            }),
             cx.subscribe_in(&pr_input, window, |reader, _, event: &InputEvent, window, cx| {
                 if matches!(event, InputEvent::PressEnter { shift: false, .. }) {
                     reader.open_pr(window, cx);
