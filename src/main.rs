@@ -11,7 +11,7 @@ use futures::StreamExt;
 use serde_json::Value;
 
 use gpui_kit::component::{
-    ActiveTheme, Sizable,
+    ActiveTheme, IconName, Sizable,
     button::{Button, ButtonVariants},
     input::{Editor, EditorState, InputEvent, Textarea, TextareaState},
     list::ListItem,
@@ -746,12 +746,18 @@ impl Reader {
         let agents = self.agents.clone();
         let action = if self.busy {
             Button::new("stop")
-                .label("Stop")
+                .icon(IconName::Square)
+                .rounded(gpui::px(999.0))
+                .small()
+                .tooltip("Stop")
                 .on_click(move |_, _, cx| stop.update(cx, |reader, cx| reader.stop(cx)))
         } else {
             Button::new("send")
-                .label("Send")
+                .icon(IconName::ArrowUp)
                 .primary()
+                .rounded(gpui::px(999.0))
+                .small()
+                .tooltip("Send")
                 .on_click(move |_, window, cx| send.update(cx, |reader, cx| reader.send(window, cx)))
         };
         div()
@@ -801,14 +807,19 @@ impl Reader {
                     })),
             )
             .child(
-                div()
-                    .flex_none()
-                    .p_3()
-                    .flex()
-                    .items_end()
-                    .gap_2()
-                    .child(div().flex_1().min_w_0().child(Textarea::new(&self.draft)))
-                    .child(action),
+                div().flex_none().p_3().child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .p_2()
+                        .rounded_xl()
+                        .border_1()
+                        .border_color(colors.border)
+                        .bg(colors.background)
+                        .child(Textarea::new(&self.draft).appearance(false).bordered(false))
+                        .child(div().flex().justify_end().child(action)),
+                ),
             )
     }
 }
