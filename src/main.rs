@@ -818,7 +818,8 @@ impl Reader {
                         .p_2()
                         .rounded_lg()
                         .border_1()
-                        .border_color(colors.border.opacity(0.6))
+                        .border_color(colors.border)
+                        .bg(colors.background)
                         .child(Textarea::new(&self.draft).appearance(false).bordered(false))
                         .child(div().flex().justify_end().child(action)),
                 ),
