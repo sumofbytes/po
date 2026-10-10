@@ -11,7 +11,7 @@ use std::rc::Rc;
 use std::time::{Duration, SystemTime};
 
 use acp::{Client, Event, PermissionOption};
-use diff::{Change, Kind, Row};
+use diff::{Change, Kind, Pair, Row};
 use futures::StreamExt;
 use serde_json::Value;
 
@@ -318,6 +318,8 @@ struct Reader {
     scroll: ScrollHandle,
     left_open: bool,
     right_open: bool,
+    /// Whether diffs show old and new side by side instead of inline.
+    split: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -403,6 +405,7 @@ impl Reader {
             scroll: ScrollHandle::new(),
             left_open: true,
             right_open: true,
+            split: false,
             _subscriptions: subscriptions,
         };
         reader.refresh_tree(cx);
@@ -543,6 +546,11 @@ impl Reader {
 
     fn toggle_left(&mut self, cx: &mut Context<Self>) {
         self.left_open = !self.left_open;
+        cx.notify();
+    }
+
+    fn set_split(&mut self, split: bool, cx: &mut Context<Self>) {
+        self.split = split;
         cx.notify();
     }
 
@@ -1166,6 +1174,38 @@ impl Reader {
         let font = cx.theme().mono_font_family.clone();
         let body: AnyElement = if rows.is_empty() {
             centered("No textual changes".into(), cx)
+        } else if self.split {
+            let pairs = diff::split(&rows);
+            let count = pairs.len();
+            gpui::uniform_list("diff-split", count, move |range, _, _| {
+                range
+                    .map(|ix| {
+                        let line = div().flex().w_full().h(px(20.0)).items_center().font_family(font.clone()).text_sm();
+                        let cell = |cell: &Option<diff::Cell>, first: bool| {
+                            let half = div().flex_1().min_w_0().h_full().flex().items_center().gap_2().overflow_hidden();
+                            let half = if first { half.border_r_1().border_color(border) } else { half };
+                            let Some(cell) = cell else { return half.bg(muted.opacity(0.06)) };
+                            let tint = match cell.kind {
+                                Kind::Added => Some(success.opacity(0.16)),
+                                Kind::Removed => Some(danger.opacity(0.16)),
+                                _ => None,
+                            };
+                            let half = match tint {
+                                Some(tint) => half.bg(tint),
+                                None => half,
+                            };
+                            half.child(div().w(px(44.0)).flex_none().text_right().text_color(muted).child(cell.number.to_string()))
+                                .child(div().flex_1().min_w_0().whitespace_nowrap().child(cell.text.clone()))
+                        };
+                        match &pairs[ix] {
+                            Pair::Hunk(text) => line.px_2().bg(muted.opacity(0.12)).text_color(muted).child(text.clone()),
+                            Pair::Line(old, new) => line.child(cell(old, true)).child(cell(new, false)),
+                        }
+                    })
+                    .collect()
+            })
+            .size_full()
+            .into_any_element()
         } else {
             let count = rows.len();
             // The list sizes itself from one row, so measure the widest.
@@ -1209,6 +1249,32 @@ impl Reader {
             .text_xs()
             .child(div().text_color(success).child(format!("+{added}")))
             .child(div().text_color(danger).child(format!("-{removed}")));
+        let (inline_view, split_view) = (cx.entity(), cx.entity());
+        let right = div()
+            .flex()
+            .items_center()
+            .gap_3()
+            .child(right)
+            .child(
+                div()
+                    .flex()
+                    .child(
+                        Button::new("view-inline")
+                            .label("Inline")
+                            .ghost()
+                            .xsmall()
+                            .selected(!self.split)
+                            .on_click(move |_, _, cx| inline_view.update(cx, |reader, cx| reader.set_split(false, cx))),
+                    )
+                    .child(
+                        Button::new("view-split")
+                            .label("Split")
+                            .ghost()
+                            .xsmall()
+                            .selected(self.split)
+                            .on_click(move |_, _, cx| split_view.update(cx, |reader, cx| reader.set_split(true, cx))),
+                    ),
+            );
         div()
             .size_full()
             .flex()

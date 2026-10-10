@@ -133,3 +133,49 @@ fn parse(text: &str) -> Vec<Row> {
     }
     rows
 }
+
+/// One side of a side-by-side row.
+pub struct Cell {
+    pub kind: Kind,
+    pub number: u32,
+    pub text: String,
+}
+
+/// A side-by-side row: a hunk header, or an old and a new cell. Runs of removed and added
+/// lines are paired off, so a changed line sits opposite its replacement.
+pub enum Pair {
+    Hunk(String),
+    Line(Option<Cell>, Option<Cell>),
+}
+
+pub fn split(rows: &[Row]) -> Vec<Pair> {
+    let mut out = Vec::new();
+    let (mut removed, mut added): (Vec<Cell>, Vec<Cell>) = (vec![], vec![]);
+    let flush = |out: &mut Vec<Pair>, removed: &mut Vec<Cell>, added: &mut Vec<Cell>| {
+        let (mut old, mut new) = (std::mem::take(removed).into_iter(), std::mem::take(added).into_iter());
+        loop {
+            let (a, b) = (old.next(), new.next());
+            if a.is_none() && b.is_none() {
+                break;
+            }
+            out.push(Pair::Line(a, b));
+        }
+    };
+    for row in rows {
+        match row.kind {
+            Kind::Removed => removed.push(Cell { kind: row.kind, number: row.old.unwrap_or(0), text: row.text.clone() }),
+            Kind::Added => added.push(Cell { kind: row.kind, number: row.new.unwrap_or(0), text: row.text.clone() }),
+            Kind::Hunk => {
+                flush(&mut out, &mut removed, &mut added);
+                out.push(Pair::Hunk(row.text.clone()));
+            }
+            Kind::Context => {
+                flush(&mut out, &mut removed, &mut added);
+                let cell = |number: Option<u32>| Cell { kind: Kind::Context, number: number.unwrap_or(0), text: row.text.clone() };
+                out.push(Pair::Line(Some(cell(row.old)), Some(cell(row.new))));
+            }
+        }
+    }
+    flush(&mut out, &mut removed, &mut added);
+    out
+}
