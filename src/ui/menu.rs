@@ -66,11 +66,13 @@ pub struct MenuState {
     highlighted: Option<usize>,
     focus: FocusHandle,
     restore: Option<FocusHandle>,
+    /// Where the button that opens it is, for [`MenuState::toggle`].
+    trigger: Bounds<Pixels>,
 }
 
 impl MenuState {
     pub fn new(cx: &mut Context<Self>) -> Self {
-        Self { open: false, position: Point::default(), highlighted: None, focus: cx.focus_handle(), restore: None }
+        Self { open: false, position: Point::default(), highlighted: None, focus: cx.focus_handle(), restore: None, trigger: Bounds::default() }
     }
 
     pub fn is_open(&self) -> bool {
@@ -85,6 +87,16 @@ impl MenuState {
         self.restore = window.focused(cx);
         self.focus.focus(window, cx);
         cx.notify();
+    }
+
+    /// Opens the menu under its button, or closes it if it's open.
+    pub fn toggle(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.open {
+            self.close(window, cx);
+        } else {
+            let trigger = self.trigger;
+            self.open_at(point(trigger.left(), trigger.bottom() + OFFSET), window, cx);
+        }
     }
 
     pub fn close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -219,7 +231,15 @@ pub fn menu(state: &Entity<MenuState>, items: Vec<MenuItem>, keep: Option<Bounds
 
 /// `button`, opening a menu of what `items` returns each time it opens.
 pub fn dropdown(id: impl Into<ElementId>, button: Button, items: impl Fn() -> Vec<MenuItem> + 'static) -> Dropdown {
-    Dropdown { id: id.into(), button, items: Rc::new(items) }
+    Dropdown { id: id.into(), button, items: Rc::new(items), menu: None }
+}
+
+impl Dropdown {
+    /// Uses `menu` as its state, so the menu can also be opened from elsewhere, like a shortcut.
+    pub fn menu(mut self, menu: Entity<MenuState>) -> Self {
+        self.menu = Some(menu);
+        self
+    }
 }
 
 #[derive(IntoElement)]
@@ -227,39 +247,29 @@ pub struct Dropdown {
     id: ElementId,
     button: Button,
     items: Rc<dyn Fn() -> Vec<MenuItem>>,
+    menu: Option<Entity<MenuState>>,
 }
 
-/// A dropdown's menu and where its button is.
+/// A dropdown's own menu, when it isn't given one.
 struct DropdownState {
     menu: Entity<MenuState>,
-    trigger: Bounds<Pixels>,
 }
 
 impl RenderOnce for Dropdown {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let state = window.use_keyed_state(self.id.clone(), cx, |_, cx| DropdownState {
-            menu: cx.new(MenuState::new),
-            trigger: Bounds::default(),
-        });
-        let (menu_state, trigger) = {
-            let s = state.read(cx);
-            (s.menu.clone(), s.trigger)
+        let menu_state = match self.menu {
+            Some(menu) => menu,
+            None => window.use_keyed_state(self.id.clone(), cx, |_, cx| DropdownState { menu: cx.new(MenuState::new) }).read(cx).menu.clone(),
         };
+        let trigger = menu_state.read(cx).trigger;
         let toggle = menu_state.clone();
-        let button = self.button.on_click(move |_, window, cx| {
-            toggle.update(cx, |menu, cx| {
-                if menu.is_open() {
-                    menu.close(window, cx);
-                } else {
-                    menu.open_at(point(trigger.left(), trigger.bottom() + OFFSET), window, cx);
-                }
-            });
-        });
+        let button = self.button.on_click(move |_, window, cx| toggle.update(cx, |menu, cx| menu.toggle(window, cx)));
         let open = menu_state.read(cx).is_open().then(|| (self.items)());
+        let track = menu_state.clone();
         div()
             .relative()
             .child(button)
-            .child(canvas(move |bounds, _, cx| state.update(cx, |s, _| s.trigger = bounds), |_, _, _, _| {}).absolute().size_full())
+            .child(canvas(move |bounds, _, cx| track.update(cx, |s, _| s.trigger = bounds), |_, _, _, _| {}).absolute().size_full())
             .children(open.and_then(|items| menu(&menu_state, items, Some(trigger), cx)))
     }
 }

@@ -20,7 +20,7 @@ use ui::button::Button;
 use ui::icon::IconName;
 use ui::input::{Input, InputEvent, InputState};
 use ui::list_item::ListItem;
-use ui::menu::{MenuItem, dropdown};
+use ui::menu::{MenuItem, MenuState, dropdown};
 use ui::resizable::{SidebarsState, sidebars};
 use ui::tree::{TreeEvent, TreeItem, TreeState, tree};
 use futures::StreamExt;
@@ -32,7 +32,7 @@ use gpui::{
     px, size, KeyBinding,
 };
 
-gpui::actions!(po, [ToggleLeft, ToggleRight]);
+gpui::actions!(po, [ToggleLeft, ToggleRight, ShowSource, ShowChanges, ToggleSplit, NewThread]);
 
 const SKIP: [&str; 5] = ["target", "node_modules", "dist", "build", "__pycache__"];
 const MAX_FILES: usize = 5000;
@@ -378,6 +378,8 @@ struct Reader {
     /// The selection across the agent's replies.
     selection: Entity<ui::markdown::Selection>,
     thread_focus: gpui::FocusHandle,
+    /// The New Thread menu, so a shortcut can open it.
+    thread_menu: Entity<MenuState>,
     left_open: bool,
     right_open: bool,
     /// Whether diffs show old and new side by side instead of inline.
@@ -499,6 +501,7 @@ impl Reader {
             sidebars: cx.new(|_| SidebarsState::new(px(260.0), px(460.0))),
             selection: cx.new(|_| ui::markdown::Selection::default()),
             thread_focus: cx.focus_handle(),
+            thread_menu: cx.new(MenuState::new),
             left_open: true,
             right_open: true,
             split: false,
@@ -1131,7 +1134,7 @@ impl Reader {
                     .icon(IconName::Folder)
                     .ghost()
                     .small()
-                    .tooltip("Source")
+                    .tooltip("Source (Ctrl+1)")
                     .selected(mode == Mode::Source)
                     .on_click(move |_, _, cx| source.update(cx, |reader, cx| reader.set_mode(Mode::Source, cx))),
             )
@@ -1140,7 +1143,7 @@ impl Reader {
                     .icon(IconName::Replace)
                     .ghost()
                     .small()
-                    .tooltip("Changes")
+                    .tooltip("Changes (Ctrl+2)")
                     .selected(mode == Mode::Diff)
                     .on_click(move |_, _, cx| changes.update(cx, |reader, cx| reader.set_mode(Mode::Diff, cx))),
             );
@@ -1344,6 +1347,7 @@ impl Reader {
                     .child(
                         Button::new("view-inline")
                             .label("Inline")
+                            .tooltip("Toggle inline/split (Ctrl+\\)")
                             .ghost()
                             .xsmall()
                             .selected(!self.split)
@@ -1352,6 +1356,7 @@ impl Reader {
                     .child(
                         Button::new("view-split")
                             .label("Split")
+                            .tooltip("Toggle inline/split (Ctrl+\\)")
                             .ghost()
                             .xsmall()
                             .selected(self.split)
@@ -1430,7 +1435,12 @@ impl Reader {
                     .child(
                         dropdown(
                             "agent-select",
-                            Button::new("agent-select").label("New Thread").small().outline().dropdown_caret(true),
+                            Button::new("agent-select")
+                                .label("New Thread")
+                                .tooltip("New thread (Ctrl+N)")
+                                .small()
+                                .outline()
+                                .dropdown_caret(true),
                             move || {
                                 agents
                                     .iter()
@@ -1442,7 +1452,8 @@ impl Reader {
                                     })
                                     .collect()
                             },
-                        ),
+                        )
+                        .menu(self.thread_menu.clone()),
                     ),
                 cx,
             ))
@@ -1725,6 +1736,17 @@ impl Render for Reader {
             .track_focus(&self.focus)
             .on_action(cx.listener(|reader, _: &ToggleLeft, _, cx| reader.toggle_left(cx)))
             .on_action(cx.listener(|reader, _: &ToggleRight, _, cx| reader.toggle_right(cx)))
+            .on_action(cx.listener(|reader, _: &ShowSource, _, cx| reader.set_mode(Mode::Source, cx)))
+            .on_action(cx.listener(|reader, _: &ShowChanges, _, cx| reader.set_mode(Mode::Diff, cx)))
+            .on_action(cx.listener(|reader, _: &ToggleSplit, _, cx| reader.set_split(!reader.split, cx)))
+            .on_action(cx.listener(|reader, _: &NewThread, window, cx| {
+                // Opening the right sidebar first: the menu hangs off its header.
+                if !reader.right_open {
+                    reader.right_open = true;
+                    cx.notify();
+                }
+                reader.thread_menu.update(cx, |menu, cx| menu.toggle(window, cx));
+            }))
             .child(
                 div().flex_1().min_h_0().child(
                     sidebars(&self.sidebars)
@@ -1862,6 +1884,10 @@ fn main() {
         cx.bind_keys([
             KeyBinding::new("ctrl-b", ToggleLeft, None),
             KeyBinding::new("ctrl-shift-b", ToggleRight, None),
+            KeyBinding::new("ctrl-1", ShowSource, None),
+            KeyBinding::new("ctrl-2", ShowChanges, None),
+            KeyBinding::new("ctrl-\\", ToggleSplit, None),
+            KeyBinding::new("ctrl-n", NewThread, None),
         ]);
         let bounds = Bounds::centered(None, size(px(1360.0), px(840.0)), cx);
         cx.open_window(
