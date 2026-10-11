@@ -27,9 +27,9 @@ use futures::StreamExt;
 use serde_json::Value;
 
 use gpui::{
-    AnyElement, App, Bounds, Context, Entity, FontWeight, ScrollHandle, IntoElement, ParentElement,
-    Render, SharedString, Styled, Subscription, Window, WindowBounds, WindowOptions, div, prelude::*,
-    px, rems, size, KeyBinding,
+    AnyElement, App, Bounds, Context, Entity, FontWeight, IntoElement, ListAlignment, ListState, ParentElement,
+    Render, SharedString, StyleRefinement, Styled, Subscription, Task, Window, WindowBounds, WindowOptions, div, list,
+    prelude::*, px, rems, size, KeyBinding,
 };
 
 gpui::actions!(po, [ToggleLeft, ToggleRight, ShowSource, ShowChanges, ToggleSplit, NewThread]);
@@ -158,6 +158,20 @@ fn syntax(path: &str) -> SharedString {
         _ => &ext,
     }
     .into()
+}
+
+/// The syntaxes of the most common file kinds in `files`, plus Markdown for the agent's
+/// replies, to compile ahead of the first file that needs them.
+fn common_syntaxes(files: &[String]) -> Vec<String> {
+    let mut counts: HashMap<SharedString, usize> = HashMap::new();
+    for file in files.iter().filter(|file| file.contains('.')) {
+        *counts.entry(syntax(file)).or_default() += 1;
+    }
+    let mut counts: Vec<_> = counts.into_iter().collect();
+    counts.sort_by_key(|&(_, count)| std::cmp::Reverse(count));
+    let mut out: Vec<String> = counts.into_iter().take(4).map(|(name, _)| name.to_string()).collect();
+    out.push("md".into());
+    out
 }
 
 /// A folder in the explorer, built from the flat file list.
@@ -344,7 +358,19 @@ struct Reader {
     changes_tree: Entity<TreeState>,
     collapsed: HashSet<SharedString>,
     picked: Option<String>,
+    /// The picked file's diff, its side-by-side pairs and how many lines it adds and removes.
     rows: Rc<Vec<Row>>,
+    pairs: Rc<Vec<Pair>>,
+    counts: (usize, usize),
+    /// The diff's rows as laid out, inline or split; only those in view are drawn.
+    diff_list: ListState,
+    /// Change marks for the explorer, by path.
+    marks: Rc<HashMap<String, char>>,
+    /// The latest `git diff` for the picked file and `git status`, run off the UI thread;
+    /// replacing one drops the stale run.
+    diffing: Option<Task<()>>,
+    listing: Option<Task<()>>,
+    scanning: Option<Task<()>>,
     root: PathBuf,
     /// What Changes mode diffs against: `HEAD`, or a PR's merge-base when reviewing.
     base: String,
@@ -373,7 +399,8 @@ struct Reader {
     agent: Option<String>,
     agents: Vec<config::Agent>,
     generation: u64,
-    scroll: ScrollHandle,
+    /// The thread's messages as laid out; only those in view are drawn.
+    thread_list: ListState,
     sidebars: Entity<SidebarsState>,
     /// The selection across the agent's replies.
     selection: Entity<ui::markdown::Selection>,
@@ -409,6 +436,7 @@ impl Reader {
             }
         };
         trace::mark("walk");
+        viewer::prewarm(common_syntaxes(&files));
         let pr_input = cx.new(|cx| {
             InputState::new(window, cx).auto_grow(1, 1).submit_on_enter(true).placeholder("PR number or URL")
         });
@@ -475,6 +503,13 @@ impl Reader {
             collapsed: HashSet::new(),
             picked: None,
             rows: Rc::new(vec![]),
+            pairs: Rc::new(vec![]),
+            counts: (0, 0),
+            diff_list: ListState::new(0, ListAlignment::Top, px(400.)),
+            marks: Rc::default(),
+            diffing: None,
+            listing: None,
+            scanning: None,
             root,
             base: pr.as_ref().map_or_else(|| "HEAD".to_string(), |pr| pr.base.clone()),
             pr,
@@ -500,7 +535,7 @@ impl Reader {
             agent: None,
             agents,
             generation: 0,
-            scroll: ScrollHandle::new(),
+            thread_list: ListState::new(0, ListAlignment::Top, px(400.)),
             sidebars: cx.new(|_| SidebarsState::new(px(260.0), px(460.0))),
             selection: cx.new(|_| ui::markdown::Selection::default()),
             thread_focus: cx.focus_handle(),
@@ -536,10 +571,14 @@ impl Reader {
         });
     }
 
-    /// Takes a fresh list of changed files; in diff mode it also reloads the picked file's diff.
-    fn apply_changes(&mut self, changes: Vec<Change>, rebuild: bool, cx: &mut Context<Self>) {
+    /// Takes a fresh list of changed files. In diff mode it picks a file if none is, and
+    /// reloads the picked file's diff when `rediff` says it may have changed.
+    fn apply_changes(&mut self, changes: Vec<Change>, rebuild: bool, rediff: bool, cx: &mut Context<Self>) {
         let listed = rebuild || self.changes != changes;
         self.changes = changes;
+        if listed {
+            self.marks = Rc::new(self.changes.iter().map(|c| (c.path.clone(), c.status)).collect());
+        }
         if self.mode != Mode::Diff {
             return;
         }
@@ -551,22 +590,83 @@ impl Reader {
             self.changes_tree.update(cx, |tree, cx| tree.set_items(items, cx));
         }
         let keep = self.picked.clone().filter(|path| self.changes.iter().any(|c| &c.path == path));
-        match keep.or_else(|| self.changes.first().map(|c| c.path.clone())) {
-            Some(path) => self.pick(&path, cx),
-            None => {
-                self.picked = None;
-                self.rows = Rc::new(vec![]);
-            }
+        match keep {
+            Some(path) if rediff || listed => self.pick(&path, cx),
+            Some(_) => {}
+            None => match self.changes.first().map(|c| c.path.clone()) {
+                Some(path) => self.pick(&path, cx),
+                None => {
+                    self.picked = None;
+                    self.diffing = None;
+                    self.set_rows(vec![]);
+                }
+            },
         }
         cx.notify();
     }
 
-    /// Shows `path`'s diff in the viewer.
+    /// Lists the changed files with `git` off the UI thread, then applies them as
+    /// [`Self::apply_changes`] does and picks `then`, if given.
+    fn refresh_changes(&mut self, rebuild: bool, then: Option<String>, cx: &mut Context<Self>) {
+        let (root, base) = (self.root.clone(), self.base.clone());
+        self.listing = Some(cx.spawn(async move |this, cx| {
+            let changes = cx.background_executor().spawn(async move { diff::changes(&root, &base) }).await;
+            this.update(cx, |reader, cx| {
+                reader.apply_changes(changes, rebuild, true, cx);
+                if let Some(path) = then.filter(|_| reader.mode == Mode::Diff) {
+                    reader.pick(&path, cx);
+                }
+            })
+            .ok();
+        }));
+    }
+
+    /// Re-walks the workspace off the UI thread and refreshes the explorer.
+    fn rescan(&mut self, cx: &mut Context<Self>) {
+        let root = self.root.clone();
+        self.scanning = Some(cx.spawn(async move |this, cx| {
+            let files = cx
+                .background_executor()
+                .spawn(async move {
+                    let mut files = Vec::new();
+                    walk(&root, &root, &mut files);
+                    files
+                })
+                .await;
+            this.update(cx, |reader, cx| {
+                if reader.files != files {
+                    reader.files = files;
+                    reader.refresh_tree(cx);
+                    cx.notify();
+                }
+            })
+            .ok();
+        }));
+    }
+
+    /// Shows the diff `rows`, and works out their side-by-side pairs and counts once.
+    fn set_rows(&mut self, rows: Vec<Row>) {
+        self.counts = rows.iter().fold((0, 0), |(a, r), row| match row.kind {
+            Kind::Added => (a + 1, r),
+            Kind::Removed => (a, r + 1),
+            _ => (a, r),
+        });
+        self.pairs = Rc::new(diff::split(&rows));
+        self.rows = Rc::new(rows);
+        self.relist_diff();
+    }
+
+    fn relist_diff(&mut self) {
+        self.diff_list.reset(if self.split { self.pairs.len() } else { self.rows.len() });
+    }
+
+    /// Shows `path`'s diff in the viewer, once `git` has produced it off the UI thread.
     fn pick(&mut self, path: &str, cx: &mut Context<Self>) {
-        let Some(change) = self.changes.iter().find(|c| c.path == path) else { return };
-        self.rows = Rc::new(diff::file_diff(&self.root, &self.base, change));
+        let Some(change) = self.changes.iter().find(|c| c.path == path).cloned() else { return };
         if self.picked.as_deref() != Some(path) {
             self.picked = Some(path.to_string());
+            // The last file's diff isn't shown under this one's name while this one loads.
+            self.set_rows(vec![]);
             let id = SharedString::from(path.to_string());
             self.changes_tree.update(cx, |tree, cx| {
                 if let Some(ix) = tree.index_of(&id) {
@@ -574,6 +674,18 @@ impl Reader {
                 }
             });
         }
+        let (root, base, path) = (self.root.clone(), self.base.clone(), path.to_string());
+        self.diffing = Some(cx.spawn(async move |this, cx| {
+            let rows = cx.background_executor().spawn(async move { diff::file_diff(&root, &base, &change) }).await;
+            this.update(cx, |reader, cx| {
+                if reader.picked.as_deref() == Some(&path) {
+                    reader.set_rows(rows);
+                    reader.diffing = None;
+                    cx.notify();
+                }
+            })
+            .ok();
+        }));
         cx.notify();
     }
 
@@ -629,7 +741,6 @@ impl Reader {
         self.root = root;
         drop(std::mem::replace(&mut self.pr, pr));
         self.files.clear();
-        walk(&self.root, &self.root, &mut self.files);
         self.expanded.clear();
         self.collapsed.clear();
         self.current = None;
@@ -637,8 +748,12 @@ impl Reader {
         self.code = None;
         self.notice = None;
         self.picked = None;
-        self.rows = Rc::new(vec![]);
+        self.diffing = None;
+        self.set_rows(vec![]);
+        self.changes.clear();
+        self.marks = Rc::default();
         self.refresh_tree(cx);
+        self.rescan(cx);
         // The agent works in the old directory, so it restarts in the new one.
         if let Some(agent) = self.agent.clone() {
             self.connect(&agent, window, cx);
@@ -647,8 +762,7 @@ impl Reader {
         if self.pr.is_some() {
             self.mode = Mode::Diff;
         }
-        let fresh = diff::changes(&self.root, &self.base);
-        self.apply_changes(fresh, true, cx);
+        self.refresh_changes(true, None, cx);
         cx.notify();
     }
 
@@ -658,7 +772,10 @@ impl Reader {
     }
 
     fn set_split(&mut self, split: bool, cx: &mut Context<Self>) {
-        self.split = split;
+        if self.split != split {
+            self.split = split;
+            self.relist_diff();
+        }
         cx.notify();
     }
 
@@ -673,8 +790,9 @@ impl Reader {
         }
         self.mode = mode;
         if mode == Mode::Diff {
-            let fresh = diff::changes(&self.root, &self.base);
-            self.apply_changes(fresh, true, cx);
+            // Show the last known changes at once; `git` confirms them in the background.
+            self.apply_changes(self.changes.clone(), true, false, cx);
+            self.refresh_changes(true, None, cx);
         }
         cx.notify();
     }
@@ -704,15 +822,25 @@ impl Reader {
                 while let Ok(event) = rx.try_recv() {
                     events.push(event);
                 }
-                let mut changed = false;
-                for path in events.iter().filter(|e| !e.kind.is_access()).flat_map(|e| &e.paths) {
-                    let Ok(rel) = path.strip_prefix(&root) else { continue };
-                    if rel.components().any(|c| ignored(&c.as_os_str().to_string_lossy())) {
-                        continue;
-                    }
-                    changed = true;
-                    if path.is_dir() {
-                        watch_dirs(&mut watcher, &root, path);
+                // Files coming, going or being renamed change the explorer; edits alone don't,
+                // so only those re-walk the tree.
+                let (mut changed, mut moved) = (false, false);
+                let mut touched = HashSet::new();
+                for event in events.iter().filter(|e| !e.kind.is_access()) {
+                    for path in &event.paths {
+                        let Ok(rel) = path.strip_prefix(&root) else { continue };
+                        if rel.components().any(|c| ignored(&c.as_os_str().to_string_lossy())) {
+                            continue;
+                        }
+                        changed = true;
+                        moved |= !matches!(
+                            event.kind,
+                            notify::EventKind::Modify(notify::event::ModifyKind::Data(_) | notify::event::ModifyKind::Metadata(_))
+                        );
+                        touched.insert(rel.to_string_lossy().replace('\\', "/"));
+                        if path.is_dir() {
+                            watch_dirs(&mut watcher, &root, path);
+                        }
                     }
                 }
                 if !changed {
@@ -724,20 +852,24 @@ impl Reader {
                 let (files, seen, changes) = cx
                     .background_executor()
                     .spawn(async move {
-                        let mut files = Vec::new();
-                        walk(&scan_root, &scan_root, &mut files);
+                        let files = moved.then(|| {
+                            let mut files = Vec::new();
+                            walk(&scan_root, &scan_root, &mut files);
+                            files
+                        });
                         let seen = current.as_ref().and_then(|path| stamp(&scan_root.join(path)));
                         (files, seen, diff::changes(&scan_root, &base))
                     })
                     .await;
                 let alive = handle.update(cx, |_, window, cx| {
                     this.update(cx, |reader, cx| {
-                        if reader.files != files {
+                        if let Some(files) = files.filter(|files| reader.files != *files) {
                             reader.files = files;
                             reader.refresh_tree(cx);
                             cx.notify();
                         }
-                        reader.apply_changes(changes, false, cx);
+                        let rediff = reader.picked.as_ref().is_some_and(|path| touched.contains(path));
+                        reader.apply_changes(changes, false, rediff, cx);
                         if let (Some(path), Some(seen)) = (reader.current.clone(), seen) {
                             if reader.stamp != Some(seen) {
                                 log::info!("reloading {path}");
@@ -761,6 +893,8 @@ impl Reader {
         self.client = None;
         self.agent = Some(key.to_string());
         self.thread.clear();
+        self.relist(0);
+        self.selection.update(cx, |s, _| s.clear());
         self.busy = false;
         self.ready = false;
         let command = self.agents.iter().find(|agent| agent.id == key).map_or(key.to_string(), |agent| agent.command.clone());
@@ -824,11 +958,21 @@ impl Reader {
     fn fail(&mut self, text: String) {
         self.busy = false;
         self.thread.push(Msg::Agent(vec![Block::Text(format!("**Error:** {text}"))]));
+        self.relist(self.thread.len() - 1);
+    }
+
+    /// Tells the thread's list that messages from `from` on were added or changed, so it lays
+    /// them out again.
+    fn relist(&mut self, from: usize) {
+        let listed = self.thread_list.item_count();
+        let from = from.min(listed).min(self.thread.len());
+        self.thread_list.splice(from..listed, self.thread.len() - from);
     }
 
     fn blocks(&mut self) -> &mut Vec<Block> {
         if !matches!(self.thread.last(), Some(Msg::Agent(_))) {
             self.thread.push(Msg::Agent(vec![]));
+            self.relist(self.thread.len() - 1);
         }
         match self.thread.last_mut() {
             Some(Msg::Agent(blocks)) => blocks,
@@ -837,6 +981,8 @@ impl Reader {
     }
 
     fn on_event(&mut self, event: Event, window: &mut Window, cx: &mut Context<Self>) {
+        // Most events change the last message; a tool call update may change an earlier one.
+        let mut changed = self.thread.len().saturating_sub(1);
         match event {
             Event::Ready { agent } => {
                 self.ready = true;
@@ -844,6 +990,9 @@ impl Reader {
                 self.status = "ready".into();
             }
             Event::Update(update) => {
+                if let Some(ix) = self.tool_message(&update) {
+                    changed = changed.min(ix);
+                }
                 if let Some((path, finished)) = self.update(&update) {
                     self.follow(&path, finished, window, cx);
                 }
@@ -870,8 +1019,21 @@ impl Reader {
                 }
             }
         }
-        self.scroll.scroll_to_bottom();
+        self.relist(changed);
+        self.thread_list.scroll_to_end();
         cx.notify();
+    }
+
+    /// The message holding the tool call an update is for, if it updates one.
+    fn tool_message(&self, update: &Value) -> Option<usize> {
+        if update["sessionUpdate"].as_str() != Some("tool_call_update") {
+            return None;
+        }
+        let id = update["toolCallId"].as_str().unwrap_or_default();
+        self.thread.iter().rposition(|msg| match msg {
+            Msg::Agent(blocks) => blocks.iter().any(|b| matches!(b, Block::Tool(tool) if tool.id == id)),
+            Msg::User(_) => false,
+        })
     }
 
     fn update(&mut self, update: &Value) -> Option<(String, bool)> {
@@ -945,18 +1107,14 @@ impl Reader {
         }
         let relative = relative.to_string_lossy().replace('\\', "/");
         if !self.files.contains(&relative) {
-            self.files.clear();
-            walk(&self.root, &self.root, &mut self.files);
-            self.refresh_tree(cx);
+            self.rescan(cx);
         }
         if self.current.as_deref() != Some(&relative) || finished {
             log::info!("agent: showing {relative}");
             self.open(&relative, window, cx);
         }
         if self.mode == Mode::Diff {
-            let fresh = diff::changes(&self.root, &self.base);
-            self.apply_changes(fresh, false, cx);
-            self.pick(&relative, cx);
+            self.refresh_changes(false, Some(relative), cx);
         }
     }
 
@@ -968,15 +1126,18 @@ impl Reader {
             client.answer(ask.request.clone(), Some(&choice.id));
         }
         ask.answered = Some(choice.name.clone());
+        self.relist(msg);
         cx.notify();
     }
 
     fn open(&mut self, path: &str, window: &mut Window, cx: &mut Context<Self>) {
         let full = self.root.join(path);
         let too_big = std::fs::metadata(&full).map_or(false, |m| m.len() > 4 * 1024 * 1024);
-        match std::fs::read_to_string(&full) {
-            Ok(_) if too_big => self.notice = Some(format!("{path} is too large to show")),
-            Ok(text) => {
+        // A file too big to show isn't read at all.
+        let read = if too_big { Ok(None) } else { std::fs::read_to_string(&full).map(Some) };
+        match read {
+            Ok(None) => self.notice = Some(format!("{path} is too large to show")),
+            Ok(Some(text)) => {
                 match &self.code {
                     // Same file: swap the text in place so the scroll position and caret survive.
                     Some(code) if self.current.as_deref() == Some(path) => {
@@ -1027,7 +1188,8 @@ impl Reader {
         self.busy = true;
         self.thread.push(Msg::User(prompt));
         self.thread.push(Msg::Agent(vec![]));
-        self.scroll.scroll_to_bottom();
+        self.relist(self.thread.len() - 2);
+        self.thread_list.scroll_to_end();
         cx.notify();
     }
 
@@ -1045,6 +1207,7 @@ impl Reader {
                 }
             }
         }
+        self.relist(0);
         cx.notify();
     }
 
@@ -1052,6 +1215,7 @@ impl Reader {
         let Some(Msg::Agent(blocks)) = self.thread.get_mut(msg) else { return };
         let Some(Block::Tool(tool)) = blocks.get_mut(block) else { return };
         tool.open = !tool.open;
+        self.relist(msg);
         cx.notify();
     }
 
@@ -1155,8 +1319,7 @@ impl Reader {
             Mode::Diff => "Changes",
         };
         let state = if mode == Mode::Diff { &self.changes_tree } else { &self.tree };
-        let marks: HashMap<String, char> = self.changes.iter().map(|c| (c.path.clone(), c.status)).collect();
-        let marks = if mode == Mode::Diff { marks } else { HashMap::new() };
+        let marks = if mode == Mode::Diff { self.marks.clone() } else { Rc::default() };
         // Themes may lack a green (Rosé Pine's success is teal), so added files get their own.
         let (muted, danger) = (colors.muted_foreground, colors.danger);
         let kinds = [colors.primary, colors.warning, colors.info, gpui::hsla(0.37, 0.5, 0.5, 1.0)];
@@ -1264,79 +1427,69 @@ impl Reader {
                 .child(header("Changes", String::new(), cx))
                 .child(div().flex_1().min_h_0().child(centered("Pick a changed file".into(), cx)));
         };
-        let rows = self.rows.clone();
-        let (added, removed) = rows.iter().fold((0, 0), |(a, r), row| match row.kind {
-            Kind::Added => (a + 1, r),
-            Kind::Removed => (a, r + 1),
-            _ => (a, r),
-        });
+        let (rows, pairs) = (self.rows.clone(), self.pairs.clone());
+        let (added, removed) = self.counts;
         // Themes may lack a green (Rosé Pine's success is teal), so added lines get their own.
         let (success, danger, muted, border) =
             (gpui::hsla(0.37, 0.5, 0.5, 1.0), colors.danger, colors.muted_foreground, colors.border);
         let font = cx.global::<Palette>().mono_font_family.clone();
-        let body: AnyElement = if rows.is_empty() {
+        let split = self.split;
+        // Only the rows in view are built, so a long diff costs no more than a short one.
+        let body: AnyElement = if rows.is_empty() && self.diffing.is_some() {
+            div().into_any_element()
+        } else if rows.is_empty() {
             centered("No textual changes".into(), cx)
-        } else if self.split {
-            let pairs = diff::split(&rows);
-            let count = pairs.len();
-            div().id("diff-split").size_full().overflow_y_scroll().children(
-                (0..count)
-                    .map(|ix| {
-                        let line = div().flex().w_full().min_h(rems(1.5)).items_start().font_family(font.clone()).text_sm();
-                        let cell = |cell: &Option<diff::Cell>, first: bool| {
-                            let half = div().flex_1().min_w_0().self_stretch().flex().items_start().gap_2();
-                            let half = if first { half.border_r_1().border_color(border) } else { half };
-                            let Some(cell) = cell else { return half.bg(muted.opacity(0.06)) };
-                            let tint = match cell.kind {
-                                Kind::Added => Some(success.opacity(0.16)),
-                                Kind::Removed => Some(danger.opacity(0.16)),
-                                _ => None,
-                            };
-                            let half = match tint {
-                                Some(tint) => half.bg(tint),
-                                None => half,
-                            };
-                            half.child(div().w(rems(3.)).flex_none().text_right().text_color(muted).child(cell.number.to_string()))
-                                .child(div().flex_1().min_w_0().child(cell.text.clone()))
-                        };
-                        match &pairs[ix] {
-                            Pair::Hunk(text) => line.px_2().bg(muted.opacity(0.12)).text_color(muted).child(text.clone()),
-                            Pair::Line(old, new) => line.child(cell(old, true)).child(cell(new, false)),
-                        }
-                    })
-                    .collect::<Vec<_>>(),
-            )
-            .into_any_element()
         } else {
-            let count = rows.len();
-            div().id("diff-rows").size_full().overflow_y_scroll().children(
-                (0..count)
-                    .map(|ix| {
-                        let row = &rows[ix];
-                        let number = |n: Option<u32>| {
-                            div().w(rems(3.)).flex_none().text_right().text_color(muted).child(n.map_or(String::new(), |n| n.to_string()))
+            list(self.diff_list.clone(), move |ix, _, _| {
+                let line = div().flex().w_full().min_h(rems(1.5)).items_start().font_family(font.clone()).text_sm();
+                if split {
+                    let cell = |cell: &Option<diff::Cell>, first: bool| {
+                        let half = div().flex_1().min_w_0().self_stretch().flex().items_start().gap_2();
+                        let half = if first { half.border_r_1().border_color(border) } else { half };
+                        let Some(cell) = cell else { return half.bg(muted.opacity(0.06)) };
+                        let tint = match cell.kind {
+                            Kind::Added => Some(success.opacity(0.16)),
+                            Kind::Removed => Some(danger.opacity(0.16)),
+                            _ => None,
                         };
-                        let (tint, sign) = match row.kind {
-                            Kind::Added => (Some(success.opacity(0.16)), "+"),
-                            Kind::Removed => (Some(danger.opacity(0.16)), "-"),
-                            Kind::Hunk => (Some(muted.opacity(0.12)), ""),
-                            Kind::Context => (None, " "),
+                        let half = match tint {
+                            Some(tint) => half.bg(tint),
+                            None => half,
                         };
-                        let line = div().flex().w_full().min_h(rems(1.5)).items_start().gap_2().font_family(font.clone()).text_sm();
-                        let line = match tint {
-                            Some(tint) => line.bg(tint),
-                            None => line,
-                        };
-                        if row.kind == Kind::Hunk {
-                            return line.px_2().text_color(muted).child(row.text.clone());
-                        }
-                        line.child(number(row.old))
-                            .child(number(row.new))
-                            .child(div().w(rems(0.75)).flex_none().text_color(muted).child(sign))
-                            .child(div().flex_1().min_w_0().child(row.text.clone()))
-                    })
-                    .collect::<Vec<_>>(),
-            )
+                        half.child(div().w(rems(3.)).flex_none().text_right().text_color(muted).child(cell.number.to_string()))
+                            .child(div().flex_1().min_w_0().child(cell.text.clone()))
+                    };
+                    return match &pairs[ix] {
+                        Pair::Hunk(text) => line.px_2().bg(muted.opacity(0.12)).text_color(muted).child(text.clone()),
+                        Pair::Line(old, new) => line.child(cell(old, true)).child(cell(new, false)),
+                    }
+                    .into_any_element();
+                }
+                let row = &rows[ix];
+                let number = |n: Option<u32>| {
+                    div().w(rems(3.)).flex_none().text_right().text_color(muted).child(n.map_or(String::new(), |n| n.to_string()))
+                };
+                let (tint, sign) = match row.kind {
+                    Kind::Added => (Some(success.opacity(0.16)), "+"),
+                    Kind::Removed => (Some(danger.opacity(0.16)), "-"),
+                    Kind::Hunk => (Some(muted.opacity(0.12)), ""),
+                    Kind::Context => (None, " "),
+                };
+                let line = line.gap_2();
+                let line = match tint {
+                    Some(tint) => line.bg(tint),
+                    None => line,
+                };
+                if row.kind == Kind::Hunk {
+                    return line.px_2().text_color(muted).child(row.text.clone()).into_any_element();
+                }
+                line.child(number(row.old))
+                    .child(number(row.new))
+                    .child(div().w(rems(0.75)).flex_none().text_color(muted).child(sign))
+                    .child(div().flex_1().min_w_0().child(row.text.clone()))
+                    .into_any_element()
+            })
+            .size_full()
             .into_any_element()
         };
         let right = div()
@@ -1387,7 +1540,8 @@ impl Reader {
         let title = self.current.clone().unwrap_or_else(|| "No file open".into());
         let body: AnyElement = match (&self.code, &self.notice) {
             (_, Some(notice)) => centered(notice.clone(), cx),
-            (Some(code), None) => viewer::CodeView::new(code).h_full().into_any_element(),
+            // Cached: the viewer redraws when it changes, not with every agent update or caret blink elsewhere.
+            (Some(code), None) => code.clone().cached(StyleRefinement::default().size_full()).into_any_element(),
             (None, None) => centered("Pick a file in the explorer".into(), cx),
         };
         div()
@@ -1403,11 +1557,30 @@ impl Reader {
             .child(div().flex_1().min_h_0().child(body))
     }
 
-    fn agent_panel(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn agent_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let this = cx.entity();
         self.selection.update(cx, |s, _| s.begin_frame());
-        let messages: Vec<AnyElement> =
-            self.thread.iter().enumerate().map(|(ix, msg)| render_msg(ix, msg, &this, &self.selection, window, cx)).collect();
+        // Only the messages in view are built and laid out, however long the thread gets.
+        let selection = self.selection.clone();
+        let thread: AnyElement = if self.agent.is_none() {
+            centered("Choose an agent from New Thread".into(), cx)
+        } else {
+            list(
+                self.thread_list.clone(),
+                cx.processor(move |reader: &mut Self, ix: usize, window, cx| {
+                    let Some(msg) = reader.thread.get(ix) else { return div().into_any_element() };
+                    let last = ix + 1 == reader.thread.len();
+                    div()
+                        .px_3()
+                        .pt_3()
+                        .when(last, |this| this.pb_3())
+                        .child(render_msg(ix, msg, &this, &selection, window, cx))
+                        .into_any_element()
+                }),
+            )
+            .size_full()
+            .into_any_element()
+        };
         let colors = cx.global::<Palette>();
         let (send, stop, picker) = (cx.entity(), cx.entity(), cx.entity());
         let agents = self.agents.clone();
@@ -1473,7 +1646,18 @@ impl Reader {
                     .key_context("Markdown")
                     .track_focus(&self.thread_focus)
                     .on_action(cx.listener(|reader, _: &ui::markdown::Copy, _, cx| {
-                        let text = reader.selection.read(cx).selected_text();
+                        // Select All takes the replies scrolled out of view too, which aren't laid out.
+                        let text = if reader.selection.read(cx).is_all() {
+                            ui::markdown::all_text(reader.thread.iter().flat_map(|msg| match msg {
+                                Msg::Agent(blocks) => blocks.as_slice(),
+                                Msg::User(_) => &[],
+                            }).filter_map(|block| match block {
+                                Block::Text(text) | Block::Thought(text) => Some(text.as_str()),
+                                _ => None,
+                            }))
+                        } else {
+                            reader.selection.read(cx).selected_text()
+                        };
                         if text.is_empty() {
                             return cx.propagate();
                         }
@@ -1507,17 +1691,7 @@ impl Reader {
                     }))
                     .flex_1()
                     .min_h_0()
-                    .overflow_y_scroll()
-                    .track_scroll(&self.scroll)
-                    .px_3()
-                    .py_3()
-                    .flex()
-                    .flex_col()
-                    .gap_3()
-                    .children(messages)
-                    .children(self.agent.is_none().then(|| {
-                        div().flex_1().child(centered("Choose an agent from New Thread".into(), cx))
-                    })),
+                    .child(thread),
             )
             .child(
                 div().flex_none().p_3().child(
@@ -1573,11 +1747,11 @@ fn render_msg(
         let id = ix * 10_000 + n;
         column = match block {
             Block::Text(text) => {
-                column.child(ui::markdown::markdown(("answer", id), text.clone().into(), selection, window, cx))
+                column.child(ui::markdown::markdown(("answer", id), text, selection, window, cx))
             }
             Block::Thought(text) => column.child(div().italic().opacity(0.7).child(ui::markdown::markdown(
                 ("thought", id),
-                text.clone().into(),
+                text,
                 selection,
                 window,
                 cx,
@@ -1699,7 +1873,7 @@ fn centered(text: String, cx: &App) -> AnyElement {
 }
 
 impl Render for Reader {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if !self.painted {
             self.painted = true;
             trace::mark("first render");
@@ -1765,7 +1939,7 @@ impl Render for Reader {
                             Mode::Source => self.viewer(cx).into_any_element(),
                             Mode::Diff => self.diff_viewer(cx).into_any_element(),
                         })
-                        .right(right_open, px(300.0)..px(760.0), self.agent_panel(window, cx)),
+                        .right(right_open, px(300.0)..px(760.0), self.agent_panel(cx)),
                 ),
             )
             .child(bar)

@@ -76,13 +76,13 @@ pub fn init(cx: &mut gpui::App) {
 pub struct SearchBar {
     view: WeakEntity<CodeViewState>,
     input: Entity<InputState>,
-    _subscription: Subscription,
+    _subscriptions: [Subscription; 2],
 }
 
 impl SearchBar {
     pub fn new(view: WeakEntity<CodeViewState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let input = cx.new(|cx| InputState::new(window, cx));
-        let _subscription = cx.subscribe(&input, |this, input, event: &InputEvent, cx| match event {
+        let events = cx.subscribe(&input, |this, input, event: &InputEvent, cx| match event {
             InputEvent::Change => {
                 let query = input.read(cx).value().to_string();
                 this.view.update(cx, |view, cx| view.set_query(query, cx)).ok();
@@ -92,7 +92,9 @@ impl SearchBar {
                 this.view.update(cx, |view, cx| if shift { view.previous_match(cx) } else { view.next_match(cx) }).ok();
             }
         });
-        Self { view, input, _subscription }
+        // The field is drawn inside the viewer's cached view, which redraws only when notified.
+        let redraw = cx.observe(&input, |_, _, cx| cx.notify());
+        Self { view, input, _subscriptions: [events, redraw] }
     }
 
     /// Shows `query` selected in a focused field, as reopening the kit's panel did.

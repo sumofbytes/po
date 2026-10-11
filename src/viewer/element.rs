@@ -9,6 +9,9 @@ use gpui::{
     SharedString, Style, TextAlign, TextRun, Window, fill, font, point, px, relative, size,
 };
 
+use std::sync::Arc;
+
+use super::highlight::Highlights;
 use super::wrap::{self, WrapMap};
 use super::{CodeViewState, Geometry};
 use crate::theme::Palette;
@@ -127,23 +130,78 @@ fn run(len: usize, font: &Font, color: Hsla, style: Option<&HighlightStyle>) -> 
     TextRun { len, font, color, background_color: None, underline: None, strikethrough: None }
 }
 
+/// The theme's style for each capture name, by capture id less one.
+type Styles = Arc<Vec<Option<HighlightStyle>>>;
+
+/// What layout reuses between frames while the font and highlights stay the same.
+#[derive(Default)]
+pub struct Cache {
+    metrics: Option<Metrics>,
+    /// The theme's style for each capture name of these highlights.
+    styles: Option<(Arc<Highlights>, Styles)>,
+}
+
+/// Widths that depend only on the font and the gutter's digit count.
+#[derive(Clone)]
+struct Metrics {
+    key: (SharedString, Pixels, usize),
+    digit_width: Pixels,
+    space: Pixels,
+    /// Each ASCII character's advance, and the widest of them.
+    ascii: [Pixels; 128],
+    widest: Pixels,
+}
+
+impl Cache {
+    fn metrics(&mut self, font: &Font, font_size: Pixels, digits: usize, color: Hsla, window: &Window) -> Metrics {
+        let key = (font.family.clone(), font_size, digits);
+        if let Some(metrics) = self.metrics.as_ref().filter(|m| m.key == key) {
+            return metrics.clone();
+        }
+        let text_system = window.text_system();
+        let shape = |text: String| text_system.shape_line(text.into(), font_size, &[run(digits.max(1), font, color, None)], None).width;
+        let font_id = text_system.resolve_font(font);
+        let mut ascii = [px(0.); 128];
+        for (c, slot) in ascii.iter_mut().enumerate() {
+            *slot = text_system.advance(font_id, font_size, c as u8 as char).map_or(px(0.), |a| a.width);
+        }
+        let widest = ascii.iter().copied().fold(px(0.), Pixels::max);
+        let space = text_system.shape_line(" ".into(), font_size, &[run(1, font, color, None)], None).width;
+        let metrics = Metrics { key, digit_width: shape("+".repeat(digits)), space, ascii, widest };
+        self.metrics = Some(metrics.clone());
+        metrics
+    }
+
+    fn styles(&mut self, highlights: Option<&Arc<Highlights>>, palette: &Palette) -> Styles {
+        let Some(highlights) = highlights else { return Arc::default() };
+        match &self.styles {
+            Some((cached, styles)) if Arc::ptr_eq(cached, highlights) => styles.clone(),
+            _ => {
+                let styles = Arc::new(highlights.names.iter().map(|name| palette.syntax(name)).collect::<Vec<_>>());
+                self.styles = Some((highlights.clone(), styles.clone()));
+                styles
+            }
+        }
+    }
+}
+
 /// Wraps every line at `width`. Widths are sums of each character's advance, which for a
 /// monospace font is what shaping gives, without shaping every candidate row.
-fn wrap(state: &CodeViewState, font: &Font, font_size: Pixels, width: Pixels, window: &Window) -> WrapMap {
+fn wrap(state: &CodeViewState, metrics: &Metrics, font: &Font, font_size: Pixels, width: Pixels, window: &Window) -> WrapMap {
     let text_system = window.text_system();
     let font_id = text_system.resolve_font(font);
-    let mut ascii = [None::<Pixels>; 128];
     let mut other = std::collections::HashMap::new();
-    let mut advance = |c: char| {
-        let slot = match ascii.get_mut(c as usize) {
-            Some(slot) => slot,
-            None => other.entry(c).or_insert(None),
-        };
-        *slot.get_or_insert_with(|| text_system.advance(font_id, font_size, c).map_or(px(0.), |a| a.width))
+    let mut advance = |c: char| match metrics.ascii.get(c as usize) {
+        Some(&width) => width,
+        None => *other.entry(c).or_insert_with(|| text_system.advance(font_id, font_size, c).map_or(px(0.), |a| a.width)),
     };
     // The width before each byte of the line.
     let mut before = Vec::new();
     WrapMap::build(&state.text, |line| {
+        // Most lines are ASCII and fit even at the widest character's advance; skip measuring them.
+        if line.is_ascii() && metrics.widest * line.len() as f32 <= width {
+            return Vec::new();
+        }
         before.clear();
         let mut x = px(0.);
         for c in line.chars() {
@@ -242,16 +300,10 @@ impl Element for CodeElement {
         cx: &mut App,
     ) -> Layout {
         let colors = Colors::new(cx);
+        let styles = self.state.update(cx, |state, cx| state.cache.styles(state.highlights.as_ref(), cx.global::<Palette>()));
         let palette = cx.global::<Palette>();
         let font = font(palette.mono_font_family.clone());
         let font_size = palette.mono_font_size;
-        let styles: Vec<Option<HighlightStyle>> = self
-            .state
-            .read(cx)
-            .highlights
-            .as_ref()
-            .map(|h| h.names.iter().map(|name| palette.syntax(name)).collect())
-            .unwrap_or_default();
         let line_height = font_size * LINE_HEIGHT;
         let hitbox = window.insert_hitbox(bounds, HitboxBehavior::Normal);
         let state = self.state.clone();
@@ -259,10 +311,8 @@ impl Element for CodeElement {
         state.update(cx, |state, _| {
             let lines = state.text.lines();
             let digits = lines.to_string().len().clamp(MIN_DIGITS, MAX_DIGITS);
-            let digit_width = window
-                .text_system()
-                .shape_line("+".repeat(digits).into(), font_size, &[run(digits, &font, colors.number, None)], None)
-                .width;
+            let metrics = state.cache.metrics(&font, font_size, digits, colors.number, window);
+            let digit_width = metrics.digit_width;
             let gutter_width = digit_width + NUMBER_MARGIN + FOLD_COLUMN;
             let text_x = bounds.left() + PADDING.left + gutter_width;
             let wrap_width = (bounds.size.width - PADDING.left - PADDING.right - gutter_width - RIGHT_MARGIN).max(px(1.));
@@ -272,7 +322,7 @@ impl Element for CodeElement {
                 // Keep the line at the top of the view in place across the rewrap.
                 let anchor = state.anchor.take().unwrap_or_else(|| state.top());
                 let started = std::time::Instant::now();
-                state.wrap = wrap(state, &font, font_size, wrap_width, window);
+                state.wrap = wrap(state, &metrics, &font, font_size, wrap_width, window);
                 state.apply_folds();
                 crate::trace::mark(&format!("viewer wrapped at {wrap_width:?} in {:?}", started.elapsed()));
                 state.wrap_key = Some(key);
@@ -286,10 +336,7 @@ impl Element for CodeElement {
             let content = PADDING.top + line_height * rows as f32 + bottom.max(PADDING.bottom);
             state.max_scroll = (content - viewport).max(px(0.));
             state.scroll_y = state.scroll_y.clamp(px(0.), state.max_scroll);
-            let space = window
-                .text_system()
-                .shape_line(" ".into(), font_size, &[run(1, &font, colors.foreground, None)], None)
-                .width;
+            let space = metrics.space;
             state.geometry =
                 Some(Geometry { bounds, text_x, line_height, space, font: font.clone(), font_size });
             state.follow_caret(viewport);

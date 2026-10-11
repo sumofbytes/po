@@ -11,11 +11,13 @@ use std::ops::Range;
 use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 
 use streaming_iterator::StreamingIterator;
-use tree_sitter::{Parser, Query, QueryCursor, Tree};
+use tree_sitter::{InputEdit, Parser, Point, Query, QueryCursor, Tree};
 
 /// Separate parses for injections that aren't combined, such as fenced code blocks; the kit's
 /// limit.
 const MAX_INJECTIONS: usize = 512;
+/// Capture names one file can color with; the canvas keeps a byte per byte of text.
+const MAX_NAMES: usize = u8::MAX as usize;
 
 /// A language's grammar and compiled queries. Compiling a query takes tens of milliseconds, so
 /// each is built once per run, the first time a file needs it.
@@ -67,6 +69,14 @@ fn grammar(name: &str) -> Option<Arc<Grammar>> {
     grammar
 }
 
+/// Compiles the grammars for `languages` (names or file extensions), so the first file of
+/// each opens without waiting for its queries. Meant for a background thread.
+pub fn prewarm<'a>(languages: impl IntoIterator<Item = &'a str>) {
+    for language in languages {
+        grammar(language);
+    }
+}
+
 /// Runs of the same capture over the text: `starts[i]..starts[i + 1]` has capture `ids[i]`,
 /// where 0 means none and `n` means `names[n - 1]`.
 #[derive(Default)]
@@ -76,6 +86,8 @@ pub struct Highlights {
     pub folds: Vec<(usize, usize)>,
     starts: Vec<u32>,
     ids: Vec<u16>,
+    /// The parse, kept so the next version of the text reparses only what changed.
+    tree: Option<Tree>,
 }
 
 impl Highlights {
@@ -98,18 +110,20 @@ impl Highlights {
 /// Every byte's capture, filled in as captures are painted over each other.
 struct Canvas<'a> {
     text: &'a str,
-    ids: Vec<u16>,
+    ids: Vec<u8>,
     names: Vec<String>,
-    by_name: HashMap<String, u16>,
+    by_name: HashMap<String, u8>,
 }
 
 impl Canvas<'_> {
     fn paint(&mut self, range: Range<usize>, name: &str) {
         let id = match self.by_name.get(name) {
             Some(&id) => id,
+            // No grammar comes near this many names; any past it stay uncolored.
+            None if self.names.len() >= MAX_NAMES => return,
             None => {
                 self.names.push(name.to_string());
-                let id = self.names.len() as u16;
+                let id = self.names.len() as u8;
                 self.by_name.insert(name.to_string(), id);
                 id
             }
@@ -124,26 +138,37 @@ impl Canvas<'_> {
         let (mut starts, mut ids) = (Vec::new(), Vec::new());
         for (ix, &id) in self.ids.iter().enumerate() {
             // Runs only start on character boundaries, so shaping never splits a character.
-            if ids.last() != Some(&id) && self.text.is_char_boundary(ix) {
+            if ids.last() != Some(&(id as u16)) && self.text.is_char_boundary(ix) {
                 starts.push(ix as u32);
-                ids.push(id);
+                ids.push(id as u16);
             }
         }
         if starts.is_empty() {
             starts.push(0);
             ids.push(0);
         }
-        Highlights { names: self.names, folds: Vec::new(), starts, ids }
+        Highlights { names: self.names, folds: Vec::new(), starts, ids, tree: None }
     }
 }
 
 /// Highlights `text` as `language` (a name or file extension the kit's registry knows), or
 /// `None` when there is no grammar for it.
 pub fn highlight(text: &str, language: &str) -> Option<Highlights> {
+    rehighlight(text, language, None)
+}
+
+/// Like [`highlight`], reusing `old`, the highlights of `old_text`, so only the parts of the
+/// tree the edit touched are parsed again.
+pub fn rehighlight(text: &str, language: &str, old: Option<(&str, &Highlights)>) -> Option<Highlights> {
     let grammar = grammar(language)?;
     let mut parser = Parser::new();
     parser.set_language(&grammar.language).ok()?;
-    let tree = parser.parse(text, None)?;
+    let old_tree = old.and_then(|(old_text, old)| {
+        let mut tree = old.tree.clone()?;
+        tree.edit(&edit(old_text, text));
+        Some(tree)
+    });
+    let tree = parser.parse(text, old_tree.as_ref())?;
 
     let mut canvas = Canvas { text, ids: vec![0; text.len()], names: Vec::new(), by_name: HashMap::new() };
     let query = &grammar.query;
@@ -169,7 +194,39 @@ pub fn highlight(text: &str, language: &str) -> Option<Highlights> {
     }
     let mut highlights = canvas.finish();
     highlights.folds = folds(&tree);
+    highlights.tree = Some(tree);
     Some(highlights)
+}
+
+/// The one edit that turns `old` into `new`: everything between their common start and end.
+fn edit(old: &str, new: &str) -> InputEdit {
+    let mut start = old.bytes().zip(new.bytes()).take_while(|(a, b)| a == b).count();
+    while !old.is_char_boundary(start) || !new.is_char_boundary(start) {
+        start -= 1;
+    }
+    let room = old.len().min(new.len()) - start;
+    let suffix = old.bytes().rev().zip(new.bytes().rev()).take(room).take_while(|(a, b)| a == b).count();
+    let (mut old_end, mut new_end) = (old.len() - suffix, new.len() - suffix);
+    while !old.is_char_boundary(old_end) || !new.is_char_boundary(new_end) {
+        old_end += 1;
+        new_end += 1;
+    }
+    InputEdit {
+        start_byte: start,
+        old_end_byte: old_end,
+        new_end_byte: new_end,
+        start_position: point(old, start),
+        old_end_position: point(old, old_end),
+        new_end_position: point(new, new_end),
+    }
+}
+
+/// The row and byte column of `byte` in `text`.
+fn point(text: &str, byte: usize) -> Point {
+    let before = &text.as_bytes()[..byte];
+    let row = before.iter().filter(|&&b| b == b'\n').count();
+    let column = byte - before.iter().rposition(|&b| b == b'\n').map_or(0, |ix| ix + 1);
+    Point { row, column }
 }
 
 /// What can fold, as the kit decides: every named node spanning three or more lines, keeping
@@ -309,6 +366,24 @@ mod tests {
         let text = "fn a() {\n    if x {\n        y();\n    }\n}\nfn b() {}\n";
         let h = highlight(text, "rs").unwrap();
         assert_eq!(h.folds, [(0, 4), (1, 3)]);
+    }
+
+    #[test]
+    fn reparsing_an_edit_matches_a_fresh_parse() {
+        let old = "fn a() {\n    let x = 1;\n}\n";
+        let new = "fn a() {\n    let x = \"ü\";\n    if x {\n        y();\n    }\n}\n";
+        let fresh = highlight(new, "rs").unwrap();
+        let reused = super::rehighlight(new, "rs", Some((old, &highlight(old, "rs").unwrap()))).unwrap();
+        assert_eq!((&reused.names, &reused.starts, &reused.ids, &reused.folds), (&fresh.names, &fresh.starts, &fresh.ids, &fresh.folds));
+    }
+
+    #[test]
+    fn edits_cover_only_what_changed() {
+        let edit = super::edit("ab\ncd\nef", "ab\ncXd\nef");
+        assert_eq!((edit.start_byte, edit.old_end_byte, edit.new_end_byte), (4, 4, 5));
+        assert_eq!((edit.start_position.row, edit.start_position.column), (1, 1));
+        let edit = super::edit("aüb", "aöb");
+        assert_eq!((edit.start_byte, edit.old_end_byte, edit.new_end_byte), (1, 3, 3));
     }
 
     #[test]

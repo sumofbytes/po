@@ -182,8 +182,62 @@ pub struct Selection {
     /// The runs laid out in the last frame, in reading order.
     runs: Vec<(SharedString, Run)>,
     index: HashMap<SharedString, usize>,
-    /// Parsed replies, by their id and text.
-    parsed: HashMap<ElementId, (SharedString, Rc<Vec<Block>>)>,
+    /// Parsed replies, by their id.
+    parsed: HashMap<ElementId, Parsed>,
+}
+
+/// A reply's text, its blocks and its code blocks' colors, kept until the text changes.
+struct Parsed {
+    source: String,
+    blocks: Rc<Vec<Block>>,
+    colors: Rc<CodeColorMap>,
+}
+
+/// Code block colors by [`code_key`]; `None` for a language without a grammar.
+type CodeColorMap = HashMap<u64, Option<Rc<crate::viewer::CodeColors>>>;
+
+fn code_key(language: &str, code: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    (language, code).hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Calls `f` with every code block's language and code, in order.
+fn each_code(blocks: &[Block], f: &mut impl FnMut(&str, &str)) {
+    for block in blocks {
+        match block {
+            Block::Code { language: Some(language), code } => f(language, code),
+            Block::Quote(children) => each_code(children, f),
+            Block::List { items, .. } => items.iter().for_each(|item| each_code(&item.children, f)),
+            _ => {}
+        }
+    }
+}
+
+/// The text of every run `blocks` draw, in reading order, as the selection collects it.
+fn leaves<'a>(blocks: &'a [Block], out: &mut Vec<&'a str>) {
+    for block in blocks {
+        match block {
+            Block::Paragraph(inline) | Block::Heading(_, inline) => out.push(&inline.text),
+            Block::Quote(children) => leaves(children, out),
+            Block::List { items, .. } => items.iter().for_each(|item| leaves(&item.children, out)),
+            Block::Code { code, .. } => out.push(code),
+            Block::Rule => {}
+            Block::Table { rows, .. } => out.extend(rows.iter().flatten().map(|cell| cell.text.as_str())),
+        }
+    }
+}
+
+/// The text Select All copies from `sources`, the replies in order, including those scrolled
+/// out of view and so not laid out: every run's text, one run a line.
+pub fn all_text<'a>(sources: impl IntoIterator<Item = &'a str>) -> String {
+    let parsed: Vec<Vec<Block>> = sources.into_iter().map(parse).collect();
+    let mut parts = Vec::new();
+    for blocks in &parsed {
+        leaves(blocks, &mut parts);
+    }
+    parts.join("\n").trim().to_string()
 }
 
 #[derive(Clone)]
@@ -260,6 +314,16 @@ impl Selection {
         self.picked = Some(Picked::All);
     }
 
+    pub fn is_all(&self) -> bool {
+        matches!(self.picked, Some(Picked::All))
+    }
+
+    /// Forgets parsed replies, for a new thread.
+    pub fn clear(&mut self) {
+        self.parsed.clear();
+        self.picked = None;
+    }
+
     /// The part of a run that's selected, from where the drag points were last frame.
     fn range_for(&self, key: &SharedString) -> Option<Range<usize>> {
         match &self.picked {
@@ -309,17 +373,26 @@ fn word_at(text: &str, ix: usize) -> Range<usize> {
 }
 
 /// Renders `source` as a reply. `id` must be unique among replies shown together.
-pub fn markdown(id: impl Into<ElementId>, source: SharedString, selection: &Entity<Selection>, window: &mut Window, cx: &mut App) -> AnyElement {
+pub fn markdown(id: impl Into<ElementId>, source: &str, selection: &Entity<Selection>, window: &mut Window, cx: &mut App) -> AnyElement {
     let id = id.into();
-    let blocks = selection.update(cx, |s, _| match s.parsed.get(&id) {
-        Some((text, blocks)) if *text == source => blocks.clone(),
-        _ => {
-            let blocks = Rc::new(parse(&source));
-            s.parsed.insert(id.clone(), (source.clone(), blocks.clone()));
-            blocks
+    let (blocks, colors) = selection.update(cx, |s, _| match s.parsed.get(&id) {
+        Some(parsed) if parsed.source == source => (parsed.blocks.clone(), parsed.colors.clone()),
+        old => {
+            let blocks = Rc::new(parse(source));
+            // A reply grows while it streams; code blocks it already finished keep their colors.
+            let old = old.map(|parsed| parsed.colors.clone());
+            let mut colors = CodeColorMap::new();
+            each_code(&blocks, &mut |language, code| {
+                let key = code_key(language, code);
+                let reused = old.as_ref().and_then(|old| old.get(&key).cloned());
+                colors.entry(key).or_insert_with(|| reused.unwrap_or_else(|| crate::viewer::CodeColors::new(code, language).map(Rc::new)));
+            });
+            let colors = Rc::new(colors);
+            s.parsed.insert(id.clone(), Parsed { source: source.to_string(), blocks: blocks.clone(), colors: colors.clone() });
+            (blocks, colors)
         }
     });
-    let mut cx2 = Render { id: format!("{id:?}"), leaf: 0, selection: selection.clone(), style: window.text_style() };
+    let mut cx2 = Render { id: format!("{id:?}"), leaf: 0, selection: selection.clone(), style: window.text_style(), colors };
     let count = blocks.len();
     div()
         .children(blocks.iter().enumerate().map(|(ix, b)| cx2.block(b, ix + 1 == count, false, 0, window, cx)))
@@ -332,6 +405,7 @@ struct Render {
     selection: Entity<Selection>,
     /// The text style blocks around the current one set, which the text runs carry.
     style: gpui::TextStyle,
+    colors: Rc<CodeColorMap>,
 }
 
 fn gapped(element: AnyElement, last: bool) -> AnyElement {
@@ -401,7 +475,8 @@ impl Render {
             Block::Code { language, code } => {
                 let highlights = language
                     .as_deref()
-                    .map(|language| crate::viewer::code_highlights(code, language, cx))
+                    .and_then(|language| self.colors.get(&code_key(language, code))?.as_ref())
+                    .map(|colors| colors.styles(cx))
                     .unwrap_or_default();
                 let text = Inline { text: code.clone(), ..Default::default() };
                 let leaf = self.styled(
@@ -667,6 +742,12 @@ mod tests {
         assert_eq!(prefix(2, Some(1), true, 0), "3. ");
         assert_eq!(prefix(0, Some(1), true, 1), "A. ");
         assert_eq!(prefix(1, Some(1), true, 2), "b. ");
+    }
+
+    #[test]
+    fn select_all_takes_every_run() {
+        let text = super::all_text(["# Hi\n\n- one\n- two\n\n```rs\nfn x() {}\n```\n", "| a | b |\n|---|---|\n| c | d |\n"]);
+        assert_eq!(text, "Hi\none\ntwo\nfn x() {}\na\nb\nc\nd");
     }
 
     #[test]
