@@ -4,6 +4,9 @@ mod config;
 mod diff;
 mod pr;
 mod theme;
+mod trace;
+mod ui;
+mod viewer;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -12,19 +15,17 @@ use std::time::{Duration, SystemTime};
 
 use acp::{Client, Event, PermissionOption};
 use diff::{Change, Kind, Pair, Row};
+use theme::Palette;
+use ui::button::Button;
+use ui::icon::IconName;
+use ui::input::{Input, InputEvent, InputState};
+use ui::list_item::ListItem;
+use ui::menu::{MenuItem, dropdown};
+use ui::resizable::{SidebarsState, sidebars};
+use ui::tree::{TreeEvent, TreeItem, TreeState, tree};
 use futures::StreamExt;
 use serde_json::Value;
 
-use gpui_kit::component::{
-    ActiveTheme, IconName, Selectable, Sizable,
-    button::{Button, ButtonVariants},
-    input::{Editor, EditorState, InputEvent, Textarea, TextareaState},
-    list::ListItem,
-    menu::{DropdownMenu, PopupMenuItem},
-    resizable::{h_resizable, resizable_panel},
-    text::TextView,
-    tree::{TreeEvent, TreeItem, TreeState, tree},
-};
 use gpui::{
     AnyElement, App, Bounds, Context, Entity, FontWeight, ScrollHandle, IntoElement, ParentElement,
     Render, SharedString, Styled, Subscription, Window, WindowBounds, WindowOptions, div, prelude::*,
@@ -52,6 +53,55 @@ fn watch_dirs(watcher: &mut impl notify::Watcher, root: &Path, dir: &Path) {
         if path.is_dir() && !ignored(&entry.file_name().to_string_lossy()) {
             watch_dirs(watcher, root, &path);
         }
+    }
+}
+
+type Watch = (notify::RecommendedWatcher, futures::channel::mpsc::UnboundedReceiver<notify::Event>);
+
+/// A watcher on every folder under `root`. Adding the watches costs a syscall per folder, which
+/// adds up to seconds on a big tree, so callers run this off the UI thread.
+fn start_watcher(root: &Path) -> Option<Watch> {
+    let (tx, rx) = futures::channel::mpsc::unbounded();
+    let mut watcher = match notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
+        if let Ok(event) = event {
+            tx.unbounded_send(event).ok();
+        }
+    }) {
+        Ok(watcher) => watcher,
+        Err(error) => {
+            log::error!("watch: {error}");
+            return None;
+        }
+    };
+    watch_dirs(&mut watcher, root, root);
+    Some((watcher, rx))
+}
+
+/// The explorer's file list and the watcher, started before the window opens so they run while
+/// the GPU is being set up instead of after it.
+struct Prefetch {
+    root: PathBuf,
+    files: std::thread::JoinHandle<Vec<String>>,
+    watch: futures::channel::oneshot::Receiver<Option<Watch>>,
+}
+
+impl Prefetch {
+    fn start(root: PathBuf) -> Self {
+        let scan = root.clone();
+        let files = std::thread::spawn(move || {
+            let mut files = Vec::new();
+            walk(&scan, &scan, &mut files);
+            trace::mark("walk (thread)");
+            files
+        });
+        let (done, watch) = futures::channel::oneshot::channel();
+        let target = root.clone();
+        std::thread::spawn(move || {
+            let watch = start_watcher(&target);
+            trace::mark("watcher (thread)");
+            done.send(watch).ok();
+        });
+        Self { root, files, watch }
     }
 }
 
@@ -92,15 +142,22 @@ fn language(path: &str) -> &'static str {
         "toml" => "TOML",
         "md" => "Markdown",
         "go" => "Go",
+        "ex" | "exs" => "Elixir",
         "c" | "h" => "C",
         "sh" => "Shell",
         _ => "Plain text",
     }
 }
 
-/// The highlighter's name for a file: its extension, which the editor maps to a grammar.
+/// The highlighter's name for a file: its extension, which the viewer maps to a grammar.
+/// `.exs` is Elixir too; the viewer only knows that grammar as "elixir".
 fn syntax(path: &str) -> SharedString {
-    path.rsplit_once('.').map_or("", |(_, ext)| ext).to_lowercase().into()
+    let ext = path.rsplit_once('.').map_or("", |(_, ext)| ext).to_lowercase();
+    match ext.as_str() {
+        "exs" => "elixir",
+        _ => &ext,
+    }
+    .into()
 }
 
 /// A folder in the explorer, built from the flat file list.
@@ -294,7 +351,7 @@ struct Reader {
     pr: Option<pr::Pr>,
     /// The directory `po` was started in: where PRs are checked out from and where Close returns to.
     home: PathBuf,
-    pr_input: Entity<TextareaState>,
+    pr_input: Entity<InputState>,
     /// Progress or failure of the last attempt to open a PR.
     pr_status: Option<String>,
     opening: bool,
@@ -302,20 +359,25 @@ struct Reader {
     files: Vec<String>,
     current: Option<String>,
     stamp: Option<Stamp>,
-    editor: Option<Entity<EditorState>>,
+    code: Option<Entity<viewer::CodeViewState>>,
     notice: Option<String>,
     tree: Entity<TreeState>,
     expanded: HashSet<SharedString>,
-    draft: Entity<TextareaState>,
+    draft: Entity<InputState>,
     thread: Vec<Msg>,
     busy: bool,
     ready: bool,
+    painted: bool,
     status: String,
     client: Option<Client>,
     agent: Option<String>,
     agents: Vec<config::Agent>,
     generation: u64,
     scroll: ScrollHandle,
+    sidebars: Entity<SidebarsState>,
+    /// The selection across the agent's replies.
+    selection: Entity<ui::markdown::Selection>,
+    thread_focus: gpui::FocusHandle,
     left_open: bool,
     right_open: bool,
     /// Whether diffs show old and new side by side instead of inline.
@@ -326,15 +388,30 @@ struct Reader {
 }
 
 impl Reader {
-    fn new(home: PathBuf, pr: Option<pr::Pr>, command: Option<String>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    fn new(
+        home: PathBuf,
+        pr: Option<pr::Pr>,
+        command: Option<String>,
+        prefetch: Prefetch,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let root = pr.as_ref().map_or_else(|| home.clone(), |pr| pr.worktree.clone());
-        let mut files = Vec::new();
-        walk(&root, &root, &mut files);
+        let prefetch = Some(prefetch).filter(|prefetch| prefetch.root == root);
+        let (files, watch) = match prefetch {
+            Some(Prefetch { files, watch, .. }) => (files.join().unwrap_or_default(), Some(watch)),
+            None => {
+                let mut files = Vec::new();
+                walk(&root, &root, &mut files);
+                (files, None)
+            }
+        };
+        trace::mark("walk");
         let pr_input = cx.new(|cx| {
-            TextareaState::new(window, cx).auto_grow(1, 1).submit_on_enter(true).placeholder("PR number or URL")
+            InputState::new(window, cx).auto_grow(1, 1).submit_on_enter(true).placeholder("PR number or URL")
         });
         let draft = cx.new(|cx| {
-            TextareaState::new(window, cx)
+            InputState::new(window, cx)
                 .auto_grow(1, 6)
                 .submit_on_enter(true)
                 .placeholder("Message the agent")
@@ -360,13 +437,13 @@ impl Reader {
             }),
             // Moving the selection with the keyboard opens the file too, like a click.
             cx.observe_in(&tree, window, |reader, tree, window, cx| {
-                let path = tree.read(cx).selected_entry().filter(|e| !e.is_folder()).map(|e| e.item().id.to_string());
+                let path = tree.read(cx).selected_entry().filter(|e| !e.folder).map(|e| e.id.to_string());
                 if let Some(path) = path.filter(|p| reader.mode == Mode::Source && reader.current.as_deref() != Some(p)) {
                     reader.open(&path, window, cx);
                 }
             }),
             cx.observe(&changes_tree, |reader, tree, cx| {
-                let path = tree.read(cx).selected_entry().filter(|e| !e.is_folder()).map(|e| e.item().id.to_string());
+                let path = tree.read(cx).selected_entry().filter(|e| !e.folder).map(|e| e.id.to_string());
                 if let Some(path) = path.filter(|p| reader.mode == Mode::Diff && reader.picked.as_deref() != Some(p)) {
                     reader.pick(&path, cx);
                 }
@@ -404,7 +481,7 @@ impl Reader {
             files,
             current: None,
             stamp: None,
-            editor: None,
+            code: None,
             notice: None,
             tree,
             expanded: HashSet::new(),
@@ -412,12 +489,16 @@ impl Reader {
             thread: vec![],
             busy: false,
             ready: false,
+            painted: false,
             status: String::new(),
             client: None,
             agent: None,
             agents,
             generation: 0,
             scroll: ScrollHandle::new(),
+            sidebars: cx.new(|_| SidebarsState::new(px(260.0), px(460.0))),
+            selection: cx.new(|_| ui::markdown::Selection::default()),
+            thread_focus: cx.focus_handle(),
             left_open: true,
             right_open: true,
             split: false,
@@ -425,11 +506,15 @@ impl Reader {
             _subscriptions: subscriptions,
         };
         reader.focus.focus(window, cx);
+        trace::mark("reader built");
         reader.refresh_tree(cx);
+        trace::mark("tree");
         if let Some(command) = command {
             reader.connect(&command, window, cx);
+            trace::mark("connect");
         }
-        reader.watch(window, cx);
+        reader.watch(watch, window, cx);
+        trace::mark("watch");
         reader
     }
 
@@ -543,7 +628,7 @@ impl Reader {
         self.collapsed.clear();
         self.current = None;
         self.stamp = None;
-        self.editor = None;
+        self.code = None;
         self.notice = None;
         self.picked = None;
         self.rows = Rc::new(vec![]);
@@ -552,7 +637,7 @@ impl Reader {
         if let Some(agent) = self.agent.clone() {
             self.connect(&agent, window, cx);
         }
-        self.watch(window, cx);
+        self.watch(None, window, cx);
         if self.pr.is_some() {
             self.mode = Mode::Diff;
         }
@@ -590,24 +675,22 @@ impl Reader {
 
     /// Watches the workspace: refreshes the explorer when files come or go, and
     /// reloads the open file when it changes on disk.
-    fn watch(&mut self, window: &Window, cx: &mut Context<Self>) {
+    fn watch(&mut self, prepared: Option<futures::channel::oneshot::Receiver<Option<Watch>>>, window: &Window, cx: &mut Context<Self>) {
         use notify::Watcher;
-        let (tx, mut rx) = futures::channel::mpsc::unbounded();
-        let mut watcher = match notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
-            if let Ok(event) = event {
-                tx.unbounded_send(event).ok();
-            }
-        }) {
-            Ok(watcher) => watcher,
-            Err(error) => return log::error!("watch: {error}"),
-        };
         let root = self.root.clone();
-        watch_dirs(&mut watcher, &root, &root);
         let handle = window.window_handle();
         // Kept so the watcher stops when the root changes.
         self.watching = Some(cx.spawn(async move |this, cx| {
+            // Adding the watches takes a while on a big tree; the window doesn't wait for it.
+            let watch = match prepared {
+                Some(prepared) => prepared.await.ok().flatten(),
+                None => {
+                    let target = root.clone();
+                    cx.background_executor().spawn(async move { start_watcher(&target) }).await
+                }
+            };
             // Moved in so the watcher lives as long as this task.
-            let mut watcher = watcher;
+            let Some((mut watcher, mut rx)) = watch else { return };
             while let Some(first) = rx.next().await {
                 // Let a burst of events settle, then handle them together.
                 cx.background_executor().timer(Duration::from_millis(100)).await;
@@ -887,31 +970,19 @@ impl Reader {
         let too_big = std::fs::metadata(&full).map_or(false, |m| m.len() > 4 * 1024 * 1024);
         match std::fs::read_to_string(&full) {
             Ok(_) if too_big => self.notice = Some(format!("{path} is too large to show")),
-            Ok(text) if self.current.as_deref() == Some(path) && self.editor.is_some() => {
-                // Same file: swap the text in place so the scroll position survives.
-                if let Some(editor) = &self.editor {
-                    editor.update(cx, |state, cx| {
-                        let (offset, cursor) = (state.scroll_offset(), state.cursor_position());
-                        state.set_value(text, window, cx);
-                        state.set_cursor_position(cursor, window, cx);
-                        state.set_scroll_offset(offset, cx);
-                    });
-                }
-                self.notice = None;
-            }
             Ok(text) => {
-                self.editor = Some(cx.new(|cx| {
-                    EditorState::new(window, cx)
-                        .language(syntax(path))
-                        .line_number(true)
-                        .soft_wrap(true)
-                        .default_value(text)
-                }));
+                match &self.code {
+                    // Same file: swap the text in place so the scroll position and caret survive.
+                    Some(code) if self.current.as_deref() == Some(path) => {
+                        code.update(cx, |state, cx| state.set_text(text, cx));
+                    }
+                    _ => self.code = Some(cx.new(|cx| viewer::CodeViewState::new(text, syntax(path), window, cx))),
+                }
                 self.notice = None;
             }
             Err(error) => {
                 log::warn!("open {path}: {error}");
-                self.editor = None;
+                self.code = None;
                 self.notice = Some(format!("{path} is not a text file"));
             }
         }
@@ -981,7 +1052,7 @@ impl Reader {
     /// The strip under the explorer header in Changes mode: an input to open a PR for
     /// review, or the open PR's summary with a way out.
     fn pr_strip(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let colors = &cx.theme().colors;
+        let colors = cx.global::<Palette>();
         let (border, muted, danger) = (colors.border, colors.muted_foreground, colors.danger);
         let this = cx.entity();
         let body: AnyElement = match &self.pr {
@@ -1034,7 +1105,7 @@ impl Reader {
                                 div()
                                     .flex_1()
                                     .min_w_0()
-                                    .child(Textarea::new(&self.pr_input).appearance(false).bordered(false)),
+                                    .child(Input::new(&self.pr_input)),
                             )
                             .child(open),
                     )
@@ -1046,7 +1117,7 @@ impl Reader {
     }
 
     fn explorer(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let colors = &cx.theme().colors;
+        let colors = cx.global::<Palette>();
         let this = cx.entity();
         let mode = self.mode;
         let (source, changes) = (cx.entity(), cx.entity());
@@ -1086,17 +1157,16 @@ impl Reader {
         let body: AnyElement = if mode == Mode::Diff && self.changes.is_empty() {
             centered("No changes".into(), cx)
         } else {
-            tree(state, move |ix, entry, selected, _, _| {
-                let item = entry.item();
-                let path = item.id.clone();
-                let name = item.label.to_string();
-                let lead: AnyElement = if entry.is_folder() {
+            tree(state, move |ix, entry, selected, right_clicked, _, _| {
+                let path = entry.id.clone();
+                let name = entry.label.to_string();
+                let lead: AnyElement = if entry.folder {
                     div()
                         .w(px(10.0))
                         .flex_none()
                         .text_xs()
                         .text_color(muted)
-                        .child(if entry.is_expanded() { "▾" } else { "▸" })
+                        .child(if entry.expanded { "▾" } else { "▸" })
                         .into_any_element()
                 } else {
                     let tint = match file_kind(&name) {
@@ -1124,11 +1194,12 @@ impl Reader {
                     .child(lead)
                     .child(div().flex_1().min_w_0().truncate().child(name))
                     .children(mark);
-                let folder = entry.is_folder();
+                let folder = entry.folder;
                 let this = this.clone();
                 ListItem::new(ix)
                     .selected(selected)
-                    .pl(px(8.0 + 14.0 * entry.depth() as f32))
+                    .secondary_selected(right_clicked)
+                    .pl(px(8.0 + 14.0 * entry.depth as f32))
                     .text_sm()
                     .child(label)
                     .on_click(move |_, window, cx| {
@@ -1140,6 +1211,7 @@ impl Reader {
                             Mode::Diff => reader.pick(&path, cx),
                         });
                     })
+                    .into_any_element()
             })
             .into_any_element()
         };
@@ -1169,7 +1241,7 @@ impl Reader {
     }
 
     fn diff_viewer(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let colors = &cx.theme().colors;
+        let colors = cx.global::<Palette>();
         let Some(path) = self.picked.clone() else {
             return div()
                 .size_full()
@@ -1188,7 +1260,7 @@ impl Reader {
         // Themes may lack a green (Rosé Pine's success is teal), so added lines get their own.
         let (success, danger, muted, border) =
             (gpui::hsla(0.37, 0.5, 0.5, 1.0), colors.danger, colors.muted_foreground, colors.border);
-        let font = cx.theme().mono_font_family.clone();
+        let font = cx.global::<Palette>().mono_font_family.clone();
         let body: AnyElement = if rows.is_empty() {
             centered("No textual changes".into(), cx)
         } else if self.split {
@@ -1296,15 +1368,12 @@ impl Reader {
     }
 
     fn viewer(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let colors = &cx.theme().colors;
+        let colors = cx.global::<Palette>();
         let title = self.current.clone().unwrap_or_else(|| "No file open".into());
-        let body: AnyElement = match (&self.editor, &self.notice) {
-            (Some(editor), _) => div()
-                .size_full()
-                .child(Editor::new(editor).readonly(true).bordered(false).h_full())
-                .into_any_element(),
-            (None, Some(notice)) => centered(notice.clone(), cx),
-            _ => centered("Pick a file in the explorer".into(), cx),
+        let body: AnyElement = match (&self.code, &self.notice) {
+            (_, Some(notice)) => centered(notice.clone(), cx),
+            (Some(code), None) => viewer::CodeView::new(code).h_full().into_any_element(),
+            (None, None) => centered("Pick a file in the explorer".into(), cx),
         };
         div()
             .size_full()
@@ -1319,10 +1388,12 @@ impl Reader {
             .child(div().flex_1().min_h_0().child(body))
     }
 
-    fn agent_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let colors = &cx.theme().colors;
+    fn agent_panel(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let this = cx.entity();
-        let messages = self.thread.iter().enumerate().map(|(ix, msg)| render_msg(ix, msg, &this, cx));
+        self.selection.update(cx, |s, _| s.begin_frame());
+        let messages: Vec<AnyElement> =
+            self.thread.iter().enumerate().map(|(ix, msg)| render_msg(ix, msg, &this, &self.selection, window, cx)).collect();
+        let colors = cx.global::<Palette>();
         let (send, stop, picker) = (cx.entity(), cx.entity(), cx.entity());
         let agents = self.agents.clone();
         let action = if self.busy {
@@ -1357,25 +1428,62 @@ impl Reader {
                     .gap_2()
                     .children(self.agent.is_some().then(|| status_text(self.status.clone(), cx)))
                     .child(
-                        Button::new("agent-select")
-                            .label("New Thread")
-                            .small()
-                            .outline()
-                            .dropdown_caret(true)
-                            .dropdown_menu(move |menu, _, _| {
-                                agents.iter().fold(menu, |menu, agent| {
-                                    let (picker, key) = (picker.clone(), agent.id.clone());
-                                    menu.item(PopupMenuItem::new(agent.name.clone()).on_click(move |_, window, cx| {
-                                        picker.update(cx, |reader, cx| reader.new_thread(&key, window, cx))
-                                    }))
-                                })
-                            }),
+                        dropdown(
+                            "agent-select",
+                            Button::new("agent-select").label("New Thread").small().outline().dropdown_caret(true),
+                            move || {
+                                agents
+                                    .iter()
+                                    .map(|agent| {
+                                        let (picker, key) = (picker.clone(), agent.id.clone());
+                                        MenuItem::new(agent.name.clone(), move |window, cx| {
+                                            picker.update(cx, |reader, cx| reader.new_thread(&key, window, cx))
+                                        })
+                                    })
+                                    .collect()
+                            },
+                        ),
                     ),
                 cx,
             ))
             .child(
                 div()
                     .id("thread")
+                    .key_context("Markdown")
+                    .track_focus(&self.thread_focus)
+                    .on_action(cx.listener(|reader, _: &ui::markdown::Copy, _, cx| {
+                        let text = reader.selection.read(cx).selected_text();
+                        if text.is_empty() {
+                            return cx.propagate();
+                        }
+                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+                    }))
+                    .on_action(cx.listener(|reader, _: &ui::markdown::SelectAll, _, cx| {
+                        reader.selection.update(cx, |s, _| s.select_all());
+                        cx.notify();
+                    }))
+                    .on_mouse_down(gpui::MouseButton::Left, cx.listener(|reader, event: &gpui::MouseDownEvent, window, cx| {
+                        reader.thread_focus.focus(window, cx);
+                        reader.selection.update(cx, |s, _| s.mouse_down(event.position, event.click_count));
+                        cx.notify();
+                    }))
+                    .on_mouse_move(cx.listener(|reader, event: &gpui::MouseMoveEvent, _, cx| {
+                        if event.pressed_button == Some(gpui::MouseButton::Left) && reader.selection.read(cx).selecting {
+                            reader.selection.update(cx, |s, _| s.drag(event.position));
+                            cx.notify();
+                        }
+                    }))
+                    .on_mouse_up(gpui::MouseButton::Left, cx.listener(|reader, event: &gpui::MouseUpEvent, _, cx| {
+                        if let Some(url) = reader.selection.update(cx, |s, _| s.mouse_up(event.position)) {
+                            cx.open_url(&url);
+                        }
+                        cx.notify();
+                    }))
+                    .on_mouse_up_out(gpui::MouseButton::Left, cx.listener(|reader, event: &gpui::MouseUpEvent, _, cx| {
+                        reader.selection.update(cx, |s, _| {
+                            s.mouse_up(event.position);
+                        });
+                    }))
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
@@ -1401,15 +1509,22 @@ impl Reader {
                         .border_1()
                         .border_color(colors.border)
                         .bg(colors.background)
-                        .child(Textarea::new(&self.draft).appearance(false).bordered(false))
+                        .child(Input::new(&self.draft))
                         .child(div().flex().justify_end().child(action)),
                 ),
             )
     }
 }
 
-fn render_msg(ix: usize, msg: &Msg, this: &Entity<Reader>, cx: &App) -> AnyElement {
-    let colors = &cx.theme().colors;
+fn render_msg(
+    ix: usize,
+    msg: &Msg,
+    this: &Entity<Reader>,
+    selection: &Entity<ui::markdown::Selection>,
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
+    let colors = cx.global::<Palette>();
     let blocks = match msg {
         Msg::User(text) => {
             return div()
@@ -1436,13 +1551,16 @@ fn render_msg(ix: usize, msg: &Msg, this: &Entity<Reader>, cx: &App) -> AnyEleme
     for (n, block) in blocks.iter().enumerate() {
         let id = ix * 10_000 + n;
         column = match block {
-            Block::Text(text) => column.child(TextView::markdown(("answer", id), text.clone()).selectable(true)),
-            Block::Thought(text) => column.child(
-                div()
-                    .italic()
-                    .opacity(0.7)
-                    .child(TextView::markdown(("thought", id), text.clone()).selectable(true)),
-            ),
+            Block::Text(text) => {
+                column.child(ui::markdown::markdown(("answer", id), text.clone().into(), selection, window, cx))
+            }
+            Block::Thought(text) => column.child(div().italic().opacity(0.7).child(ui::markdown::markdown(
+                ("thought", id),
+                text.clone().into(),
+                selection,
+                window,
+                cx,
+            ))),
             Block::Tool(tool) => column.child(tool_card(ix, n, tool, this, cx)),
             Block::Permission(ask) => column.child(permission(ix, n, ask, this)),
         };
@@ -1451,7 +1569,7 @@ fn render_msg(ix: usize, msg: &Msg, this: &Entity<Reader>, cx: &App) -> AnyEleme
 }
 
 fn tool_card(ix: usize, n: usize, tool: &ToolBlock, this: &Entity<Reader>, cx: &App) -> impl IntoElement {
-    let colors = &cx.theme().colors;
+    let colors = cx.global::<Palette>();
     let (mark, tint) = match tool.status {
         Step::Waiting => ("○", colors.muted_foreground),
         Step::Working => ("◐", colors.primary),
@@ -1487,7 +1605,7 @@ fn tool_card(ix: usize, n: usize, tool: &ToolBlock, this: &Entity<Reader>, cx: &
                     div()
                         .max_h(px(220.0))
                         .overflow_hidden()
-                        .font_family(cx.theme().mono_font_family.clone())
+                        .font_family(cx.global::<Palette>().mono_font_family.clone())
                         .text_xs()
                         .text_color(colors.muted_foreground)
                         .child(text.clone()),
@@ -1520,11 +1638,11 @@ fn header(title: &str, detail: String, cx: &App) -> impl IntoElement {
 }
 
 fn status_text(text: String, cx: &App) -> impl IntoElement {
-    div().flex_none().truncate().text_xs().text_color(cx.theme().colors.muted_foreground).child(text)
+    div().flex_none().truncate().text_xs().text_color(cx.global::<Palette>().muted_foreground).child(text)
 }
 
 fn header_with(title: &str, right: impl IntoElement, cx: &App) -> impl IntoElement {
-    let colors = &cx.theme().colors;
+    let colors = cx.global::<Palette>();
     div()
         .h_10()
         .flex_none()
@@ -1554,14 +1672,21 @@ fn centered(text: String, cx: &App) -> AnyElement {
         .items_center()
         .justify_center()
         .text_sm()
-        .text_color(cx.theme().colors.muted_foreground)
+        .text_color(cx.global::<Palette>().muted_foreground)
         .child(text)
         .into_any_element()
 }
 
 impl Render for Reader {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let colors = &cx.theme().colors;
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if !self.painted {
+            self.painted = true;
+            trace::mark("first render");
+            if trace::exit_after_first_frame() {
+                cx.defer(|_| std::process::exit(0));
+            }
+        }
+        let colors = cx.global::<Palette>();
         let (background, foreground, border, sidebar) = (colors.background, colors.foreground, colors.border, colors.sidebar);
         let (left, right) = (cx.entity(), cx.entity());
         let (left_open, right_open) = (self.left_open, self.right_open);
@@ -1602,27 +1727,13 @@ impl Render for Reader {
             .on_action(cx.listener(|reader, _: &ToggleRight, _, cx| reader.toggle_right(cx)))
             .child(
                 div().flex_1().min_h_0().child(
-                    h_resizable("shell")
-                        .child(
-                            resizable_panel()
-                                .visible(left_open)
-                                .flex_none()
-                                .size(px(260.0))
-                                .size_range(px(160.0)..px(520.0))
-                                .child(self.explorer(cx)),
-                        )
-                        .child(resizable_panel().child(match self.mode {
+                    sidebars(&self.sidebars)
+                        .left(left_open, px(160.0)..px(520.0), self.explorer(cx))
+                        .center(match self.mode {
                             Mode::Source => self.viewer(cx).into_any_element(),
                             Mode::Diff => self.diff_viewer(cx).into_any_element(),
-                        }))
-                        .child(
-                            resizable_panel()
-                                .visible(right_open)
-                                .flex_none()
-                                .size(px(460.0))
-                                .size_range(px(300.0)..px(760.0))
-                                .child(self.agent_panel(cx)),
-                        ),
+                        })
+                        .right(right_open, px(300.0)..px(760.0), self.agent_panel(window, cx)),
                 ),
             )
             .child(bar)
@@ -1671,7 +1782,28 @@ fn detach(root: &Path, command: &Option<String>, pr: &Option<pr::Pr>) -> std::io
     Ok(())
 }
 
+/// The window's root: sets the base font, size and colors everything inside inherits.
+struct Shell {
+    child: Entity<Reader>,
+}
+
+impl Render for Shell {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let palette = cx.global::<Palette>();
+        window.set_rem_size(palette.font_size);
+        div()
+            .id("root")
+            .relative()
+            .size_full()
+            .font_family(palette.font_family.clone())
+            .bg(palette.background)
+            .text_color(palette.foreground)
+            .child(self.child.clone())
+    }
+}
+
 fn main() {
+    trace::init();
     let mut args = std::env::args().skip(1);
     let mut path = None;
     let mut foreground = false;
@@ -1718,23 +1850,49 @@ fn main() {
             Err(err) => eprintln!("po: could not detach ({err}), running in foreground"),
         }
     }
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
-    gpui_platform::application().with_assets(gpui_kit::assets::Assets).run(move |cx: &mut App| {
-        gpui_kit::init(cx);
-        theme::apply(cx);
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn,po=info"))
+        .format_timestamp_millis()
+        .init();
+    trace::mark("args parsed");
+    let prefetch = Prefetch::start(pr.as_ref().map_or_else(|| root.clone(), |pr| pr.worktree.clone()));
+    gpui_platform::application().run(move |cx: &mut App| {
+        trace::mark("app running");
+        viewer::init(cx);
+        ui::init(cx);
         cx.bind_keys([
             KeyBinding::new("ctrl-b", ToggleLeft, None),
             KeyBinding::new("ctrl-shift-b", ToggleRight, None),
         ]);
         let bounds = Bounds::centered(None, size(px(1360.0), px(840.0)), cx);
-        gpui_kit::open_window(
+        cx.open_window(
             WindowOptions { window_bounds: Some(WindowBounds::Windowed(bounds)), ..Default::default() },
-            cx,
             |window, cx| {
-                cx.new(|cx| Reader::new(root, pr, command, window, cx))
+                // Applied here rather than before the window opens: the first text lookup waits
+                // for the system fonts, and until the window exists the GPU setup can run alongside.
+                trace::mark("window created");
+                theme::apply(cx);
+                trace::mark("theme applied");
+                let reader = cx.new(|cx| Reader::new(root, pr, command, prefetch, window, cx));
+                cx.new(|_| Shell { child: reader })
             },
         )
         .expect("window");
         cx.activate(true);
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{language, syntax};
+
+    #[test]
+    fn elixir_files_highlight() {
+        assert_eq!(language("lib/app.ex"), "Elixir");
+        assert_eq!(language("lib/app.exs"), "Elixir");
+        // `.ex` resolves through the viewer's alias table, `.exs` through `syntax`.
+        assert_eq!(syntax("lib/app.ex"), "ex");
+        assert_eq!(syntax("mix.exs"), "elixir");
+        assert!(super::viewer::highlights("defmodule A do\nend\n", "ex"));
+        assert!(super::viewer::highlights("defmodule A do\nend\n", &syntax("mix.exs")));
+    }
 }
