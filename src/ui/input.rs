@@ -779,7 +779,8 @@ impl Element for TextElement {
             let at = if placeholder { origin } else { layout.position(state.caret()) };
             let height = line_height * 0.85;
             let caret = Some(Bounds::new(point(at.x, at.y + (line_height - height) / 2.), size(CARET_WIDTH, height)));
-            state.layout = Some(layout);
+            // The placeholder is not text: hit-testing it would put the caret past an empty value.
+            state.layout = Some(if placeholder { Layout { lines: std::rc::Rc::new(vec![]), origin, line_height } } else { layout });
             Prepaint { hitbox, lines, origin, line_height, selection, caret }
         })
     }
