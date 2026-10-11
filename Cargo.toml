@@ -54,11 +54,6 @@ tree-sitter-typescript = "0.23.2"
 tree-sitter-yaml = "0.7.1"
 tree-sitter-zig = "1.1.2"
 
-[dev-dependencies]
-wayland-client = "0.31"
-wayland-protocols-wlr = { version = "0.3", features = ["client"] }
-wayland-scanner = "0.31"
-
 [profile.dev]
 debug = "line-tables-only"
 

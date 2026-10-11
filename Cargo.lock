@@ -4407,9 +4407,6 @@ dependencies = [
  "tree-sitter-zig",
  "unicode-linebreak",
  "unicode-segmentation",
- "wayland-client",
- "wayland-protocols-wlr",
- "wayland-scanner",
 ]
 
 [[package]]
