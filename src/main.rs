@@ -287,6 +287,8 @@ enum Block {
     Thought(String),
     Tool(ToolBlock),
     Permission(Ask),
+    /// The agent's to-do list; each update replaces the whole list.
+    Plan(Vec<(String, Step)>),
 }
 
 #[derive(Clone)]
@@ -323,6 +325,25 @@ fn pretty(value: &Value) -> String {
     }
 }
 
+/// A diff content block as `-`/`+` lines, without the lines the edit leaves alone.
+fn diff_text(item: &Value) -> String {
+    const LIMIT: usize = 200;
+    let old: Vec<&str> = item["oldText"].as_str().unwrap_or_default().lines().collect();
+    let new: Vec<&str> = item["newText"].as_str().unwrap_or_default().lines().collect();
+    let head = old.iter().zip(&new).take_while(|(a, b)| a == b).count();
+    let tail = old[head..].iter().rev().zip(new[head..].iter().rev()).take_while(|(a, b)| a == b).count();
+    let removed = &old[head..old.len() - tail];
+    let added = &new[head..new.len() - tail];
+    let mut out = vec![format!("edit {}", item["path"].as_str().unwrap_or("?"))];
+    out.extend(removed.iter().chain(added).enumerate().take(LIMIT).map(|(i, line)| {
+        format!("{} {line}", if i < removed.len() { '-' } else { '+' })
+    }));
+    if removed.len() + added.len() > LIMIT {
+        out.push(format!("… {} more lines", removed.len() + added.len() - LIMIT));
+    }
+    out.join("\n")
+}
+
 /// The text a tool call carries: content blocks, diffs, then its raw output.
 fn tool_result(update: &Value) -> String {
     let mut out = Vec::new();
@@ -333,7 +354,7 @@ fn tool_result(update: &Value) -> String {
                     out.push(text.to_string());
                 }
             }
-            Some("diff") => out.push(format!("edit {}", item["path"].as_str().unwrap_or("?"))),
+            Some("diff") => out.push(diff_text(item)),
             Some("terminal") => out.push("terminal output".into()),
             _ => {}
         }
@@ -1050,6 +1071,19 @@ impl Reader {
                 Some(Block::Thought(body)) => body.push_str(text),
                 _ => self.blocks().push(Block::Thought(text.to_string())),
             },
+            Some("plan") => {
+                let entries = update["entries"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|e| (e["content"].as_str().unwrap_or_default().to_string(), step(e["status"].as_str().unwrap_or("pending"))))
+                    .collect();
+                let blocks = self.blocks();
+                match blocks.iter_mut().find(|b| matches!(b, Block::Plan(_))) {
+                    Some(block) => *block = Block::Plan(entries),
+                    None => blocks.push(Block::Plan(entries)),
+                }
+            }
             Some("tool_call") => self.blocks().push(Block::Tool(ToolBlock {
                 id: update["toolCallId"].as_str().unwrap_or_default().to_string(),
                 title: update["title"].as_str().unwrap_or("Tool").to_string(),
@@ -1760,19 +1794,32 @@ fn render_msg(
             ))),
             Block::Tool(tool) => column.child(tool_card(ix, n, tool, this, cx)),
             Block::Permission(ask) => column.child(permission(ix, n, ask, this)),
+            Block::Plan(entries) => column.child(plan(entries, cx)),
         };
     }
     column.into_any_element()
 }
 
-fn tool_card(ix: usize, n: usize, tool: &ToolBlock, this: &Entity<Reader>, cx: &App) -> impl IntoElement {
-    let colors = cx.global::<Palette>();
-    let (mark, tint) = match tool.status {
+fn step_mark(status: Step, colors: &Palette) -> (&'static str, gpui::Hsla) {
+    match status {
         Step::Waiting => ("○", colors.muted_foreground),
         Step::Working => ("◐", colors.primary),
         Step::Done => ("✓", colors.success),
         Step::Failed => ("✕", colors.danger),
-    };
+    }
+}
+
+fn plan(entries: &[(String, Step)], cx: &App) -> impl IntoElement {
+    let colors = cx.global::<Palette>();
+    div().flex().flex_col().gap_1().text_sm().children(entries.iter().map(|(text, status)| {
+        let (mark, tint) = step_mark(*status, colors);
+        div().flex().gap_2().child(div().flex_none().text_color(tint).child(mark)).child(div().flex_1().min_w_0().child(text.clone()))
+    }))
+}
+
+fn tool_card(ix: usize, n: usize, tool: &ToolBlock, this: &Entity<Reader>, cx: &App) -> impl IntoElement {
+    let colors = cx.global::<Palette>();
+    let (mark, tint) = step_mark(tool.status, colors);
     let toggle = this.clone();
     let mut card = div()
         .flex()

@@ -94,6 +94,14 @@ impl Shared {
             return;
         };
         if let Some(error) = message.get("error") {
+            // -32000 is ACP's `authRequired`.
+            if error["code"].as_i64() == Some(-32000) {
+                let agent = self.agent.lock().expect("agent lock").clone();
+                self.emit(Event::Failed(format!(
+                    "{agent} needs you to sign in. Run its login in a terminal (for Claude: `claude /login`), then start a new thread."
+                )));
+                return;
+            }
             let text = error["message"].as_str().unwrap_or("agent error");
             let detail = error["data"].as_str().or(error["data"]["details"].as_str()).unwrap_or("");
             self.emit(Event::Failed(format!("{text} {detail}").trim().to_string()));
