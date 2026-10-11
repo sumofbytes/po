@@ -2,10 +2,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::config::{self, read_json};
-use std::rc::Rc;
 
-use gpui::App;
-use gpui_kit::component::{Theme, ThemeConfig};
+use std::collections::HashMap;
+
+use gpui::{App, FontStyle, FontWeight, Global, HighlightStyle, Hsla, Pixels, Rgba, SharedString, font, hsla, px};
 use serde_json::Value;
 
 const DEFAULT_THEME: &str = "main";
@@ -96,14 +96,422 @@ pub fn apply(cx: &mut App) {
     for (key, value) in fields.into_iter().filter(|(_, value)| !value.is_null()) {
         theme[key] = value;
     }
-    let config: ThemeConfig = match serde_json::from_value(theme) {
-        Ok(config) => config,
-        Err(error) => return log::error!("theme: {error}"),
-    };
-    let mode = config.mode;
-    let config = Rc::new(config);
-    Theme::update(cx, |theme| theme.apply_config(&config));
-    Theme::change(mode, None, cx);
+    let palette = Palette::new(&theme, cx);
+    cx.set_global(palette);
+}
+
+/// A button's colors in one state.
+#[derive(Clone, Copy)]
+pub struct ButtonColors {
+    pub bg: Hsla,
+    pub border: Hsla,
+    pub fg: Hsla,
+}
+
+/// A button variant's colors in each state, resolved as gpui-kit's buttons resolve them.
+#[derive(Clone, Copy)]
+pub struct ButtonStyle {
+    pub normal: ButtonColors,
+    pub hover: ButtonColors,
+    pub active: ButtonColors,
+    pub selected: ButtonColors,
+    pub disabled: ButtonColors,
+}
+
+/// The button variants po uses.
+pub struct Buttons {
+    /// Filled, as the kit's default button.
+    pub default: ButtonStyle,
+    /// The default button outlined.
+    pub outline: ButtonStyle,
+    pub ghost: ButtonStyle,
+    pub primary: ButtonStyle,
+    /// Bare text or icon, no background or padding.
+    pub text: ButtonStyle,
+}
+
+impl Buttons {
+    fn new(c: &Base) -> Self {
+        let col = |bg: Hsla, border: Hsla, fg: Hsla| ButtonColors { bg, border, fg };
+        let t = c.transparent;
+        let disabled_fg = c.muted_foreground.opacity(0.5);
+        let default = ButtonStyle {
+            normal: col(c.button, c.input, c.button_foreground),
+            hover: col(c.button_hover, c.input, c.button_foreground),
+            active: col(c.button_active, c.input, c.button_foreground),
+            selected: col(c.button_active, c.input, c.button_foreground),
+            disabled: col(c.input_background.opacity(0.5), c.input.opacity(0.5), disabled_fg),
+        };
+        let outline_active = mix_oklab(c.input, t, 0.7);
+        let outline = ButtonStyle {
+            normal: col(c.input_background, c.input, c.button_foreground),
+            hover: col(mix_oklab(c.input, t, 0.5), c.input, c.button_foreground),
+            active: col(outline_active, c.input, c.button_foreground),
+            selected: col(outline_active, c.input, c.button_foreground),
+            disabled: col(c.input_background.opacity(0.5), c.input.opacity(0.5), disabled_fg),
+        };
+        let ghost_hover = if c.dark { c.accent.opacity(0.5) } else { c.accent };
+        let ghost = ButtonStyle {
+            normal: col(t, t, c.secondary_foreground),
+            hover: col(ghost_hover, t, c.accent_foreground),
+            active: col(c.button_active, t, c.secondary_foreground),
+            selected: col(c.secondary_active, t, c.secondary_foreground),
+            disabled: col(t, t, disabled_fg),
+        };
+        let primary = ButtonStyle {
+            normal: col(c.button_primary, c.primary, c.button_primary_foreground),
+            hover: col(c.button_primary_hover, c.primary, c.button_primary_foreground),
+            active: col(c.button_primary_active, c.primary, c.button_primary_foreground),
+            selected: col(c.button_primary_active, c.primary, c.button_primary_foreground),
+            disabled: col(c.button_primary.opacity(0.15), c.button_primary.opacity(0.15), disabled_fg),
+        };
+        let text = ButtonStyle {
+            normal: col(t, t, c.foreground.opacity(0.9)),
+            hover: col(t, t, c.foreground),
+            active: col(t, t, c.foreground.opacity(0.7)),
+            selected: col(t, t, c.foreground.opacity(0.7)),
+            disabled: col(t, t, disabled_fg),
+        };
+        Self { default, outline, ghost, primary, text }
+    }
+}
+
+/// A color as the themes write it: `#rrggbb` or `#rrggbbaa`.
+fn parse_color(value: &Value) -> Option<Hsla> {
+    Rgba::try_from(value.as_str()?).ok().map(Hsla::from)
+}
+
+/// Mixes two colors in the Oklab space, `factor` of the first, like CSS `color-mix(in oklab)`.
+fn mix_oklab(a: Hsla, b: Hsla, factor: f32) -> Hsla {
+    let factor = factor.clamp(0., 1.);
+    let alpha = a.a * factor + b.a * (1. - factor);
+    if alpha == 0. {
+        return hsla(0., 0., 0., 0.);
+    }
+    let (la, lb) = (oklab(Rgba::from(a)), oklab(Rgba::from(b)));
+    let mix = |x: f32, y: f32| (x * a.a * factor + y * b.a * (1. - factor)) / alpha;
+    let mut rgb = from_oklab(mix(la.0, lb.0), mix(la.1, lb.1), mix(la.2, lb.2));
+    rgb.a = alpha;
+    Hsla::from(rgb)
+}
+
+fn oklab(rgb: Rgba) -> (f32, f32, f32) {
+    let lin = |c: f32| if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) };
+    let (r, g, b) = (lin(rgb.r), lin(rgb.g), lin(rgb.b));
+    let l = (0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b).cbrt();
+    let m = (0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b).cbrt();
+    let s = (0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b).cbrt();
+    (
+        0.2104542553 * l + 0.7936177850 * m - 0.0040720468 * s,
+        1.9779984951 * l - 2.4285922050 * m + 0.4505937099 * s,
+        0.0259040371 * l + 0.7827717662 * m - 0.8086757660 * s,
+    )
+}
+
+fn from_oklab(l: f32, a: f32, b: f32) -> Rgba {
+    let (l_, m_, s_) = (l + 0.3963377774 * a + 0.2158037573 * b, l - 0.1055613458 * a - 0.0638541728 * b, l - 0.0894841775 * a - 1.2914855480 * b);
+    let (l, m, s) = (l_ * l_ * l_, m_ * m_ * m_, s_ * s_ * s_);
+    let (r, g, b) = (
+        4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s,
+        -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s,
+        -0.0041960863 * l - 0.7034186147 * m + 1.7076147010 * s,
+    );
+    let gamma = |c: f32| (if c <= 0.0031308 { c * 12.92 } else { 1.055 * c.powf(1. / 2.4) - 0.055 }).clamp(0., 1.);
+    Rgba { r: gamma(r), g: gamma(g), b: gamma(b), a: 1. }
+}
+
+/// The same hue and saturation at a lower lightness.
+fn darken(c: Hsla, amount: f32) -> Hsla {
+    Hsla { l: c.l * (1. - amount.clamp(0., 1.)), ..c }
+}
+
+/// Every color the app draws with, resolved from a theme's `colors` the way gpui-kit did:
+/// what the theme names, else a fallback derived from the colors already resolved.
+struct Base {
+    dark: bool,
+    transparent: Hsla,
+    background: Hsla,
+    foreground: Hsla,
+    border: Hsla,
+    input: Hsla,
+    input_background: Hsla,
+    muted: Hsla,
+    muted_foreground: Hsla,
+    primary: Hsla,
+    secondary: Hsla,
+    secondary_foreground: Hsla,
+    secondary_active: Hsla,
+    accent: Hsla,
+    accent_foreground: Hsla,
+    button: Hsla,
+    button_foreground: Hsla,
+    button_hover: Hsla,
+    button_active: Hsla,
+    button_primary: Hsla,
+    button_primary_foreground: Hsla,
+    button_primary_hover: Hsla,
+    button_primary_active: Hsla,
+}
+
+/// What a theme missing a color falls back to, by mode.
+struct Defaults {
+    background: &'static str,
+    foreground: &'static str,
+    border: &'static str,
+    muted: &'static str,
+    primary: &'static str,
+    secondary: &'static str,
+}
+
+fn defaults(dark: bool) -> Defaults {
+    if dark {
+        Defaults { background: "#09090b", foreground: "#fafafa", border: "#27272a", muted: "#18181b", primary: "#fafafa", secondary: "#27272a" }
+    } else {
+        Defaults { background: "#ffffff", foreground: "#09090b", border: "#e4e4e7", muted: "#f4f4f5", primary: "#18181b", secondary: "#f4f4f5" }
+    }
+}
+
+fn color(hex: &str) -> Hsla {
+    Rgba::try_from(hex).map_or_else(|_| hsla(0., 0., 0., 1.), Hsla::from)
+}
+
+impl Base {
+    fn new(colors: &Value, dark: bool) -> Self {
+        let get = |key: &str, fallback: Hsla| colors.get(key).and_then(parse_color).unwrap_or(fallback);
+        let d = defaults(dark);
+        let transparent = hsla(0., 0., 0., 0.);
+        let background = get("background", color(d.background));
+        let foreground = get("foreground", color(d.foreground));
+        let border = get("border", color(d.border));
+        let input = get("input.border", border);
+        let muted = get("muted.background", color(d.muted));
+        let muted_foreground = get("muted.foreground", muted.blend(foreground.opacity(0.7)));
+        let primary = get("primary.background", color(d.primary));
+        let primary_foreground = get("primary.foreground", foreground);
+        let secondary = get("secondary.background", color(d.secondary));
+        let secondary_foreground = get("secondary.foreground", foreground);
+        let active_darken = if dark { 0.2 } else { 0.1 };
+        let secondary_active = get("secondary.active.background", darken(secondary, active_darken));
+        let input_background = if dark { mix_oklab(input, transparent, 0.3) } else { background };
+        let primary_hover = get("primary.hover.background", background.blend(primary.opacity(0.9)));
+        let primary_active = get("primary.active.background", darken(primary, active_darken));
+        let accent = get("accent.background", secondary);
+        Self {
+            dark,
+            transparent,
+            background,
+            foreground,
+            border,
+            input,
+            input_background,
+            muted,
+            muted_foreground,
+            primary,
+            secondary,
+            secondary_foreground,
+            secondary_active,
+            accent,
+            accent_foreground: get("accent.foreground", foreground),
+            button: get("button.background", input_background),
+            button_foreground: get("button.foreground", foreground),
+            button_hover: get("button.hover.background", mix_oklab(input, transparent, 0.5)),
+            button_active: get("button.active.background", mix_oklab(input, transparent, 0.7)),
+            button_primary: get("button.primary.background", primary),
+            button_primary_foreground: get("button.primary.foreground", primary_foreground),
+            button_primary_hover: get("button.primary.hover.background", primary_hover),
+            button_primary_active: get("button.primary.active.background", primary_active),
+        }
+    }
+}
+
+/// A font weight named in a theme: `bold`, `semibold`, or a number.
+fn weight(value: &Value) -> Option<FontWeight> {
+    if let Some(n) = value.as_f64() {
+        return Some(FontWeight(n as f32));
+    }
+    let name = value.as_str()?.to_lowercase().replace(['_', '-'], "");
+    Some(FontWeight(match name.as_str() {
+        "thin" => 100.,
+        "extralight" => 200.,
+        "light" => 300.,
+        "normal" => 400.,
+        "medium" => 500.,
+        "semibold" => 600.,
+        "bold" => 700.,
+        "extrabold" => 800.,
+        "black" => 900.,
+        _ => return None,
+    }))
+}
+
+/// The UI font: the theme's, else the family the system UI font resolves to.
+fn ui_font(wanted: Option<&str>, cx: &App) -> SharedString {
+    const SYSTEM: &str = ".SystemUIFont";
+    if let Some(family) = wanted {
+        return family.to_string().into();
+    }
+    let text_system = cx.text_system();
+    let resolved = text_system.get_font_for_id(text_system.resolve_font(&font(SYSTEM))).map(|f| f.family);
+    match resolved {
+        Some(family) if family != SYSTEM && text_system.all_font_names().contains(&family.to_string()) => family,
+        _ => SYSTEM.into(),
+    }
+}
+
+/// The monospace font: the theme's, else the first of a few common ones that is installed.
+fn mono_font(wanted: Option<&str>, cx: &App) -> SharedString {
+    if let Some(family) = wanted {
+        return family.to_string().into();
+    }
+    let installed = cx.text_system().all_font_names();
+    ["DejaVu Sans Mono", "Noto Sans Mono", "Liberation Mono", "Ubuntu Mono"]
+        .into_iter()
+        .find(|candidate| installed.iter().any(|name| name == candidate))
+        .unwrap_or(".SystemUIFont")
+        .to_string()
+        .into()
+}
+
+/// The colors and fonts po's own components draw with, taken from the applied theme. Kept
+/// apart from the kit's theme so those components don't depend on it.
+pub struct Palette {
+    pub buttons: Buttons,
+    pub background: Hsla,
+    pub foreground: Hsla,
+    pub primary: Hsla,
+    pub secondary: Hsla,
+    pub sidebar: Hsla,
+    pub success: Hsla,
+    pub danger: Hsla,
+    pub info: Hsla,
+    pub warning: Hsla,
+    pub popover: Hsla,
+    pub popover_foreground: Hsla,
+    /// The hairline around popovers and menus.
+    pub popover_ring: Hsla,
+    pub accent: Hsla,
+    pub accent_foreground: Hsla,
+    pub muted: Hsla,
+    pub muted_foreground: Hsla,
+    pub link: Hsla,
+    pub table_head: Hsla,
+    pub table_head_foreground: Hsla,
+    pub input_background: Hsla,
+    pub input_border: Hsla,
+    /// A list row under the pointer.
+    pub list_hover: Hsla,
+    /// The selected list row.
+    pub list_selected: Hsla,
+    pub resize_handle: Hsla,
+    pub resize_handle_active: Hsla,
+    pub scrollbar_track: Hsla,
+    pub scrollbar_thumb: Hsla,
+    pub scrollbar_thumb_hover: Hsla,
+    pub border: Hsla,
+    pub selection: Hsla,
+    pub caret: Hsla,
+    pub editor_background: Hsla,
+    pub editor_foreground: Hsla,
+    pub editor_active_line: Option<Hsla>,
+    pub editor_line_number: Hsla,
+    /// The corner radius of small parts, like scrollbar thumbs.
+    pub radius: Pixels,
+    pub font_family: SharedString,
+    pub font_size: Pixels,
+    pub mono_font_family: SharedString,
+    pub mono_font_size: Pixels,
+    syntax: HashMap<String, HighlightStyle>,
+}
+
+impl Global for Palette {}
+
+impl Palette {
+    /// Resolves the colors, fonts and syntax styles of the theme `theme` (its JSON).
+    pub fn new(theme: &Value, cx: &App) -> Self {
+        let dark = theme["mode"].as_str() != Some("light");
+        let colors = &theme["colors"];
+        let base = Base::new(colors, dark);
+        let get = |key: &str, fallback: Hsla| colors.get(key).and_then(parse_color).unwrap_or(fallback);
+        let clamp_alpha = |c: Hsla, max: f32| c.alpha(c.a.min(max));
+
+        let accent = base.accent;
+        let list_head = get("list.head.background", get("list.background", base.background));
+        let scrollbar_thumb = get("scrollbar.thumb.background", accent);
+        let highlight = &theme["highlight"];
+        let editor = |key: &str| highlight.get(key).and_then(parse_color);
+        let syntax = highlight["syntax"]
+            .as_object()
+            .map(|map| {
+                map.iter()
+                    .map(|(name, style)| {
+                        let style = HighlightStyle {
+                            color: style.get("color").and_then(parse_color),
+                            font_weight: style.get("font_weight").and_then(weight),
+                            font_style: match style.get("font_style").and_then(Value::as_str) {
+                                Some("italic") => Some(FontStyle::Italic),
+                                Some("normal") => Some(FontStyle::Normal),
+                                _ => None,
+                            },
+                            ..Default::default()
+                        };
+                        (name.clone(), style)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let primary = base.primary;
+
+        Self {
+            buttons: Buttons::new(&base),
+            background: base.background,
+            foreground: base.foreground,
+            primary,
+            secondary: base.secondary,
+            sidebar: get("sidebar.background", base.background.blend(base.border.opacity(0.15))),
+            success: get("success.background", color("#22c55e")),
+            danger: get("danger.background", color("#ef4444")),
+            info: get("info.background", color("#06b6d4")),
+            warning: get("warning.background", color("#eab308")),
+            popover: get("popover.background", base.background),
+            popover_foreground: get("popover.foreground", base.foreground),
+            popover_ring: base.foreground.alpha(0.1),
+            accent,
+            accent_foreground: base.accent_foreground,
+            muted: base.muted,
+            muted_foreground: base.muted_foreground,
+            link: get("link", primary),
+            table_head: get("table.head.background", list_head),
+            table_head_foreground: get("table.head.foreground", base.muted_foreground),
+            input_background: base.input_background,
+            input_border: base.input,
+            list_hover: get("list.hover.background", accent.opacity(0.6)),
+            list_selected: clamp_alpha(get("list.active.background", base.background.blend(primary.opacity(0.1))), 0.2),
+            resize_handle: base.border,
+            resize_handle_active: get("drag.border", primary.opacity(0.65)),
+            scrollbar_track: get("scrollbar.background", base.background),
+            scrollbar_thumb,
+            scrollbar_thumb_hover: get("scrollbar.thumb.hover.background", scrollbar_thumb),
+            border: base.border,
+            selection: clamp_alpha(get("selection.background", primary), 0.3),
+            caret: get("caret", primary),
+            editor_background: editor("editor.background").unwrap_or(base.background),
+            editor_foreground: editor("editor.foreground").unwrap_or(base.foreground),
+            editor_active_line: editor("editor.active_line.background"),
+            editor_line_number: editor("editor.line_number").unwrap_or(base.muted_foreground),
+            radius: px(theme["radius"].as_f64().unwrap_or(6.) as f32),
+            font_family: ui_font(theme["font.family"].as_str(), cx),
+            font_size: px(theme["font.size"].as_f64().unwrap_or(FONT_SIZE) as f32),
+            mono_font_family: mono_font(theme["mono_font.family"].as_str(), cx),
+            mono_font_size: px(theme["mono_font.size"].as_f64().unwrap_or(MONO_FONT_SIZE) as f32),
+            syntax,
+        }
+    }
+
+    /// The style for a tree-sitter capture: its own, else its first part's, as `keyword.modifier`
+    /// falls back to `keyword`.
+    pub fn syntax(&self, name: &str) -> Option<HighlightStyle> {
+        self.syntax.get(name).or_else(|| self.syntax.get(name.split('.').next()?)).copied()
+    }
 }
 
 #[cfg(test)]
