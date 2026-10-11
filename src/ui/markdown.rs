@@ -366,11 +366,11 @@ impl Render {
                     6 => (1., FontWeight::MEDIUM),
                     _ => (1., FontWeight::NORMAL),
                 };
-                // The kit sizes headings from a 14px base, whatever the text size.
+                // Headings scale from the base text size, like everything else.
                 div()
                     .pb(rems(0.3))
                     .whitespace_normal()
-                    .text_size(px(14. * size))
+                    .text_size(rems(size))
                     .font_weight(weight)
                     .child(self.styled(|s| s.font_weight = weight, |this| this.text(inline, window, cx)))
                     .into_any_element()

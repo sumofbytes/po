@@ -7,7 +7,7 @@ use std::rc::Rc;
 use gpui::{
     AnyElement, App, AppContext as _, Bounds, BoxShadow, Context, ElementId, Entity, FocusHandle,
     InteractiveElement as _, IntoElement, KeyBinding, MouseButton, ParentElement as _, Pixels, Point, RenderOnce,
-    SharedString, StatefulInteractiveElement as _, Styled as _, Window, anchored, canvas, deferred, div, hsla, point,
+    Rems, SharedString, StatefulInteractiveElement as _, Styled as _, Window, anchored, canvas, deferred, div, hsla, point,
     prelude::FluentBuilder as _, px, rems,
 };
 
@@ -17,7 +17,7 @@ use crate::theme::Palette;
 gpui::actions!(popup_menu, [SelectUp, SelectDown, Confirm, Cancel]);
 
 const CONTEXT: &str = "PopupMenu";
-const ITEM_HEIGHT: Pixels = px(26.);
+const ITEM_HEIGHT: Rems = rems(1.875);
 /// The gap between a button and its menu.
 const OFFSET: Pixels = px(4.);
 
@@ -167,7 +167,7 @@ pub fn menu(state: &Entity<MenuState>, items: Vec<MenuItem>, keep: Option<Bounds
             .flex()
             .items_center()
             .h(ITEM_HEIGHT)
-            .px(px(8.))
+            .px_2()
             .text_sm()
             .rounded(radius)
             .text_color(if item.disabled { muted } else { fg })

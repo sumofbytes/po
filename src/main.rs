@@ -17,7 +17,7 @@ use acp::{Client, Event, PermissionOption};
 use diff::{Change, Kind, Pair, Row};
 use theme::Palette;
 use ui::button::Button;
-use ui::icon::IconName;
+use ui::icon::{Icon, IconName, IconSize};
 use ui::input::{Input, InputEvent, InputState};
 use ui::list_item::ListItem;
 use ui::menu::{MenuItem, MenuState, dropdown};
@@ -29,7 +29,7 @@ use serde_json::Value;
 use gpui::{
     AnyElement, App, Bounds, Context, Entity, FontWeight, ScrollHandle, IntoElement, ParentElement,
     Render, SharedString, Styled, Subscription, Window, WindowBounds, WindowOptions, div, prelude::*,
-    px, size, KeyBinding,
+    px, rems, size, KeyBinding,
 };
 
 gpui::actions!(po, [ToggleLeft, ToggleRight, ShowSource, ShowChanges, ToggleSplit, NewThread]);
@@ -421,6 +421,9 @@ impl Reader {
         let tree = cx.new(|cx| TreeState::new(cx));
         let changes_tree = cx.new(|cx| TreeState::new(cx));
         let subscriptions = vec![
+            // Switching modes unmounts whatever was focused (the explorer, the viewer), which
+            // leaves nothing focused and the shortcuts unrouted, so take focus back.
+            cx.on_focus_lost(window, |reader, window, cx| reader.focus.focus(window, cx)),
             cx.subscribe(&tree, |reader, _, event: &TreeEvent, _| match event {
                 TreeEvent::Expanded(id) => {
                     reader.expanded.insert(id.clone());
@@ -1091,7 +1094,7 @@ impl Reader {
                     div()
                         .text_xs()
                         .text_color(if failed { danger } else { muted })
-                        .max_h(px(72.0))
+                        .max_h(rems(5.))
                         .overflow_hidden()
                         .child(text.clone())
                 });
@@ -1165,11 +1168,15 @@ impl Reader {
                 let name = entry.label.to_string();
                 let lead: AnyElement = if entry.folder {
                     div()
-                        .w(px(10.0))
+                        .w(IconSize::XSmall.rems())
                         .flex_none()
-                        .text_xs()
-                        .text_color(muted)
-                        .child(if entry.expanded { "▾" } else { "▸" })
+                        .flex()
+                        .items_center()
+                        .child(
+                            Icon::new(if entry.expanded { IconName::ChevronDown } else { IconName::ChevronRight })
+                                .size(IconSize::XSmall)
+                                .color(muted),
+                        )
                         .into_any_element()
                 } else {
                     let tint = match file_kind(&name) {
@@ -1180,7 +1187,7 @@ impl Reader {
                         FileKind::Image => kinds[3],
                         FileKind::Other => muted.opacity(0.6),
                     };
-                    div().w(px(7.0)).h(px(7.0)).flex_none().rounded(px(2.0)).bg(tint).into_any_element()
+                    div().size(rems(0.5)).flex_none().rounded(px(2.0)).bg(tint).into_any_element()
                 };
                 let mark = marks.get(path.as_ref()).map(|status| {
                     let color = match status {
@@ -1188,12 +1195,15 @@ impl Reader {
                         'D' => danger,
                         _ => kinds[1],
                     };
-                    div().w(px(10.0)).flex_none().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(color).child(status.to_string())
+                    div().w(rems(0.75)).flex_none().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(color).child(status.to_string())
                 });
                 let label = div()
                     .flex()
                     .items_center()
-                    .gap_2()
+                    // The chevron svg carries ~4px of padding on its right, so folders take
+                    // a smaller gap to sit the name as far from the glyph as files do.
+                    .when(entry.folder, |d| d.gap_1())
+                    .when(!entry.folder, |d| d.gap_2())
                     .child(lead)
                     .child(div().flex_1().min_w_0().truncate().child(name))
                     .children(mark);
@@ -1202,7 +1212,7 @@ impl Reader {
                 ListItem::new(ix)
                     .selected(selected)
                     .secondary_selected(right_clicked)
-                    .pl(px(8.0 + 14.0 * entry.depth as f32))
+                    .pl(rems(0.5 + entry.depth as f32))
                     .text_sm()
                     .child(label)
                     .on_click(move |_, window, cx| {
@@ -1272,7 +1282,7 @@ impl Reader {
             div().id("diff-split").size_full().overflow_y_scroll().children(
                 (0..count)
                     .map(|ix| {
-                        let line = div().flex().w_full().min_h(px(20.0)).items_start().font_family(font.clone()).text_sm();
+                        let line = div().flex().w_full().min_h(rems(1.5)).items_start().font_family(font.clone()).text_sm();
                         let cell = |cell: &Option<diff::Cell>, first: bool| {
                             let half = div().flex_1().min_w_0().self_stretch().flex().items_start().gap_2();
                             let half = if first { half.border_r_1().border_color(border) } else { half };
@@ -1286,7 +1296,7 @@ impl Reader {
                                 Some(tint) => half.bg(tint),
                                 None => half,
                             };
-                            half.child(div().w(px(44.0)).flex_none().text_right().text_color(muted).child(cell.number.to_string()))
+                            half.child(div().w(rems(3.)).flex_none().text_right().text_color(muted).child(cell.number.to_string()))
                                 .child(div().flex_1().min_w_0().child(cell.text.clone()))
                         };
                         match &pairs[ix] {
@@ -1304,7 +1314,7 @@ impl Reader {
                     .map(|ix| {
                         let row = &rows[ix];
                         let number = |n: Option<u32>| {
-                            div().w(px(44.0)).flex_none().text_right().text_color(muted).child(n.map_or(String::new(), |n| n.to_string()))
+                            div().w(rems(3.)).flex_none().text_right().text_color(muted).child(n.map_or(String::new(), |n| n.to_string()))
                         };
                         let (tint, sign) = match row.kind {
                             Kind::Added => (Some(success.opacity(0.16)), "+"),
@@ -1312,7 +1322,7 @@ impl Reader {
                             Kind::Hunk => (Some(muted.opacity(0.12)), ""),
                             Kind::Context => (None, " "),
                         };
-                        let line = div().flex().w_full().min_h(px(20.0)).items_start().gap_2().font_family(font.clone()).text_sm();
+                        let line = div().flex().w_full().min_h(rems(1.5)).items_start().gap_2().font_family(font.clone()).text_sm();
                         let line = match tint {
                             Some(tint) => line.bg(tint),
                             None => line,
@@ -1322,7 +1332,7 @@ impl Reader {
                         }
                         line.child(number(row.old))
                             .child(number(row.new))
-                            .child(div().w(px(10.0)).flex_none().text_color(muted).child(sign))
+                            .child(div().w(rems(0.75)).flex_none().text_color(muted).child(sign))
                             .child(div().flex_1().min_w_0().child(row.text.clone()))
                     })
                     .collect::<Vec<_>>(),
@@ -1614,7 +1624,7 @@ fn tool_card(ix: usize, n: usize, tool: &ToolBlock, this: &Entity<Reader>, cx: &
             if !text.is_empty() {
                 card = card.child(
                     div()
-                        .max_h(px(220.0))
+                        .max_h(rems(16.))
                         .overflow_hidden()
                         .font_family(cx.global::<Palette>().mono_font_family.clone())
                         .text_xs()

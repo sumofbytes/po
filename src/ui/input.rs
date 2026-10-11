@@ -626,8 +626,8 @@ fn line_bounds(text: &str, offset: usize) -> Range<usize> {
 }
 
 /// The paddings around the text: the kit's medium textarea, or its small field.
-fn paddings(multi_line: bool) -> (Pixels, Pixels) {
-    if multi_line { (px(10.), px(8.)) } else { (px(0.), px(0.)) }
+fn paddings(multi_line: bool, rem_size: Pixels) -> (Pixels, Pixels) {
+    if multi_line { (rems(0.75).to_pixels(rem_size), rems(0.5).to_pixels(rem_size)) } else { (px(0.), px(0.)) }
 }
 
 struct TextElement {
@@ -683,7 +683,7 @@ impl Element for TextElement {
             layout_style.size.height = window.line_height().into();
             return (window.request_layout(layout_style, [], cx), ());
         }
-        let (pad_x, pad_y) = paddings(true);
+        let (pad_x, pad_y) = paddings(true, window.rem_size());
         // Read here, where this input's text style applies; measuring runs outside it.
         let line_height = window.line_height();
         let id = window.request_measured_layout(layout_style, move |known, available, window, _| {
@@ -714,7 +714,7 @@ impl Element for TextElement {
         let line_height = window.line_height();
         let hitbox = window.insert_hitbox(bounds, HitboxBehavior::Normal);
         self.state.update(cx, |state, _| {
-            let (pad_x, pad_y) = paddings(state.multi_line);
+            let (pad_x, pad_y) = paddings(state.multi_line, window.rem_size());
             let placeholder = state.text.is_empty();
             let (text, color) = if placeholder { (state.placeholder.to_string(), muted) } else { (state.text.clone(), style.color) };
             let wrap = state.multi_line.then(|| (bounds.size.width - pad_x * 2.).max(px(1.)));
@@ -891,7 +891,7 @@ impl RenderOnce for Input {
             .line_height(rems(1.25))
             .text_sm()
             .when(self.look == Look::Field, |this| {
-                this.h_6().px(px(8.)).py(px(2.)).gap(px(4.)).bg(palette.input_background).rounded(palette.radius).border_1().border_color(palette.input_border)
+                this.h_6().px_2().py_0p5().gap_1().bg(palette.input_background).rounded(palette.radius).border_1().border_color(palette.input_border)
             })
             .on_action(window.listener_for(s, InputState::backspace))
             .on_action(window.listener_for(s, InputState::delete))
