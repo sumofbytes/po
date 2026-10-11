@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use gpui::{
     App, AppContext as _, Context, FocusHandle, InteractiveElement, IntoElement, KeyBinding, ParentElement, Pixels, Point, Refineable,
-    RenderOnce, SharedString, StyleRefinement, Styled, Subscription, Task, Window, div, px,
+    Render, RenderOnce, SharedString, StyleRefinement, Styled, Subscription, Task, Window, div, px,
 };
 
 use crate::ui::menu::{MenuItem, MenuState};
@@ -78,22 +78,44 @@ pub fn init(cx: &mut App) {
     search::init(cx);
 }
 
-/// Syntax colors for `code` in `language` (a name or file extension), for code shown outside
-/// the viewer, such as Markdown code blocks.
-pub fn code_highlights(code: &str, language: &str, cx: &App) -> Vec<(std::ops::Range<usize>, gpui::HighlightStyle)> {
-    let Some(highlights) = highlight::highlight(code, language) else { return Vec::new() };
-    let palette = cx.global::<crate::theme::Palette>();
-    let styles: Vec<_> = highlights.names.iter().map(|name| palette.syntax(name)).collect();
-    let mut at = 0;
-    highlights
-        .runs(0..code.len())
-        .filter_map(|(len, id)| {
-            let range = at..at + len;
-            at += len;
-            let style = styles.get(id.checked_sub(1)? as usize)?.as_ref()?;
-            Some((range, *style))
-        })
-        .collect()
+/// Compiles the grammars for `languages` (names or file extensions) on a background thread,
+/// so opening the first file of each doesn't wait for its queries.
+pub fn prewarm(languages: Vec<String>) {
+    std::thread::spawn(move || highlight::prewarm(languages.iter().map(String::as_str)));
+}
+
+/// A code block's captures, worked out once and colored from the theme when drawn.
+pub struct CodeColors {
+    names: Vec<String>,
+    runs: Vec<(std::ops::Range<usize>, u16)>,
+}
+
+impl CodeColors {
+    /// Parses `code` in `language` (a name or file extension); `None` without a grammar.
+    pub fn new(code: &str, language: &str) -> Option<Self> {
+        let highlights = highlight::highlight(code, language)?;
+        let mut at = 0;
+        let runs = highlights
+            .runs(0..code.len())
+            .filter_map(|(len, id)| {
+                let range = at..at + len;
+                at += len;
+                (id > 0).then_some((range, id))
+            })
+            .collect();
+        Some(Self { names: highlights.names, runs })
+    }
+
+    /// Syntax colors for the code, for code shown outside the viewer, such as Markdown code
+    /// blocks.
+    pub fn styles(&self, cx: &App) -> Vec<(std::ops::Range<usize>, gpui::HighlightStyle)> {
+        let palette = cx.global::<crate::theme::Palette>();
+        let styles: Vec<_> = self.names.iter().map(|name| palette.syntax(name)).collect();
+        self.runs
+            .iter()
+            .filter_map(|(range, id)| Some((range.clone(), (*styles.get(*id as usize - 1)?)?)))
+            .collect()
+    }
 }
 
 /// Whether text in `language` (a name or file extension) gets colors, for tests outside.
@@ -152,6 +174,10 @@ pub struct CodeViewState {
     gutter_hovered: bool,
     focus: FocusHandle,
     scrollbar: gpui::Entity<ScrollbarState>,
+    /// Row metrics and syntax styles from the last layout, kept while their inputs hold.
+    cache: element::Cache,
+    /// Redraw the view, which is cached, when its scrollbar or menu changes.
+    _children: [Subscription; 2],
 }
 
 impl CodeViewState {
@@ -162,6 +188,9 @@ impl CodeViewState {
             cx.on_focus(&focus, window, |this, _, cx| this.start_blink(cx)),
             cx.on_blur(&focus, window, |this, _, cx| this.stop_blink(cx)),
         ];
+        let scrollbar = cx.new(|_| ScrollbarState::default());
+        let context_menu = cx.new(MenuState::new);
+        let children = [cx.observe(&scrollbar, |_, _, cx| cx.notify()), cx.observe(&context_menu, |_, _, cx| cx.notify())];
         let mut this = Self {
             wrap: WrapMap::unwrapped(text.lines()),
             text,
@@ -183,7 +212,7 @@ impl CodeViewState {
             drag_at: None,
             auto_scroll: None,
             menu_at: None,
-            context_menu: cx.new(MenuState::new),
+            context_menu,
             blink_on: false,
             blink_paused: false,
             blink_epoch: 0,
@@ -196,16 +225,18 @@ impl CodeViewState {
             folded: Vec::new(),
             gutter_hovered: false,
             focus,
-            scrollbar: cx.new(|_| ScrollbarState::default()),
+            scrollbar,
+            cache: element::Cache::default(),
+            _children: children,
         };
-        this.rehighlight(cx);
+        this.rehighlight(None, cx);
         this
     }
 
     /// Replaces the text, keeping the scroll position and cursor where they still fit.
     pub fn set_text(&mut self, text: impl Into<Arc<str>>, cx: &mut Context<Self>) {
         self.anchor = Some(self.top());
-        self.text = Text::new(text);
+        let old = std::mem::replace(&mut self.text, Text::new(text));
         self.selection = Selection {
             anchor: self.text.clip_left(self.selection.anchor),
             head: self.text.clip_left(self.selection.head),
@@ -216,7 +247,7 @@ impl CodeViewState {
         // Wrapping redoes itself at the next layout, which scrolls back to the anchor.
         self.wrap = WrapMap::unwrapped(self.text.lines());
         self.wrap_key = None;
-        self.rehighlight(cx);
+        self.rehighlight(Some(old.src().clone()), cx);
         cx.notify();
     }
 
@@ -368,10 +399,12 @@ impl CodeViewState {
         self.scroll_y = self.line_height * (self.wrap.first_row(line) + sub) as f32 + within;
     }
 
-    fn rehighlight(&mut self, cx: &mut Context<Self>) {
+    /// Colors the text. A new view colors small files before its first frame; a reload, given
+    /// the text it replaced, reparses only what changed, in the background.
+    fn rehighlight(&mut self, old_text: Option<Arc<str>>, cx: &mut Context<Self>) {
         let src = self.text.src().clone();
         let language = self.language.to_string();
-        if src.len() <= SYNC_HIGHLIGHT {
+        if old_text.is_none() && src.len() <= SYNC_HIGHLIGHT {
             self.highlighting = None;
             self.highlights = highlight::highlight(&src, &language).map(Arc::new);
             crate::trace::mark("viewer highlighted");
@@ -379,8 +412,12 @@ impl CodeViewState {
         }
         // Old colors stay until the new ones are ready; the element keeps them on character
         // boundaries if the text moved underneath them.
+        let old = old_text.zip(self.highlights.clone());
         self.highlighting = Some(cx.spawn(async move |this, cx| {
-            let highlights = cx.background_executor().spawn(async move { highlight::highlight(&src, &language) }).await;
+            let highlights = cx
+                .background_executor()
+                .spawn(async move { highlight::rehighlight(&src, &language, old.as_ref().map(|(text, h)| (&**text, &**h))) })
+                .await;
             this.update(cx, |this, cx| {
                 this.highlights = highlights.map(Arc::new);
                 this.highlighting = None;
@@ -400,6 +437,14 @@ impl CodeViewState {
         self.scroll_y = y;
         cx.notify();
         true
+    }
+}
+
+/// The state draws itself filling its bounds, so it can be embedded as a cached view and skip
+/// rendering while only the rest of the window changes.
+impl Render for CodeViewState {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        CodeView::new(&cx.entity()).size_full()
     }
 }
 
