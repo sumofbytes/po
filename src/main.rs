@@ -41,17 +41,23 @@ fn ignored(name: &str) -> bool {
     name.starts_with('.') || SKIP.contains(&name)
 }
 
+/// The tree under `dir` without dotfiles, `SKIP` folders and anything the `.gitignore` files
+/// exclude (they apply even outside a git repository).
+fn walker(dir: &Path) -> ignore::Walk {
+    ignore::WalkBuilder::new(dir)
+        .hidden(false)
+        .require_git(false)
+        .sort_by_file_name(|a, b| a.cmp(b))
+        .filter_entry(|entry| entry.depth() == 0 || !ignored(&entry.file_name().to_string_lossy()))
+        .build()
+}
+
 /// Watches `dir` and its subfolders one by one, so skipped folders such as
 /// `target` never take up watches.
-fn watch_dirs(watcher: &mut impl notify::Watcher, root: &Path, dir: &Path) {
-    if watcher.watch(dir, notify::RecursiveMode::NonRecursive).is_err() {
-        return;
-    }
-    let Ok(read) = std::fs::read_dir(dir) else { return };
-    for entry in read.flatten() {
-        let path = entry.path();
-        if path.is_dir() && !ignored(&entry.file_name().to_string_lossy()) {
-            watch_dirs(watcher, root, &path);
+fn watch_dirs(watcher: &mut impl notify::Watcher, dir: &Path) {
+    for entry in walker(dir).flatten() {
+        if entry.file_type().is_some_and(|t| t.is_dir()) {
+            watcher.watch(entry.path(), notify::RecursiveMode::NonRecursive).ok();
         }
     }
 }
@@ -73,7 +79,7 @@ fn start_watcher(root: &Path) -> Option<Watch> {
             return None;
         }
     };
-    watch_dirs(&mut watcher, root, root);
+    watch_dirs(&mut watcher, root);
     Some((watcher, rx))
 }
 
@@ -90,7 +96,7 @@ impl Prefetch {
         let scan = root.clone();
         let files = std::thread::spawn(move || {
             let mut files = Vec::new();
-            walk(&scan, &scan, &mut files);
+            walk(&scan, &mut files);
             trace::mark("walk (thread)");
             files
         });
@@ -105,22 +111,15 @@ impl Prefetch {
     }
 }
 
-fn walk(root: &Path, dir: &Path, out: &mut Vec<String>) {
-    let Ok(read) = std::fs::read_dir(dir) else { return };
-    let mut entries: Vec<_> = read.flatten().collect();
-    entries.sort_by_key(|e| e.file_name());
-    for entry in entries {
+fn walk(root: &Path, out: &mut Vec<String>) {
+    for entry in walker(root).flatten() {
         if out.len() >= MAX_FILES {
             return;
         }
-        let name = entry.file_name().to_string_lossy().to_string();
-        let path = entry.path();
-        if path.is_dir() {
-            if !ignored(&name) {
-                walk(root, &path, out);
+        if entry.file_type().is_some_and(|t| t.is_file()) {
+            if let Ok(rel) = entry.path().strip_prefix(root) {
+                out.push(rel.to_string_lossy().replace('\\', "/"));
             }
-        } else if let Ok(rel) = path.strip_prefix(root) {
-            out.push(rel.to_string_lossy().replace('\\', "/"));
         }
     }
 }
@@ -431,7 +430,7 @@ impl Reader {
             Some(Prefetch { files, watch, .. }) => (files.join().unwrap_or_default(), Some(watch)),
             None => {
                 let mut files = Vec::new();
-                walk(&root, &root, &mut files);
+                walk(&root, &mut files);
                 (files, None)
             }
         };
@@ -629,7 +628,7 @@ impl Reader {
                 .background_executor()
                 .spawn(async move {
                     let mut files = Vec::new();
-                    walk(&root, &root, &mut files);
+                    walk(&root, &mut files);
                     files
                 })
                 .await;
@@ -826,10 +825,13 @@ impl Reader {
                 // so only those re-walk the tree.
                 let (mut changed, mut moved) = (false, false);
                 let mut touched = HashSet::new();
+                let (gitignore, _) = ignore::gitignore::Gitignore::new(root.join(".gitignore"));
                 for event in events.iter().filter(|e| !e.kind.is_access()) {
                     for path in &event.paths {
                         let Ok(rel) = path.strip_prefix(&root) else { continue };
-                        if rel.components().any(|c| ignored(&c.as_os_str().to_string_lossy())) {
+                        if rel.components().any(|c| ignored(&c.as_os_str().to_string_lossy()))
+                            || gitignore.matched_path_or_any_parents(rel, path.is_dir()).is_ignore()
+                        {
                             continue;
                         }
                         changed = true;
@@ -839,7 +841,7 @@ impl Reader {
                         );
                         touched.insert(rel.to_string_lossy().replace('\\', "/"));
                         if path.is_dir() {
-                            watch_dirs(&mut watcher, &root, path);
+                            watch_dirs(&mut watcher, path);
                         }
                     }
                 }
@@ -854,7 +856,7 @@ impl Reader {
                     .spawn(async move {
                         let files = moved.then(|| {
                             let mut files = Vec::new();
-                            walk(&scan_root, &scan_root, &mut files);
+                            walk(&scan_root, &mut files);
                             files
                         });
                         let seen = current.as_ref().and_then(|path| stamp(&scan_root.join(path)));
