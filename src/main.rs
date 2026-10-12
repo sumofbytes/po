@@ -2728,7 +2728,7 @@ impl Reader {
     /// The open projects, each marked with the busiest of its threads, and a way to add one.
     fn projects_strip(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.global::<Palette>();
-        let (border, hover, muted) = (colors.border, colors.list_hover, colors.muted_foreground);
+        let (border, hover, muted, foreground) = (colors.border, colors.list_hover, colors.muted_foreground, colors.foreground);
         let busiest = |threads: &[&Thread]| threads.iter().map(|t| t.activity()).max().unwrap_or(Activity::Idle);
         let mut rows: Vec<(u64, String, Activity)> = std::iter::once((self.project_id, &self.project, &self.thread, &self.parked[..]))
             .chain(self.slots.iter().map(|slot| (slot.id, &slot.project, &slot.thread, &slot.parked[..])))
@@ -2762,7 +2762,7 @@ impl Reader {
                     .hover(|row| row.bg(hover))
                     .on_click(move |_, window, cx| select.update(cx, |reader, cx| reader.show_project(id, window, cx)))
                     .child(div().flex_none().text_xs().text_color(tint).child(glyph))
-                    .child(div().flex_1().min_w_0().truncate().text_sm().child(name))
+                    .child(div().flex_1().min_w_0().truncate().text_sm().text_color(if id == active { foreground } else { muted }).child(name))
                     .when(many, |row| {
                         row.child(
                             Button::new(("project-close", id as usize))
@@ -2929,7 +2929,7 @@ impl Reader {
     fn agents_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let explorer = self.explorer(false, cx).into_any_element();
         let colors = cx.global::<Palette>();
-        let (hover, muted) = (colors.list_hover, colors.muted_foreground);
+        let (hover, muted, foreground, accent) = (colors.list_hover, colors.muted_foreground, colors.foreground, colors.primary);
         let views = self.views();
         let (active_project, active_thread) = (self.project_id, self.thread.id);
         let many = views.len() > 1;
@@ -2940,6 +2940,9 @@ impl Reader {
             let activity = view.threads.iter().map(|t| t.activity()).max().unwrap_or(Activity::Idle);
             let (glyph, tint) = activity.mark(colors);
             let (select, close, start) = (cx.entity(), cx.entity(), cx.entity());
+            // The project on screen is quietly marked: its name at full strength, a faint tint and a
+            // thin edge. The others are muted, and the edge is there but invisible, so nothing shifts.
+            let current = pid == active_project;
             tree = tree.child(
                 div()
                     .id(("agent-project", pid as usize))
@@ -2949,11 +2952,23 @@ impl Reader {
                     .pl_2()
                     .mt_1()
                     .rounded_md()
+                    .border_l_2()
+                    .border_color(if current { accent.opacity(0.5) } else { gpui::transparent_black() })
+                    .when(current, |row| row.bg(hover.opacity(0.5)))
                     .cursor_pointer()
                     .hover(|row| row.bg(hover))
                     .on_click(move |_, window, cx| select.update(cx, |reader, cx| reader.show_project(pid, window, cx)))
                     .child(div().flex_none().text_xs().text_color(tint).child(glyph))
-                    .child(div().flex_1().min_w_0().truncate().text_sm().font_weight(FontWeight::MEDIUM).child(view.project.name()))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_sm()
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(if current { foreground } else { muted })
+                            .child(view.project.name()),
+                    )
                     .when(many, |row| {
                         row.child(
                             Button::new(("agent-project-close", pid as usize))
