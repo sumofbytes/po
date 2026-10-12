@@ -450,6 +450,10 @@ struct Project {
 /// One conversation with an agent: its messages, the process behind it and what is waiting to
 /// be sent to it.
 struct Thread {
+    /// Names the thread to the events of its agent while it isn't the one on screen.
+    id: u64,
+    /// It finished a turn while another thread was on screen.
+    unread: bool,
     messages: Vec<Msg>,
     busy: bool,
     /// Messages typed during a turn, shown above the input until they are taken.
@@ -470,6 +474,8 @@ struct Thread {
     /// The selection across the agent's replies.
     selection: Entity<ui::markdown::Selection>,
     focus: gpui::FocusHandle,
+    /// Sends the draft on Enter; goes with the thread.
+    _enter: Subscription,
 }
 
 impl Thread {
@@ -596,10 +602,59 @@ impl Thread {
     }
 }
 
+/// What a thread is up to, for the thread list.
+#[derive(Clone, Copy, PartialEq)]
+enum Activity {
+    Idle,
+    Running,
+    /// Waiting for an answer to a permission request.
+    Asking,
+    /// Finished a turn nobody has looked at.
+    Unread,
+}
+
+impl Thread {
+    fn activity(&self) -> Activity {
+        let asking = match self.messages.last() {
+            Some(Msg::Agent(blocks)) => blocks.iter().any(|b| matches!(b, Block::Permission(ask) if ask.answered.is_none())),
+            _ => false,
+        };
+        if asking {
+            Activity::Asking
+        } else if self.busy {
+            Activity::Running
+        } else if self.unread {
+            Activity::Unread
+        } else {
+            Activity::Idle
+        }
+    }
+
+    /// The first thing asked, or a placeholder while there is none.
+    fn title(&self) -> String {
+        let first = self.messages.iter().find_map(|msg| match msg {
+            Msg::User(text) => text.lines().find(|line| !line.trim().is_empty()),
+            Msg::Agent(_) => None,
+        });
+        match first {
+            Some(line) => {
+                let line = line.trim();
+                let short: String = line.chars().take(28).collect();
+                if short.len() < line.len() { format!("{short}…") } else { short }
+            }
+            None => "New thread".into(),
+        }
+    }
+}
+
 struct Reader {
     mode: Mode,
     project: Project,
+    /// The thread on screen; its methods act on this one.
     thread: Thread,
+    /// The other threads, still running; swapped in with [`Self::with_thread`] to handle their events.
+    parked: Vec<Thread>,
+    next_thread: u64,
     /// The directory `po` was started in: where PRs are checked out from and where Close returns to.
     home: PathBuf,
     pr_input: Entity<InputState>,
@@ -698,12 +753,8 @@ impl Reader {
                     reader.open_pr(window, cx);
                 }
             }),
-            cx.subscribe_in(&draft, window, |reader, _, event: &InputEvent, window, cx| {
-                if let InputEvent::PressEnter { shift: false, alt } = event {
-                    reader.send(*alt, window, cx);
-                }
-            }),
         ];
+        let enter = Self::send_on_enter(&draft, window, cx);
         let mut agents = config::agents(&config::load());
         if let Some(command) = command.as_ref().filter(|c| !agents.iter().any(|agent| agent.id == **c)) {
             agents.push(config::Agent { id: command.clone(), name: "Custom".into(), command: command.clone(), daemon: None });
@@ -734,6 +785,9 @@ impl Reader {
             expanded: HashSet::new(),
         };
         let thread = Thread {
+            id: 0,
+            unread: false,
+            _enter: enter,
             messages: vec![],
             busy: false,
             queue: vec![],
@@ -754,6 +808,8 @@ impl Reader {
             mode: Mode::Source,
             project,
             thread,
+            parked: vec![],
+            next_thread: 1,
             home,
             pr_input,
             pr_status: None,
@@ -993,7 +1049,9 @@ impl Reader {
         self.project.marks = Rc::default();
         self.refresh_tree(cx);
         self.rescan(cx);
-        // The agent works in the old directory, so it restarts in the new one.
+        // The other threads work in the old directory, so they end; the one on screen restarts
+        // in the new one.
+        self.parked.clear();
         if let Some(agent) = self.thread.agent.clone() {
             self.connect(&agent, false, window, cx);
         }
@@ -1126,11 +1184,12 @@ impl Reader {
         }));
     }
 
-    /// Replaces the running agent with `key`'s, with a fresh thread, or with the agent's session
-    /// list to resume from when `resume`.
+    /// Starts `key`'s agent in the thread on screen, with a fresh conversation, or with the
+    /// agent's session list to resume from when `resume`.
     fn connect(&mut self, key: &str, resume: bool, window: &mut Window, cx: &mut Context<Self>) {
         self.thread.generation += 1;
         let generation = self.thread.generation;
+        let id = self.thread.id;
         self.thread.client = None;
         self.thread.agent = Some(key.to_string());
         self.thread.messages.clear();
@@ -1160,11 +1219,14 @@ impl Reader {
                         cx.background_executor().timer(Duration::from_secs(20)).await;
                         watchdog
                             .update(cx, |reader, cx| {
-                                if reader.thread.generation == generation && !reader.thread.ready && reader.thread.client.is_some() {
-                                    reader.thread.status = "not responding".into();
-                                    reader.thread.fail("The agent did not answer the handshake. Check that its command speaks ACP.".into());
-                                    cx.notify();
-                                }
+                                reader.with_thread(id, |reader, _| {
+                                    let thread = &mut reader.thread;
+                                    if thread.generation == generation && !thread.ready && thread.client.is_some() {
+                                        thread.status = "not responding".into();
+                                        thread.fail("The agent did not answer the handshake. Check that its command speaks ACP.".into());
+                                    }
+                                });
+                                cx.notify();
                             })
                             .ok();
                     })
@@ -1172,10 +1234,16 @@ impl Reader {
                     while let Some(event) = events.next().await {
                         let done = handle.update(cx, |_, window, cx| {
                             this.update(cx, |reader, cx| {
-                                if reader.thread.generation == generation {
-                                    reader.on_event(event, window, cx);
-                                }
-                                reader.thread.generation == generation
+                                // The thread may have been closed, or its agent replaced, since.
+                                reader
+                                    .with_thread(id, |reader, visible| {
+                                        let current = reader.thread.generation == generation;
+                                        if current {
+                                            reader.on_event(event, visible, window, cx);
+                                        }
+                                        current
+                                    })
+                                    .unwrap_or(false)
                             })
                         });
                         if !matches!(done, Ok(Ok(true))) {
@@ -1194,16 +1262,105 @@ impl Reader {
         cx.notify();
     }
 
-    /// Starts a new thread with `key`'s agent, replacing any running one.
+    /// Starts a new thread with `key`'s agent. The thread on screen keeps running in the
+    /// background, unless it is empty, in which case the new one takes its place.
     fn new_thread(&mut self, key: &str, window: &mut Window, cx: &mut Context<Self>) {
         log::info!("agent: new thread with {key}");
+        self.add_thread(window, cx);
         self.connect(key, false, window, cx);
     }
 
-    /// Replaces the running agent with `key`'s, offering its sessions to resume.
+    /// Like [`Self::new_thread`], offering `key`'s sessions to resume.
     fn resume_thread(&mut self, key: &str, window: &mut Window, cx: &mut Context<Self>) {
         log::info!("agent: resuming with {key}");
+        self.add_thread(window, cx);
         self.connect(key, true, window, cx);
+    }
+
+    /// Sends the draft on Enter, while its thread is the one on screen.
+    fn send_on_enter(draft: &Entity<InputState>, window: &mut Window, cx: &mut Context<Self>) -> Subscription {
+        cx.subscribe_in(draft, window, |reader, input, event: &InputEvent, window, cx| {
+            if let InputEvent::PressEnter { shift: false, alt } = event
+                && reader.thread.draft == *input
+            {
+                reader.send(*alt, window, cx);
+            }
+        })
+    }
+
+    /// Makes a thread with no agent yet.
+    fn blank_thread(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Thread {
+        let draft = cx.new(|cx| {
+            InputState::new(window, cx).auto_grow(1, 6).submit_on_enter(true).placeholder("Message the agent")
+        });
+        let id = self.next_thread;
+        self.next_thread += 1;
+        Thread {
+            id,
+            unread: false,
+            _enter: Self::send_on_enter(&draft, window, cx),
+            messages: vec![],
+            busy: false,
+            queue: vec![],
+            ready: false,
+            loading: false,
+            picking: false,
+            sessions: None,
+            status: String::new(),
+            client: None,
+            agent: None,
+            generation: 0,
+            draft,
+            list: ListState::new(0, ListAlignment::Top, px(400.)),
+            selection: cx.new(|_| ui::markdown::Selection::default()),
+            focus: cx.focus_handle(),
+        }
+    }
+
+    /// Puts a blank thread on screen, parking the one that was, unless that is still blank.
+    fn add_thread(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let fresh = self.blank_thread(window, cx);
+        let old = std::mem::replace(&mut self.thread, fresh);
+        if old.agent.is_some() {
+            self.parked.push(old);
+        }
+    }
+
+    /// Runs `work` with thread `id` as [`Self::thread`], and whether it is the one on screen.
+    /// `None` if there is no such thread.
+    fn with_thread<R>(&mut self, id: u64, work: impl FnOnce(&mut Self, bool) -> R) -> Option<R> {
+        if self.thread.id == id {
+            return Some(work(self, true));
+        }
+        let at = self.parked.iter().position(|thread| thread.id == id)?;
+        std::mem::swap(&mut self.thread, &mut self.parked[at]);
+        let out = work(self, false);
+        std::mem::swap(&mut self.thread, &mut self.parked[at]);
+        Some(out)
+    }
+
+    /// Brings thread `id` on screen.
+    fn show_thread(&mut self, id: u64, cx: &mut Context<Self>) {
+        if let Some(at) = self.parked.iter().position(|thread| thread.id == id) {
+            std::mem::swap(&mut self.thread, &mut self.parked[at]);
+            self.thread.unread = false;
+            cx.notify();
+        }
+    }
+
+    /// Ends thread `id`, stopping its agent. Closing the one on screen brings up another.
+    fn close_thread(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(at) = self.parked.iter().position(|thread| thread.id == id) {
+            self.parked.remove(at);
+        } else if self.thread.id == id {
+            let next = match self.parked.pop() {
+                Some(next) => next,
+                None => self.blank_thread(window, cx),
+            };
+            self.thread = next;
+            self.thread.unread = false;
+        }
+        cx.notify();
     }
 
     /// Opens a listed session; its history arrives as updates before the agent is ready.
@@ -1226,7 +1383,8 @@ impl Reader {
 
 
 
-    fn on_event(&mut self, event: Event, window: &mut Window, cx: &mut Context<Self>) {
+    /// `visible`: this thread is the one on screen, so its edits may move the viewer.
+    fn on_event(&mut self, event: Event, visible: bool, window: &mut Window, cx: &mut Context<Self>) {
         // Most events change the last message; a tool call update may change an earlier one.
         let mut changed = self.thread.messages.len().saturating_sub(1);
         match event {
@@ -1246,7 +1404,7 @@ impl Reader {
                     changed = changed.min(ix);
                 }
                 // A replayed history would otherwise open every file it ever touched.
-                if let Some((path, finished)) = self.thread.update(&update).filter(|_| !self.thread.loading) {
+                if let Some((path, finished)) = self.thread.update(&update).filter(|_| !self.thread.loading && visible) {
                     self.follow(&path, finished, window, cx);
                 }
             }
@@ -1255,6 +1413,7 @@ impl Reader {
             }
             Event::Stopped(reason) => {
                 self.thread.busy = false;
+                self.thread.unread = !visible;
                 log::info!("agent: stopped ({reason})");
                 // What the daemon didn't take into the turn is no longer in its queue.
                 for item in &mut self.thread.queue {
@@ -2077,6 +2236,46 @@ impl Reader {
                     .into_any_element()
             })
             .collect();
+        let active = self.thread.id;
+        let mut tabs: Vec<(u64, String, Activity)> =
+            std::iter::once(&self.thread).chain(&self.parked).map(|t| (t.id, t.title(), t.activity())).collect();
+        tabs.sort_by_key(|(id, ..)| *id);
+        let (primary, warning, done, hover) = (colors.primary, colors.warning, gpui::hsla(0.37, 0.5, 0.5, 1.0), colors.list_hover);
+        // With one thread there is nothing to choose between.
+        let tabs = (tabs.len() > 1).then(|| {
+            div().flex_none().flex().flex_wrap().gap_1().px_2().py_1().border_b_1().border_color(border).children(
+                tabs.into_iter().map(|(id, title, activity)| {
+                    let (select, close) = (cx.entity(), cx.entity());
+                    let (glyph, tint) = match activity {
+                        Activity::Idle => ("○", muted),
+                        Activity::Running => ("●", primary),
+                        Activity::Asking => ("!", warning),
+                        Activity::Unread => ("●", done),
+                    };
+                    div()
+                        .id(("thread-tab", id as usize))
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .pl_2()
+                        .rounded_md()
+                        .cursor_pointer()
+                        .when(id == active, |tab| tab.bg(hover))
+                        .hover(|tab| tab.bg(hover))
+                        .on_click(move |_, _, cx| select.update(cx, |reader, cx| reader.show_thread(id, cx)))
+                        .child(div().text_xs().text_color(tint).child(glyph))
+                        .child(div().text_xs().max_w(px(160.0)).truncate().child(title))
+                        .child(
+                            Button::new(("thread-close", id as usize))
+                                .icon(IconName::Close)
+                                .ghost()
+                                .xsmall()
+                                .tooltip("Close thread")
+                                .on_click(move |_, window, cx| close.update(cx, |reader, cx| reader.close_thread(id, window, cx))),
+                        )
+                }),
+            )
+        });
         div()
             .size_full()
             .flex()
@@ -2118,6 +2317,7 @@ impl Reader {
                     ),
                 cx,
             ))
+            .children(tabs)
             .child(
                 div()
                     .id("thread")
