@@ -32,6 +32,8 @@ pub struct Workspace {
     pub agents: bool,
     /// The agent last chosen for a new thread.
     pub agent: Option<String>,
+    /// The height, in pixels, the agents view gives its projects above the explorer, if dragged.
+    pub split: Option<f32>,
 }
 
 /// The file for the window started in `start`.
@@ -69,7 +71,7 @@ impl Workspace {
                 })
             })
             .collect();
-        json!({ "version": 1, "layout": if self.agents { "agents" } else { "files" }, "agent": self.agent, "projects": projects })
+        json!({ "version": 1, "layout": if self.agents { "agents" } else { "files" }, "agent": self.agent, "split": self.split, "projects": projects })
     }
 
     fn from_json(value: &Value) -> Option<Self> {
@@ -103,7 +105,10 @@ impl Workspace {
                 })
             })
             .collect();
-        Some(Self { projects, agents: value["layout"].as_str() == Some("agents"), agent: text(&value["agent"]) })
+        Some(Self { projects, agents: value["layout"].as_str() == Some("agents"), agent: text(&value["agent"]),
+            // A saved height that isn't a sensible number is dropped rather than trusted.
+            split: value["split"].as_f64().map(|height| height as f32).filter(|height| height.is_finite() && *height > 0.),
+        })
     }
 
     /// What the window started in `start` saved last, if anything.
@@ -135,6 +140,7 @@ mod tests {
         let saved = Workspace {
             agents: true,
             agent: Some("dex".into()),
+            split: Some(212.5),
             projects: vec![
                 ProjectState {
                     root: "/work/po".into(),
@@ -158,12 +164,21 @@ mod tests {
         let back = Workspace::from_json(&saved.to_json()).expect("parses");
         assert!(back.agents);
         assert_eq!(back.agent.as_deref(), Some("dex"));
+        assert_eq!(back.split, Some(212.5));
         assert_eq!(back.projects.len(), 2);
         assert_eq!(back.projects[0].active, 1);
         assert_eq!(back.projects[0].threads[1].title, "quote \"this\"");
         let wt = back.projects[1].worktree.as_ref().expect("worktree");
         assert_eq!((wt.branch.as_str(), wt.base.as_str()), ("po/1", "abc"));
         assert!(back.projects[1].review);
+    }
+
+    #[test]
+    fn a_nonsense_split_is_dropped() {
+        for bad in [json!(-5), json!("tall"), json!(0), Value::Null] {
+            let back = Workspace::from_json(&json!({ "projects": [], "split": bad })).expect("parses");
+            assert_eq!(back.split, None);
+        }
     }
 
     #[test]

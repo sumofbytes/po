@@ -223,6 +223,20 @@ impl VSplitState {
     pub fn new() -> Self {
         Self { top: None, dragging: false, bounds: Bounds::default() }
     }
+
+    /// The height of the top pane once it has been set by a drag (or [`Self::set_top`]).
+    pub fn top(&self) -> Option<Pixels> {
+        self.top
+    }
+
+    pub fn set_top(&mut self, top: Pixels) {
+        self.top = Some(top);
+    }
+
+    /// The handle is being dragged.
+    pub fn dragging(&self) -> bool {
+        self.dragging
+    }
 }
 
 /// Two panes, one above the other, with the boundary between them dragged: the vertical

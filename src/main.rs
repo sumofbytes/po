@@ -842,10 +842,17 @@ impl Reader {
                 .submit_on_enter(true)
                 .placeholder("Message the agent")
         });
+        let agents_split = cx.new(|_| VSplitState::new());
         let subscriptions = vec![
             // Switching modes unmounts whatever was focused (the explorer, the viewer), which
             // leaves nothing focused and the shortcuts unrouted, so take focus back.
             cx.on_focus_lost(window, |reader, window, cx| reader.focus.focus(window, cx)),
+            // Where the split was dragged to is kept, once the drag is over.
+            cx.observe(&agents_split, |reader, split, cx| {
+                if !split.read(cx).dragging() {
+                    reader.request_save(cx);
+                }
+            }),
             cx.subscribe_in(&pr_input, window, |reader, _, event: &InputEvent, window, cx| {
                 if matches!(event, InputEvent::PressEnter { shift: false, alt: false }) {
                     reader.open_pr(window, cx);
@@ -917,7 +924,7 @@ impl Reader {
             sidebars: cx.new(|_| SidebarsState::new(px(260.0), px(460.0))),
             agents_sidebars: cx.new(|_| SidebarsState::new(px(280.0), px(560.0))),
             agents_left_open: true,
-            agents_split: cx.new(|_| VSplitState::new()),
+            agents_split,
             side_open: false,
             agent_menu: cx.new(MenuState::new),
             chosen_agent: command.clone(),
@@ -1939,6 +1946,9 @@ impl Reader {
         let mut seen = HashSet::new();
         self.layout = if saved.agents { Layout::Agents } else { Layout::Files };
         self.chosen_agent = saved.agent.clone().or(self.chosen_agent.take());
+        if let Some(height) = saved.split {
+            self.agents_split.update(cx, |split, _| split.set_top(px(height)));
+        }
         for state in saved.projects {
             let worktree = match state.worktree {
                 Some(spec) => match worktree::Worktree::adopt(spec) {
@@ -1999,7 +2009,7 @@ impl Reader {
     }
 
     /// What is worth keeping of the projects and threads: those with an agent session.
-    fn workspace(&self) -> workspace::Workspace {
+    fn workspace(&self, cx: &App) -> workspace::Workspace {
         // A PR is a throwaway checkout; it is not brought back.
         let projects = self
             .views()
@@ -2022,7 +2032,7 @@ impl Reader {
                 }
             })
             .collect();
-        workspace::Workspace { projects, agents: self.layout == Layout::Agents, agent: self.chosen_agent.clone() }
+        workspace::Workspace { projects, agents: self.layout == Layout::Agents, agent: self.chosen_agent.clone(), split: self.agents_split.read(cx).top().map(f32::from) }
     }
 
     /// Saves the workspace once the current change has settled, so that a thread that is
@@ -2034,9 +2044,9 @@ impl Reader {
         self.save_pending = true;
         let this = cx.entity();
         cx.defer(move |cx| {
-            this.update(cx, |reader, _| {
+            this.update(cx, |reader, cx| {
                 reader.save_pending = false;
-                reader.workspace().save(&reader.home);
+                reader.workspace(cx).save(&reader.home);
             })
         });
     }

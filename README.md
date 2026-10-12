@@ -104,7 +104,7 @@ Three views, switched from the bar at the bottom or with Ctrl+1, 2 and 3:
 
 Each view keeps its own sidebar widths, and the view you were in comes back
 with your workspace. In Agents, the line between the projects and the explorer
-can be dragged to give either more height.
+can be dragged to give either more height, and stays where you put it.
 
 ### Projects and threads
 
