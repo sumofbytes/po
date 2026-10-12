@@ -133,7 +133,11 @@ between them in the list on the left. Under the input box, a blank thread shows
 the agent it will start with (a dropdown; the last one you used is remembered)
 and, in a git repository, a **Worktree** toggle. The agent starts when you send
 the first message, which waits for it if it is slow to start. **History** in the
-thread's header lists an agent's earlier sessions to resume. A mark shows what each is doing (`●` running, `!` waiting
+thread's header (Ctrl+Shift+H) lists the earlier sessions of the thread's agent
+to resume, newest first; one already open in a thread is shown instead of opened
+twice, and a listing you leave without picking is not kept.
+
+A mark on each thread shows what it is doing (`●` running, `!` waiting
 for a permission answer, green `●` finished while you were elsewhere), and a
 project shows the busiest of its threads. Only the thread on screen moves the
 viewer to the files it edits.

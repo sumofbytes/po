@@ -39,7 +39,7 @@ use gpui::{
     prelude::*, px, rems, size, KeyBinding,
 };
 
-gpui::actions!(po, [ToggleLeft, ToggleRight, ShowSource, ShowChanges, ShowChat, SwapPanes, ToggleSplit, NewThread, OpenProject, ShowFinder, CloseFinder, FinderUp, FinderDown]);
+gpui::actions!(po, [ToggleLeft, ToggleRight, ShowSource, ShowChanges, ShowChat, SwapPanes, ShowHistory, ToggleSplit, NewThread, OpenProject, ShowFinder, CloseFinder, FinderUp, FinderDown]);
 
 const SKIP: [&str; 5] = ["target", "node_modules", "dist", "build", "__pycache__"];
 const MAX_FILES: usize = 5000;
@@ -700,6 +700,11 @@ impl Thread {
         self.client.is_none() && self.agent.is_some() && self.session.is_some()
     }
 
+    /// It is showing an agent's sessions to pick one from, and nothing has been picked.
+    fn is_listing(&self) -> bool {
+        self.agent.is_some() && self.picking && !self.loading && self.messages.is_empty() && self.session.is_none()
+    }
+
     /// Whether stopping its agent would lose nothing: no turn, no question and nothing queued.
     fn restful(&self) -> bool {
         self.client.is_some() && self.session.is_some() && self.activity() != Activity::Asking && !self.busy && self.queue.is_empty()
@@ -1269,6 +1274,13 @@ impl Reader {
 
     /// [`Self::show_project`], with thread `thread` of it on screen if it has one.
     fn show_project_with(&mut self, id: u64, thread: Option<u64>, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.slots.iter().any(|slot| slot.id == id) {
+            return;
+        }
+        // Leaving a session listing unused drops it.
+        if self.thread.is_listing() {
+            self.close_thread(self.thread.id, window, cx);
+        }
         let Some(at) = self.slots.iter().position(|slot| slot.id == id) else { return };
         self.suspend_project();
         self.swap_slot(at);
@@ -1775,9 +1787,10 @@ impl Reader {
         self.chosen_agent.as_ref().and_then(|key| self.agents.iter().find(|agent| agent.id == *key)).or(self.agents.first())
     }
 
-    /// Lists the chosen agent's sessions in a new thread, to resume one.
+    /// Lists an agent's sessions in a new thread, to resume one: those of the agent the thread on
+    /// screen is running, or of the chosen one if it has not started.
     fn resume_thread(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(key) = self.chosen().map(|agent| agent.id.clone()) else { return };
+        let Some(key) = self.thread.agent.clone().or_else(|| self.chosen().map(|agent| agent.id.clone())) else { return };
         log::info!("agent: resuming with {key}");
         self.add_thread(window, cx);
         self.connect(&key, true, window, cx);
@@ -1874,7 +1887,8 @@ impl Reader {
     fn add_thread(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let fresh = self.blank_thread(window, cx);
         let old = std::mem::replace(&mut self.thread, fresh);
-        if old.agent.is_some() {
+        // A blank thread, or a session listing nothing was picked from, isn't kept.
+        if old.agent.is_some() && !old.is_listing() {
             self.parked.push(old);
         }
     }
@@ -1908,6 +1922,8 @@ impl Reader {
     fn show_thread(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(at) = self.parked.iter().position(|thread| thread.id == id) {
             std::mem::swap(&mut self.thread, &mut self.parked[at]);
+            // A session listing that was left without picking anything isn't kept.
+            self.parked.retain(|thread| !thread.is_listing());
             self.thread.unread = false;
             self.wake_thread(window, cx);
             self.request_save(cx);
@@ -2149,7 +2165,21 @@ impl Reader {
     }
 
     /// Opens a listed session; its history arrives as updates before the agent is ready.
-    fn resume_session(&mut self, id: &str, cx: &mut Context<Self>) {
+    fn resume_session(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        // A session already open in a thread is shown rather than opened a second time, and the
+        // listing it was picked from goes away.
+        let open = self
+            .views()
+            .iter()
+            .find_map(|view| view.threads.iter().find(|t| t.session.as_deref() == Some(id)).map(|t| (view.id, t.id)));
+        if let Some((pid, tid)) = open {
+            let listing = (self.project_id, self.thread.id);
+            self.open_thread(pid, tid, window, cx);
+            if self.views().iter().any(|v| v.id == listing.0 && v.threads.iter().any(|t| t.id == listing.1)) {
+                self.close_any_thread(listing.0, listing.1, window, cx);
+            }
+            return;
+        }
         let Some(client) = &self.thread.client else { return };
         if self.thread.loading || !client.load(id) {
             return;
@@ -3387,7 +3417,7 @@ impl Reader {
                     .child(
                         Button::new("history")
                             .label("History")
-                            .tooltip("Resume an earlier session")
+                            .tooltip("Resume an earlier session (Ctrl+Shift+H)")
                             .ghost()
                             .small()
                             .on_click(move |_, window, cx| history.update(cx, |reader, cx| reader.resume_thread(window, cx))),
@@ -3565,7 +3595,7 @@ fn session_picker(sessions: &[SessionInfo], this: &Entity<Reader>, cx: &App) -> 
                 .rounded_md()
                 .cursor_pointer()
                 .hover(|style| style.bg(colors.list_hover))
-                .on_click(move |_, _, cx| this.update(cx, |reader, cx| reader.resume_session(&id, cx)))
+                .on_click(move |_, window, cx| this.update(cx, |reader, cx| reader.resume_session(&id, window, cx)))
                 .child(div().text_sm().truncate().child(title))
                 .child(div().text_xs().text_color(colors.muted_foreground).child(when))
         }))
@@ -3793,6 +3823,7 @@ impl Render for Reader {
             .on_action(cx.listener(|reader, _: &ShowChanges, _, cx| reader.show_viewer(Mode::Diff, cx)))
             .on_action(cx.listener(|reader, _: &ShowChat, _, cx| reader.show_chat(cx)))
             .on_action(cx.listener(|reader, _: &SwapPanes, _, cx| reader.swap_panes(cx)))
+            .on_action(cx.listener(|reader, _: &ShowHistory, window, cx| reader.resume_thread(window, cx)))
             .on_action(cx.listener(|reader, _: &ToggleSplit, _, cx| reader.set_split(!reader.split, cx)))
             .on_action(cx.listener(|reader, _: &OpenProject, window, cx| reader.pick_project(window, cx)))
             .on_action(cx.listener(|reader, _: &NewThread, window, cx| {
@@ -3936,6 +3967,7 @@ fn main() {
             KeyBinding::new("ctrl-2", ShowChanges, None),
             KeyBinding::new("ctrl-3", ShowChat, None),
             KeyBinding::new("ctrl-shift-s", SwapPanes, None),
+            KeyBinding::new("ctrl-shift-h", ShowHistory, None),
             KeyBinding::new("ctrl-\\", ToggleSplit, None),
             KeyBinding::new("ctrl-n", NewThread, None),
             KeyBinding::new("ctrl-o", OpenProject, None),
