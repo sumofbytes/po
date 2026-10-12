@@ -38,6 +38,10 @@ pub enum Event {
     Update(Value),
     Permission { request: Value, title: String, options: Vec<PermissionOption> },
     Stopped(String),
+    /// The agent took a steering or follow-up message into the turn (dex daemon only).
+    Accepted { content: String, queue: crate::dex::Queue },
+    /// The daemon had no turn to add a steering or follow-up message to (dex daemon only).
+    Rejected { content: String, queue: crate::dex::Queue },
     Failed(String),
     Exited(String),
 }

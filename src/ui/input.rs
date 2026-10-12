@@ -21,7 +21,7 @@ gpui::actions!(
     [
         Backspace, Delete, DeleteWordLeft, DeleteWordRight, Left, Right, Up, Down, WordLeft, WordRight, Home, End,
         SelectLeft, SelectRight, SelectUp, SelectDown, SelectWordLeft, SelectWordRight, SelectHome, SelectEnd,
-        SelectAll, Copy, Cut, Paste, Undo, Redo, Enter, ShiftEnter,
+        SelectAll, Copy, Cut, Paste, Undo, Redo, Enter, ShiftEnter, AltEnter,
     ]
 );
 
@@ -62,12 +62,13 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("ctrl-shift-z", Redo, Some(CONTEXT)),
         KeyBinding::new("enter", Enter, Some(CONTEXT)),
         KeyBinding::new("shift-enter", ShiftEnter, Some(CONTEXT)),
+        KeyBinding::new("alt-enter", AltEnter, Some(CONTEXT)),
     ]);
 }
 
 pub enum InputEvent {
     Change,
-    PressEnter { shift: bool },
+    PressEnter { shift: bool, alt: bool },
 }
 
 /// The laid-out text from the last frame, for hit testing and moving between rows.
@@ -420,16 +421,21 @@ impl InputState {
     }
     fn enter(&mut self, _: &Enter, _: &mut Window, cx: &mut Context<Self>) {
         if self.submit_on_enter || !self.multi_line {
-            cx.emit(InputEvent::PressEnter { shift: false });
+            cx.emit(InputEvent::PressEnter { shift: false, alt: false });
         } else {
             self.edit(self.selection.clone(), "\n", cx);
+        }
+    }
+    fn alt_enter(&mut self, _: &AltEnter, _: &mut Window, cx: &mut Context<Self>) {
+        if self.submit_on_enter {
+            cx.emit(InputEvent::PressEnter { shift: false, alt: true });
         }
     }
     fn shift_enter(&mut self, _: &ShiftEnter, _: &mut Window, cx: &mut Context<Self>) {
         if self.multi_line {
             self.edit(self.selection.clone(), "\n", cx);
         } else {
-            cx.emit(InputEvent::PressEnter { shift: true });
+            cx.emit(InputEvent::PressEnter { shift: true, alt: false });
         }
     }
 
@@ -921,6 +927,7 @@ impl RenderOnce for Input {
             .on_action(window.listener_for(s, InputState::on_redo))
             .on_action(window.listener_for(s, InputState::enter))
             .on_action(window.listener_for(s, InputState::shift_enter))
+            .on_action(window.listener_for(s, InputState::alt_enter))
             .child(div().flex_1().min_w_0().child(TextElement { state: self.state.clone() }))
             .children(self.suffix)
     }

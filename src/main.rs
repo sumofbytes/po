@@ -1,6 +1,8 @@
 #![recursion_limit = "1024"]
 mod acp;
+mod agent;
 mod config;
+mod dex;
 mod diff;
 mod pr;
 mod theme;
@@ -13,7 +15,9 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::{Duration, SystemTime};
 
-use acp::{Client, Event, PermissionOption, SessionInfo};
+use acp::{Event, PermissionOption, SessionInfo};
+use agent::Client;
+use dex::Queue;
 use diff::{Change, Kind, Pair, Row};
 use theme::Palette;
 use ui::button::Button;
@@ -32,7 +36,7 @@ use gpui::{
     prelude::*, px, rems, size, KeyBinding,
 };
 
-gpui::actions!(po, [ToggleLeft, ToggleRight, ShowSource, ShowChanges, ToggleSplit, NewThread]);
+gpui::actions!(po, [ToggleLeft, ToggleRight, ShowSource, ShowChanges, ToggleSplit, NewThread, ShowFinder, CloseFinder, FinderUp, FinderDown]);
 
 const SKIP: [&str; 5] = ["target", "node_modules", "dist", "build", "__pycache__"];
 const MAX_FILES: usize = 5000;
@@ -291,6 +295,13 @@ enum Block {
     Plan(Vec<(String, Step)>),
 }
 
+/// A message typed while the agent was working.
+struct Queued {
+    content: String,
+    /// Where the daemon holds it; `None` when it waits here for the turn to end.
+    kind: Option<Queue>,
+}
+
 #[derive(Clone)]
 enum Msg {
     User(String),
@@ -342,6 +353,29 @@ fn diff_text(item: &Value) -> String {
         out.push(format!("… {} more lines", removed.len() + added.len() - LIMIT));
     }
     out.join("\n")
+}
+
+/// Files matching `query`: name hits first (shorter names first), then path hits, each in
+/// walk order; ASCII-case-insensitive substring, like the viewer's search.
+/// shortcut: substring only — no fuzzy/typo-tolerant ranking; add it if finding a file by a
+/// scrambled query (typing `cvs` for `code_view_state.rs`) matters.
+fn match_files(files: &[String], query: &str) -> Vec<String> {
+    if query.is_empty() {
+        return files.to_vec();
+    }
+    let query = query.as_bytes();
+    // Windows compared with eq_ignore_ascii_case, so no lowercase copy of each path is made.
+    let contains = |text: &str| text.as_bytes().windows(query.len()).any(|window| window.eq_ignore_ascii_case(query));
+    let mut hits: Vec<(u8, usize, &String)> = files
+        .iter()
+        .filter_map(|file| {
+            let name_start = file.rfind('/').map_or(0, |slash| slash + 1);
+            let rank = if contains(&file[name_start..]) { 0 } else if contains(file) { 1 } else { return None };
+            Some((rank, file.len() - name_start, file))
+        })
+        .collect();
+    hits.sort_by_key(|&(rank, name_len, _)| (rank, name_len));
+    hits.into_iter().map(|(_, _, file)| file.clone()).collect()
 }
 
 /// A prompt as the user typed it, without the note `send` puts in front about the open file.
@@ -413,12 +447,22 @@ struct Reader {
     current: Option<String>,
     stamp: Option<Stamp>,
     code: Option<Entity<viewer::CodeViewState>>,
+    /// The Ctrl+P finder, when open: its query field, the matching files and which is picked.
+    finder: Option<Entity<InputState>>,
+    finder_matches: Rc<Vec<String>>,
+    finder_selected: usize,
+    finder_list: ListState,
+    finder_open: bool,
+    /// Keeps the finder input's event subscription alive for the reader's lifetime.
+    finder_events: Option<Subscription>,
     notice: Option<String>,
     tree: Entity<TreeState>,
     expanded: HashSet<SharedString>,
     draft: Entity<InputState>,
     thread: Vec<Msg>,
     busy: bool,
+    /// Messages typed during a turn, shown above the input until they are taken.
+    queue: Vec<Queued>,
     ready: bool,
     /// A resumed session's history is being replayed.
     loading: bool,
@@ -514,19 +558,19 @@ impl Reader {
                 }
             }),
             cx.subscribe_in(&pr_input, window, |reader, _, event: &InputEvent, window, cx| {
-                if matches!(event, InputEvent::PressEnter { shift: false, .. }) {
+                if matches!(event, InputEvent::PressEnter { shift: false, alt: false }) {
                     reader.open_pr(window, cx);
                 }
             }),
             cx.subscribe_in(&draft, window, |reader, _, event: &InputEvent, window, cx| {
-                if matches!(event, InputEvent::PressEnter { shift: false, .. }) {
-                    reader.send(window, cx);
+                if let InputEvent::PressEnter { shift: false, alt } = event {
+                    reader.send(*alt, window, cx);
                 }
             }),
         ];
         let mut agents = config::agents(&config::load());
         if let Some(command) = command.as_ref().filter(|c| !agents.iter().any(|agent| agent.id == **c)) {
-            agents.push(config::Agent { id: command.clone(), name: "Custom".into(), command: command.clone() });
+            agents.push(config::Agent { id: command.clone(), name: "Custom".into(), command: command.clone(), daemon: None });
         }
         let mut reader = Self {
             mode: Mode::Source,
@@ -554,12 +598,19 @@ impl Reader {
             current: None,
             stamp: None,
             code: None,
+            finder: None,
+            finder_matches: Rc::new(vec![]),
+            finder_selected: 0,
+            finder_list: ListState::new(0, ListAlignment::Top, px(400.)),
+            finder_open: false,
+            finder_events: None,
             notice: None,
             tree,
             expanded: HashSet::new(),
             draft,
             thread: vec![],
             busy: false,
+            queue: vec![],
             ready: false,
             loading: false,
             picking: false,
@@ -669,14 +720,25 @@ impl Reader {
                 })
                 .await;
             this.update(cx, |reader, cx| {
-                if reader.files != files {
-                    reader.files = files;
-                    reader.refresh_tree(cx);
-                    cx.notify();
-                }
+                reader.set_files(files, cx);
             })
             .ok();
         }));
+    }
+
+    /// Adopts a fresh walk of the workspace, if it changed, in the explorer and an open finder.
+    fn set_files(&mut self, files: Vec<String>, cx: &mut Context<Self>) {
+        if self.files == files {
+            return;
+        }
+        self.files = files;
+        self.refresh_tree(cx);
+        if self.finder_open {
+            let picked = self.finder_selected;
+            self.refind(cx);
+            self.finder_selected = picked.min(self.finder_matches.len().saturating_sub(1));
+        }
+        cx.notify();
     }
 
     /// Shows the diff `rows`, and works out their side-by-side pairs and counts once.
@@ -901,10 +963,8 @@ impl Reader {
                     .await;
                 let alive = handle.update(cx, |_, window, cx| {
                     this.update(cx, |reader, cx| {
-                        if let Some(files) = files.filter(|files| reader.files != *files) {
-                            reader.files = files;
-                            reader.refresh_tree(cx);
-                            cx.notify();
+                        if let Some(files) = files {
+                            reader.set_files(files, cx);
                         }
                         let rediff = reader.picked.as_ref().is_some_and(|path| touched.contains(path));
                         reader.apply_changes(changes, false, rediff, cx);
@@ -935,13 +995,19 @@ impl Reader {
         self.relist(0);
         self.selection.update(cx, |s, _| s.clear());
         self.busy = false;
+        self.queue.clear();
         self.ready = false;
         self.loading = false;
         self.picking = resume;
         self.sessions = None;
-        let command = self.agents.iter().find(|agent| agent.id == key).map_or(key.to_string(), |agent| agent.command.clone());
+        let agent = self.agents.iter().find(|agent| agent.id == key).cloned().unwrap_or_else(|| config::Agent {
+            id: key.to_string(),
+            name: key.to_string(),
+            command: key.to_string(),
+            daemon: None,
+        });
         self.status = if resume { "listing sessions…" } else { "starting…" }.into();
-        match Client::spawn(&command, &self.root, resume) {
+        match Client::spawn(&agent, &self.root, resume) {
             Ok((client, mut events)) => {
                 self.client = Some(client);
                 let handle = window.window_handle();
@@ -1070,12 +1136,31 @@ impl Reader {
             Event::Stopped(reason) => {
                 self.busy = false;
                 log::info!("agent: stopped ({reason})");
+                // What the daemon didn't take into the turn is no longer in its queue.
+                for item in &mut self.queue {
+                    item.kind = None;
+                }
+                self.send_next(window, cx);
+            }
+            Event::Accepted { content, queue } => {
+                if let Some(at) = self.queue.iter().position(|q| q.kind == Some(queue) && q.content == content) {
+                    self.queue.remove(at);
+                }
+                self.thread.push(Msg::User(content));
+            }
+            Event::Rejected { content, queue } => {
+                // No turn to join: it waits for the turn to end like any other queued message.
+                if let Some(item) = self.queue.iter_mut().find(|q| q.kind == Some(queue) && q.content == content) {
+                    item.kind = None;
+                }
+                self.send_next(window, cx);
             }
             Event::Failed(error) => {
                 if !self.ready {
                     self.status = "failed to start".into();
                 }
                 self.fail(error);
+                self.restore_queue(window, cx);
             }
             Event::Exited(status) => {
                 log::warn!("agent exited: {status}");
@@ -1083,6 +1168,7 @@ impl Reader {
                 self.status = "exited".into();
                 if self.busy {
                     self.fail(format!("the agent exited ({status})"));
+                    self.restore_queue(window, cx);
                 }
             }
         }
@@ -1220,6 +1306,144 @@ impl Reader {
         cx.notify();
     }
 
+    /// Ctrl+P: shows the finder over the workspace's files, query and selection preserved.
+    fn show_finder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.finder.is_none() {
+            let input = cx.new(|cx| InputState::new(window, cx).placeholder("Search files…"));
+            // Every keystroke refilters the matches; Enter picks the selected file.
+            self.finder_events = Some(cx.subscribe_in(&input, window, |this, _, event: &InputEvent, window, cx| match event {
+                InputEvent::Change => {
+                    this.refind(cx);
+                    cx.notify();
+                }
+                InputEvent::PressEnter { alt: false, .. } => this.accept_picked(window, cx),
+                InputEvent::PressEnter { .. } => {}
+            }));
+            self.finder = Some(input);
+        }
+        self.finder_open = true;
+        self.refind(cx);
+        self.finder.as_ref().unwrap().update(cx, |input, cx| {
+            input.select_all(window, cx);
+            input.focus(window, cx);
+        });
+        cx.notify();
+    }
+
+    /// Refilters the finder's matches for its query and rewinds the selection to the first.
+    fn refind(&mut self, cx: &mut Context<Self>) {
+        let query = self.finder.as_ref().map_or_else(String::new, |input| input.read(cx).value().to_string());
+        self.finder_matches = Rc::new(match_files(&self.files, &query));
+        self.finder_selected = 0;
+        self.finder_list.reset(self.finder_matches.len());
+        self.finder_list.scroll_to(gpui::ListOffset { item_ix: 0, offset_in_item: px(0.) });
+    }
+
+    /// Moves the finder's selection by `delta` rows, wrapping, and keeps it in view.
+    fn step_finder(&mut self, delta: isize, cx: &mut Context<Self>) {
+        if self.finder_matches.is_empty() {
+            return;
+        }
+        let len = self.finder_matches.len() as isize;
+        self.finder_selected = (self.finder_selected as isize + delta).rem_euclid(len) as usize;
+        self.finder_list.scroll_to_reveal_item(self.finder_selected);
+        cx.notify();
+    }
+
+    /// Opens the file under the finder's selection and closes the finder.
+    fn accept_picked(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(path) = self.finder_matches.get(self.finder_selected).cloned() else { return };
+        self.accept_path(&path, window, cx);
+    }
+
+    /// Opens `path` in the viewer and closes the finder.
+    fn accept_path(&mut self, path: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.open(path, window, cx);
+        // A file that can't be shown leaves the finder up so the query isn't lost.
+        if self.notice.is_none() {
+            self.hide_finder(window, cx);
+            self.set_mode(Mode::Source, cx);
+        }
+    }
+
+    /// Hides the finder and gives the keys back to the reader.
+    fn hide_finder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.finder_open = false;
+        self.focus.focus(window, cx);
+        cx.notify();
+    }
+
+    /// The finder overlay, while Ctrl+P is open: a query field over the matching files.
+    fn finder(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let palette = cx.global::<Palette>();
+        let (popover, border, muted, radius) = (palette.popover, palette.border, palette.muted_foreground, palette.radius);
+        let Some(input) = self.finder.clone() else { return div().into_any_element() };
+        let matches = self.finder_matches.clone();
+        let this = cx.entity();
+        div()
+            .absolute()
+            .inset_0()
+            .id("finder-backdrop")
+            .occlude()
+            .on_click(cx.listener(|reader, _: &gpui::ClickEvent, window, cx| reader.hide_finder(window, cx)))
+            .flex()
+            .justify_center()
+            .pt_2()
+            .child(
+                div()
+                    .id("finder")
+                    .occlude()
+                    .w(px(560.0))
+                    .flex()
+                    .flex_col()
+                    .key_context("Finder")
+                    .on_action(cx.listener(|reader, _: &CloseFinder, window, cx| reader.hide_finder(window, cx)))
+                    .on_action(cx.listener(|reader, _: &FinderUp, _, cx| reader.step_finder(-1, cx)))
+                    .on_action(cx.listener(|reader, _: &FinderDown, _, cx| reader.step_finder(1, cx)))
+                    .rounded(radius)
+                    .border_1()
+                    .border_color(border)
+                    .bg(popover)
+                    .overflow_hidden()
+                    .child(Input::new(&input).field())
+                    .child(if matches.is_empty() {
+                        div().h(px(380.0)).flex().justify_center().pt_3().text_color(muted).child("No matching files").into_any_element()
+                    } else {
+                        div().h(px(380.0)).border_t_1().border_color(border).child(list(
+                            self.finder_list.clone(),
+                            cx.processor(move |reader: &mut Reader, ix, _, _| {
+                                let Some(path): Option<&String> = matches.get(ix) else { return div().into_any_element() };
+                                let name = path.rsplit('/').next().unwrap_or(path).to_string();
+                                let dir = path.strip_suffix(name.as_str()).unwrap_or("").to_string();
+                                let path = path.clone();
+                                let this = this.clone();
+                                ListItem::new(("file", ix))
+                                    .selected(ix == reader.finder_selected)
+                                    .on_click(move |_, window, cx| this.update(cx, |reader, cx| reader.accept_path(&path, window, cx)))
+                                    .child(name)
+                                    .when(!dir.is_empty(), |row| row.child(div().text_color(muted).child(dir)))
+                                    .into_any_element()
+                            }),
+                        )
+                        .size_full())
+                        .into_any_element()
+                    })
+                    .child(
+                        div()
+                            .flex()
+                            .justify_between()
+                            .px_3()
+                            .py_1()
+                            .border_t_1()
+                            .border_color(border)
+                            .text_color(muted)
+                            .child(if self.files.len() >= MAX_FILES { format!("first {MAX_FILES} files only") } else { "↑↓ navigate".to_string() })
+                            .child("↵ open · esc close"),
+                    ),
+            )
+            .into_any_element()
+    }
+
     fn open(&mut self, path: &str, window: &mut Window, cx: &mut Context<Self>) {
         let full = self.root.join(path);
         let too_big = std::fs::metadata(&full).map_or(false, |m| m.len() > 4 * 1024 * 1024);
@@ -1254,16 +1478,90 @@ impl Reader {
         cx.notify();
     }
 
-    fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// Sends the draft: as a new turn, or, while the agent is working, into the queue
+    /// (`later` for after the turn rather than into it).
+    fn send(&mut self, later: bool, window: &mut Window, cx: &mut Context<Self>) {
         let prompt = self.draft.read(cx).value().trim().to_string();
-        if prompt.is_empty() || self.busy {
+        if prompt.is_empty() {
             return;
         }
+        if !self.busy {
+            if self.dispatch(prompt, cx) {
+                self.draft.update(cx, |input, cx| input.set_value("", window, cx));
+            }
+            return;
+        }
+        self.draft.update(cx, |input, cx| input.set_value("", window, cx));
+        // An agent that can't take messages mid-turn gets them when the turn is over.
+        let kind = match self.client.as_ref().filter(|client| client.queues()) {
+            Some(client) => {
+                let kind = if later { Queue::Followup } else { Queue::Steer };
+                client.enqueue(&prompt, kind);
+                Some(kind)
+            }
+            None => None,
+        };
+        self.queue.push(Queued { content: prompt, kind });
+        cx.notify();
+    }
+
+    /// Takes a queued message back into the draft to edit.
+    fn recall(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if ix >= self.queue.len() {
+            return;
+        }
+        let item = self.queue.remove(ix);
+        if let (Some(kind), Some(client)) = (item.kind, &self.client) {
+            client.recall(&item.content, kind);
+        }
+        let draft = self.draft.read(cx).value().to_string();
+        let text = if draft.trim().is_empty() { item.content } else { format!("{}\n{draft}", item.content) };
+        self.draft.update(cx, |input, cx| input.set_value(text, window, cx));
+        cx.notify();
+    }
+
+    /// If no turn is running, sends the oldest queued message that waits here rather than in
+    /// the daemon. A message that can't be sent goes back to the draft with the rest.
+    fn send_next(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.busy {
+            return;
+        }
+        let Some(at) = self.queue.iter().position(|q| q.kind.is_none()) else { return };
+        let next = self.queue.remove(at);
+        if !self.dispatch(next.content.clone(), cx) {
+            self.queue.insert(0, next);
+            self.restore_queue(window, cx);
+        }
+    }
+
+    /// Moves everything queued back into the draft, taking back what the daemon still holds.
+    fn restore_queue(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.queue.is_empty() {
+            return;
+        }
+        let items: Vec<Queued> = self.queue.drain(..).collect();
+        let mut text = Vec::new();
+        for item in items {
+            if let (Some(kind), Some(client)) = (item.kind, &self.client) {
+                client.recall(&item.content, kind);
+            }
+            text.push(item.content);
+        }
+        let draft = self.draft.read(cx).value().to_string();
+        if !draft.trim().is_empty() {
+            text.push(draft);
+        }
+        self.draft.update(cx, |input, cx| input.set_value(text.join("\n\n"), window, cx));
+        cx.notify();
+    }
+
+    /// Sends `prompt` as a new turn; false if it could not be sent (the error is in the thread).
+    fn dispatch(&mut self, prompt: String, cx: &mut Context<Self>) -> bool {
         let Some(client) = self.client.as_ref().filter(|_| self.ready) else {
             let why = if self.agent.is_some() { "The agent is not ready yet." } else { "Pick an agent from New Thread first." };
             self.fail(why.into());
             cx.notify();
-            return;
+            return false;
         };
         let context = match &self.current {
             Some(file) => format!("[The user has `{file}` open in the viewer.]\n\n{prompt}"),
@@ -1272,18 +1570,18 @@ impl Reader {
         if !client.prompt(&context) {
             self.fail("The agent has no session yet.".into());
             cx.notify();
-            return;
+            return false;
         }
-        self.draft.update(cx, |input, cx| input.set_value("", window, cx));
         self.busy = true;
         self.thread.push(Msg::User(prompt));
         self.thread.push(Msg::Agent(vec![]));
         self.relist(self.thread.len() - 2);
         self.thread_list.scroll_to_end();
         cx.notify();
+        true
     }
 
-    fn stop(&mut self, cx: &mut Context<Self>) {
+    fn stop(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(client) = &self.client else { return };
         client.cancel();
         for msg in &mut self.thread {
@@ -1298,6 +1596,8 @@ impl Reader {
             }
         }
         self.relist(0);
+        // What was waiting goes back to the draft rather than being sent into a stopped turn.
+        self.restore_queue(window, cx);
         cx.notify();
     }
 
@@ -1680,25 +1980,77 @@ impl Reader {
         let colors = cx.global::<Palette>();
         let (send, stop, picker) = (cx.entity(), cx.entity(), cx.entity());
         let agents = self.agents.clone();
-        let action = if self.busy {
+        let typed = !self.draft.read(cx).value().trim().is_empty();
+        let stop_button = |stop: Entity<Reader>| {
             Button::new("stop")
                 .icon(IconName::Square)
                 .ghost()
                 .rounded(gpui::px(999.0))
                 .small()
                 .tooltip("Stop")
-                .on_click(move |_, _, cx| stop.update(cx, |reader, cx| reader.stop(cx)))
-        } else {
-            let send = Button::new("send")
+                .on_click(move |_, window, cx| stop.update(cx, |reader, cx| reader.stop(window, cx)))
+        };
+        let send_button = |send: Entity<Reader>, tooltip: &'static str| {
+            let button = Button::new("send")
                 .icon(IconName::ArrowUp)
                 .ghost()
                 .rounded(gpui::px(999.0))
                 .small()
-                .tooltip("Send")
-                .on_click(move |_, window, cx| send.update(cx, |reader, cx| reader.send(window, cx)));
+                .tooltip(tooltip)
+                .on_click(move |_, window, cx| send.update(cx, |reader, cx| reader.send(false, window, cx)));
             // Quiet until there is something to send.
-            if self.draft.read(cx).value().trim().is_empty() { send } else { send.primary() }
+            if typed { button.primary() } else { button }
         };
+        let steer_tip = if self.client.as_ref().is_some_and(|client| client.queues()) {
+            "Steer: the agent reads it before its next step (Alt+Enter: after this turn)"
+        } else {
+            "Queue: sent when this turn is over"
+        };
+        let action = if self.busy && typed {
+            // Typing during a turn queues it; Stop stays one click away.
+            div()
+                .flex()
+                .gap_1()
+                .child(stop_button(stop))
+                .child(send_button(send, steer_tip))
+                .into_any_element()
+        } else if self.busy {
+            stop_button(stop).into_any_element()
+        } else {
+            send_button(send, "Send").into_any_element()
+        };
+        let muted = colors.muted_foreground;
+        let (border, queue_this) = (colors.border, cx.entity());
+        let queued: Vec<AnyElement> = self
+            .queue
+            .iter()
+            .enumerate()
+            .map(|(ix, item)| {
+                let label = match item.kind {
+                    Some(Queue::Steer) => "Steer",
+                    Some(Queue::Followup) => "Follow-up",
+                    None => "Queued",
+                };
+                let this = queue_this.clone();
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .text_xs()
+                    .text_color(muted)
+                    .child(div().flex_none().child(label))
+                    .child(div().flex_1().min_w_0().truncate().child(item.content.replace('\n', " ")))
+                    .child(
+                        Button::new(("recall", ix))
+                            .icon(IconName::Close)
+                            .ghost()
+                            .small()
+                            .tooltip("Take back to edit")
+                            .on_click(move |_, window, cx| this.update(cx, |reader, cx| reader.recall(ix, window, cx))),
+                    )
+                    .into_any_element()
+            })
+            .collect();
         div()
             .size_full()
             .flex()
@@ -1804,6 +2156,9 @@ impl Reader {
                         .border_1()
                         .border_color(colors.border)
                         .bg(colors.background)
+                        .when(!queued.is_empty(), |this| {
+                            this.child(div().flex().flex_col().gap_1().pb_1().border_b_1().border_color(border).children(queued))
+                        })
                         .child(Input::new(&self.draft))
                         .child(div().flex().justify_end().child(action)),
                 ),
@@ -2060,7 +2415,9 @@ impl Render for Reader {
             .flex_col()
             .bg(background)
             .text_color(foreground)
+            .relative()
             .track_focus(&self.focus)
+            .on_action(cx.listener(|reader, _: &ShowFinder, window, cx| reader.show_finder(window, cx)))
             .on_action(cx.listener(|reader, _: &ToggleLeft, _, cx| reader.toggle_left(cx)))
             .on_action(cx.listener(|reader, _: &ToggleRight, _, cx| reader.toggle_right(cx)))
             .on_action(cx.listener(|reader, _: &ShowSource, _, cx| reader.set_mode(Mode::Source, cx)))
@@ -2086,6 +2443,7 @@ impl Render for Reader {
                 ),
             )
             .child(bar)
+            .when(self.finder_open, |this| this.child(self.finder(cx)))
     }
 }
 
@@ -2215,6 +2573,11 @@ fn main() {
             KeyBinding::new("ctrl-2", ShowChanges, None),
             KeyBinding::new("ctrl-\\", ToggleSplit, None),
             KeyBinding::new("ctrl-n", NewThread, None),
+            KeyBinding::new("ctrl-p", ShowFinder, None),
+            KeyBinding::new("escape", CloseFinder, Some("Finder")),
+            // The Input binds up/down itself and swallows them when single-line, so these name it.
+            KeyBinding::new("up", FinderUp, Some("Finder > Input")),
+            KeyBinding::new("down", FinderDown, Some("Finder > Input")),
         ]);
         let bounds = Bounds::centered(None, size(px(1360.0), px(840.0)), cx);
         cx.open_window(
@@ -2236,7 +2599,26 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{language, syntax};
+    use super::{language, match_files, syntax};
+
+    #[test]
+    fn file_matches_rank_names_before_paths() {
+        let files = vec![
+            "src/none.txt".to_string(),
+            "needle/lib/a.rs".to_string(),
+            "needle.rs".to_string(),
+            "deep/needlemod.rs".to_string(),
+            "src/Needle-ish.rs".to_string(),
+        ];
+        // Name hits first (shorter names first), then path-only hits, each in walk order.
+        assert_eq!(
+            match_files(&files, "needle"),
+            vec!["needle.rs", "deep/needlemod.rs", "src/Needle-ish.rs", "needle/lib/a.rs"]
+        );
+        assert!(match_files(&files, "needs").is_empty());
+        // An empty query lists everything in walk order.
+        assert_eq!(match_files(&files, ""), files);
+    }
 
     #[test]
     fn elixir_files_highlight() {

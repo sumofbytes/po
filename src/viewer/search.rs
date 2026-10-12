@@ -87,7 +87,7 @@ impl SearchBar {
                 let query = input.read(cx).value().to_string();
                 this.view.update(cx, |view, cx| view.set_query(query, cx)).ok();
             }
-            InputEvent::PressEnter { shift } => {
+            InputEvent::PressEnter { shift, .. } => {
                 let shift = *shift;
                 this.view.update(cx, |view, cx| if shift { view.previous_match(cx) } else { view.next_match(cx) }).ok();
             }
