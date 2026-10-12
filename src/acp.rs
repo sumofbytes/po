@@ -20,8 +20,20 @@ pub struct PermissionOption {
     pub name: String,
 }
 
+/// A session an agent can resume.
+#[derive(Clone, Debug)]
+pub struct SessionInfo {
+    pub id: String,
+    pub title: String,
+    /// ISO 8601, or empty when the agent doesn't say.
+    pub updated: String,
+}
+
 pub enum Event {
+    /// A session is open: a new one, or a loaded one once its history has been replayed.
     Ready { agent: String },
+    /// The agent's resumable sessions for this project, newest first.
+    Sessions(Vec<SessionInfo>),
     /// A `session/update` payload.
     Update(Value),
     Permission { request: Value, title: String, options: Vec<PermissionOption> },
@@ -35,7 +47,16 @@ enum Pending {
     Init,
     Session,
     Prompt,
+    /// A page of `session/list`, counting from 0.
+    List(u8),
+    Load,
 }
+
+/// `session/list` pages followed before giving up on the rest.
+const MAX_PAGES: u8 = 5;
+
+/// Sessions offered for resuming; the picker isn't virtualized, and agents like dex keep hundreds.
+const MAX_SESSIONS: usize = 100;
 
 struct Shared {
     stdin: Mutex<ChildStdin>,
@@ -45,6 +66,9 @@ struct Shared {
     cwd: PathBuf,
     session: Mutex<Option<String>>,
     agent: Mutex<String>,
+    /// Start by listing sessions to resume instead of opening a new one.
+    resume: bool,
+    listed: Mutex<Vec<SessionInfo>>,
 }
 
 impl Shared {
@@ -68,6 +92,14 @@ impl Shared {
 
     fn respond_error(&self, id: Value, code: i64, message: &str) {
         self.write(&json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } }));
+    }
+
+    fn list_sessions(&self, cursor: Option<&str>, page: u8) {
+        let mut params = json!({ "cwd": self.cwd.to_string_lossy() });
+        if let Some(cursor) = cursor {
+            params["cursor"] = json!(cursor);
+        }
+        self.request("session/list", params, Pending::List(page));
     }
 
     fn emit(&self, event: Event) {
@@ -113,8 +145,46 @@ impl Shared {
                 if let Some(name) = result["agentInfo"]["name"].as_str() {
                     *self.agent.lock().expect("agent lock") = name.to_string();
                 }
+                if self.resume {
+                    let caps = &result["agentCapabilities"];
+                    if caps["loadSession"].as_bool() != Some(true) || !caps["sessionCapabilities"]["list"].is_object() {
+                        let agent = self.agent.lock().expect("agent lock").clone();
+                        self.emit(Event::Failed(format!("{agent} can't list and resume sessions.")));
+                        return;
+                    }
+                    self.list_sessions(None, 0);
+                    return;
+                }
                 let cwd = self.cwd.to_string_lossy().to_string();
                 self.request("session/new", json!({ "cwd": cwd, "mcpServers": [] }), Pending::Session);
+            }
+            Pending::List(page) => {
+                let mut listed = self.listed.lock().expect("listed lock");
+                for entry in result["sessions"].as_array().into_iter().flatten() {
+                    let Some(id) = entry["sessionId"].as_str() else { continue };
+                    listed.push(SessionInfo {
+                        id: id.to_string(),
+                        title: entry["title"].as_str().unwrap_or_default().trim().to_string(),
+                        updated: entry["updatedAt"].as_str().unwrap_or_default().to_string(),
+                    });
+                }
+                match result["nextCursor"].as_str().filter(|cursor| !cursor.is_empty()) {
+                    Some(cursor) if page + 1 < MAX_PAGES => {
+                        drop(listed);
+                        self.list_sessions(Some(cursor), page + 1);
+                    }
+                    _ => {
+                        let mut all = std::mem::take(&mut *listed);
+                        drop(listed);
+                        all.sort_by(|a, b| b.updated.cmp(&a.updated));
+                        all.truncate(MAX_SESSIONS);
+                        self.emit(Event::Sessions(all));
+                    }
+                }
+            }
+            Pending::Load => {
+                let agent = self.agent.lock().expect("agent lock").clone();
+                self.emit(Event::Ready { agent });
             }
             Pending::Session => {
                 *self.session.lock().expect("session lock") = result["sessionId"].as_str().map(String::from);
@@ -176,7 +246,8 @@ pub struct Client {
 
 impl Client {
     /// Starts `command` (program and arguments) in `cwd` and begins the handshake.
-    pub fn spawn(command: &str, cwd: &Path) -> Result<(Self, UnboundedReceiver<Event>)> {
+    /// With `resume`, lists the agent's sessions rather than opening a new one; `load` picks one.
+    pub fn spawn(command: &str, cwd: &Path, resume: bool) -> Result<(Self, UnboundedReceiver<Event>)> {
         let mut parts = command.split_whitespace();
         let program = parts.next().context("empty agent command")?;
         let mut child = Command::new(program)
@@ -198,6 +269,8 @@ impl Client {
             cwd: cwd.to_path_buf(),
             session: Mutex::new(None),
             agent: Mutex::new(program.to_string()),
+            resume,
+            listed: Mutex::new(Vec::new()),
         });
         let child = Arc::new(Mutex::new(child));
         let (reader, reaper) = (shared.clone(), child.clone());
@@ -235,6 +308,14 @@ impl Client {
             json!({ "sessionId": session, "prompt": [{ "type": "text", "text": text }] }),
             Pending::Prompt,
         );
+        true
+    }
+
+    /// Resumes a listed session; the agent replays its history as updates, then answers.
+    pub fn load(&self, id: &str) -> bool {
+        *self.shared.session.lock().expect("session lock") = Some(id.to_string());
+        let cwd = self.shared.cwd.to_string_lossy().to_string();
+        self.shared.request("session/load", json!({ "sessionId": id, "cwd": cwd, "mcpServers": [] }), Pending::Load);
         true
     }
 
