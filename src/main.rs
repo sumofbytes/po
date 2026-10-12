@@ -2005,6 +2005,10 @@ impl Reader {
             threads: std::iter::once(&slot.thread).chain(&slot.parked).collect(),
         }));
         views.sort_by_key(|view| view.id);
+        // The thread on screen is first among them; lists keep the order they were made in.
+        for view in &mut views {
+            view.threads.sort_by_key(|thread| thread.id);
+        }
         views
     }
 
@@ -2762,6 +2766,7 @@ impl Reader {
                 let (glyph, tint) = activity.mark(colors);
                 div()
                     .id(("project", id as usize))
+                    .group(row_group("project", id))
                     .flex()
                     .items_center()
                     .gap_2()
@@ -2774,14 +2779,15 @@ impl Reader {
                     .child(div().flex_none().text_xs().text_color(tint).child(glyph))
                     .child(div().flex_1().min_w_0().truncate().text_sm().text_color(if id == active { foreground } else { muted }).child(name))
                     .when(many, |row| {
-                        row.child(
+                        row.child(show_on_hover(
+                            row_group("project", id),
                             Button::new(("project-close", id as usize))
                                 .icon(IconName::Close)
                                 .ghost()
                                 .xsmall()
                                 .tooltip("Close project")
                                 .on_click(move |_, window, cx| close.update(cx, |reader, cx| reader.close_project(id, window, cx))),
-                        )
+                        ))
                     })
             }))
             .children(self.worktree_status.clone().map(|text| {
@@ -2950,21 +2956,25 @@ impl Reader {
             let activity = view.threads.iter().map(|t| t.activity()).max().unwrap_or(Activity::Idle);
             let (glyph, tint) = activity.mark(colors);
             let (select, close, start) = (cx.entity(), cx.entity(), cx.entity());
-            // The project on screen is quietly marked: its name at full strength, a faint tint and a
-            // thin edge. The others are muted, and the edge is there but invisible, so nothing shifts.
+            // The project on screen is quietly marked: its name at full strength and a thin rail down
+            // the left of the whole group, its threads included. The others are muted, and their rail
+            // is there but invisible, so nothing shifts.
             let current = pid == active_project;
-            tree = tree.child(
+            let mut group = div()
+                .flex()
+                .flex_col()
+                .mt_1()
+                .border_l_2()
+                .border_color(if current { accent.opacity(0.5) } else { gpui::transparent_black() });
+            group = group.child(
                 div()
                     .id(("agent-project", pid as usize))
+                    .group(row_group("agent-project", pid))
                     .flex()
                     .items_center()
                     .gap_2()
                     .pl_2()
-                    .mt_1()
                     .rounded_md()
-                    .border_l_2()
-                    .border_color(if current { accent.opacity(0.5) } else { gpui::transparent_black() })
-                    .when(current, |row| row.bg(hover.opacity(0.5)))
                     .cursor_pointer()
                     .hover(|row| row.bg(hover))
                     .on_click(move |_, window, cx| select.update(cx, |reader, cx| reader.show_project(pid, window, cx)))
@@ -2980,23 +2990,25 @@ impl Reader {
                             .child(view.project.name()),
                     )
                     .when(many, |row| {
-                        row.child(
+                        row.child(show_on_hover(
+                            row_group("agent-project", pid),
                             Button::new(("agent-project-close", pid as usize))
                                 .icon(IconName::Close)
                                 .ghost()
                                 .xsmall()
                                 .tooltip("Close project")
                                 .on_click(move |_, window, cx| close.update(cx, |reader, cx| reader.close_project(pid, window, cx))),
-                        )
+                        ))
                     }),
             );
             for thread in view.threads.iter().filter(|t| t.agent.is_some() || t.id == view.shown) {
                 let tid = thread.id;
                 let (glyph, tint) = thread.activity().mark(colors);
                 let (select, close) = (cx.entity(), cx.entity());
-                tree = tree.child(
+                group = group.child(
                     div()
                         .id(("agent-thread", tid as usize))
+                        .group(row_group("agent-thread", tid))
                         .flex()
                         .items_center()
                         .gap_2()
@@ -3008,17 +3020,18 @@ impl Reader {
                         .on_click(move |_, window, cx| select.update(cx, |reader, cx| reader.open_thread(pid, tid, window, cx)))
                         .child(div().flex_none().text_xs().text_color(tint).child(glyph))
                         .child(div().flex_1().min_w_0().truncate().text_sm().child(thread.title()))
-                        .child(
+                        .child(show_on_hover(
+                            row_group("agent-thread", tid),
                             Button::new(("agent-thread-close", tid as usize))
                                 .icon(IconName::Close)
                                 .ghost()
                                 .xsmall()
                                 .tooltip("Close thread")
                                 .on_click(move |_, window, cx| close.update(cx, |reader, cx| reader.close_any_thread(pid, tid, window, cx))),
-                        ),
+                        )),
                 );
             }
-            tree = tree.child(
+            group = group.child(
                 div()
                     .id(("agent-new-thread", pid as usize))
                     .pl_6()
@@ -3031,6 +3044,7 @@ impl Reader {
                     .on_click(move |_, window, cx| start.update(cx, |reader, cx| reader.start_thread_in(pid, window, cx)))
                     .child("+ New thread"),
             );
+            tree = tree.child(group);
         }
         div()
             .size_full()
@@ -3323,6 +3337,7 @@ impl Reader {
                     let (glyph, tint) = activity.mark(colors);
                     div()
                         .id(("thread-tab", id as usize))
+                        .group(row_group("thread-tab", id))
                         .flex()
                         .items_center()
                         .gap_1()
@@ -3334,14 +3349,15 @@ impl Reader {
                         .on_click(move |_, window, cx| select.update(cx, |reader, cx| reader.show_thread(id, window, cx)))
                         .child(div().text_xs().text_color(tint).child(glyph))
                         .child(div().text_xs().max_w(px(160.0)).truncate().child(title))
-                        .child(
+                        .child(show_on_hover(
+                            row_group("thread-tab", id),
                             Button::new(("thread-close", id as usize))
                                 .icon(IconName::Close)
                                 .ghost()
                                 .xsmall()
                                 .tooltip("Close thread")
                                 .on_click(move |_, window, cx| close.update(cx, |reader, cx| reader.close_thread(id, window, cx))),
-                        )
+                        ))
                 }),
             )
         });
@@ -3692,6 +3708,16 @@ fn header(title: &str, detail: String, cx: &App) -> impl IntoElement {
 
 fn status_text(text: String, cx: &App) -> impl IntoElement {
     div().flex_none().truncate().text_xs().text_color(cx.global::<Palette>().muted_foreground).child(text)
+}
+
+/// The name that ties a row to the controls that appear only while it is hovered.
+fn row_group(kind: &str, id: u64) -> SharedString {
+    format!("{kind}-row-{id}").into()
+}
+
+/// `control`, kept in the row's layout but drawn only while the row named `group` is hovered.
+fn show_on_hover(group: SharedString, control: impl IntoElement) -> gpui::Div {
+    div().invisible().group_hover(group, |style| style.visible()).child(control)
 }
 
 fn header_with(title: &str, right: impl IntoElement, cx: &App) -> impl IntoElement {
