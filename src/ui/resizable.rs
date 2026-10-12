@@ -207,6 +207,9 @@ impl RenderOnce for Sidebars {
     }
 }
 
+/// The height of a folded [`VSplit`]'s bottom pane, in rems: that of a pane header.
+pub const COLLAPSED_REMS: f32 = 2.5;
+
 /// The least height either pane of a [`VSplit`] gets.
 const MIN_TOP: Pixels = px(72.);
 const MIN_BOTTOM: Pixels = px(120.);
@@ -214,6 +217,9 @@ const MIN_BOTTOM: Pixels = px(120.);
 /// Where the boundary of a [`VSplit`] is. Until it is dragged, the panes share the height.
 pub struct VSplitState {
     top: Option<Pixels>,
+    /// The bottom pane is folded down to its header, which sits at the bottom, and the top pane
+    /// takes the rest. `top` is kept, so unfolding goes back to where the boundary was.
+    collapsed: bool,
     dragging: bool,
     /// The whole split's bounds, from the last frame.
     bounds: Bounds<Pixels>,
@@ -221,7 +227,15 @@ pub struct VSplitState {
 
 impl VSplitState {
     pub fn new() -> Self {
-        Self { top: None, dragging: false, bounds: Bounds::default() }
+        Self { top: None, collapsed: false, dragging: false, bounds: Bounds::default() }
+    }
+
+    pub fn collapsed(&self) -> bool {
+        self.collapsed
+    }
+
+    pub fn set_collapsed(&mut self, collapsed: bool) {
+        self.collapsed = collapsed;
     }
 
     /// The height of the top pane once it has been set by a drag (or [`Self::set_top`]).
@@ -272,9 +286,9 @@ fn dragged_height(y: Pixels, bounds: Bounds<Pixels>) -> Pixels {
 
 impl RenderOnce for VSplit {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
-        let (top, dragging) = {
+        let (top, dragging, collapsed) = {
             let state = self.state.read(cx);
-            (state.top, state.dragging)
+            (state.top, state.dragging, state.collapsed)
         };
         let palette = cx.global::<Palette>();
         let color = if dragging { palette.resize_handle_active } else { palette.resize_handle };
@@ -302,6 +316,15 @@ impl RenderOnce for VSplit {
         let pane = match top {
             Some(height) => pane.flex_basis(height),
             None => pane.flex_basis(gpui::relative(0.5)),
+        };
+        // Folded, the top pane fills the space and the bottom shows only its header-high strip.
+        let (pane, bottom) = if collapsed {
+            (
+                div().flex_1().min_h(MIN_TOP),
+                div().flex_none().h(gpui::rems(COLLAPSED_REMS)).overflow_hidden().border_t_1().border_color(palette.border),
+            )
+        } else {
+            (pane, div().flex_1().min_h(MIN_BOTTOM))
         };
 
         div()
@@ -344,7 +367,7 @@ impl RenderOnce for VSplit {
                 .size_full(),
             )
             .child(pane.relative().overflow_hidden().children(self.top))
-            .child(div().flex_1().min_h(MIN_BOTTOM).relative().children(self.bottom).child(handle))
+            .child(bottom.relative().children(self.bottom).when(!collapsed, |bottom| bottom.child(handle)))
     }
 }
 

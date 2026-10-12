@@ -1949,6 +1949,7 @@ impl Reader {
         if let Some(height) = saved.split {
             self.agents_split.update(cx, |split, _| split.set_top(px(height)));
         }
+        self.agents_split.update(cx, |split, _| split.set_collapsed(saved.explorer_collapsed));
         for state in saved.projects {
             let worktree = match state.worktree {
                 Some(spec) => match worktree::Worktree::adopt(spec) {
@@ -2036,7 +2037,7 @@ impl Reader {
                 }
             })
             .collect();
-        workspace::Workspace { projects, agents: self.layout == Layout::Agents, agent: self.chosen_agent.clone(), split: self.agents_split.read(cx).top().map(f32::from) }
+        workspace::Workspace { projects, agents: self.layout == Layout::Agents, agent: self.chosen_agent.clone(), split: self.agents_split.read(cx).top().map(f32::from), explorer_collapsed: self.agents_split.read(cx).collapsed() }
     }
 
     /// Saves the workspace once the current change has settled, so that a thread that is
@@ -2913,12 +2914,36 @@ impl Reader {
             })
             .into_any_element()
         };
+        // On the agents view the explorer can be folded down to this header, so it has a chevron.
+        let title: AnyElement = if with_projects {
+            div().min_w_0().truncate().text_sm().font_weight(FontWeight::MEDIUM).child(title.to_string()).into_any_element()
+        } else {
+            let folded = self.agents_split.read(cx).collapsed();
+            let fold = cx.entity();
+            div()
+                .id("explorer-fold")
+                .flex()
+                .items_center()
+                .gap_1()
+                .min_w_0()
+                .cursor_pointer()
+                .text_sm()
+                .font_weight(FontWeight::MEDIUM)
+                .on_click(move |_, _, cx| fold.update(cx, |reader, cx| reader.toggle_explorer(cx)))
+                .child(
+                    Icon::new(if folded { IconName::ChevronRight } else { IconName::ChevronDown })
+                        .size(IconSize::XSmall)
+                        .color(colors.muted_foreground),
+                )
+                .child(div().min_w_0().truncate().child(title.to_string()))
+                .into_any_element()
+        };
         div()
             .size_full()
             .flex()
             .flex_col()
             .bg(colors.sidebar)
-            .child(header_with(
+            .child(header_row(
                 title,
                 div()
                     .flex()
@@ -3086,6 +3111,16 @@ impl Reader {
                 div().px_3().py_1().text_xs().text_color(muted).max_h(rems(5.)).overflow_hidden().child(text)
             }))
             .child(div().flex_1().min_h_0().child(vsplit(&self.agents_split).top(tree).bottom(div().size_full().child(explorer))))
+    }
+
+    /// Folds the explorer on the agents view down to its header, or unfolds it to the height it
+    /// had.
+    fn toggle_explorer(&mut self, cx: &mut Context<Self>) {
+        self.agents_split.update(cx, |split, cx| {
+            let folded = split.collapsed();
+            split.set_collapsed(!folded);
+            cx.notify();
+        });
     }
 
     /// The viewer or the diff viewer, as the project's mode says.
@@ -3749,6 +3784,22 @@ fn show_on_hover(group: SharedString, control: impl IntoElement) -> gpui::Div {
 
 fn header_with(title: &str, right: impl IntoElement, cx: &App) -> impl IntoElement {
     let colors = cx.global::<Palette>();
+    header_row(
+        div()
+            .min_w_0()
+            .truncate()
+            .text_sm()
+            .font_weight(FontWeight::MEDIUM)
+            .text_color(colors.foreground)
+            .child(title.to_string()),
+        right,
+        cx,
+    )
+}
+
+/// A pane header: `left` and `right` on a bar with a line under it.
+fn header_row(left: impl IntoElement, right: impl IntoElement, cx: &App) -> impl IntoElement {
+    let colors = cx.global::<Palette>();
     div()
         .h_10()
         .flex_none()
@@ -3759,15 +3810,8 @@ fn header_with(title: &str, right: impl IntoElement, cx: &App) -> impl IntoEleme
         .px_3()
         .border_b_1()
         .border_color(colors.border)
-        .child(
-            div()
-                .min_w_0()
-                .truncate()
-                .text_sm()
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(colors.foreground)
-                .child(title.to_string()),
-        )
+        .text_color(colors.foreground)
+        .child(left)
         .child(right)
 }
 

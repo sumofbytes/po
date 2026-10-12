@@ -34,6 +34,8 @@ pub struct Workspace {
     pub agent: Option<String>,
     /// The height, in pixels, the agents view gives its projects above the explorer, if dragged.
     pub split: Option<f32>,
+    /// The explorer on the agents view was folded down to its header.
+    pub explorer_collapsed: bool,
 }
 
 /// The file for the window started in `start`.
@@ -71,7 +73,7 @@ impl Workspace {
                 })
             })
             .collect();
-        json!({ "version": 1, "layout": if self.agents { "agents" } else { "files" }, "agent": self.agent, "split": self.split, "projects": projects })
+        json!({ "version": 1, "layout": if self.agents { "agents" } else { "files" }, "agent": self.agent, "split": self.split, "explorer_collapsed": self.explorer_collapsed, "projects": projects })
     }
 
     fn from_json(value: &Value) -> Option<Self> {
@@ -107,6 +109,7 @@ impl Workspace {
             .collect();
         Some(Self { projects, agents: value["layout"].as_str() == Some("agents"), agent: text(&value["agent"]),
             // A saved height that isn't a sensible number is dropped rather than trusted.
+            explorer_collapsed: value["explorer_collapsed"].as_bool().unwrap_or(false),
             split: value["split"].as_f64().map(|height| height as f32).filter(|height| height.is_finite() && *height > 0.),
         })
     }
@@ -141,6 +144,7 @@ mod tests {
             agents: true,
             agent: Some("dex".into()),
             split: Some(212.5),
+            explorer_collapsed: true,
             projects: vec![
                 ProjectState {
                     root: "/work/po".into(),
@@ -165,6 +169,7 @@ mod tests {
         assert!(back.agents);
         assert_eq!(back.agent.as_deref(), Some("dex"));
         assert_eq!(back.split, Some(212.5));
+        assert!(back.explorer_collapsed);
         assert_eq!(back.projects.len(), 2);
         assert_eq!(back.projects[0].active, 1);
         assert_eq!(back.projects[0].threads[1].title, "quote \"this\"");
