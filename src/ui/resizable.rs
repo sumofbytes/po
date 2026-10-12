@@ -29,6 +29,9 @@ enum Side {
 pub struct SidebarsState {
     left: Pixels,
     right: Pixels,
+    /// The right width was set by a drag (or restored from one), so it is what the user wants and
+    /// is no longer replaced by a default.
+    right_chosen: bool,
     dragging: Option<Side>,
     /// The whole layout's bounds, from the last frame.
     bounds: Bounds<Pixels>,
@@ -36,14 +39,36 @@ pub struct SidebarsState {
 
 impl SidebarsState {
     pub fn new(left: Pixels, right: Pixels) -> Self {
-        Self { left, right, dragging: None, bounds: Bounds::default() }
+        Self { left, right, right_chosen: false, dragging: None, bounds: Bounds::default() }
+    }
+
+    /// The widths of the left and right sidebars, and the right one's only if it was chosen.
+    pub fn widths(&self) -> (Pixels, Option<Pixels>) {
+        (self.left, self.right_chosen.then_some(self.right))
+    }
+
+    /// Restores widths from an earlier run; a right width given this way counts as chosen.
+    pub fn set_widths(&mut self, left: Option<Pixels>, right: Option<Pixels>) {
+        if let Some(left) = left {
+            self.left = left;
+        }
+        if let Some(right) = right {
+            self.right = right;
+            self.right_chosen = true;
+        }
+    }
+
+    /// A handle is being dragged.
+    pub fn dragging(&self) -> bool {
+        self.dragging.is_some()
     }
 
     /// Gives the right sidebar `share` of the whole layout's width, within the range it is drawn
-    /// with. Does nothing until the layout has been measured.
+    /// with, unless a width was chosen for it, which is kept. Does nothing until the layout has
+    /// been measured.
     pub fn set_right_share(&mut self, share: f32) {
         let width = self.bounds.size.width;
-        if width > px(0.) {
+        if width > px(0.) && !self.right_chosen {
             self.right = width * share;
         }
     }
@@ -172,6 +197,7 @@ impl RenderOnce for Sidebars {
                                         Some(Side::Right) => {
                                             let width = left_shown.then_some(state.left).unwrap_or_default();
                                             state.right = dragged_width(Side::Right, event.position.x, state.bounds, width, &right_range);
+                                            state.right_chosen = true;
                                         }
                                         None => return,
                                     }
@@ -382,7 +408,7 @@ impl RenderOnce for VSplit {
 
 #[cfg(test)]
 mod tests {
-    use super::{MIN_BOTTOM, MIN_CENTER, MIN_TOP, Side, dragged_height, dragged_width};
+    use super::{MIN_BOTTOM, MIN_CENTER, MIN_TOP, Side, SidebarsState, dragged_height, dragged_width};
     use gpui::{Bounds, point, px, size};
 
     #[test]
@@ -406,5 +432,19 @@ mod tests {
         // A split too short for both minimums doesn't panic; the top gets its minimum.
         let short = Bounds::new(point(px(0.), px(0.)), size(px(300.), px(100.)));
         assert_eq!(dragged_height(px(90.), short), MIN_TOP);
+    }
+
+    #[test]
+    fn a_width_that_was_chosen_is_kept_when_the_sidebar_opens_again() {
+        let mut state = SidebarsState::new(px(280.), px(560.));
+        state.bounds = Bounds::new(point(px(0.), px(0.)), size(px(1000.), px(800.)));
+        // Not chosen: opening gives it its default share.
+        state.set_right_share(0.5);
+        assert_eq!(state.right, px(500.));
+        assert_eq!(state.widths().1, None);
+        // Chosen (dragged, or restored): opening leaves it alone.
+        state.set_widths(Some(px(300.)), Some(px(420.)));
+        state.set_right_share(0.5);
+        assert_eq!(state.widths(), (px(300.), Some(px(420.))));
     }
 }

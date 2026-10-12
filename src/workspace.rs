@@ -38,6 +38,9 @@ pub struct Workspace {
     pub split: Option<f32>,
     /// The explorer on the agents view was folded down to its header.
     pub explorer_collapsed: bool,
+    /// How wide the left side was, and the right side if it had been dragged to a width.
+    pub left_width: Option<f32>,
+    pub right_width: Option<f32>,
 }
 
 /// The file for the window started in `start`.
@@ -46,6 +49,11 @@ fn file(start: &Path) -> PathBuf {
     let hash = start.to_string_lossy().bytes().fold(0xcbf29ce484222325u64, |h, b| (h ^ u64::from(b)).wrapping_mul(0x100000001b3));
     let name = start.file_name().map_or_else(|| "root".to_string(), |n| n.to_string_lossy().to_string());
     crate::config::data_dir().join("workspaces").join(format!("{name}-{hash:016x}.json"))
+}
+
+/// A saved width in pixels, if it is a sensible one.
+fn width(value: &Value) -> Option<f32> {
+    value.as_f64().map(|w| w as f32).filter(|w| w.is_finite() && (50.0..=4000.0).contains(w))
 }
 
 fn path(value: &Value) -> Option<PathBuf> {
@@ -75,7 +83,7 @@ impl Workspace {
                 })
             })
             .collect();
-        json!({ "version": 1, "viewer_open": self.viewer_open, "swapped": self.swapped, "agent": self.agent, "split": self.split, "explorer_collapsed": self.explorer_collapsed, "projects": projects })
+        json!({ "version": 1, "viewer_open": self.viewer_open, "swapped": self.swapped, "agent": self.agent, "split": self.split, "explorer_collapsed": self.explorer_collapsed, "left_width": self.left_width, "right_width": self.right_width, "projects": projects })
     }
 
     fn from_json(value: &Value) -> Option<Self> {
@@ -115,6 +123,8 @@ impl Workspace {
             agent: text(&value["agent"]),
             // A saved height that isn't a sensible number is dropped rather than trusted.
             explorer_collapsed: value["explorer_collapsed"].as_bool().unwrap_or(false),
+            left_width: width(&value["left_width"]),
+            right_width: width(&value["right_width"]),
             split: value["split"].as_f64().map(|height| height as f32).filter(|height| height.is_finite() && *height > 0.),
         })
     }
@@ -151,6 +161,8 @@ mod tests {
             agent: Some("dex".into()),
             split: Some(212.5),
             explorer_collapsed: true,
+            left_width: Some(300.0),
+            right_width: Some(640.0),
             projects: vec![
                 ProjectState {
                     root: "/work/po".into(),
@@ -177,6 +189,7 @@ mod tests {
         assert_eq!(back.agent.as_deref(), Some("dex"));
         assert_eq!(back.split, Some(212.5));
         assert!(back.explorer_collapsed);
+        assert_eq!((back.left_width, back.right_width), (Some(300.0), Some(640.0)));
         assert_eq!(back.projects.len(), 2);
         assert_eq!(back.projects[0].active, 1);
         assert_eq!(back.projects[0].threads[1].title, "quote \"this\"");
@@ -193,6 +206,14 @@ mod tests {
         assert!(old_files.viewer_open);
         let neither = Workspace::from_json(&json!({ "projects": [] })).expect("parses");
         assert!(neither.viewer_open);
+    }
+
+    #[test]
+    fn nonsense_widths_are_dropped() {
+        for bad in [json!(-5), json!(0), json!(1), json!(1e9), json!("wide"), Value::Null] {
+            let back = Workspace::from_json(&json!({ "projects": [], "left_width": bad, "right_width": bad })).expect("parses");
+            assert_eq!((back.left_width, back.right_width), (None, None));
+        }
     }
 
     #[test]

@@ -838,10 +838,17 @@ impl Reader {
                 .placeholder("Message the agent")
         });
         let left_split = cx.new(|_| VSplitState::new());
+        let sidebars = cx.new(|_| SidebarsState::new(px(280.0), px(560.0)));
         let subscriptions = vec![
             // Switching modes unmounts whatever was focused (the explorer, the viewer), which
             // leaves nothing focused and the shortcuts unrouted, so take focus back.
             cx.on_focus_lost(window, |reader, window, cx| reader.focus.focus(window, cx)),
+            // So are the column widths.
+            cx.observe(&sidebars, |reader, sidebars, cx| {
+                if !sidebars.read(cx).dragging() {
+                    reader.request_save(cx);
+                }
+            }),
             // Where the split was dragged to is kept, once the drag is over.
             cx.observe(&left_split, |reader, split, cx| {
                 if !split.read(cx).dragging() {
@@ -915,7 +922,7 @@ impl Reader {
             notifications: settings["notifications"].as_bool().unwrap_or(true),
             idle_after: (idle_minutes > 0).then(|| Duration::from_secs(idle_minutes * 60)),
             max_live: settings["max_live_agents"].as_u64().unwrap_or(8).max(1) as usize,
-            sidebars: cx.new(|_| SidebarsState::new(px(280.0), px(560.0))),
+            sidebars,
             left_open: true,
             left_split,
             side_open: true,
@@ -1966,6 +1973,7 @@ impl Reader {
         let mut seen = HashSet::new();
         self.side_open = saved.viewer_open;
         self.swapped = saved.swapped;
+        self.sidebars.update(cx, |sidebars, _| sidebars.set_widths(saved.left_width.map(px), saved.right_width.map(px)));
         self.chosen_agent = saved.agent.clone().or(self.chosen_agent.take());
         if let Some(height) = saved.split {
             self.left_split.update(cx, |split, _| split.set_top(px(height)));
@@ -2058,7 +2066,7 @@ impl Reader {
                 }
             })
             .collect();
-        workspace::Workspace { projects, viewer_open: self.side_open, swapped: self.swapped, agent: self.chosen_agent.clone(), split: self.left_split.read(cx).top().map(f32::from), explorer_collapsed: self.left_split.read(cx).collapsed() }
+        workspace::Workspace { projects, viewer_open: self.side_open, swapped: self.swapped, agent: self.chosen_agent.clone(), split: self.left_split.read(cx).top().map(f32::from), explorer_collapsed: self.left_split.read(cx).collapsed(), left_width: Some(self.sidebars.read(cx).widths().0.into()), right_width: self.sidebars.read(cx).widths().1.map(f32::from) }
     }
 
     /// Saves the workspace once the current change has settled, so that a thread that is
