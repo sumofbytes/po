@@ -5,6 +5,22 @@ coding agents that speak the [Agent Client Protocol](https://agentclientprotocol
 Chat with an agent, browse the project's files with a syntax-highlighted viewer,
 and review the agent's plans and edit diffs side by side.
 
+## Install
+
+Prebuilt binaries are published for Linux x86_64 and macOS Apple Silicon:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/sumofbytes/po/HEAD/scripts/install.sh | sh
+```
+
+- Pin a version: `curl -fsSL .../install.sh | sh -s -- 0.1.0`
+- Custom directory: `PO_INSTALL_DIR=/usr/local/bin curl -fsSL .../install.sh | sh`
+  (default is `~/.local/bin`)
+
+Or download a tarball from the [releases page](https://github.com/sumofbytes/po/releases).
+On Linux the runtime needs Wayland or X11, Vulkan, and fontconfig libraries.
+Other platforms: build from source below.
+
 ## Build
 
 Requires a stable Rust toolchain (edition 2024). On Linux, install a C
