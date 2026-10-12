@@ -1,0 +1,95 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # The tag must match the version in Cargo.toml (land the bump via PR, then
+  # tag its tip), so released binaries carry the released version.
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Check tag against Cargo.toml
+        run: |
+          ver="${GITHUB_REF_NAME#v}"
+          if ! printf '%s\n' "$ver" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "error: tag '$GITHUB_REF_NAME' is not vX.Y.Z" >&2
+            exit 1
+          fi
+          cur="$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)"
+          if [ "$ver" != "$cur" ]; then
+            echo "error: tag v$ver does not match Cargo.toml $cur" >&2
+            exit 1
+          fi
+
+  build:
+    needs: verify
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Oldest runner image, so the glibc requirement stays low.
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - os: macos-latest
+            target: aarch64-apple-darwin
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install system libraries (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q clang mold pkg-config libwayland-dev libxkbcommon-x11-dev \
+            libxkbcommon-dev libx11-xcb-dev libxcb1-dev libfontconfig-dev libfreetype-dev \
+            libssl-dev libvulkan-dev
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }}
+      # po is a GUI and has no --version, so just check the binary exists and
+      # is the right kind of executable.
+      - name: Smoke test
+        run: file "target/${{ matrix.target }}/release/po"
+      - name: Package
+        run: |
+          name="po-${GITHUB_REF_NAME}-${{ matrix.target }}"
+          mkdir -p "dist/$name"
+          cp "target/${{ matrix.target }}/release/po" LICENSE LICENSE-APACHE README.md "dist/$name/"
+          tar -czf "$name.tar.gz" -C dist "$name"
+      - uses: actions/upload-artifact@v6
+        with:
+          name: po-${{ matrix.target }}
+          path: po-*.tar.gz
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    env:
+      GH_REPO: ${{ github.repository }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Generate checksums
+        run: |
+          cd dist
+          sha256sum * > SHA256SUMS
+      - name: Publish release
+        run: gh release create "${GITHUB_REF_NAME}" --verify-tag --generate-notes dist/*
