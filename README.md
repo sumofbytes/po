@@ -102,8 +102,25 @@ for a permission answer, green `●` finished while you were elsewhere), and a
 project shows the busiest of its threads. Only the thread on screen moves the
 viewer to the files it edits.
 
-Threads and projects aren't remembered across restarts yet. Threads in the same
-project share a checkout, so two agents editing at once can step on each other.
+#### Worktrees
+
+Threads in one project share its checkout, so two agents editing at once can step
+on each other. In a git repository, **New Thread → … in a worktree** gives the
+thread a checkout of its own: a new branch `po/<id>` under
+`~/.local/share/po/worktrees/`, shown as a project of its own whose Changes view
+is everything the thread did since it branched. Two buttons finish it:
+
+- **Merge** commits what is in the worktree and merges the branch into the
+  checkout it came from, then removes the worktree. If the merge conflicts it is
+  undone and the branch is kept.
+- **Discard** (click twice) deletes the branch and everything in it.
+
+Closing a worktree project with × never loses work: what is left is committed
+and the branch is kept if it has anything on it. The worktree starts from the
+last commit, so uncommitted changes and untracked files in the original checkout
+aren't in it.
+
+Threads and projects aren't remembered across restarts yet.
 
 ### Themes
 

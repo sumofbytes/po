@@ -9,6 +9,7 @@ mod theme;
 mod trace;
 mod ui;
 mod viewer;
+mod worktree;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -445,6 +446,8 @@ struct Project {
     notice: Option<String>,
     tree: Entity<TreeState>,
     expanded: HashSet<SharedString>,
+    /// Set when this is a thread's own checkout, made from another project's repository.
+    worktree: Option<worktree::Worktree>,
     /// Keep the explorer and changes list wired to this project.
     _subscriptions: Vec<Subscription>,
 }
@@ -454,7 +457,13 @@ impl Project {
     fn name(&self) -> String {
         match &self.pr {
             Some(pr) => format!("PR #{} {}", pr.number, pr.title),
-            None => self.root.file_name().map_or_else(|| self.root.display().to_string(), |n| n.to_string_lossy().to_string()),
+            None => {
+                let name = self.root.file_name().map_or_else(|| self.root.display().to_string(), |n| n.to_string_lossy().to_string());
+                match &self.worktree {
+                    Some(wt) => format!("{} ⎇ {}", wt.spec.repo.file_name().map_or(name, |n| n.to_string_lossy().to_string()), wt.spec.branch),
+                    None => name,
+                }
+            }
         }
     }
 }
@@ -702,6 +711,12 @@ struct Reader {
     /// Progress or failure of the last attempt to open a PR.
     pr_status: Option<String>,
     opening: bool,
+    /// The last thing that happened to a worktree (made, merged, closed), or why it failed.
+    worktree_status: Option<String>,
+    /// A merge or discard is running; asking for either again waits.
+    finishing: bool,
+    /// Discard was asked for once and waits for a second click, since it can't be undone.
+    confirm_discard: bool,
     /// The Ctrl+P finder, when open: its query field, the matching files and which is picked.
     finder: Option<Entity<InputState>>,
     finder_matches: Rc<Vec<String>>,
@@ -803,6 +818,9 @@ impl Reader {
             pr_input,
             pr_status: None,
             opening: false,
+            worktree_status: None,
+            finishing: false,
+            confirm_discard: false,
             finder: None,
             finder_matches: Rc::new(vec![]),
             finder_selected: 0,
@@ -909,6 +927,7 @@ impl Reader {
             notice: None,
             tree,
             expanded: HashSet::new(),
+            worktree: None,
             _subscriptions: subscriptions,
         }
     }
@@ -1138,6 +1157,8 @@ impl Reader {
         }
         self.thread.unread = false;
         self.pr_status = None;
+        self.worktree_status = None;
+        self.confirm_discard = false;
         self.focus.focus(window, cx);
         cx.notify();
     }
@@ -1165,24 +1186,152 @@ impl Reader {
         let agent = self.thread.agent.clone();
         let review = pr.is_some();
         let project = Self::build_project(root, pr, vec![], window, cx);
+        self.open_project(project, if review { Mode::Diff } else { Mode::Source }, agent, window, cx);
+    }
+
+    /// Shows `project` in `mode`, with a thread of its own that runs `agent`, if any. The
+    /// project on screen goes on running in the background.
+    fn open_project(&mut self, project: Project, mode: Mode, agent: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
         let thread = self.blank_thread(window, cx);
         self.suspend_project();
         let id = self.next_project;
         self.next_project += 1;
         // The project on screen goes into a slot, and the new one takes its fields.
-        self.slots.push(Slot {
-            id,
-            mode: if review { Mode::Diff } else { Mode::Source },
-            project,
-            thread,
-            parked: vec![],
-        });
+        self.slots.push(Slot { id, mode, project, thread, parked: vec![] });
         let at = self.slots.len() - 1;
         self.swap_slot(at);
         self.resume_project(window, cx);
         if let Some(agent) = agent {
             self.connect(&agent, false, window, cx);
         }
+    }
+
+    /// Starts a thread with `key`'s agent in a git worktree of its own, shown as a project:
+    /// a branch whose changes can be reviewed here, then merged or discarded.
+    fn new_worktree_thread(&mut self, key: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if self.finishing {
+            return;
+        }
+        // A worktree is made from the repository, not from another worktree.
+        let from = match &self.project.worktree {
+            Some(wt) => wt.spec.repo.clone(),
+            None => self.project.root.clone(),
+        };
+        self.finishing = true;
+        self.worktree_status = Some("Creating worktree…".into());
+        cx.notify();
+        let (key, handle) = (key.to_string(), window.window_handle());
+        cx.spawn(async move |this, cx| {
+            let made = cx.background_executor().spawn(async move { worktree::Worktree::create(&from) }).await;
+            handle
+                .update(cx, |_, window, cx| {
+                    this.update(cx, |reader, cx| {
+                        reader.finishing = false;
+                        match made {
+                            Ok(wt) => {
+                                reader.worktree_status = None;
+                                reader.open_worktree(wt, key, window, cx);
+                            }
+                            Err(error) => {
+                                log::warn!("worktree: {error}");
+                                reader.worktree_status = Some(error);
+                                cx.notify();
+                            }
+                        }
+                    })
+                })
+                .ok();
+        })
+        .detach();
+    }
+
+    fn open_worktree(&mut self, wt: worktree::Worktree, agent: String, window: &mut Window, cx: &mut Context<Self>) {
+        log::info!("worktree: {} for {agent}", wt.spec.branch);
+        let mut project = Self::build_project(wt.spec.path.clone(), None, vec![], window, cx);
+        project.base = wt.spec.base.clone();
+        project.worktree = Some(wt);
+        self.confirm_discard = false;
+        self.open_project(project, Mode::Diff, Some(agent), window, cx);
+    }
+
+    /// Merges the worktree on screen into the checkout it came from, or throws it away.
+    fn finish_worktree(&mut self, merge: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(spec) = self.project.worktree.as_ref().map(|wt| wt.spec.clone()) else { return };
+        if self.finishing {
+            return;
+        }
+        if !merge && !self.confirm_discard {
+            self.confirm_discard = true;
+            cx.notify();
+            return;
+        }
+        self.confirm_discard = false;
+        self.finishing = true;
+        self.worktree_status = Some(if merge { "Merging…" } else { "Discarding…" }.into());
+        let (id, handle) = (self.project_id, window.window_handle());
+        let message = format!("po: {}", self.thread.title());
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    if merge {
+                        worktree::Worktree::merge(&spec, &message).map(Some)
+                    } else {
+                        worktree::Worktree::discard(&spec);
+                        Ok(None)
+                    }
+                })
+                .await;
+            handle
+                .update(cx, |_, window, cx| {
+                    this.update(cx, |reader, cx| {
+                        reader.finishing = false;
+                        match result {
+                            Ok(into) => {
+                                reader.close_worktree_project(id, window, cx);
+                                reader.worktree_status = Some(match into {
+                                    Some(into) => format!("Merged into {into}"),
+                                    None => "Discarded".into(),
+                                });
+                            }
+                            Err(error) => {
+                                log::warn!("worktree: {error}");
+                                reader.worktree_status = Some(error);
+                            }
+                        }
+                        cx.notify();
+                    })
+                })
+                .ok();
+        })
+        .detach();
+    }
+
+    /// Project `id`, on screen or not.
+    fn project_by_id(&mut self, id: u64) -> Option<&mut Project> {
+        if self.project_id == id {
+            return Some(&mut self.project);
+        }
+        self.slots.iter_mut().find(|slot| slot.id == id).map(|slot| &mut slot.project)
+    }
+
+    /// Closes the project of a worktree that has been merged or discarded, going back to the
+    /// project it came from if that is open.
+    fn close_worktree_project(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
+        let origin = self.project_by_id(id).and_then(|project| project.worktree.as_ref()).map(|wt| wt.spec.repo.clone());
+        if let Some(wt) = self.project_by_id(id).and_then(|project| project.worktree.as_mut()) {
+            wt.finished();
+        }
+        let parent = origin.and_then(|repo| {
+            std::iter::once((self.project_id, &self.project)).chain(self.slots.iter().map(|s| (s.id, &s.project)))
+                .find(|(pid, project)| *pid != id && project.worktree.is_none() && project.pr.is_none() && project.root == repo)
+                .map(|(pid, _)| pid)
+        });
+        if let Some(parent) = parent {
+            self.show_project(parent, window, cx);
+        }
+        self.close_project(id, window, cx);
     }
 
     /// Asks for a folder and opens it as a project.
@@ -1211,6 +1360,11 @@ impl Reader {
             // Show another first; the closed project is then the one in the slot.
             let Some(other) = self.slots.last().map(|slot| slot.id) else { return };
             self.show_project(other, window, cx);
+        }
+        // A worktree is closed without losing what was done in it, which the user is told.
+        let kept = self.project_by_id(id).and_then(|project| project.worktree.as_mut()).and_then(|wt| wt.retire());
+        if let Some(branch) = kept {
+            self.worktree_status = Some(format!("Closed. Its work is kept on branch {branch}"));
         }
         self.slots.retain(|slot| slot.id != id);
         cx.notify();
@@ -2025,10 +2179,60 @@ impl Reader {
         div().flex_none().px_3().py_2().border_b_1().border_color(border).child(body)
     }
 
+    /// For a worktree project: its branch, and the ways to finish it.
+    fn worktree_strip(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        let wt = self.project.worktree.as_ref()?;
+        let colors = cx.global::<Palette>();
+        let (border, muted) = (colors.border, colors.muted_foreground);
+        let (merge, discard) = (cx.entity(), cx.entity());
+        let busy = self.finishing;
+        Some(
+            div()
+                .flex_none()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .px_3()
+                .py_2()
+                .border_b_1()
+                .border_color(border)
+                .child(div().truncate().text_xs().text_color(muted).child(format!("⎇ {}", wt.spec.branch)))
+                .child(
+                    div()
+                        .flex()
+                        .gap_2()
+                        .child(
+                            Button::new("worktree-merge")
+                                .label("Merge")
+                                .tooltip("Commit this branch's work and merge it into the checkout it came from")
+                                .small()
+                                .outline()
+                                .on_click(move |_, window, cx| {
+                                    if !busy {
+                                        merge.update(cx, |reader, cx| reader.finish_worktree(true, window, cx))
+                                    }
+                                }),
+                        )
+                        .child(
+                            Button::new("worktree-discard")
+                                .label(if self.confirm_discard { "Discard everything?" } else { "Discard" })
+                                .tooltip("Delete this branch and everything done in it")
+                                .small()
+                                .ghost()
+                                .on_click(move |_, window, cx| {
+                                    if !busy {
+                                        discard.update(cx, |reader, cx| reader.finish_worktree(false, window, cx))
+                                    }
+                                }),
+                        ),
+                ),
+        )
+    }
+
     /// The open projects, each marked with the busiest of its threads, and a way to add one.
     fn projects_strip(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.global::<Palette>();
-        let (border, hover) = (colors.border, colors.list_hover);
+        let (border, hover, muted) = (colors.border, colors.list_hover, colors.muted_foreground);
         let busiest = |threads: &[&Thread]| threads.iter().map(|t| t.activity()).max().unwrap_or(Activity::Idle);
         let mut rows: Vec<(u64, String, Activity)> = std::iter::once((self.project_id, &self.project, &self.thread, &self.parked[..]))
             .chain(self.slots.iter().map(|slot| (slot.id, &slot.project, &slot.thread, &slot.parked[..])))
@@ -2073,6 +2277,9 @@ impl Reader {
                                 .on_click(move |_, window, cx| close.update(cx, |reader, cx| reader.close_project(id, window, cx))),
                         )
                     })
+            }))
+            .children(self.worktree_status.clone().map(|text| {
+                div().px_2().pt_1().text_xs().text_color(muted).max_h(rems(5.)).overflow_hidden().child(text)
             }))
             .child(
                 div().pt_1().child(
@@ -2213,6 +2420,7 @@ impl Reader {
                 cx,
             ))
             .child(self.projects_strip(cx))
+            .children(self.worktree_strip(cx))
             .children((mode == Mode::Diff).then(|| self.pr_strip(cx)))
             .child(div().flex_1().min_h_0().p_1().child(body))
     }
@@ -2391,6 +2599,7 @@ impl Reader {
         let colors = cx.global::<Palette>();
         let (send, stop, picker) = (cx.entity(), cx.entity(), cx.entity());
         let agents = self.agents.clone();
+        let in_repo = worktree::in_repo(&self.project.root);
         let typed = !self.thread.draft.read(cx).value().trim().is_empty();
         let stop_button = |stop: Entity<Reader>| {
             Button::new("stop")
@@ -2526,13 +2735,24 @@ impl Reader {
                                         picker.update(cx, |reader, cx| reader.new_thread(&key, window, cx))
                                     })
                                 });
+                                let isolated = in_repo.then(|| {
+                                    agents.iter().map(|agent| {
+                                        let (picker, key) = (picker.clone(), agent.id.clone());
+                                        MenuItem::new(format!("{} in a worktree", agent.name), move |window, cx| {
+                                            picker.update(cx, |reader, cx| reader.new_worktree_thread(&key, window, cx))
+                                        })
+                                    })
+                                });
                                 let resume = agents.iter().map(|agent| {
                                     let (picker, key) = (picker.clone(), agent.id.clone());
                                     MenuItem::new(format!("Resume with {}…", agent.name), move |window, cx| {
                                         picker.update(cx, |reader, cx| reader.resume_thread(&key, window, cx))
                                     })
                                 });
-                                new.chain([MenuItem::separator()]).chain(resume).collect()
+                                new.chain([MenuItem::separator()])
+                                    .chain(isolated.into_iter().flatten().chain(in_repo.then(MenuItem::separator)))
+                                    .chain(resume)
+                                    .collect()
                             },
                         )
                         .menu(self.thread_menu.clone()),
