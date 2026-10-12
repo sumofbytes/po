@@ -1,6 +1,8 @@
 #![recursion_limit = "1024"]
 mod acp;
+mod agent;
 mod config;
+mod dex;
 mod diff;
 mod pr;
 mod theme;
@@ -13,7 +15,9 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::{Duration, SystemTime};
 
-use acp::{Client, Event, PermissionOption, SessionInfo};
+use acp::{Event, PermissionOption, SessionInfo};
+use agent::Client;
+use dex::Queue;
 use diff::{Change, Kind, Pair, Row};
 use theme::Palette;
 use ui::button::Button;
@@ -291,6 +295,13 @@ enum Block {
     Plan(Vec<(String, Step)>),
 }
 
+/// A message typed while the agent was working.
+struct Queued {
+    content: String,
+    /// Where the daemon holds it; `None` when it waits here for the turn to end.
+    kind: Option<Queue>,
+}
+
 #[derive(Clone)]
 enum Msg {
     User(String),
@@ -450,6 +461,8 @@ struct Reader {
     draft: Entity<InputState>,
     thread: Vec<Msg>,
     busy: bool,
+    /// Messages typed during a turn, shown above the input until they are taken.
+    queue: Vec<Queued>,
     ready: bool,
     /// A resumed session's history is being replayed.
     loading: bool,
@@ -550,14 +563,14 @@ impl Reader {
                 }
             }),
             cx.subscribe_in(&draft, window, |reader, _, event: &InputEvent, window, cx| {
-                if matches!(event, InputEvent::PressEnter { shift: false, .. }) {
-                    reader.send(window, cx);
+                if let InputEvent::PressEnter { shift: false, alt } = event {
+                    reader.send(*alt, window, cx);
                 }
             }),
         ];
         let mut agents = config::agents(&config::load());
         if let Some(command) = command.as_ref().filter(|c| !agents.iter().any(|agent| agent.id == **c)) {
-            agents.push(config::Agent { id: command.clone(), name: "Custom".into(), command: command.clone() });
+            agents.push(config::Agent { id: command.clone(), name: "Custom".into(), command: command.clone(), daemon: None });
         }
         let mut reader = Self {
             mode: Mode::Source,
@@ -597,6 +610,7 @@ impl Reader {
             draft,
             thread: vec![],
             busy: false,
+            queue: vec![],
             ready: false,
             loading: false,
             picking: false,
@@ -981,13 +995,19 @@ impl Reader {
         self.relist(0);
         self.selection.update(cx, |s, _| s.clear());
         self.busy = false;
+        self.queue.clear();
         self.ready = false;
         self.loading = false;
         self.picking = resume;
         self.sessions = None;
-        let command = self.agents.iter().find(|agent| agent.id == key).map_or(key.to_string(), |agent| agent.command.clone());
+        let agent = self.agents.iter().find(|agent| agent.id == key).cloned().unwrap_or_else(|| config::Agent {
+            id: key.to_string(),
+            name: key.to_string(),
+            command: key.to_string(),
+            daemon: None,
+        });
         self.status = if resume { "listing sessions…" } else { "starting…" }.into();
-        match Client::spawn(&command, &self.root, resume) {
+        match Client::spawn(&agent, &self.root, resume) {
             Ok((client, mut events)) => {
                 self.client = Some(client);
                 let handle = window.window_handle();
@@ -1063,6 +1083,7 @@ impl Reader {
 
     fn fail(&mut self, text: String) {
         self.busy = false;
+        self.queue.clear();
         self.thread.push(Msg::Agent(vec![Block::Text(format!("**Error:** {text}"))]));
         self.relist(self.thread.len() - 1);
     }
@@ -1116,6 +1137,20 @@ impl Reader {
             Event::Stopped(reason) => {
                 self.busy = false;
                 log::info!("agent: stopped ({reason})");
+                self.drain_queue(cx);
+            }
+            Event::Accepted { content, queue } => {
+                if let Some(at) = self.queue.iter().position(|q| q.kind == Some(queue) && q.content == content) {
+                    self.queue.remove(at);
+                }
+                self.thread.push(Msg::User(content));
+            }
+            Event::Rejected { content, queue } => {
+                // No turn to join: it waits for the turn to end like any other queued message.
+                if let Some(item) = self.queue.iter_mut().find(|q| q.kind == Some(queue) && q.content == content) {
+                    item.kind = None;
+                }
+                self.drain_queue(cx);
             }
             Event::Failed(error) => {
                 if !self.ready {
@@ -1437,16 +1472,67 @@ impl Reader {
         cx.notify();
     }
 
-    fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// Sends the draft: as a new turn, or, while the agent is working, into the queue
+    /// (`later` for after the turn rather than into it).
+    fn send(&mut self, later: bool, window: &mut Window, cx: &mut Context<Self>) {
         let prompt = self.draft.read(cx).value().trim().to_string();
-        if prompt.is_empty() || self.busy {
+        if prompt.is_empty() {
             return;
         }
+        if !self.busy {
+            if self.dispatch(prompt, cx) {
+                self.draft.update(cx, |input, cx| input.set_value("", window, cx));
+            }
+            return;
+        }
+        self.draft.update(cx, |input, cx| input.set_value("", window, cx));
+        // An agent that can't take messages mid-turn gets them when the turn is over.
+        let kind = match self.client.as_ref().filter(|client| client.queues()) {
+            Some(client) => {
+                let kind = if later { Queue::Followup } else { Queue::Steer };
+                client.enqueue(&prompt, kind);
+                Some(kind)
+            }
+            None => None,
+        };
+        self.queue.push(Queued { content: prompt, kind });
+        cx.notify();
+    }
+
+    /// Takes a queued message back into the draft to edit.
+    fn recall(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if ix >= self.queue.len() {
+            return;
+        }
+        let item = self.queue.remove(ix);
+        if let (Some(kind), Some(client)) = (item.kind, &self.client) {
+            client.recall(&item.content, kind);
+        }
+        let draft = self.draft.read(cx).value().to_string();
+        let text = if draft.trim().is_empty() { item.content } else { format!("{}\n{draft}", item.content) };
+        self.draft.update(cx, |input, cx| input.set_value(text, window, cx));
+        cx.notify();
+    }
+
+    /// Once a turn is over, sends the oldest message still waiting. What the agent didn't
+    /// take during the turn is no longer in its queue, so the rest wait here.
+    fn drain_queue(&mut self, cx: &mut Context<Self>) {
+        for item in &mut self.queue {
+            item.kind = None;
+        }
+        if !self.busy && !self.queue.is_empty() {
+            let next = self.queue.remove(0);
+            self.dispatch(next.content, cx);
+        }
+    }
+
+    /// Sends `prompt` as a new turn; false if it could not be sent (the error is in the thread).
+    fn dispatch(&mut self, prompt: String, cx: &mut Context<Self>) -> bool {
         let Some(client) = self.client.as_ref().filter(|_| self.ready) else {
             let why = if self.agent.is_some() { "The agent is not ready yet." } else { "Pick an agent from New Thread first." };
             self.fail(why.into());
             cx.notify();
-            return;
+            return false;
         };
         let context = match &self.current {
             Some(file) => format!("[The user has `{file}` open in the viewer.]\n\n{prompt}"),
@@ -1455,18 +1541,18 @@ impl Reader {
         if !client.prompt(&context) {
             self.fail("The agent has no session yet.".into());
             cx.notify();
-            return;
+            return false;
         }
-        self.draft.update(cx, |input, cx| input.set_value("", window, cx));
         self.busy = true;
         self.thread.push(Msg::User(prompt));
         self.thread.push(Msg::Agent(vec![]));
         self.relist(self.thread.len() - 2);
         self.thread_list.scroll_to_end();
         cx.notify();
+        true
     }
 
-    fn stop(&mut self, cx: &mut Context<Self>) {
+    fn stop(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(client) = &self.client else { return };
         client.cancel();
         for msg in &mut self.thread {
@@ -1481,6 +1567,15 @@ impl Reader {
             }
         }
         self.relist(0);
+        // What was waiting goes back to the draft rather than being sent into a stopped turn.
+        if !self.queue.is_empty() {
+            let mut text: Vec<String> = self.queue.drain(..).map(|q| q.content).collect();
+            let draft = self.draft.read(cx).value().to_string();
+            if !draft.trim().is_empty() {
+                text.push(draft);
+            }
+            self.draft.update(cx, |input, cx| input.set_value(text.join("\n\n"), window, cx));
+        }
         cx.notify();
     }
 
@@ -1863,25 +1958,77 @@ impl Reader {
         let colors = cx.global::<Palette>();
         let (send, stop, picker) = (cx.entity(), cx.entity(), cx.entity());
         let agents = self.agents.clone();
-        let action = if self.busy {
+        let typed = !self.draft.read(cx).value().trim().is_empty();
+        let stop_button = |stop: Entity<Reader>| {
             Button::new("stop")
                 .icon(IconName::Square)
                 .ghost()
                 .rounded(gpui::px(999.0))
                 .small()
                 .tooltip("Stop")
-                .on_click(move |_, _, cx| stop.update(cx, |reader, cx| reader.stop(cx)))
-        } else {
-            let send = Button::new("send")
+                .on_click(move |_, window, cx| stop.update(cx, |reader, cx| reader.stop(window, cx)))
+        };
+        let send_button = |send: Entity<Reader>, tooltip: &'static str| {
+            let button = Button::new("send")
                 .icon(IconName::ArrowUp)
                 .ghost()
                 .rounded(gpui::px(999.0))
                 .small()
-                .tooltip("Send")
-                .on_click(move |_, window, cx| send.update(cx, |reader, cx| reader.send(window, cx)));
+                .tooltip(tooltip)
+                .on_click(move |_, window, cx| send.update(cx, |reader, cx| reader.send(false, window, cx)));
             // Quiet until there is something to send.
-            if self.draft.read(cx).value().trim().is_empty() { send } else { send.primary() }
+            if typed { button.primary() } else { button }
         };
+        let steer_tip = if self.client.as_ref().is_some_and(|client| client.queues()) {
+            "Steer: the agent reads it before its next step (Alt+Enter: after this turn)"
+        } else {
+            "Queue: sent when this turn is over"
+        };
+        let action = if self.busy && typed {
+            // Typing during a turn queues it; Stop stays one click away.
+            div()
+                .flex()
+                .gap_1()
+                .child(stop_button(stop))
+                .child(send_button(send, steer_tip))
+                .into_any_element()
+        } else if self.busy {
+            stop_button(stop).into_any_element()
+        } else {
+            send_button(send, "Send").into_any_element()
+        };
+        let muted = colors.muted_foreground;
+        let (border, queue_this) = (colors.border, cx.entity());
+        let queued: Vec<AnyElement> = self
+            .queue
+            .iter()
+            .enumerate()
+            .map(|(ix, item)| {
+                let label = match item.kind {
+                    Some(Queue::Steer) => "Steer",
+                    Some(Queue::Followup) => "Follow-up",
+                    None => "Queued",
+                };
+                let this = queue_this.clone();
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .text_xs()
+                    .text_color(muted)
+                    .child(div().flex_none().child(label))
+                    .child(div().flex_1().min_w_0().truncate().child(item.content.replace('\n', " ")))
+                    .child(
+                        Button::new(("recall", ix))
+                            .icon(IconName::Close)
+                            .ghost()
+                            .small()
+                            .tooltip("Take back to edit")
+                            .on_click(move |_, window, cx| this.update(cx, |reader, cx| reader.recall(ix, window, cx))),
+                    )
+                    .into_any_element()
+            })
+            .collect();
         div()
             .size_full()
             .flex()
@@ -1987,6 +2134,9 @@ impl Reader {
                         .border_1()
                         .border_color(colors.border)
                         .bg(colors.background)
+                        .when(!queued.is_empty(), |this| {
+                            this.child(div().flex().flex_col().gap_1().pb_1().border_b_1().border_color(border).children(queued))
+                        })
                         .child(Input::new(&self.draft))
                         .child(div().flex().justify_end().child(action)),
                 ),

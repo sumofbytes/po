@@ -72,6 +72,22 @@ one replaces it, so you can change flags or the binary path. `command` is split
 on whitespace into program and arguments (no shell quoting). Choose the agent
 in the app, or pass `--agent` / `PO_AGENT`.
 
+#### Steering and follow-ups (dex daemon)
+
+ACP has no way to add to a turn that is already running, so with an ACP agent a
+message typed while it works is queued and sent when the turn ends. The `dex
+(daemon)` entry talks to a [`dex serve` daemon over HTTP
+and SSE instead, which can take messages mid-turn:
+
+- **Enter** steers: the agent reads the message before its next model call.
+- **Alt+Enter** queues a follow-up that runs after the current turn.
+- Queued messages are listed above the input until the agent takes them; the
+  **×** takes one back into the input to edit.
+
+An entry with a `daemon` URL uses this path, and its `command` starts the
+daemon if nothing answers at the URL (po stops a daemon it started). Plain
+`http` only; set `DEX_DAEMON_TOKEN` if the daemon needs a bearer token.
+
 ### Themes
 
 Set `"theme"` to a theme name. On first start `po` copies the bundled themes
