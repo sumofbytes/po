@@ -2204,7 +2204,7 @@ fn render_msg(
             Block::Text(text) => {
                 column.child(ui::markdown::markdown(("answer", id), text, selection, window, cx))
             }
-            Block::Thought(text) => column.child(div().italic().opacity(0.7).child(ui::markdown::markdown(
+            Block::Thought(text) => column.child(div().opacity(0.7).child(ui::markdown::italic(
                 ("thought", id),
                 text,
                 selection,
