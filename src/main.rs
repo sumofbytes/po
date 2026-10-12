@@ -597,7 +597,6 @@ impl Thread {
             })),
             Some("tool_call_update") => {
                 let id = update["toolCallId"].as_str().unwrap_or_default();
-                known = None;
                 for msg in self.messages.iter_mut().rev() {
                     let Msg::Agent(blocks) = msg else { continue };
                     let found = blocks.iter_mut().rev().find_map(|b| match b {
@@ -1504,12 +1503,25 @@ impl Reader {
             let Some(other) = self.slots.last().map(|slot| slot.id) else { return };
             self.show_project(other, window, cx);
         }
-        // A worktree is closed without losing what was done in it, which the user is told.
-        let kept = self.project_by_id(id).and_then(|project| project.worktree.as_mut()).and_then(|wt| wt.retire());
-        if let Some(branch) = kept {
-            self.worktree_status = Some(format!("Closed. Its work is kept on branch {branch}"));
+        let Some(at) = self.slots.iter().position(|slot| slot.id == id) else { return };
+        // Its agents stop with the slot; a worktree is then closed off the UI thread without
+        // losing what was done in it, which the user is told.
+        let mut slot = self.slots.remove(at);
+        let worktree = slot.project.worktree.take();
+        drop(slot);
+        if let Some(mut wt) = worktree {
+            cx.spawn(async move |this, cx| {
+                let kept = cx.background_executor().spawn(async move { wt.retire() }).await;
+                if let Some(branch) = kept {
+                    this.update(cx, |reader, cx| {
+                        reader.worktree_status = Some(format!("Closed. Its work is kept on branch {branch}"));
+                        cx.notify();
+                    })
+                    .ok();
+                }
+            })
+            .detach();
         }
-        self.slots.retain(|slot| slot.id != id);
         self.request_save(cx);
         cx.notify();
     }
@@ -1981,10 +1993,17 @@ impl Reader {
         self.left_split.update(cx, |split, _| split.set_collapsed(saved.explorer_collapsed));
         for state in saved.projects {
             let worktree = match state.worktree {
-                Some(spec) => match worktree::Worktree::adopt(spec) {
-                    Some(wt) => Some(wt),
-                    None => continue,
-                },
+                Some(spec) => {
+                    let branch = spec.branch.clone();
+                    match worktree::Worktree::adopt(spec) {
+                        Some(wt) => Some(wt),
+                        None => {
+                            log::warn!("worktree {} could not be restored; branch {branch} is left in its repository", state.root.display());
+                            self.worktree_status = Some(format!("A worktree could not be restored; its branch {branch} is left in the repository"));
+                            continue;
+                        }
+                    }
+                }
                 None => None,
             };
             let start = worktree.is_none() && self.project.pr.is_none() && self.project.worktree.is_none() && state.root == self.project.root;

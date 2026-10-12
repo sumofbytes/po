@@ -66,12 +66,12 @@ fn commit_all(spec: &Spec, message: &str) -> Result<bool, String> {
     Ok(true)
 }
 
-/// How many commits the branch has on top of where it started.
-fn ahead(spec: &Spec) -> usize {
-    git(&spec.repo, &["rev-list", "--count", &format!("{}..{}", spec.base, spec.branch)])
-        .ok()
-        .and_then(|n| n.parse().ok())
-        .unwrap_or(0)
+/// How many commits the branch has on top of where it started. An error is not "none": callers
+/// must not treat a branch they couldn't inspect as empty.
+fn ahead(spec: &Spec) -> Result<usize, String> {
+    git(&spec.repo, &["rev-list", "--count", &format!("{}..{}", spec.base, spec.branch)])?
+        .parse()
+        .map_err(|_| "git rev-list: unexpected output".to_string())
 }
 
 /// Takes the worktree's directory away, and its branch too when `delete_branch`.
@@ -108,8 +108,13 @@ impl Worktree {
     }
 
     /// Takes over a worktree made earlier (by a previous run), if it is still there.
+    /// The spec comes from a file on disk, so only a checkout under po's own directory on a
+    /// `po/` branch is taken: closing one deletes its directory.
     pub fn adopt(spec: Spec) -> Option<Self> {
-        spec.path.join(".git").exists().then_some(Self { spec, done: false })
+        let ours = spec.path.starts_with(crate::config::data_dir().join("worktrees"))
+            && !spec.path.components().any(|c| c == std::path::Component::ParentDir)
+            && spec.branch.starts_with("po/");
+        (ours && spec.path.join(".git").exists()).then_some(Self { spec, done: false })
     }
 
     /// Commits what is in the worktree and merges its branch into the repository's checkout,
@@ -118,7 +123,7 @@ impl Worktree {
     pub fn merge(spec: &Spec, message: &str) -> Result<String, String> {
         commit_all(spec, message)?;
         let into = git(&spec.repo, &["rev-parse", "--abbrev-ref", "HEAD"]).unwrap_or_else(|_| "HEAD".into());
-        if ahead(spec) > 0
+        if ahead(spec)? > 0
             && let Err(error) = git(&spec.repo, &["merge", "--no-edit", &spec.branch])
         {
             git(&spec.repo, &["merge", "--abort"]).ok();
@@ -150,7 +155,14 @@ impl Worktree {
             // Removing it would lose what could not be saved.
             return Some(self.spec.branch.clone());
         }
-        let keep = ahead(&self.spec) > 0;
+        let keep = match ahead(&self.spec) {
+            Ok(n) => n > 0,
+            Err(error) => {
+                // Can't tell whether it holds work, so it is kept.
+                log::warn!("worktree {}: {error}", self.spec.branch);
+                true
+            }
+        };
         remove(&self.spec, !keep);
         keep.then(|| self.spec.branch.clone())
     }
@@ -247,5 +259,25 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("po-wt-plain-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         assert!(create(&dir).is_err());
+    }
+
+    #[test]
+    fn closing_keeps_the_branch_when_it_cannot_be_inspected() {
+        let repo = repo("blind");
+        let mut wt = create(&repo).unwrap();
+        std::fs::write(wt.spec.path.join("e.txt"), "precious\n").unwrap();
+        wt.spec.base = "not-a-commit".into();
+        assert!(ahead(&wt.spec).is_err());
+        let branch = wt.spec.branch.clone();
+        assert_eq!(wt.retire(), Some(branch.clone()));
+        assert!(branches(&repo).contains(&branch));
+    }
+
+    #[test]
+    fn only_po_s_own_worktrees_are_adopted() {
+        let dir = std::env::temp_dir().join(format!("po-wt-adopt-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join(".git")).unwrap();
+        let spec = Spec { path: dir.clone(), branch: "po/x".into(), base: "b".into(), repo: dir };
+        assert!(Worktree::adopt(spec).is_none());
     }
 }
