@@ -3533,7 +3533,7 @@ impl Reader {
                         .when(!queued.is_empty(), |this| {
                             this.child(div().flex().flex_col().gap_1().pb_1().border_b_1().border_color(border).children(queued))
                         })
-                        .child(Input::new(&self.thread.draft))
+                        .child(Input::new(&self.thread.draft).large())
                         .child(
                             // The input's text sits 0.75rem in; the chips' own padding (0.5rem) plus this
                             // inset puts their text, and the label after the thread has started, on its edge.

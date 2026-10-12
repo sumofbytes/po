@@ -863,11 +863,19 @@ pub struct Input {
     state: Entity<InputState>,
     look: Look,
     suffix: Option<AnyElement>,
+    /// Text at the size of body text rather than the small size fields use.
+    large: bool,
 }
 
 impl Input {
     pub fn new(state: &Entity<InputState>) -> Self {
-        Self { state: state.clone(), look: Look::Plain, suffix: None }
+        Self { state: state.clone(), look: Look::Plain, suffix: None, large: false }
+    }
+
+    /// Text at the size of the surrounding body text, for an input people write in at length.
+    pub fn large(mut self) -> Self {
+        self.large = true;
+        self
     }
 
     /// The kit's small input: background, border and radius.
@@ -894,8 +902,7 @@ impl RenderOnce for Input {
             .flex()
             .w_full()
             .items_center()
-            .line_height(rems(1.25))
-            .text_sm()
+            .map(|this| if self.large { this.line_height(rems(1.5)).text_base() } else { this.line_height(rems(1.25)).text_sm() })
             .when(self.look == Look::Field, |this| {
                 this.h_6().px_2().py_0p5().gap_1().bg(palette.input_background).rounded(palette.radius).border_1().border_color(palette.input_border)
             })
