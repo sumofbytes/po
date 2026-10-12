@@ -88,26 +88,30 @@ An entry with a `daemon` URL uses this path, and its `command` starts the
 daemon if nothing answers at the URL (po stops a daemon it started). Plain
 `http` only; set `DEX_DAEMON_TOKEN` if the daemon needs a bearer token.
 
-### Views
+### Layout
 
-Three views, switched from the bar at the bottom or with Ctrl+1, 2 and 3:
+One layout, in three columns:
 
-- **Browse** (Ctrl+1): the explorer on the left, the file viewer in the middle,
-  the agent chat on the right.
-- **Review** (Ctrl+2): the same, showing changed files and their diffs. This is
-  where a PR or a worktree thread's work is read.
-- **Agents** (Ctrl+3): for running several agents. The left side lists every
-  project with its threads and their status marks, with the active project's
-  files below. The conversation takes the middle. The viewer or diff opens in a
-  pane on the right when you open a file, use **Open** on a tool call, or
-  toggle it with Ctrl+Shift+B; it stays out of the way until then.
+- **Left:** every project with its threads and their status marks, and below
+  them the active project's files (or changes). The line between the two can be
+  dragged, and the chevron beside **Explorer** folds it down to its header at
+  the bottom, which gives the projects the rest of the height; unfolding puts it
+  back where it was.
+- **Middle:** the conversation of the thread you are in.
+- **Right:** the viewer, for a file or a diff. Open it from the explorer, the
+  Ctrl+P finder, or **Open** on a tool call.
 
-Each view keeps its own sidebar widths, and the view you were in comes back
-with your workspace. In Agents, the line between the projects and the explorer
-can be dragged to give either more height, and stays where you put it. The
-chevron beside **Explorer** folds it down to its header at the bottom, which
-gives the projects the rest of the height; unfolding puts it back at the height
-it had. Whether it is folded is remembered too.
+The bar at the bottom (or Ctrl+1, 2 and 3) picks how it is used:
+
+- **Browse** (Ctrl+1): the viewer open on files. It opens wide, since reading
+  code wants room.
+- **Review** (Ctrl+2): the viewer open on changes and diffs. This is where a PR
+  or a worktree thread's work is read.
+- **Chat** (Ctrl+3): the viewer closed, so the conversation has the middle to
+  itself. Ctrl+Shift+B also toggles the viewer, and Ctrl+B the left side.
+
+Widths, the split, whether the explorer is folded and whether the viewer is open
+come back with your workspace.
 
 ### Projects and threads
 
@@ -117,8 +121,8 @@ threads. Opening a PR adds it as a project too, and closing it removes the
 checkout.
 
 A project can run several agent threads. **New Thread** (Ctrl+N) opens a blank
-one without stopping the others, which keep working in the background; a list
-above the chat switches between them. Under the input box, a blank thread shows
+one without stopping the others, which keep working in the background; pick
+between them in the list on the left. Under the input box, a blank thread shows
 the agent it will start with (a dropdown; the last one you used is remembered)
 and, in a git repository, a **Worktree** toggle. The agent starts when you send
 the first message, which waits for it if it is slow to start. **History** in the

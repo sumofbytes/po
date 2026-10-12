@@ -38,6 +38,15 @@ impl SidebarsState {
     pub fn new(left: Pixels, right: Pixels) -> Self {
         Self { left, right, dragging: None, bounds: Bounds::default() }
     }
+
+    /// Gives the right sidebar `share` of the whole layout's width, within the range it is drawn
+    /// with. Does nothing until the layout has been measured.
+    pub fn set_right_share(&mut self, share: f32) {
+        let width = self.bounds.size.width;
+        if width > px(0.) {
+            self.right = width * share;
+        }
+    }
 }
 
 struct Sidebar {

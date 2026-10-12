@@ -28,8 +28,8 @@ pub struct ProjectState {
 #[derive(Default)]
 pub struct Workspace {
     pub projects: Vec<ProjectState>,
-    /// The window was showing the agents view rather than files.
-    pub agents: bool,
+    /// The viewer pane was open, rather than the conversation filling the middle.
+    pub viewer_open: bool,
     /// The agent last chosen for a new thread.
     pub agent: Option<String>,
     /// The height, in pixels, the agents view gives its projects above the explorer, if dragged.
@@ -73,7 +73,7 @@ impl Workspace {
                 })
             })
             .collect();
-        json!({ "version": 1, "layout": if self.agents { "agents" } else { "files" }, "agent": self.agent, "split": self.split, "explorer_collapsed": self.explorer_collapsed, "projects": projects })
+        json!({ "version": 1, "viewer_open": self.viewer_open, "agent": self.agent, "split": self.split, "explorer_collapsed": self.explorer_collapsed, "projects": projects })
     }
 
     fn from_json(value: &Value) -> Option<Self> {
@@ -107,7 +107,8 @@ impl Workspace {
                 })
             })
             .collect();
-        Some(Self { projects, agents: value["layout"].as_str() == Some("agents"), agent: text(&value["agent"]),
+        Some(Self { projects, // Files saved before the views were merged only said which layout the window was in.
+            viewer_open: value["viewer_open"].as_bool().unwrap_or(value["layout"].as_str() != Some("agents")), agent: text(&value["agent"]),
             // A saved height that isn't a sensible number is dropped rather than trusted.
             explorer_collapsed: value["explorer_collapsed"].as_bool().unwrap_or(false),
             split: value["split"].as_f64().map(|height| height as f32).filter(|height| height.is_finite() && *height > 0.),
@@ -141,7 +142,7 @@ mod tests {
     #[test]
     fn a_workspace_survives_a_round_trip() {
         let saved = Workspace {
-            agents: true,
+            viewer_open: false,
             agent: Some("dex".into()),
             split: Some(212.5),
             explorer_collapsed: true,
@@ -166,7 +167,7 @@ mod tests {
             ],
         };
         let back = Workspace::from_json(&saved.to_json()).expect("parses");
-        assert!(back.agents);
+        assert!(!back.viewer_open);
         assert_eq!(back.agent.as_deref(), Some("dex"));
         assert_eq!(back.split, Some(212.5));
         assert!(back.explorer_collapsed);
@@ -176,6 +177,16 @@ mod tests {
         let wt = back.projects[1].worktree.as_ref().expect("worktree");
         assert_eq!((wt.branch.as_str(), wt.base.as_str()), ("po/1", "abc"));
         assert!(back.projects[1].review);
+    }
+
+    #[test]
+    fn files_from_before_the_views_were_merged_still_say_whether_the_viewer_was_open() {
+        let old_agents = Workspace::from_json(&json!({ "layout": "agents", "projects": [] })).expect("parses");
+        assert!(!old_agents.viewer_open);
+        let old_files = Workspace::from_json(&json!({ "layout": "files", "projects": [] })).expect("parses");
+        assert!(old_files.viewer_open);
+        let neither = Workspace::from_json(&json!({ "projects": [] })).expect("parses");
+        assert!(neither.viewer_open);
     }
 
     #[test]
