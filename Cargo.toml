@@ -2,6 +2,10 @@
 name = "po"
 version = "0.1.0"
 edition = "2024"
+description = "A native desktop GUI for ACP coding agents: chat, file browser, code viewer and diffs."
+license = "MIT OR Apache-2.0"
+readme = "README.md"
+repository = "https://github.com/sumofbytes/po"
 
 [dependencies]
 gpui = { package = "gpui-pre", version = "=0.3.8", default-features = false, features = ["stacker"] }
