@@ -1285,6 +1285,7 @@ impl Reader {
         self.finder_matches = Rc::new(match_files(&self.files, &query));
         self.finder_selected = 0;
         self.finder_list.reset(self.finder_matches.len());
+        self.finder_list.scroll_to(gpui::ListOffset { item_ix: 0, offset_in_item: px(0.) });
     }
 
     /// Moves the finder's selection by `delta` rows, wrapping, and keeps it in view.
@@ -1306,9 +1307,12 @@ impl Reader {
 
     /// Opens `path` in the viewer and closes the finder.
     fn accept_path(&mut self, path: &str, window: &mut Window, cx: &mut Context<Self>) {
-        self.hide_finder(window, cx);
-        self.set_mode(Mode::Source, cx);
         self.open(path, window, cx);
+        // A file that can't be shown leaves the finder up so the query isn't lost.
+        if self.notice.is_none() {
+            self.hide_finder(window, cx);
+            self.set_mode(Mode::Source, cx);
+        }
     }
 
     /// Hides the finder and gives the keys back to the reader.
@@ -2389,8 +2393,9 @@ fn main() {
             KeyBinding::new("ctrl-n", NewThread, None),
             KeyBinding::new("ctrl-p", ShowFinder, None),
             KeyBinding::new("escape", CloseFinder, Some("Finder")),
-            KeyBinding::new("up", FinderUp, Some("Finder")),
-            KeyBinding::new("down", FinderDown, Some("Finder")),
+            // The Input binds up/down itself and swallows them when single-line, so these name it.
+            KeyBinding::new("up", FinderUp, Some("Finder > Input")),
+            KeyBinding::new("down", FinderDown, Some("Finder > Input")),
         ]);
         let bounds = Bounds::centered(None, size(px(1360.0), px(840.0)), cx);
         cx.open_window(
