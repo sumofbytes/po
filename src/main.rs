@@ -3026,7 +3026,7 @@ impl Reader {
                         .when((pid, tid) == (active_project, active_thread), |row| row.bg(hover))
                         .hover(|row| row.bg(hover))
                         .on_click(move |_, window, cx| select.update(cx, |reader, cx| reader.open_thread(pid, tid, window, cx)))
-                        .child(div().flex_none().text_xs().text_color(tint).child(glyph))
+                        .child(div().flex_none().text_size(rems(0.8125)).text_color(tint).child(glyph))
                         .child(
                             // Threads sit a step below their project: smaller and regular, bright only
                             // for the one on screen.
@@ -3034,7 +3034,7 @@ impl Reader {
                                 .flex_1()
                                 .min_w_0()
                                 .truncate()
-                                .text_xs()
+                                .text_size(rems(0.8125))
                                 .text_color(if (pid, tid) == (active_project, active_thread) { foreground } else { muted })
                                 .child(thread.title()),
                         )
