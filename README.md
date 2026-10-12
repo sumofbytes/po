@@ -103,7 +103,8 @@ Three views, switched from the bar at the bottom or with Ctrl+1, 2 and 3:
   toggle it with Ctrl+Shift+B; it stays out of the way until then.
 
 Each view keeps its own sidebar widths, and the view you were in comes back
-with your workspace.
+with your workspace. In Agents, the line between the projects and the explorer
+can be dragged to give either more height.
 
 ### Projects and threads
 

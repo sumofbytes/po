@@ -207,9 +207,136 @@ impl RenderOnce for Sidebars {
     }
 }
 
+/// The least height either pane of a [`VSplit`] gets.
+const MIN_TOP: Pixels = px(72.);
+const MIN_BOTTOM: Pixels = px(120.);
+
+/// Where the boundary of a [`VSplit`] is. Until it is dragged, the panes share the height.
+pub struct VSplitState {
+    top: Option<Pixels>,
+    dragging: bool,
+    /// The whole split's bounds, from the last frame.
+    bounds: Bounds<Pixels>,
+}
+
+impl VSplitState {
+    pub fn new() -> Self {
+        Self { top: None, dragging: false, bounds: Bounds::default() }
+    }
+}
+
+/// Two panes, one above the other, with the boundary between them dragged: the vertical
+/// counterpart of [`Sidebars`], drawn the same way.
+#[derive(IntoElement)]
+pub struct VSplit {
+    state: Entity<VSplitState>,
+    top: Option<AnyElement>,
+    bottom: Option<AnyElement>,
+}
+
+pub fn vsplit(state: &Entity<VSplitState>) -> VSplit {
+    VSplit { state: state.clone(), top: None, bottom: None }
+}
+
+impl VSplit {
+    pub fn top(mut self, element: impl IntoElement) -> Self {
+        self.top = Some(element.into_any_element());
+        self
+    }
+
+    pub fn bottom(mut self, element: impl IntoElement) -> Self {
+        self.bottom = Some(element.into_any_element());
+        self
+    }
+}
+
+/// The height a drag to `y` gives the top pane, leaving both panes their minimum.
+fn dragged_height(y: Pixels, bounds: Bounds<Pixels>) -> Pixels {
+    let most = (bounds.size.height - MIN_BOTTOM).max(MIN_TOP);
+    (y - bounds.top()).clamp(MIN_TOP, most)
+}
+
+impl RenderOnce for VSplit {
+    fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
+        let (top, dragging) = {
+            let state = self.state.read(cx);
+            (state.top, state.dragging)
+        };
+        let palette = cx.global::<Palette>();
+        let color = if dragging { palette.resize_handle_active } else { palette.resize_handle };
+        let tracker = self.state.clone();
+        let grab = self.state.clone();
+        let handle = div()
+            .id("vsplit-handle")
+            .occlude()
+            .absolute()
+            .left_0()
+            .top(-HANDLE_PADDING)
+            .w_full()
+            .h(px(1.) + HANDLE_PADDING * 2.)
+            .py(HANDLE_PADDING)
+            .cursor_row_resize()
+            .child(div().flex_none().w_full().h(px(1.)).bg(color))
+            .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                grab.update(cx, |state, cx| {
+                    state.dragging = true;
+                    cx.notify();
+                });
+                cx.stop_propagation();
+            });
+        let pane = div().min_h(MIN_TOP).max_h(gpui::relative(1.)).flex_grow(0.).flex_shrink(1.);
+        let pane = match top {
+            Some(height) => pane.flex_basis(height),
+            None => pane.flex_basis(gpui::relative(0.5)),
+        };
+
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .relative()
+            // Measures the split, and follows the pointer while the handle is held.
+            .child(
+                canvas(
+                    move |bounds, _, cx| tracker.update(cx, |state, _| state.bounds = bounds),
+                    {
+                        let state = self.state.clone();
+                        move |_, _, window, _| {
+                            if !dragging {
+                                return;
+                            }
+                            window.set_window_cursor_style(CursorStyle::ResizeUpDown);
+                            let (moving, released) = (state.clone(), state.clone());
+                            window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
+                                if phase.bubble() {
+                                    moving.update(cx, |state, cx| {
+                                        state.top = Some(dragged_height(event.position.y, state.bounds));
+                                        cx.notify();
+                                    });
+                                }
+                            });
+                            window.on_mouse_event(move |_: &MouseUpEvent, phase, _, cx| {
+                                if phase.bubble() {
+                                    released.update(cx, |state, cx| {
+                                        state.dragging = false;
+                                        cx.notify();
+                                    });
+                                }
+                            });
+                        }
+                    },
+                )
+                .absolute()
+                .size_full(),
+            )
+            .child(pane.relative().overflow_hidden().children(self.top))
+            .child(div().flex_1().min_h(MIN_BOTTOM).relative().children(self.bottom).child(handle))
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{MIN_CENTER, Side, dragged_width};
+    use super::{MIN_BOTTOM, MIN_CENTER, MIN_TOP, Side, dragged_height, dragged_width};
     use gpui::{Bounds, point, px, size};
 
     #[test]
@@ -222,5 +349,16 @@ mod tests {
         // With a wide right sidebar, the left one stops where the center would get too narrow.
         assert_eq!(dragged_width(Side::Left, px(1000.), bounds, px(760.), &range), px(1200.) - px(760.) - MIN_CENTER);
         assert_eq!(dragged_width(Side::Right, px(900.), bounds, px(260.), &(px(300.)..px(760.))), px(400.));
+    }
+
+    #[test]
+    fn the_split_keeps_both_panes_their_minimum() {
+        let bounds = Bounds::new(point(px(0.), px(50.)), size(px(300.), px(800.)));
+        assert_eq!(dragged_height(px(350.), bounds), px(300.));
+        assert_eq!(dragged_height(px(60.), bounds), MIN_TOP);
+        assert_eq!(dragged_height(px(2000.), bounds), px(800.) - MIN_BOTTOM);
+        // A split too short for both minimums doesn't panic; the top gets its minimum.
+        let short = Bounds::new(point(px(0.), px(0.)), size(px(300.), px(100.)));
+        assert_eq!(dragged_height(px(90.), short), MIN_TOP);
     }
 }

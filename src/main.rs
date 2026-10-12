@@ -28,7 +28,7 @@ use ui::icon::{Icon, IconName, IconSize};
 use ui::input::{Input, InputEvent, InputState};
 use ui::list_item::ListItem;
 use ui::menu::{MenuItem, MenuState, dropdown};
-use ui::resizable::{SidebarsState, sidebars};
+use ui::resizable::{SidebarsState, VSplitState, sidebars, vsplit};
 use ui::tree::{TreeEvent, TreeItem, TreeState, tree};
 use futures::StreamExt;
 use serde_json::Value;
@@ -793,6 +793,8 @@ struct Reader {
     /// Widths for the agents layout, which wants a wider left and right than the files layout.
     agents_sidebars: Entity<SidebarsState>,
     agents_left_open: bool,
+    /// The boundary between the projects and the explorer on the agents layout's left.
+    agents_split: Entity<VSplitState>,
     /// The agents layout's pane for the viewer or diff, which stays out of the way until used.
     side_open: bool,
     /// The agent picker in the input box.
@@ -915,6 +917,7 @@ impl Reader {
             sidebars: cx.new(|_| SidebarsState::new(px(260.0), px(460.0))),
             agents_sidebars: cx.new(|_| SidebarsState::new(px(280.0), px(560.0))),
             agents_left_open: true,
+            agents_split: cx.new(|_| VSplitState::new()),
             side_open: false,
             agent_menu: cx.new(MenuState::new),
             chosen_agent: command.clone(),
@@ -2926,12 +2929,12 @@ impl Reader {
     fn agents_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let explorer = self.explorer(false, cx).into_any_element();
         let colors = cx.global::<Palette>();
-        let (border, hover, muted) = (colors.border, colors.list_hover, colors.muted_foreground);
+        let (hover, muted) = (colors.list_hover, colors.muted_foreground);
         let views = self.views();
         let (active_project, active_thread) = (self.project_id, self.thread.id);
         let many = views.len() > 1;
         let add = cx.entity();
-        let mut tree = div().id("agents-tree").flex_1().min_h_0().overflow_y_scroll().flex().flex_col().p_1();
+        let mut tree = div().id("agents-tree").size_full().overflow_y_scroll().flex().flex_col().p_1();
         for view in &views {
             let pid = view.id;
             let activity = view.threads.iter().map(|t| t.activity()).max().unwrap_or(Activity::Idle);
@@ -3022,8 +3025,7 @@ impl Reader {
             .children(self.worktree_status.clone().map(|text| {
                 div().px_3().py_1().text_xs().text_color(muted).max_h(rems(5.)).overflow_hidden().child(text)
             }))
-            .child(tree)
-            .child(div().flex_1().min_h_0().border_t_1().border_color(border).child(explorer))
+            .child(div().flex_1().min_h_0().child(vsplit(&self.agents_split).top(tree).bottom(div().size_full().child(explorer))))
     }
 
     /// The viewer or the diff viewer, as the project's mode says.
