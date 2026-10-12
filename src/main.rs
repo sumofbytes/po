@@ -1504,6 +1504,12 @@ impl Reader {
     /// since looking at code or a diff wants room; if it is open its width is left as it was.
     fn show_viewer(&mut self, mode: Mode, cx: &mut Context<Self>) {
         self.set_mode(mode, cx);
+        self.open_viewer_wide(cx);
+    }
+
+    /// Opens the viewer if it is closed, wide since looking at code or a diff wants room; if it is
+    /// open its width is left as it was.
+    fn open_viewer_wide(&mut self, cx: &mut Context<Self>) {
         if !self.side_open {
             self.side_open = true;
             self.sidebars.update(cx, |sidebars, _| sidebars.set_right_share(0.55));
@@ -1560,9 +1566,11 @@ impl Reader {
     }
 
     fn toggle_right(&mut self, cx: &mut Context<Self>) {
-        self.side_open = !self.side_open;
-        self.request_save(cx);
-        cx.notify();
+        if self.side_open {
+            self.show_chat(cx);
+        } else {
+            self.open_viewer_wide(cx);
+        }
     }
 
     fn set_mode(&mut self, mode: Mode, cx: &mut Context<Self>) {
@@ -3058,14 +3066,14 @@ impl Reader {
     }
 
     /// The viewer or the diff viewer, as the project's mode says.
-    fn pane(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn pane(&self, lead: Option<AnyElement>, trail: Option<AnyElement>, cx: &mut Context<Self>) -> AnyElement {
         match self.mode {
-            Mode::Source => self.viewer(cx).into_any_element(),
-            Mode::Diff => self.diff_viewer(cx).into_any_element(),
+            Mode::Source => self.viewer(lead, trail, cx).into_any_element(),
+            Mode::Diff => self.diff_viewer(lead, trail, cx).into_any_element(),
         }
     }
 
-    fn diff_viewer(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn diff_viewer(&self, lead: Option<AnyElement>, trail: Option<AnyElement>, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.global::<Palette>();
         let Some(path) = self.project.picked.clone() else {
             return div()
@@ -3073,7 +3081,7 @@ impl Reader {
                 .flex()
                 .flex_col()
                 .bg(colors.background)
-                .child(header("Changes", String::new(), cx))
+                .child(pane_header("Changes", status_text(String::new(), cx), lead, trail, cx))
                 .child(div().flex_1().min_h_0().child(centered("Pick a changed file".into(), cx)));
         };
         let (rows, pairs) = (self.project.rows.clone(), self.project.pairs.clone());
@@ -3180,11 +3188,11 @@ impl Reader {
             .flex()
             .flex_col()
             .bg(colors.background)
-            .child(header_with(&path, right, cx))
+            .child(pane_header(&path, right, lead, trail, cx))
             .child(div().flex_1().min_h_0().border_color(border).child(body))
     }
 
-    fn viewer(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn viewer(&self, lead: Option<AnyElement>, trail: Option<AnyElement>, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.global::<Palette>();
         let title = self.project.current.clone().unwrap_or_else(|| "No file open".into());
         let body: AnyElement = match (&self.project.code, &self.project.notice) {
@@ -3198,15 +3206,17 @@ impl Reader {
             .flex()
             .flex_col()
             .bg(colors.background)
-            .child(header(
+            .child(pane_header(
                 &title,
-                self.project.current.as_deref().map(language).unwrap_or("").to_string(),
+                status_text(self.project.current.as_deref().map(language).unwrap_or("").to_string(), cx),
+                lead,
+                trail,
                 cx,
             ))
             .child(div().flex_1().min_h_0().child(body))
     }
 
-    fn agent_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn agent_panel(&self, lead: Option<AnyElement>, trail: Option<AnyElement>, cx: &mut Context<Self>) -> impl IntoElement {
         let this = cx.entity();
         self.thread.selection.update(cx, |s, _| s.begin_frame());
         // Only the messages in view are built and laid out, however long the thread gets.
@@ -3365,7 +3375,7 @@ impl Reader {
             .flex()
             .flex_col()
             .bg(colors.background)
-            .child(header_with(
+            .child(pane_header(
                 self.agent_label().unwrap_or("Agent"),
                 div()
                     .flex()
@@ -3388,6 +3398,8 @@ impl Reader {
                             .outline()
                             .on_click(move |_, window, cx| fresh.update(cx, |reader, cx| reader.new_blank_thread(window, cx))),
                     ),
+                lead,
+                trail,
                 cx,
             ))
             .child(
@@ -3649,10 +3661,6 @@ fn permission(ix: usize, n: usize, ask: &Ask, this: &Entity<Reader>) -> impl Int
     div().flex().flex_col().gap_2().text_sm().child(format!("Permission: {}", ask.title)).child(row)
 }
 
-fn header(title: &str, detail: String, cx: &App) -> impl IntoElement {
-    header_with(title, status_text(detail, cx), cx)
-}
-
 fn status_text(text: String, cx: &App) -> impl IntoElement {
     div().flex_none().truncate().text_xs().text_color(cx.global::<Palette>().muted_foreground).child(text)
 }
@@ -3673,17 +3681,16 @@ fn show_on_hover(group: SharedString, control: impl IntoElement) -> gpui::Div {
     div().invisible().group_hover(group, |style| style.visible()).child(control)
 }
 
-fn header_with(title: &str, right: impl IntoElement, cx: &App) -> impl IntoElement {
+/// A pane's header. The window's own controls sit in the headers of the panes at its edges:
+/// `lead` before the title in the leftmost pane, `trail` after what is on the right in the
+/// rightmost one.
+fn pane_header(title: &str, right: impl IntoElement, lead: Option<AnyElement>, trail: Option<AnyElement>, cx: &App) -> impl IntoElement {
     let colors = cx.global::<Palette>();
     header_row(
-        div()
-            .min_w_0()
-            .truncate()
-            .text_sm()
-            .font_weight(FontWeight::MEDIUM)
-            .text_color(colors.foreground)
-            .child(title.to_string()),
-        right,
+        div().flex().items_center().gap_1().min_w_0().children(lead).child(
+            div().min_w_0().truncate().text_sm().font_weight(FontWeight::MEDIUM).text_color(colors.foreground).child(title.to_string()),
+        ),
+        div().flex().items_center().gap_2().child(right).children(trail),
         cx,
     )
 }
@@ -3730,67 +3737,41 @@ impl Render for Reader {
             }
         }
         let colors = cx.global::<Palette>();
-        let (background, foreground, border, sidebar) = (colors.background, colors.foreground, colors.border, colors.sidebar);
+        let (background, foreground) = (colors.background, colors.foreground);
+        let (left_open, side_open) = (self.left_open, self.side_open);
+        // The window's controls live in the headers of the panes at its edges: the sidebar toggle
+        // at the left of the leftmost pane, the viewer toggle (and the swap, while the viewer is
+        // open) at the right of the rightmost one.
         let (left, right, swap) = (cx.entity(), cx.entity(), cx.entity());
-        let (left_open, right_open) = (self.left_open, self.side_open);
-        // Three views of one layout: the viewer pane open on files, open on changes, or closed.
-        let views = [
-            ("view-browse", "Browse", "Files in the viewer (Ctrl+1)", self.side_open && self.mode == Mode::Source, 0),
-            ("view-review", "Review", "Changes and diffs in the viewer (Ctrl+2)", self.side_open && self.mode == Mode::Diff, 1),
-            ("view-chat", "Chat", "The conversation, with the viewer closed (Ctrl+3)", !self.side_open, 2),
-        ];
-        let switcher = div().flex().items_center().gap_1().children(views.into_iter().map(|(id, label, tip, selected, which)| {
-            let this = cx.entity();
-            Button::new(id).label(label).tooltip(tip).ghost().xsmall().selected(selected).on_click(move |_, _, cx| {
-                this.update(cx, |reader, cx| match which {
-                    0 => reader.show_viewer(Mode::Source, cx),
-                    1 => reader.show_viewer(Mode::Diff, cx),
-                    _ => reader.show_chat(cx),
-                })
-            })
-        }));
-        let bar = div()
-            .h_8()
-            .flex_none()
-            .flex()
-            .items_center()
-            .justify_between()
-            .px_2()
-            .border_t_1()
-            .border_color(border)
-            .bg(sidebar)
-            .child(
-                Button::new("toggle-left")
-                    .icon(if left_open { IconName::PanelLeftClose } else { IconName::PanelLeftOpen })
-                    .ghost()
-                    .small()
-                    .tooltip("Toggle left sidebar (Ctrl+B)")
-                    .on_click(move |_, _, cx| left.update(cx, |reader, cx| reader.toggle_left(cx))),
-            )
-            .child(switcher)
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_1()
-                    .child(
-                        Button::new("swap-panes")
-                            .icon(IconName::ArrowLeftRight)
-                            .ghost()
-                            .small()
-                            .disabled(!self.side_open)
-                            .tooltip("Swap the viewer and the conversation (Ctrl+Shift+S)")
-                            .on_click(move |_, _, cx| swap.update(cx, |reader, cx| reader.swap_panes(cx))),
-                    )
-                    .child(
-                        Button::new("toggle-right")
-                            .icon(if right_open { IconName::PanelRightClose } else { IconName::PanelRightOpen })
-                            .ghost()
-                            .small()
-                            .tooltip("Toggle the viewer (Ctrl+Shift+B)")
-                            .on_click(move |_, _, cx| right.update(cx, |reader, cx| reader.toggle_right(cx))),
-                    ),
-            );
+        let sidebar_toggle = Button::new("toggle-left")
+            .icon(if left_open { IconName::PanelLeftClose } else { IconName::PanelLeftOpen })
+            .ghost()
+            .small()
+            .tooltip("Toggle the sidebar (Ctrl+B)")
+            .on_click(move |_, _, cx| left.update(cx, |reader, cx| reader.toggle_left(cx)))
+            .into_any_element();
+        let swap_button = Button::new("swap-panes")
+            .icon(IconName::ArrowLeftRight)
+            .ghost()
+            .small()
+            .tooltip("Swap the viewer and the conversation (Ctrl+Shift+S)")
+            .on_click(move |_, _, cx| swap.update(cx, |reader, cx| reader.swap_panes(cx)));
+        let viewer_toggle = Button::new("toggle-right")
+            .icon(if side_open { IconName::PanelRightClose } else { IconName::PanelRightOpen })
+            .ghost()
+            .small()
+            .tooltip("Toggle the viewer (Ctrl+Shift+B)")
+            .on_click(move |_, _, cx| right.update(cx, |reader, cx| reader.toggle_right(cx)));
+        let trailing = div().flex().items_center().gap_1().children(side_open.then_some(swap_button)).child(viewer_toggle).into_any_element();
+        // With the viewer open they can trade places; with it closed the conversation is the middle
+        // either way, and has both controls.
+        let (middle, side) = if !side_open {
+            (self.agent_panel(Some(sidebar_toggle), Some(trailing), cx).into_any_element(), self.pane(None, None, cx))
+        } else if self.swapped {
+            (self.pane(Some(sidebar_toggle), None, cx), self.agent_panel(None, Some(trailing), cx).into_any_element())
+        } else {
+            (self.agent_panel(Some(sidebar_toggle), None, cx).into_any_element(), self.pane(None, Some(trailing), cx))
+        };
         div()
             .size_full()
             .flex()
@@ -3813,22 +3794,12 @@ impl Render for Reader {
             }))
             .child(
                 div().flex_1().min_h_0().child(
-                    {
-                        // With the viewer open they can trade places; with it closed the
-                        // conversation is the middle either way.
-                        let (middle, side) = if self.swapped && self.side_open {
-                            (self.pane(cx), self.agent_panel(cx).into_any_element())
-                        } else {
-                            (self.agent_panel(cx).into_any_element(), self.pane(cx))
-                        };
-                        sidebars(&self.sidebars)
-                            .left(left_open, px(220.0)..px(520.0), self.left_sidebar(cx))
-                            .center(middle)
-                            .right(right_open, px(320.0)..px(900.0), side)
-                    },
+                    sidebars(&self.sidebars)
+                        .left(left_open, px(220.0)..px(520.0), self.left_sidebar(cx))
+                        .center(middle)
+                        .right(side_open, px(320.0)..px(900.0), side),
                 ),
             )
-            .child(bar)
             .when(self.finder_open, |this| this.child(self.finder(cx)))
     }
 }

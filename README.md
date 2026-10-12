@@ -101,18 +101,21 @@ One layout, in three columns:
 - **Right:** the viewer, for a file or a diff. Open it from the explorer, the
   Ctrl+P finder, or **Open** on a tool call.
 
-The bar at the bottom (or Ctrl+1, 2 and 3) picks how it is used:
+The window's own controls sit in the pane headers, at the edges: the sidebar
+toggle (Ctrl+B) at the left of the leftmost pane, and the viewer toggle
+(Ctrl+Shift+B) at the right of the rightmost one, with **⇄** beside it (Ctrl+Shift+S)
+while the viewer is open. **⇄** swaps the viewer with the conversation, putting
+the viewer in the middle and the chat on the right, for when you are reading
+code more than talking to an agent.
+
+Three shortcuts set how the layout is used:
 
 - **Browse** (Ctrl+1): the viewer open on files. It opens wide, since reading
   code wants room.
 - **Review** (Ctrl+2): the viewer open on changes and diffs. This is where a PR
   or a worktree thread's work is read.
 - **Chat** (Ctrl+3): the viewer closed, so the conversation has the middle to
-  itself. Ctrl+Shift+B also toggles the viewer, and Ctrl+B the left side.
-
-With the viewer open, **⇄** in the bar (Ctrl+Shift+S) swaps it with the
-conversation, putting the viewer in the middle and the chat on the right, for
-when you are reading code more than talking to an agent.
+  itself.
 
 Widths, the split, whether the explorer is folded, whether the viewer is open and
 which way round they are come back with your workspace.
