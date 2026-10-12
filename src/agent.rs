@@ -45,6 +45,14 @@ impl Client {
         }
     }
 
+    /// The session this client has open, once it has one.
+    pub fn session(&self) -> Option<String> {
+        match self {
+            Self::Acp(client) => client.session(),
+            Self::Dex(client) => client.session(),
+        }
+    }
+
     pub fn cancel(&self) {
         match self {
             Self::Acp(client) => client.cancel(),

@@ -1,6 +1,7 @@
 #![recursion_limit = "1024"]
 mod acp;
 mod agent;
+mod alert;
 mod config;
 mod dex;
 mod diff;
@@ -9,11 +10,13 @@ mod theme;
 mod trace;
 mod ui;
 mod viewer;
+mod workspace;
+mod worktree;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use acp::{Event, PermissionOption, SessionInfo};
 use agent::Client;
@@ -25,7 +28,7 @@ use ui::icon::{Icon, IconName, IconSize};
 use ui::input::{Input, InputEvent, InputState};
 use ui::list_item::ListItem;
 use ui::menu::{MenuItem, MenuState, dropdown};
-use ui::resizable::{SidebarsState, sidebars};
+use ui::resizable::{SidebarsState, VSplitState, sidebars, vsplit};
 use ui::tree::{TreeEvent, TreeItem, TreeState, tree};
 use futures::StreamExt;
 use serde_json::Value;
@@ -36,7 +39,7 @@ use gpui::{
     prelude::*, px, rems, size, KeyBinding,
 };
 
-gpui::actions!(po, [ToggleLeft, ToggleRight, ShowSource, ShowChanges, ToggleSplit, NewThread, ShowFinder, CloseFinder, FinderUp, FinderDown]);
+gpui::actions!(po, [ToggleLeft, ToggleRight, ShowSource, ShowChanges, ShowChat, SwapPanes, ShowHistory, ToggleSplit, NewThread, OpenProject, ShowFinder, CloseFinder, FinderUp, FinderDown]);
 
 const SKIP: [&str; 5] = ["target", "node_modules", "dist", "build", "__pycache__"];
 const MAX_FILES: usize = 5000;
@@ -413,9 +416,23 @@ enum Mode {
     Diff,
 }
 
-struct Reader {
-    mode: Mode,
+/// Everything about one checkout: its files and git state, and what the explorer, viewer and
+/// diff viewer are showing of them.
+struct Project {
+    root: PathBuf,
+    /// What Changes mode diffs against: `HEAD`, or a PR's merge-base when reviewing.
+    base: String,
+    pr: Option<pr::Pr>,
+    files: Vec<String>,
     changes: Vec<Change>,
+    /// Change marks for the explorer, by path.
+    marks: Rc<HashMap<String, char>>,
+    /// The latest `git diff` for the picked file and `git status`, run off the UI thread;
+    /// replacing one drops the stale run.
+    diffing: Option<Task<()>>,
+    listing: Option<Task<()>>,
+    scanning: Option<Task<()>>,
+    watching: Option<gpui::Task<()>>,
     changes_tree: Entity<TreeState>,
     collapsed: HashSet<SharedString>,
     picked: Option<String>,
@@ -425,41 +442,54 @@ struct Reader {
     counts: (usize, usize),
     /// The diff's rows as laid out, inline or split; only those in view are drawn.
     diff_list: ListState,
-    /// Change marks for the explorer, by path.
-    marks: Rc<HashMap<String, char>>,
-    /// The latest `git diff` for the picked file and `git status`, run off the UI thread;
-    /// replacing one drops the stale run.
-    diffing: Option<Task<()>>,
-    listing: Option<Task<()>>,
-    scanning: Option<Task<()>>,
-    root: PathBuf,
-    /// What Changes mode diffs against: `HEAD`, or a PR's merge-base when reviewing.
-    base: String,
-    pr: Option<pr::Pr>,
-    /// The directory `po` was started in: where PRs are checked out from and where Close returns to.
-    home: PathBuf,
-    pr_input: Entity<InputState>,
-    /// Progress or failure of the last attempt to open a PR.
-    pr_status: Option<String>,
-    opening: bool,
-    watching: Option<gpui::Task<()>>,
-    files: Vec<String>,
     current: Option<String>,
     stamp: Option<Stamp>,
     code: Option<Entity<viewer::CodeViewState>>,
-    /// The Ctrl+P finder, when open: its query field, the matching files and which is picked.
-    finder: Option<Entity<InputState>>,
-    finder_matches: Rc<Vec<String>>,
-    finder_selected: usize,
-    finder_list: ListState,
-    finder_open: bool,
-    /// Keeps the finder input's event subscription alive for the reader's lifetime.
-    finder_events: Option<Subscription>,
     notice: Option<String>,
     tree: Entity<TreeState>,
     expanded: HashSet<SharedString>,
-    draft: Entity<InputState>,
-    thread: Vec<Msg>,
+    /// Set when this is a thread's own checkout, made from another project's repository.
+    worktree: Option<worktree::Worktree>,
+    /// Keep the explorer and changes list wired to this project.
+    _subscriptions: Vec<Subscription>,
+}
+
+impl Project {
+    /// What the project is called in the list.
+    fn name(&self) -> String {
+        match &self.pr {
+            Some(pr) => format!("PR #{} {}", pr.number, pr.title),
+            None => {
+                let name = self.root.file_name().map_or_else(|| self.root.display().to_string(), |n| n.to_string_lossy().to_string());
+                match &self.worktree {
+                    Some(wt) => format!("{} ⎇ {}", wt.spec.repo.file_name().map_or(name, |n| n.to_string_lossy().to_string()), wt.spec.branch),
+                    None => name,
+                }
+            }
+        }
+    }
+}
+
+/// One conversation with an agent: its messages, the process behind it and what is waiting to
+/// be sent to it.
+struct Thread {
+    /// Names the thread to the events of its agent while it isn't the one on screen.
+    id: u64,
+    /// It finished a turn while another thread was on screen.
+    unread: bool,
+    /// The agent's session, once it has one; what a thread without a running agent is resumed from.
+    session: Option<String>,
+    /// A session to load as soon as the agent has listed its sessions, instead of showing them.
+    restore: Option<String>,
+    /// What the thread was about before it was loaded back, since it has no messages yet.
+    saved_title: Option<String>,
+    /// When the thread last did anything; an idle one in the background is put to sleep.
+    touched: Instant,
+    /// A first message waiting for the agent to be ready, already shown in the thread.
+    pending: Option<String>,
+    /// Start the thread in a git worktree of its own. Only asked before it has started.
+    isolate: bool,
+    messages: Vec<Msg>,
     busy: bool,
     /// Messages typed during a turn, shown above the input until they are taken.
     queue: Vec<Queued>,
@@ -469,26 +499,310 @@ struct Reader {
     /// Choosing a session to resume: the agent's list once it arrives.
     picking: bool,
     sessions: Option<Vec<SessionInfo>>,
-    painted: bool,
     status: String,
     client: Option<Client>,
     agent: Option<String>,
-    agents: Vec<config::Agent>,
     generation: u64,
-    /// The thread's messages as laid out; only those in view are drawn.
-    thread_list: ListState,
-    sidebars: Entity<SidebarsState>,
+    draft: Entity<InputState>,
+    /// The messages as laid out; only those in view are drawn.
+    list: ListState,
     /// The selection across the agent's replies.
     selection: Entity<ui::markdown::Selection>,
-    thread_focus: gpui::FocusHandle,
-    /// The New Thread menu, so a shortcut can open it.
-    thread_menu: Entity<MenuState>,
+    focus: gpui::FocusHandle,
+    /// Sends the draft on Enter; goes with the thread.
+    _enter: Subscription,
+}
+
+impl Thread {
+    fn fail(&mut self, text: String) {
+        self.busy = false;
+        self.messages.push(Msg::Agent(vec![Block::Text(format!("**Error:** {text}"))]));
+        self.relist(self.messages.len() - 1);
+    }
+
+    /// Tells the thread's list that messages from `from` on were added or changed, so it lays
+    /// them out again.
+    fn relist(&mut self, from: usize) {
+        let listed = self.list.item_count();
+        let from = from.min(listed).min(self.messages.len());
+        self.list.splice(from..listed, self.messages.len() - from);
+    }
+
+    fn blocks(&mut self) -> &mut Vec<Block> {
+        if !matches!(self.messages.last(), Some(Msg::Agent(_))) {
+            self.messages.push(Msg::Agent(vec![]));
+            self.relist(self.messages.len() - 1);
+        }
+        match self.messages.last_mut() {
+            Some(Msg::Agent(blocks)) => blocks,
+            _ => unreachable!("an agent message was just pushed"),
+        }
+    }
+
+    /// The message holding the tool call an update is for, if it updates one.
+    fn tool_message(&self, update: &Value) -> Option<usize> {
+        if update["sessionUpdate"].as_str() != Some("tool_call_update") {
+            return None;
+        }
+        let id = update["toolCallId"].as_str().unwrap_or_default();
+        self.messages.iter().rposition(|msg| match msg {
+            Msg::Agent(blocks) => blocks.iter().any(|b| matches!(b, Block::Tool(tool) if tool.id == id)),
+            Msg::User(_) => false,
+        })
+    }
+
+    fn update(&mut self, update: &Value) -> Option<(String, bool)> {
+        let text = update["content"]["text"].as_str().unwrap_or_default();
+        let mut known: Option<String> = None;
+        match update["sessionUpdate"].as_str() {
+            Some("agent_message_chunk") => match self.blocks().last_mut() {
+                Some(Block::Text(body)) => body.push_str(text),
+                _ => self.blocks().push(Block::Text(text.to_string())),
+            },
+            Some("user_message_chunk") if self.loading || !self.busy => {
+                let text = without_context(text);
+                match self.messages.last_mut() {
+                    Some(Msg::User(body)) => body.push_str(text),
+                    _ => {
+                        self.messages.push(Msg::User(text.to_string()));
+                        self.relist(self.messages.len() - 1);
+                    }
+                }
+            }
+            Some("agent_thought_chunk") => match self.blocks().last_mut() {
+                Some(Block::Thought(body)) => body.push_str(text),
+                _ => self.blocks().push(Block::Thought(text.to_string())),
+            },
+            Some("plan") => {
+                let entries = update["entries"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|e| (e["content"].as_str().unwrap_or_default().to_string(), step(e["status"].as_str().unwrap_or("pending"))))
+                    .collect();
+                let blocks = self.blocks();
+                match blocks.iter_mut().find(|b| matches!(b, Block::Plan(_))) {
+                    Some(block) => *block = Block::Plan(entries),
+                    None => blocks.push(Block::Plan(entries)),
+                }
+            }
+            Some("tool_call") => self.blocks().push(Block::Tool(ToolBlock {
+                id: update["toolCallId"].as_str().unwrap_or_default().to_string(),
+                title: update["title"].as_str().unwrap_or("Tool").to_string(),
+                status: step(update["status"].as_str().unwrap_or("pending")),
+                open: false,
+                arguments: pretty(&update["rawInput"]),
+                result: tool_result(update),
+                path: touched(update),
+            })),
+            Some("tool_call_update") => {
+                let id = update["toolCallId"].as_str().unwrap_or_default();
+                for msg in self.messages.iter_mut().rev() {
+                    let Msg::Agent(blocks) = msg else { continue };
+                    let found = blocks.iter_mut().rev().find_map(|b| match b {
+                        Block::Tool(tool) if tool.id == id => Some(tool),
+                        _ => None,
+                    });
+                    if let Some(tool) = found {
+                        if let Some(title) = update["title"].as_str() {
+                            tool.title = title.to_string();
+                        }
+                        if let Some(status) = update["status"].as_str() {
+                            tool.status = step(status);
+                        }
+                        if !update["rawInput"].is_null() {
+                            tool.arguments = pretty(&update["rawInput"]);
+                        }
+                        let result = tool_result(update);
+                        if !result.is_empty() {
+                            tool.result = result;
+                        }
+                        if let Some(path) = touched(update) {
+                            tool.path = Some(path);
+                        }
+                        known = tool.path.clone();
+                        break;
+                    }
+                }
+            }
+            _ => {}
+        }
+        let kind = update["sessionUpdate"].as_str()?;
+        if kind != "tool_call" && kind != "tool_call_update" {
+            return None;
+        }
+        let path = touched(update).or(known)?;
+        Some((path, update["status"].as_str() == Some("completed")))
+    }
+}
+
+/// What a thread is up to, for the thread list.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Activity {
+    Idle,
+    /// Finished a turn nobody has looked at.
+    Unread,
+    Running,
+    /// Waiting for an answer to a permission request.
+    Asking,
+}
+
+impl Activity {
+    /// The mark the thread and project lists draw, and its colour.
+    fn mark(self, colors: &Palette) -> (&'static str, gpui::Hsla) {
+        match self {
+            Activity::Idle => ("○", colors.muted_foreground),
+            Activity::Running => ("●", colors.primary),
+            Activity::Asking => ("!", colors.warning),
+            // Themes may lack a green (Rosé Pine's success is teal), so this has its own.
+            Activity::Unread => ("●", gpui::hsla(0.37, 0.5, 0.5, 1.0)),
+        }
+    }
+}
+
+impl Thread {
+    fn activity(&self) -> Activity {
+        let asking = match self.messages.last() {
+            Some(Msg::Agent(blocks)) => blocks.iter().any(|b| matches!(b, Block::Permission(ask) if ask.answered.is_none())),
+            _ => false,
+        };
+        if asking {
+            Activity::Asking
+        } else if self.busy {
+            Activity::Running
+        } else if self.unread {
+            Activity::Unread
+        } else {
+            Activity::Idle
+        }
+    }
+
+    /// The first thing asked, or a placeholder while there is none.
+    fn title(&self) -> String {
+        let first = self.messages.iter().find_map(|msg| match msg {
+            Msg::User(text) => text.lines().find(|line| !line.trim().is_empty()),
+            Msg::Agent(_) => None,
+        });
+        match first {
+            Some(line) => {
+                let line = line.trim();
+                let short: String = line.chars().take(28).collect();
+                if short.len() < line.len() { format!("{short}…") } else { short }
+            }
+            None => self.saved_title.clone().unwrap_or_else(|| "New thread".into()),
+        }
+    }
+
+    /// An agent was started for it and then stopped (or never started after a restart), so it
+    /// can be resumed from its session.
+    fn asleep(&self) -> bool {
+        self.client.is_none() && self.agent.is_some() && self.session.is_some()
+    }
+
+    /// It is showing an agent's sessions to pick one from, and nothing has been picked.
+    fn is_listing(&self) -> bool {
+        self.agent.is_some() && self.picking && !self.loading && self.messages.is_empty() && self.session.is_none()
+    }
+
+    /// Whether stopping its agent would lose nothing: no turn, no question and nothing queued.
+    fn restful(&self) -> bool {
+        self.client.is_some() && self.session.is_some() && self.activity() != Activity::Asking && !self.busy && self.queue.is_empty()
+    }
+
+    /// Stops the agent, keeping what has been said so it can be shown and resumed.
+    fn sleep(&mut self) {
+        self.client = None;
+        self.ready = false;
+        self.loading = false;
+        self.picking = false;
+        // The events of the stopped agent are no longer this thread's.
+        self.generation += 1;
+        self.status = "asleep".into();
+    }
+}
+
+/// A project and its threads, wherever they are kept.
+struct View<'a> {
+    id: u64,
+    mode: Mode,
+    project: &'a Project,
+    /// The thread that is, or would be, on screen.
+    shown: u64,
+    threads: Vec<&'a Thread>,
+}
+
+/// A project that isn't on screen, with its threads and view settings. They are swapped with
+/// the same fields of [`Reader`] when it is shown.
+struct Slot {
+    id: u64,
+    mode: Mode,
+    project: Project,
+    thread: Thread,
+    parked: Vec<Thread>,
+}
+
+struct Reader {
+    mode: Mode,
+    /// The project on screen; its methods act on this one.
+    project: Project,
+    project_id: u64,
+    /// The other projects, with their threads still running.
+    slots: Vec<Slot>,
+    next_project: u64,
+    /// The thread on screen in this project; its methods act on this one.
+    thread: Thread,
+    /// This project's other threads, still running; swapped in with [`Self::with_thread`] to
+    /// handle their events.
+    parked: Vec<Thread>,
+    next_thread: u64,
+    /// The directory `po` was started in: where PRs are checked out from and where Close returns to.
+    home: PathBuf,
+    pr_input: Entity<InputState>,
+    /// Progress or failure of the last attempt to open a PR.
+    pr_status: Option<String>,
+    opening: bool,
+    /// The last thing that happened to a worktree (made, merged, closed), or why it failed.
+    worktree_status: Option<String>,
+    /// A merge or discard is running; asking for either again waits.
+    finishing: bool,
+    /// Discard was asked for once and waits for a second click, since it can't be undone.
+    confirm_discard: bool,
+    /// The Ctrl+P finder, when open: its query field, the matching files and which is picked.
+    finder: Option<Entity<InputState>>,
+    finder_matches: Rc<Vec<String>>,
+    finder_selected: usize,
+    finder_list: ListState,
+    finder_open: bool,
+    /// Keeps the finder input's event subscription alive for the reader's lifetime.
+    finder_events: Option<Subscription>,
+    painted: bool,
+    agents: Vec<config::Agent>,
+    /// Tell the desktop when a thread finishes or asks while it isn't being looked at.
+    notifications: bool,
+    /// How long a thread in the background can sit idle before its agent is stopped.
+    idle_after: Option<Duration>,
+    /// Agents that may run at once; beyond it the longest idle in the background are stopped.
+    max_live: usize,
+    /// Widths of the left side and the viewer pane.
+    sidebars: Entity<SidebarsState>,
     left_open: bool,
-    right_open: bool,
+    /// The boundary between the projects and the explorer on the left.
+    left_split: Entity<VSplitState>,
+    /// The viewer pane (a file or a diff) on the right is shown.
+    side_open: bool,
+    /// The viewer is in the middle and the conversation on the right, instead of the reverse.
+    /// Only matters while the viewer is open.
+    swapped: bool,
+    /// The agent picker in the input box.
+    agent_menu: Entity<MenuState>,
+    /// The agent new threads start with: the one last chosen.
+    chosen_agent: Option<String>,
     /// Whether diffs show old and new side by side instead of inline.
     split: bool,
     /// Keeps the shortcuts routed to the reader when no input is focused.
     focus: gpui::FocusHandle,
+    /// The workspace is about to be saved, so asking again changes nothing.
+    save_pending: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -522,39 +836,22 @@ impl Reader {
                 .submit_on_enter(true)
                 .placeholder("Message the agent")
         });
-        let tree = cx.new(|cx| TreeState::new(cx));
-        let changes_tree = cx.new(|cx| TreeState::new(cx));
+        let left_split = cx.new(|_| VSplitState::new());
+        let sidebars = cx.new(|_| SidebarsState::new(px(280.0), px(560.0)));
         let subscriptions = vec![
             // Switching modes unmounts whatever was focused (the explorer, the viewer), which
             // leaves nothing focused and the shortcuts unrouted, so take focus back.
             cx.on_focus_lost(window, |reader, window, cx| reader.focus.focus(window, cx)),
-            cx.subscribe(&tree, |reader, _, event: &TreeEvent, _| match event {
-                TreeEvent::Expanded(id) => {
-                    reader.expanded.insert(id.clone());
-                }
-                TreeEvent::Collapsed(id) => {
-                    reader.expanded.remove(id);
+            // So are the column widths.
+            cx.observe(&sidebars, |reader, sidebars, cx| {
+                if !sidebars.read(cx).dragging() {
+                    reader.request_save(cx);
                 }
             }),
-            cx.subscribe(&changes_tree, |reader, _, event: &TreeEvent, _| match event {
-                TreeEvent::Expanded(id) => {
-                    reader.collapsed.remove(id);
-                }
-                TreeEvent::Collapsed(id) => {
-                    reader.collapsed.insert(id.clone());
-                }
-            }),
-            // Moving the selection with the keyboard opens the file too, like a click.
-            cx.observe_in(&tree, window, |reader, tree, window, cx| {
-                let path = tree.read(cx).selected_entry().filter(|e| !e.folder).map(|e| e.id.to_string());
-                if let Some(path) = path.filter(|p| reader.mode == Mode::Source && reader.current.as_deref() != Some(p)) {
-                    reader.open(&path, window, cx);
-                }
-            }),
-            cx.observe(&changes_tree, |reader, tree, cx| {
-                let path = tree.read(cx).selected_entry().filter(|e| !e.folder).map(|e| e.id.to_string());
-                if let Some(path) = path.filter(|p| reader.mode == Mode::Diff && reader.picked.as_deref() != Some(p)) {
-                    reader.pick(&path, cx);
+            // Where the split was dragged to is kept, once the drag is over.
+            cx.observe(&left_split, |reader, split, cx| {
+                if !split.read(cx).dragging() {
+                    reader.request_save(cx);
                 }
             }),
             cx.subscribe_in(&pr_input, window, |reader, _, event: &InputEvent, window, cx| {
@@ -562,19 +859,171 @@ impl Reader {
                     reader.open_pr(window, cx);
                 }
             }),
-            cx.subscribe_in(&draft, window, |reader, _, event: &InputEvent, window, cx| {
-                if let InputEvent::PressEnter { shift: false, alt } = event {
-                    reader.send(*alt, window, cx);
-                }
-            }),
         ];
-        let mut agents = config::agents(&config::load());
+        let enter = Self::send_on_enter(&draft, window, cx);
+        let settings = config::load();
+        let mut agents = config::agents(&settings);
+        let idle_minutes = settings["idle_minutes"].as_u64().unwrap_or(15);
         if let Some(command) = command.as_ref().filter(|c| !agents.iter().any(|agent| agent.id == **c)) {
             agents.push(config::Agent { id: command.clone(), name: "Custom".into(), command: command.clone(), daemon: None });
         }
+        let project = Self::build_project(root, pr, files, window, cx);
+        let thread = Thread {
+            id: 0,
+            unread: false,
+            session: None,
+            restore: None,
+            saved_title: None,
+            touched: Instant::now(),
+            pending: None,
+            isolate: false,
+            _enter: enter,
+            messages: vec![],
+            busy: false,
+            queue: vec![],
+            ready: false,
+            loading: false,
+            picking: false,
+            sessions: None,
+            status: String::new(),
+            client: None,
+            agent: None,
+            generation: 0,
+            draft,
+            list: ListState::new(0, ListAlignment::Top, px(400.)),
+            selection: cx.new(|_| ui::markdown::Selection::default()),
+            focus: cx.focus_handle(),
+        };
         let mut reader = Self {
             mode: Mode::Source,
+            project,
+            project_id: 0,
+            slots: vec![],
+            next_project: 1,
+            thread,
+            parked: vec![],
+            next_thread: 1,
+            home,
+            pr_input,
+            pr_status: None,
+            opening: false,
+            worktree_status: None,
+            finishing: false,
+            confirm_discard: false,
+            finder: None,
+            finder_matches: Rc::new(vec![]),
+            finder_selected: 0,
+            finder_list: ListState::new(0, ListAlignment::Top, px(400.)),
+            finder_open: false,
+            finder_events: None,
+            painted: false,
+            agents,
+            notifications: settings["notifications"].as_bool().unwrap_or(true),
+            idle_after: (idle_minutes > 0).then(|| Duration::from_secs(idle_minutes * 60)),
+            max_live: settings["max_live_agents"].as_u64().unwrap_or(8).max(1) as usize,
+            sidebars,
+            left_open: true,
+            left_split,
+            side_open: true,
+            swapped: false,
+            agent_menu: cx.new(MenuState::new),
+            chosen_agent: command.clone(),
+            split: false,
+            focus: cx.focus_handle(),
+            save_pending: false,
+            _subscriptions: subscriptions,
+        };
+        reader.focus.focus(window, cx);
+        trace::mark("reader built");
+        reader.refresh_tree(cx);
+        trace::mark("tree");
+        let resumed = workspace::Workspace::load(&reader.home).is_some_and(|saved| reader.restore(saved, window, cx));
+        trace::mark("restore");
+        if resumed {
+            reader.wake_thread(window, cx);
+        } else if let Some(command) = command {
+            reader.connect(&command, false, window, cx);
+            trace::mark("connect");
+        }
+        reader.watch(watch, window, cx);
+        trace::mark("watch");
+        // Agents nobody is talking to are stopped now and then; their threads wake on demand.
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(Duration::from_secs(60)).await;
+                if this.update(cx, |reader, cx| reader.sleep_idle(cx)).is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
+        reader
+    }
+
+    /// A project over `root`, showing `files` in its explorer until the next walk.
+    fn build_project(root: PathBuf, pr: Option<pr::Pr>, files: Vec<String>, window: &mut Window, cx: &mut Context<Self>) -> Project {
+        let tree = cx.new(|cx| TreeState::new(cx));
+        let changes_tree = cx.new(|cx| TreeState::new(cx));
+        // Only the project on screen has its trees touched, so these act on `reader.project`;
+        // the check keeps a stray event from another project's tree off it.
+        let subscriptions = vec![
+            cx.subscribe(&tree, |reader, tree, event: &TreeEvent, _| {
+                if reader.project.tree != tree {
+                    return;
+                }
+                match event {
+                    TreeEvent::Expanded(id) => {
+                        reader.project.expanded.insert(id.clone());
+                    }
+                    TreeEvent::Collapsed(id) => {
+                        reader.project.expanded.remove(id);
+                    }
+                }
+            }),
+            cx.subscribe(&changes_tree, |reader, tree, event: &TreeEvent, _| {
+                if reader.project.changes_tree != tree {
+                    return;
+                }
+                match event {
+                    TreeEvent::Expanded(id) => {
+                        reader.project.collapsed.remove(id);
+                    }
+                    TreeEvent::Collapsed(id) => {
+                        reader.project.collapsed.insert(id.clone());
+                    }
+                }
+            }),
+            // Moving the selection with the keyboard opens the file too, like a click.
+            cx.observe_in(&tree, window, |reader, tree, window, cx| {
+                if reader.project.tree != tree {
+                    return;
+                }
+                let path = tree.read(cx).selected_entry().filter(|e| !e.folder).map(|e| e.id.to_string());
+                if let Some(path) = path.filter(|p| reader.mode == Mode::Source && reader.project.current.as_deref() != Some(p)) {
+                    reader.open(&path, window, cx);
+                }
+            }),
+            cx.observe(&changes_tree, |reader, tree, cx| {
+                if reader.project.changes_tree != tree {
+                    return;
+                }
+                let path = tree.read(cx).selected_entry().filter(|e| !e.folder).map(|e| e.id.to_string());
+                if let Some(path) = path.filter(|p| reader.mode == Mode::Diff && reader.project.picked.as_deref() != Some(p)) {
+                    reader.pick(&path, cx);
+                }
+            }),
+        ];
+        Project {
+            root,
+            base: pr.as_ref().map_or_else(|| "HEAD".to_string(), |pr| pr.base.clone()),
+            pr,
+            files,
             changes: vec![],
+            marks: Rc::default(),
+            diffing: None,
+            listing: None,
+            scanning: None,
+            watching: None,
             changes_tree,
             collapsed: HashSet::new(),
             picked: None,
@@ -582,74 +1031,22 @@ impl Reader {
             pairs: Rc::new(vec![]),
             counts: (0, 0),
             diff_list: ListState::new(0, ListAlignment::Top, px(400.)),
-            marks: Rc::default(),
-            diffing: None,
-            listing: None,
-            scanning: None,
-            root,
-            base: pr.as_ref().map_or_else(|| "HEAD".to_string(), |pr| pr.base.clone()),
-            pr,
-            home,
-            pr_input,
-            pr_status: None,
-            opening: false,
-            watching: None,
-            files,
             current: None,
             stamp: None,
             code: None,
-            finder: None,
-            finder_matches: Rc::new(vec![]),
-            finder_selected: 0,
-            finder_list: ListState::new(0, ListAlignment::Top, px(400.)),
-            finder_open: false,
-            finder_events: None,
             notice: None,
             tree,
             expanded: HashSet::new(),
-            draft,
-            thread: vec![],
-            busy: false,
-            queue: vec![],
-            ready: false,
-            loading: false,
-            picking: false,
-            sessions: None,
-            painted: false,
-            status: String::new(),
-            client: None,
-            agent: None,
-            agents,
-            generation: 0,
-            thread_list: ListState::new(0, ListAlignment::Top, px(400.)),
-            sidebars: cx.new(|_| SidebarsState::new(px(260.0), px(460.0))),
-            selection: cx.new(|_| ui::markdown::Selection::default()),
-            thread_focus: cx.focus_handle(),
-            thread_menu: cx.new(MenuState::new),
-            left_open: true,
-            right_open: true,
-            split: false,
-            focus: cx.focus_handle(),
+            worktree: None,
             _subscriptions: subscriptions,
-        };
-        reader.focus.focus(window, cx);
-        trace::mark("reader built");
-        reader.refresh_tree(cx);
-        trace::mark("tree");
-        if let Some(command) = command {
-            reader.connect(&command, false, window, cx);
-            trace::mark("connect");
         }
-        reader.watch(watch, window, cx);
-        trace::mark("watch");
-        reader
     }
 
     /// Rebuilds the explorer from `files`, keeping folders open and the current file selected.
     fn refresh_tree(&mut self, cx: &mut Context<Self>) {
-        let items = explorer_items(&self.files, &self.expanded);
-        let current = self.current.clone().map(SharedString::from);
-        self.tree.update(cx, |tree, cx| {
+        let items = explorer_items(&self.project.files, &self.project.expanded);
+        let current = self.project.current.clone().map(SharedString::from);
+        self.project.tree.update(cx, |tree, cx| {
             tree.set_items(items, cx);
             if let Some(ix) = current.and_then(|id| tree.index_of(&id)) {
                 tree.set_selected_index(Some(ix), cx);
@@ -660,30 +1057,30 @@ impl Reader {
     /// Takes a fresh list of changed files. In diff mode it picks a file if none is, and
     /// reloads the picked file's diff when `rediff` says it may have changed.
     fn apply_changes(&mut self, changes: Vec<Change>, rebuild: bool, rediff: bool, cx: &mut Context<Self>) {
-        let listed = rebuild || self.changes != changes;
-        self.changes = changes;
+        let listed = rebuild || self.project.changes != changes;
+        self.project.changes = changes;
         if listed {
-            self.marks = Rc::new(self.changes.iter().map(|c| (c.path.clone(), c.status)).collect());
+            self.project.marks = Rc::new(self.project.changes.iter().map(|c| (c.path.clone(), c.status)).collect());
         }
         if self.mode != Mode::Diff {
             return;
         }
         if listed {
-            let paths: Vec<String> = self.changes.iter().map(|c| c.path.clone()).collect();
+            let paths: Vec<String> = self.project.changes.iter().map(|c| c.path.clone()).collect();
             let mut expanded = folders(&paths);
-            expanded.retain(|id| !self.collapsed.contains(id));
+            expanded.retain(|id| !self.project.collapsed.contains(id));
             let items = explorer_items(&paths, &expanded);
-            self.changes_tree.update(cx, |tree, cx| tree.set_items(items, cx));
+            self.project.changes_tree.update(cx, |tree, cx| tree.set_items(items, cx));
         }
-        let keep = self.picked.clone().filter(|path| self.changes.iter().any(|c| &c.path == path));
+        let keep = self.project.picked.clone().filter(|path| self.project.changes.iter().any(|c| &c.path == path));
         match keep {
             Some(path) if rediff || listed => self.pick(&path, cx),
             Some(_) => {}
-            None => match self.changes.first().map(|c| c.path.clone()) {
+            None => match self.project.changes.first().map(|c| c.path.clone()) {
                 Some(path) => self.pick(&path, cx),
                 None => {
-                    self.picked = None;
-                    self.diffing = None;
+                    self.project.picked = None;
+                    self.project.diffing = None;
                     self.set_rows(vec![]);
                 }
             },
@@ -694,8 +1091,8 @@ impl Reader {
     /// Lists the changed files with `git` off the UI thread, then applies them as
     /// [`Self::apply_changes`] does and picks `then`, if given.
     fn refresh_changes(&mut self, rebuild: bool, then: Option<String>, cx: &mut Context<Self>) {
-        let (root, base) = (self.root.clone(), self.base.clone());
-        self.listing = Some(cx.spawn(async move |this, cx| {
+        let (root, base) = (self.project.root.clone(), self.project.base.clone());
+        self.project.listing = Some(cx.spawn(async move |this, cx| {
             let changes = cx.background_executor().spawn(async move { diff::changes(&root, &base) }).await;
             this.update(cx, |reader, cx| {
                 reader.apply_changes(changes, rebuild, true, cx);
@@ -709,8 +1106,8 @@ impl Reader {
 
     /// Re-walks the workspace off the UI thread and refreshes the explorer.
     fn rescan(&mut self, cx: &mut Context<Self>) {
-        let root = self.root.clone();
-        self.scanning = Some(cx.spawn(async move |this, cx| {
+        let root = self.project.root.clone();
+        self.project.scanning = Some(cx.spawn(async move |this, cx| {
             let files = cx
                 .background_executor()
                 .spawn(async move {
@@ -728,10 +1125,10 @@ impl Reader {
 
     /// Adopts a fresh walk of the workspace, if it changed, in the explorer and an open finder.
     fn set_files(&mut self, files: Vec<String>, cx: &mut Context<Self>) {
-        if self.files == files {
+        if self.project.files == files {
             return;
         }
-        self.files = files;
+        self.project.files = files;
         self.refresh_tree(cx);
         if self.finder_open {
             let picked = self.finder_selected;
@@ -743,41 +1140,41 @@ impl Reader {
 
     /// Shows the diff `rows`, and works out their side-by-side pairs and counts once.
     fn set_rows(&mut self, rows: Vec<Row>) {
-        self.counts = rows.iter().fold((0, 0), |(a, r), row| match row.kind {
+        self.project.counts = rows.iter().fold((0, 0), |(a, r), row| match row.kind {
             Kind::Added => (a + 1, r),
             Kind::Removed => (a, r + 1),
             _ => (a, r),
         });
-        self.pairs = Rc::new(diff::split(&rows));
-        self.rows = Rc::new(rows);
+        self.project.pairs = Rc::new(diff::split(&rows));
+        self.project.rows = Rc::new(rows);
         self.relist_diff();
     }
 
     fn relist_diff(&mut self) {
-        self.diff_list.reset(if self.split { self.pairs.len() } else { self.rows.len() });
+        self.project.diff_list.reset(if self.split { self.project.pairs.len() } else { self.project.rows.len() });
     }
 
     /// Shows `path`'s diff in the viewer, once `git` has produced it off the UI thread.
     fn pick(&mut self, path: &str, cx: &mut Context<Self>) {
-        let Some(change) = self.changes.iter().find(|c| c.path == path).cloned() else { return };
-        if self.picked.as_deref() != Some(path) {
-            self.picked = Some(path.to_string());
+        let Some(change) = self.project.changes.iter().find(|c| c.path == path).cloned() else { return };
+        if self.project.picked.as_deref() != Some(path) {
+            self.project.picked = Some(path.to_string());
             // The last file's diff isn't shown under this one's name while this one loads.
             self.set_rows(vec![]);
             let id = SharedString::from(path.to_string());
-            self.changes_tree.update(cx, |tree, cx| {
+            self.project.changes_tree.update(cx, |tree, cx| {
                 if let Some(ix) = tree.index_of(&id) {
                     tree.set_selected_index(Some(ix), cx);
                 }
             });
         }
-        let (root, base, path) = (self.root.clone(), self.base.clone(), path.to_string());
-        self.diffing = Some(cx.spawn(async move |this, cx| {
+        let (root, base, path) = (self.project.root.clone(), self.project.base.clone(), path.to_string());
+        self.project.diffing = Some(cx.spawn(async move |this, cx| {
             let rows = cx.background_executor().spawn(async move { diff::file_diff(&root, &base, &change) }).await;
             this.update(cx, |reader, cx| {
-                if reader.picked.as_deref() == Some(&path) {
+                if reader.project.picked.as_deref() == Some(&path) {
                     reader.set_rows(rows);
-                    reader.diffing = None;
+                    reader.project.diffing = None;
                     cx.notify();
                 }
             })
@@ -795,10 +1192,11 @@ impl Reader {
         self.opening = true;
         self.pr_status = Some(format!("Checking out {spec}…"));
         cx.notify();
-        let home = self.home.clone();
+        // Reviewed from the checkout on screen, or from where `po` started if that is a PR.
+        let repo = if self.project.pr.is_none() { self.project.root.clone() } else { self.home.clone() };
         let handle = window.window_handle();
         cx.spawn(async move |this, cx| {
-            let result = cx.background_executor().spawn(async move { pr::Pr::open(&home, &spec) }).await;
+            let result = cx.background_executor().spawn(async move { pr::Pr::open(&repo, &spec) }).await;
             handle
                 .update(cx, |_, window, cx| {
                     this.update(cx, |reader, cx| {
@@ -808,7 +1206,7 @@ impl Reader {
                                 reader.pr_status = None;
                                 reader.pr_input.update(cx, |input, cx| input.set_value("", window, cx));
                                 let root = pr.worktree.clone();
-                                reader.switch_root(root, Some(pr), window, cx);
+                                reader.add_project(root, Some(pr), window, cx);
                             }
                             Err(error) => {
                                 log::warn!("open PR: {error}");
@@ -823,49 +1221,364 @@ impl Reader {
         .detach();
     }
 
-    /// Leaves the PR review and goes back to the directory `po` started in.
+    /// Closes the PR review, going back to another project, or to the directory `po` started in
+    /// if this was the only one.
     fn close_pr(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let home = self.home.clone();
-        self.switch_root(home, None, window, cx);
+        let id = self.project_id;
+        if self.slots.is_empty() {
+            let home = self.home.clone();
+            self.add_project(home, None, window, cx);
+        }
+        self.close_project(id, window, cx);
     }
 
-    /// Points the whole window (explorer, viewer, watcher, agent) at `root`, which is
-    /// `pr`'s worktree when reviewing one. The previous PR's worktree is removed.
-    fn switch_root(&mut self, root: PathBuf, pr: Option<pr::Pr>, window: &mut Window, cx: &mut Context<Self>) {
-        // Stop watching the old tree before it can be deleted.
-        self.watching = None;
-        self.base = pr.as_ref().map_or_else(|| "HEAD".to_string(), |pr| pr.base.clone());
-        self.root = root;
-        drop(std::mem::replace(&mut self.pr, pr));
-        self.files.clear();
-        self.expanded.clear();
-        self.collapsed.clear();
-        self.current = None;
-        self.stamp = None;
-        self.code = None;
-        self.notice = None;
-        self.picked = None;
-        self.diffing = None;
-        self.set_rows(vec![]);
-        self.changes.clear();
-        self.marks = Rc::default();
+    /// Swaps the project on screen, with its threads and mode, for `slots[at]`.
+    fn swap_slot(&mut self, at: usize) {
+        let slot = &mut self.slots[at];
+        std::mem::swap(&mut self.project_id, &mut slot.id);
+        std::mem::swap(&mut self.mode, &mut slot.mode);
+        std::mem::swap(&mut self.project, &mut slot.project);
+        std::mem::swap(&mut self.thread, &mut slot.thread);
+        std::mem::swap(&mut self.parked, &mut slot.parked);
+    }
+
+    /// Stops what only the project on screen needs (its watcher, `git` runs and the finder), so
+    /// that nothing keeps updating it once another is shown. Its threads are not touched.
+    fn suspend_project(&mut self) {
+        let project = &mut self.project;
+        project.watching = None;
+        project.listing = None;
+        project.scanning = None;
+        project.diffing = None;
+        self.finder_open = false;
+    }
+
+    /// Brings a project that was swapped in up to date with the disk, and starts watching it.
+    fn resume_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.refresh_tree(cx);
         self.rescan(cx);
-        // The agent works in the old directory, so it restarts in the new one.
-        if let Some(agent) = self.agent.clone() {
+        self.watch(None, window, cx);
+        if self.mode == Mode::Diff {
+            self.apply_changes(self.project.changes.clone(), true, false, cx);
+            self.refresh_changes(true, None, cx);
+        }
+        if let Some(path) = self.project.current.clone() {
+            self.open(&path, window, cx);
+        }
+        self.thread.unread = false;
+        self.pr_status = None;
+        self.worktree_status = None;
+        self.confirm_discard = false;
+        self.focus.focus(window, cx);
+        cx.notify();
+    }
+
+    /// Shows project `id`; its threads keep going wherever they were.
+    fn show_project(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
+        self.show_project_with(id, None, window, cx);
+    }
+
+    /// [`Self::show_project`], with thread `thread` of it on screen if it has one.
+    fn show_project_with(&mut self, id: u64, thread: Option<u64>, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.slots.iter().any(|slot| slot.id == id) {
+            return;
+        }
+        // Leaving a session listing unused drops it.
+        if self.thread.is_listing() {
+            self.close_thread(self.thread.id, window, cx);
+        }
+        let Some(at) = self.slots.iter().position(|slot| slot.id == id) else { return };
+        self.suspend_project();
+        self.swap_slot(at);
+        if let Some(parked) = thread.and_then(|id| self.parked.iter().position(|t| t.id == id)) {
+            std::mem::swap(&mut self.thread, &mut self.parked[parked]);
+        }
+        self.resume_project(window, cx);
+        self.wake_thread(window, cx);
+        self.request_save(cx);
+    }
+
+    /// Adds a project over `root` (a PR's worktree when `pr` is given) and shows it. If it is
+    /// already open, that one is shown. An agent starts in it, the same one as in the project
+    /// it was opened from.
+    fn add_project(&mut self, root: PathBuf, pr: Option<pr::Pr>, window: &mut Window, cx: &mut Context<Self>) {
+        if pr.is_none() {
+            if self.project.pr.is_none() && self.project.root == root {
+                return;
+            }
+            if let Some(id) = self.slots.iter().find(|slot| slot.project.pr.is_none() && slot.project.root == root).map(|slot| slot.id) {
+                return self.show_project(id, window, cx);
+            }
+        }
+        let agent = self.thread.agent.clone();
+        let review = pr.is_some();
+        let project = Self::build_project(root, pr, vec![], window, cx);
+        self.open_project(project, if review { Mode::Diff } else { Mode::Source }, agent, window, cx);
+    }
+
+    /// Shows `project` in `mode`, with a thread of its own that runs `agent`, if any. The
+    /// project on screen goes on running in the background.
+    fn open_project(&mut self, project: Project, mode: Mode, agent: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+        let thread = self.blank_thread(window, cx);
+        self.suspend_project();
+        let id = self.next_project;
+        self.next_project += 1;
+        // The project on screen goes into a slot, and the new one takes its fields.
+        self.slots.push(Slot { id, mode, project, thread, parked: vec![] });
+        let at = self.slots.len() - 1;
+        self.swap_slot(at);
+        self.resume_project(window, cx);
+        if let Some(agent) = agent {
             self.connect(&agent, false, window, cx);
         }
-        self.watch(None, window, cx);
-        if self.pr.is_some() {
-            self.mode = Mode::Diff;
+        self.request_save(cx);
+    }
+
+    /// Starts a thread with `key`'s agent in a git worktree of its own, shown as a project:
+    /// a branch whose changes can be reviewed here, then merged or discarded.
+    /// With `first`, the message to start it with and the blank thread it was typed in, which
+    /// goes away once the worktree is up.
+    fn new_worktree_thread(&mut self, key: &str, first: Option<(String, (u64, u64))>, window: &mut Window, cx: &mut Context<Self>) {
+        if self.finishing {
+            return;
         }
-        self.refresh_changes(true, None, cx);
+        // A worktree is made from the repository, not from another worktree.
+        let from = match &self.project.worktree {
+            Some(wt) => wt.spec.repo.clone(),
+            None => self.project.root.clone(),
+        };
+        self.finishing = true;
+        self.worktree_status = Some("Creating worktree…".into());
+        cx.notify();
+        let (key, handle) = (key.to_string(), window.window_handle());
+        cx.spawn(async move |this, cx| {
+            let made = cx.background_executor().spawn(async move { worktree::Worktree::create(&from) }).await;
+            handle
+                .update(cx, |_, window, cx| {
+                    this.update(cx, |reader, cx| {
+                        reader.finishing = false;
+                        match made {
+                            Ok(wt) => {
+                                reader.worktree_status = None;
+                                reader.open_worktree(wt, key, first, window, cx);
+                            }
+                            Err(error) => {
+                                log::warn!("worktree: {error}");
+                                reader.worktree_status = Some(error);
+                                if let Some((_, (_, tid))) = first {
+                                    reader.with_thread(tid, |reader, _| reader.thread.status.clear());
+                                }
+                                cx.notify();
+                            }
+                        }
+                    })
+                })
+                .ok();
+        })
+        .detach();
+    }
+
+    fn open_worktree(&mut self, wt: worktree::Worktree, agent: String, first: Option<(String, (u64, u64))>, window: &mut Window, cx: &mut Context<Self>) {
+        log::info!("worktree: {} for {agent}", wt.spec.branch);
+        let mut project = Self::build_project(wt.spec.path.clone(), None, vec![], window, cx);
+        project.base = wt.spec.base.clone();
+        project.worktree = Some(wt);
+        self.confirm_discard = false;
+        self.open_project(project, Mode::Diff, Some(agent), window, cx);
+        if let Some((prompt, (pid, tid))) = first {
+            self.begin_turn(&prompt);
+            self.thread.pending = Some(prompt);
+            // The thread it was typed in stays only if something has happened to it since.
+            let blank = self.views().iter().any(|v| v.id == pid && v.threads.iter().any(|t| t.id == tid && t.agent.is_none()));
+            if blank {
+                self.close_any_thread(pid, tid, window, cx);
+            }
+        }
+    }
+
+    /// Merges the worktree on screen into the checkout it came from, or throws it away.
+    fn finish_worktree(&mut self, merge: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(spec) = self.project.worktree.as_ref().map(|wt| wt.spec.clone()) else { return };
+        if self.finishing {
+            return;
+        }
+        if !merge && !self.confirm_discard {
+            self.confirm_discard = true;
+            cx.notify();
+            return;
+        }
+        self.confirm_discard = false;
+        self.finishing = true;
+        self.worktree_status = Some(if merge { "Merging…" } else { "Discarding…" }.into());
+        let (id, handle) = (self.project_id, window.window_handle());
+        let message = format!("po: {}", self.thread.title());
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    if merge {
+                        worktree::Worktree::merge(&spec, &message).map(Some)
+                    } else {
+                        worktree::Worktree::discard(&spec);
+                        Ok(None)
+                    }
+                })
+                .await;
+            handle
+                .update(cx, |_, window, cx| {
+                    this.update(cx, |reader, cx| {
+                        reader.finishing = false;
+                        match result {
+                            Ok(into) => {
+                                reader.close_worktree_project(id, window, cx);
+                                reader.worktree_status = Some(match into {
+                                    Some(into) => format!("Merged into {into}"),
+                                    None => "Discarded".into(),
+                                });
+                            }
+                            Err(error) => {
+                                log::warn!("worktree: {error}");
+                                reader.worktree_status = Some(error);
+                            }
+                        }
+                        cx.notify();
+                    })
+                })
+                .ok();
+        })
+        .detach();
+    }
+
+    /// Project `id`, on screen or not.
+    fn project_by_id(&mut self, id: u64) -> Option<&mut Project> {
+        if self.project_id == id {
+            return Some(&mut self.project);
+        }
+        self.slots.iter_mut().find(|slot| slot.id == id).map(|slot| &mut slot.project)
+    }
+
+    /// Closes the project of a worktree that has been merged or discarded, going back to the
+    /// project it came from if that is open.
+    fn close_worktree_project(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
+        let origin = self.project_by_id(id).and_then(|project| project.worktree.as_ref()).map(|wt| wt.spec.repo.clone());
+        if let Some(wt) = self.project_by_id(id).and_then(|project| project.worktree.as_mut()) {
+            wt.finished();
+        }
+        let parent = origin.and_then(|repo| {
+            std::iter::once((self.project_id, &self.project)).chain(self.slots.iter().map(|s| (s.id, &s.project)))
+                .find(|(pid, project)| *pid != id && project.worktree.is_none() && project.pr.is_none() && project.root == repo)
+                .map(|(pid, _)| pid)
+        });
+        if let Some(parent) = parent {
+            self.show_project(parent, window, cx);
+        }
+        self.close_project(id, window, cx);
+    }
+
+    /// Asks for a folder and opens it as a project.
+    fn pick_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let picked = cx.prompt_for_paths(gpui::PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Open project".into()),
+        });
+        let handle = window.window_handle();
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(paths))) = picked.await else { return };
+            let Some(root) = paths.into_iter().next().and_then(|path| path.canonicalize().ok()) else { return };
+            handle.update(cx, |_, window, cx| this.update(cx, |reader, cx| reader.add_project(root, None, window, cx))).ok();
+        })
+        .detach();
+    }
+
+    /// Closes project `id`: its agents stop, and a PR's worktree is removed. Never the last one.
+    fn close_project(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
+        if self.slots.is_empty() {
+            return;
+        }
+        if self.project_id == id {
+            // Show another first; the closed project is then the one in the slot.
+            let Some(other) = self.slots.last().map(|slot| slot.id) else { return };
+            self.show_project(other, window, cx);
+        }
+        let Some(at) = self.slots.iter().position(|slot| slot.id == id) else { return };
+        // Its agents stop with the slot; a worktree is then closed off the UI thread without
+        // losing what was done in it, which the user is told.
+        let mut slot = self.slots.remove(at);
+        let worktree = slot.project.worktree.take();
+        drop(slot);
+        if let Some(mut wt) = worktree {
+            cx.spawn(async move |this, cx| {
+                let kept = cx.background_executor().spawn(async move { wt.retire() }).await;
+                if let Some(branch) = kept {
+                    this.update(cx, |reader, cx| {
+                        reader.worktree_status = Some(format!("Closed. Its work is kept on branch {branch}"));
+                        cx.notify();
+                    })
+                    .ok();
+                }
+            })
+            .detach();
+        }
+        self.request_save(cx);
         cx.notify();
     }
 
     fn toggle_left(&mut self, cx: &mut Context<Self>) {
         self.left_open = !self.left_open;
         cx.notify();
+    }
+
+    /// Browse (files) or Review (changes) in the viewer pane. If the pane was closed it opens wide,
+    /// since looking at code or a diff wants room; if it is open its width is left as it was.
+    fn show_viewer(&mut self, mode: Mode, cx: &mut Context<Self>) {
+        self.set_mode(mode, cx);
+        self.open_viewer_wide(cx);
+    }
+
+    /// Opens the viewer if it is closed, wide since looking at code or a diff wants room; if it is
+    /// open its width is left as it was.
+    fn open_viewer_wide(&mut self, cx: &mut Context<Self>) {
+        if !self.side_open {
+            self.side_open = true;
+            self.sidebars.update(cx, |sidebars, _| sidebars.set_right_share(0.55));
+            self.request_save(cx);
+        }
+        cx.notify();
+    }
+
+    /// Chat: the viewer pane closed, so the conversation has the middle to itself.
+    fn show_chat(&mut self, cx: &mut Context<Self>) {
+        if self.side_open {
+            self.side_open = false;
+            self.request_save(cx);
+        }
+        cx.notify();
+    }
+
+    /// Shows the viewer pane, which a file was just opened for, at the width it last had.
+    fn reveal_side(&mut self, cx: &mut Context<Self>) {
+        if !self.side_open {
+            self.side_open = true;
+            self.request_save(cx);
+            cx.notify();
+        }
+    }
+
+    /// Shows `path` where it is most useful: its diff if it has changes, the file otherwise.
+    fn reveal(&mut self, path: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let full = Path::new(path);
+        let relative = full.strip_prefix(&self.project.root).unwrap_or(full).to_string_lossy().replace('\\', "/");
+        if self.project.changes.iter().any(|change| change.path == relative) {
+            self.set_mode(Mode::Diff, cx);
+            self.pick(&relative, cx);
+        } else if self.project.root.join(&relative).is_file() {
+            self.set_mode(Mode::Source, cx);
+            self.open(&relative, window, cx);
+        }
+        self.reveal_side(cx);
     }
 
     fn set_split(&mut self, split: bool, cx: &mut Context<Self>) {
@@ -876,9 +1589,19 @@ impl Reader {
         cx.notify();
     }
 
-    fn toggle_right(&mut self, cx: &mut Context<Self>) {
-        self.right_open = !self.right_open;
+    /// Puts the viewer in the middle and the conversation on the right, or back.
+    fn swap_panes(&mut self, cx: &mut Context<Self>) {
+        self.swapped = !self.swapped;
+        self.request_save(cx);
         cx.notify();
+    }
+
+    fn toggle_right(&mut self, cx: &mut Context<Self>) {
+        if self.side_open {
+            self.show_chat(cx);
+        } else {
+            self.open_viewer_wide(cx);
+        }
     }
 
     fn set_mode(&mut self, mode: Mode, cx: &mut Context<Self>) {
@@ -888,7 +1611,7 @@ impl Reader {
         self.mode = mode;
         if mode == Mode::Diff {
             // Show the last known changes at once; `git` confirms them in the background.
-            self.apply_changes(self.changes.clone(), true, false, cx);
+            self.apply_changes(self.project.changes.clone(), true, false, cx);
             self.refresh_changes(true, None, cx);
         }
         cx.notify();
@@ -898,10 +1621,10 @@ impl Reader {
     /// reloads the open file when it changes on disk.
     fn watch(&mut self, prepared: Option<futures::channel::oneshot::Receiver<Option<Watch>>>, window: &Window, cx: &mut Context<Self>) {
         use notify::Watcher;
-        let root = self.root.clone();
+        let root = self.project.root.clone();
         let handle = window.window_handle();
         // Kept so the watcher stops when the root changes.
-        self.watching = Some(cx.spawn(async move |this, cx| {
+        self.project.watching = Some(cx.spawn(async move |this, cx| {
             // Adding the watches takes a while on a big tree; the window doesn't wait for it.
             let watch = match prepared {
                 Some(prepared) => prepared.await.ok().flatten(),
@@ -946,9 +1669,9 @@ impl Reader {
                 if !changed {
                     continue;
                 }
-                let Ok(current) = this.read_with(cx, |reader, _| reader.current.clone()) else { break };
+                let Ok(current) = this.read_with(cx, |reader, _| reader.project.current.clone()) else { break };
                 let scan_root = root.clone();
-                let Ok(base) = this.read_with(cx, |reader, _| reader.base.clone()) else { break };
+                let Ok(base) = this.read_with(cx, |reader, _| reader.project.base.clone()) else { break };
                 let (files, seen, changes) = cx
                     .background_executor()
                     .spawn(async move {
@@ -966,10 +1689,10 @@ impl Reader {
                         if let Some(files) = files {
                             reader.set_files(files, cx);
                         }
-                        let rediff = reader.picked.as_ref().is_some_and(|path| touched.contains(path));
+                        let rediff = reader.project.picked.as_ref().is_some_and(|path| touched.contains(path));
                         reader.apply_changes(changes, false, rediff, cx);
-                        if let (Some(path), Some(seen)) = (reader.current.clone(), seen) {
-                            if reader.stamp != Some(seen) {
+                        if let (Some(path), Some(seen)) = (reader.project.current.clone(), seen) {
+                            if reader.project.stamp != Some(seen) {
                                 log::info!("reloading {path}");
                                 reader.open(&path, window, cx);
                             }
@@ -984,32 +1707,33 @@ impl Reader {
         }));
     }
 
-    /// Replaces the running agent with `key`'s, with a fresh thread, or with the agent's session
-    /// list to resume from when `resume`.
+    /// Starts `key`'s agent in the thread on screen, with a fresh conversation, or with the
+    /// agent's session list to resume from when `resume`.
     fn connect(&mut self, key: &str, resume: bool, window: &mut Window, cx: &mut Context<Self>) {
-        self.generation += 1;
-        let generation = self.generation;
-        self.client = None;
-        self.agent = Some(key.to_string());
-        self.thread.clear();
-        self.relist(0);
-        self.selection.update(cx, |s, _| s.clear());
-        self.busy = false;
-        self.queue.clear();
-        self.ready = false;
-        self.loading = false;
-        self.picking = resume;
-        self.sessions = None;
+        self.thread.generation += 1;
+        let generation = self.thread.generation;
+        let id = self.thread.id;
+        self.thread.client = None;
+        self.thread.agent = Some(key.to_string());
+        self.thread.messages.clear();
+        self.thread.relist(0);
+        self.thread.selection.update(cx, |s, _| s.clear());
+        self.thread.busy = false;
+        self.thread.queue.clear();
+        self.thread.ready = false;
+        self.thread.loading = false;
+        self.thread.picking = resume;
+        self.thread.sessions = None;
         let agent = self.agents.iter().find(|agent| agent.id == key).cloned().unwrap_or_else(|| config::Agent {
             id: key.to_string(),
             name: key.to_string(),
             command: key.to_string(),
             daemon: None,
         });
-        self.status = if resume { "listing sessions…" } else { "starting…" }.into();
-        match Client::spawn(&agent, &self.root, resume) {
+        self.thread.status = if resume { "listing sessions…" } else { "starting…" }.into();
+        match Client::spawn(&agent, &self.project.root, resume) {
             Ok((client, mut events)) => {
-                self.client = Some(client);
+                self.thread.client = Some(client);
                 let handle = window.window_handle();
                 cx.spawn(async move |this, cx| {
                     // An agent that never answers the handshake would leave the thread on "starting…".
@@ -1018,11 +1742,14 @@ impl Reader {
                         cx.background_executor().timer(Duration::from_secs(20)).await;
                         watchdog
                             .update(cx, |reader, cx| {
-                                if reader.generation == generation && !reader.ready && reader.client.is_some() {
-                                    reader.status = "not responding".into();
-                                    reader.fail("The agent did not answer the handshake. Check that its command speaks ACP.".into());
-                                    cx.notify();
-                                }
+                                reader.with_thread(id, |reader, _| {
+                                    let thread = &mut reader.thread;
+                                    if thread.generation == generation && !thread.ready && thread.client.is_some() {
+                                        thread.status = "not responding".into();
+                                        thread.fail("The agent did not answer the handshake. Check that its command speaks ACP.".into());
+                                    }
+                                });
+                                cx.notify();
                             })
                             .ok();
                     })
@@ -1030,10 +1757,16 @@ impl Reader {
                     while let Some(event) = events.next().await {
                         let done = handle.update(cx, |_, window, cx| {
                             this.update(cx, |reader, cx| {
-                                if reader.generation == generation {
-                                    reader.on_event(event, window, cx);
-                                }
-                                reader.generation == generation
+                                // The thread may have been closed, or its agent replaced, since.
+                                reader
+                                    .with_thread(id, |reader, visible| {
+                                        let current = reader.thread.generation == generation;
+                                        if current {
+                                            reader.on_event(event, visible, window, cx);
+                                        }
+                                        current
+                                    })
+                                    .unwrap_or(false)
                             })
                         });
                         if !matches!(done, Ok(Ok(true))) {
@@ -1045,247 +1778,568 @@ impl Reader {
             }
             Err(error) => {
                 log::error!("agent: {error:#}");
-                self.status = "not running".into();
-                self.fail(format!("{error:#}"));
+                self.thread.status = "not running".into();
+                self.thread.fail(format!("{error:#}"));
             }
         }
+        self.enforce_cap();
         cx.notify();
     }
 
-    /// Starts a new thread with `key`'s agent, replacing any running one.
-    fn new_thread(&mut self, key: &str, window: &mut Window, cx: &mut Context<Self>) {
-        log::info!("agent: new thread with {key}");
-        self.connect(key, false, window, cx);
+    /// Opens a thread that has no agent yet, ready for a message. The thread on screen keeps
+    /// running in the background; if it is itself still blank it is used instead. The agent
+    /// starts when the first message is sent.
+    fn new_blank_thread(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.thread.agent.is_some() {
+            self.add_thread(window, cx);
+        }
+        self.focus_draft(window, cx);
+        cx.notify();
     }
 
-    /// Replaces the running agent with `key`'s, offering its sessions to resume.
-    fn resume_thread(&mut self, key: &str, window: &mut Window, cx: &mut Context<Self>) {
+    fn focus_draft(&self, window: &mut Window, cx: &mut Context<Self>) {
+        self.thread.draft.update(cx, |input, cx| input.focus(window, cx));
+    }
+
+    /// The agent a new thread would start with.
+    fn chosen(&self) -> Option<&config::Agent> {
+        self.chosen_agent.as_ref().and_then(|key| self.agents.iter().find(|agent| agent.id == *key)).or(self.agents.first())
+    }
+
+    /// Lists an agent's sessions in a new thread, to resume one: those of the agent the thread on
+    /// screen is running, or of the chosen one if it has not started.
+    fn resume_thread(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(key) = self.thread.agent.clone().or_else(|| self.chosen().map(|agent| agent.id.clone())) else { return };
         log::info!("agent: resuming with {key}");
-        self.connect(key, true, window, cx);
+        self.add_thread(window, cx);
+        self.connect(&key, true, window, cx);
+    }
+
+    /// Starts the blank thread on screen: the chosen agent runs `prompt` as its first message,
+    /// which is shown at once and sent when the agent is ready. In a worktree of its own if
+    /// that was asked for.
+    fn start_thread(&mut self, prompt: String, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(key) = self.chosen().map(|agent| agent.id.clone()) else {
+            self.thread.fail("No agents are configured.".into());
+            cx.notify();
+            return;
+        };
+        if self.finishing {
+            return;
+        }
+        self.chosen_agent = Some(key.clone());
+        if self.thread.isolate && worktree::in_repo(&self.project.root) {
+            // The draft stays until the worktree exists, so a failure loses nothing.
+            let blank = (self.project_id, self.thread.id);
+            self.thread.status = "creating worktree…".into();
+            self.new_worktree_thread(&key, Some((prompt, blank)), window, cx);
+            return;
+        }
+        self.thread.draft.update(cx, |input, cx| input.set_value("", window, cx));
+        log::info!("agent: new thread with {key}");
+        self.connect(&key, false, window, cx);
+        self.begin_turn(&prompt);
+        self.thread.pending = Some(prompt);
+        self.request_save(cx);
+        cx.notify();
+    }
+
+    /// Puts a first message back in the draft after the agent failed before it could be sent.
+    fn return_pending(&mut self) {
+        let Some(prompt) = self.thread.pending.take() else { return };
+        let shown = matches!(self.thread.messages.as_slice(), [.., Msg::User(text), Msg::Agent(blocks)] if *text == prompt && blocks.is_empty());
+        if shown {
+            let keep = self.thread.messages.len() - 2;
+            self.thread.messages.truncate(keep);
+            self.thread.relist(keep);
+        }
+        self.thread.queue.insert(0, Queued { content: prompt, kind: None });
+    }
+
+    /// Sends the draft on Enter, while its thread is the one on screen.
+    fn send_on_enter(draft: &Entity<InputState>, window: &mut Window, cx: &mut Context<Self>) -> Subscription {
+        cx.subscribe_in(draft, window, |reader, input, event: &InputEvent, window, cx| {
+            if let InputEvent::PressEnter { shift: false, alt } = event
+                && reader.thread.draft == *input
+            {
+                reader.send(*alt, window, cx);
+            }
+        })
+    }
+
+    /// Makes a thread with no agent yet.
+    fn blank_thread(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Thread {
+        let draft = cx.new(|cx| {
+            InputState::new(window, cx).auto_grow(1, 6).submit_on_enter(true).placeholder("Message the agent")
+        });
+        let id = self.next_thread;
+        self.next_thread += 1;
+        Thread {
+            id,
+            unread: false,
+            session: None,
+            restore: None,
+            saved_title: None,
+            touched: Instant::now(),
+            pending: None,
+            isolate: false,
+            _enter: Self::send_on_enter(&draft, window, cx),
+            messages: vec![],
+            busy: false,
+            queue: vec![],
+            ready: false,
+            loading: false,
+            picking: false,
+            sessions: None,
+            status: String::new(),
+            client: None,
+            agent: None,
+            generation: 0,
+            draft,
+            list: ListState::new(0, ListAlignment::Top, px(400.)),
+            selection: cx.new(|_| ui::markdown::Selection::default()),
+            focus: cx.focus_handle(),
+        }
+    }
+
+    /// Puts a blank thread on screen, parking the one that was, unless that is still blank.
+    fn add_thread(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let fresh = self.blank_thread(window, cx);
+        let old = std::mem::replace(&mut self.thread, fresh);
+        // A blank thread, or a session listing nothing was picked from, isn't kept.
+        if old.agent.is_some() && !old.is_listing() {
+            self.parked.push(old);
+        }
+    }
+
+    /// Runs `work` with thread `id` as [`Self::thread`] (in whichever project it belongs to), and
+    /// whether it is the one on screen. `None` if there is no such thread.
+    fn with_thread<R>(&mut self, id: u64, work: impl FnOnce(&mut Self, bool) -> R) -> Option<R> {
+        if self.thread.id == id || self.parked.iter().any(|thread| thread.id == id) {
+            return self.with_thread_here(id, work);
+        }
+        let at = self.slots.iter().position(|slot| slot.thread.id == id || slot.parked.iter().any(|thread| thread.id == id))?;
+        self.swap_slot(at);
+        let out = self.with_thread_here(id, |reader, _| work(reader, false));
+        self.swap_slot(at);
+        out
+    }
+
+    /// [`Self::with_thread`] for a thread of the project on screen.
+    fn with_thread_here<R>(&mut self, id: u64, work: impl FnOnce(&mut Self, bool) -> R) -> Option<R> {
+        if self.thread.id == id {
+            return Some(work(self, true));
+        }
+        let at = self.parked.iter().position(|thread| thread.id == id)?;
+        std::mem::swap(&mut self.thread, &mut self.parked[at]);
+        let out = work(self, false);
+        std::mem::swap(&mut self.thread, &mut self.parked[at]);
+        Some(out)
+    }
+
+    /// Brings thread `id` on screen.
+    fn show_thread(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(at) = self.parked.iter().position(|thread| thread.id == id) {
+            std::mem::swap(&mut self.thread, &mut self.parked[at]);
+            // A session listing that was left without picking anything isn't kept.
+            self.parked.retain(|thread| !thread.is_listing());
+            self.thread.unread = false;
+            self.wake_thread(window, cx);
+            self.request_save(cx);
+            cx.notify();
+        }
+    }
+
+    /// Starts the agent of the thread on screen again if it was stopped, resuming its session.
+    fn wake_thread(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.thread.asleep() {
+            return;
+        }
+        let (Some(key), Some(session)) = (self.thread.agent.clone(), self.thread.session.clone()) else { return };
+        log::info!("agent: waking {key} session {session}");
+        self.connect(&key, true, window, cx);
+        self.thread.restore = Some(session);
+        self.thread.status = "waking…".into();
+    }
+
+    /// The threads not on screen, in every project.
+    fn background_threads(&mut self) -> impl Iterator<Item = &mut Thread> {
+        self.parked.iter_mut().chain(self.slots.iter_mut().flat_map(|slot| std::iter::once(&mut slot.thread).chain(slot.parked.iter_mut())))
+    }
+
+    /// A thread with no agent running, to be resumed from `saved`'s session when it is shown.
+    fn sleeping_thread(&mut self, saved: workspace::ThreadState, window: &mut Window, cx: &mut Context<Self>) -> Thread {
+        let mut thread = self.blank_thread(window, cx);
+        thread.agent = Some(saved.agent);
+        thread.session = Some(saved.session);
+        thread.saved_title = Some(saved.title).filter(|title| !title.is_empty());
+        thread.status = "asleep".into();
+        thread
+    }
+
+    /// Brings back the projects and threads the last window started here left. The project on
+    /// screen is the one `po` was started on; the others wait in the background and the
+    /// threads sleep until shown. True if the project on screen got its threads back.
+    fn restore(&mut self, saved: workspace::Workspace, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let mut resumed = false;
+        let mut seen = HashSet::new();
+        self.side_open = saved.viewer_open;
+        self.swapped = saved.swapped;
+        self.sidebars.update(cx, |sidebars, _| sidebars.set_widths(saved.left_width.map(px), saved.right_width.map(px)));
+        self.chosen_agent = saved.agent.clone().or(self.chosen_agent.take());
+        if let Some(height) = saved.split {
+            self.left_split.update(cx, |split, _| split.set_top(px(height)));
+        }
+        self.left_split.update(cx, |split, _| split.set_collapsed(saved.explorer_collapsed));
+        for state in saved.projects {
+            let worktree = match state.worktree {
+                Some(spec) => {
+                    let branch = spec.branch.clone();
+                    match worktree::Worktree::adopt(spec) {
+                        Some(wt) => Some(wt),
+                        None => {
+                            log::warn!("worktree {} could not be restored; branch {branch} is left in its repository", state.root.display());
+                            self.worktree_status = Some(format!("A worktree could not be restored; its branch {branch} is left in the repository"));
+                            continue;
+                        }
+                    }
+                }
+                None => None,
+            };
+            let start = worktree.is_none() && self.project.pr.is_none() && self.project.worktree.is_none() && state.root == self.project.root;
+            if !start && (!state.root.is_dir() || !seen.insert(state.root.clone()) || state.root == self.project.root) {
+                continue;
+            }
+            let mut threads: Vec<Thread> = state.threads.into_iter().map(|t| self.sleeping_thread(t, window, cx)).collect();
+            let shown = (!threads.is_empty()).then(|| threads.remove(state.active.min(threads.len() - 1)));
+            if start {
+                if let Some(shown) = shown {
+                    self.thread = shown;
+                    self.parked = threads;
+                    resumed = true;
+                }
+                continue;
+            }
+            let mut project = Self::build_project(state.root, None, vec![], window, cx);
+            if let Some(wt) = worktree {
+                project.base = wt.spec.base.clone();
+                project.worktree = Some(wt);
+            }
+            let thread = match shown {
+                Some(thread) => thread,
+                None => self.blank_thread(window, cx),
+            };
+            let id = self.next_project;
+            self.next_project += 1;
+            let mode = if state.review { Mode::Diff } else { Mode::Source };
+            self.slots.push(Slot { id, mode, project, thread, parked: threads });
+        }
+        resumed
+    }
+
+    /// Every open project with its threads, oldest first.
+    fn views(&self) -> Vec<View<'_>> {
+        let mut views = vec![View {
+            id: self.project_id,
+            mode: self.mode,
+            project: &self.project,
+            shown: self.thread.id,
+            threads: std::iter::once(&self.thread).chain(&self.parked).collect(),
+        }];
+        views.extend(self.slots.iter().map(|slot| View {
+            id: slot.id,
+            mode: slot.mode,
+            project: &slot.project,
+            shown: slot.thread.id,
+            threads: std::iter::once(&slot.thread).chain(&slot.parked).collect(),
+        }));
+        views.sort_by_key(|view| view.id);
+        // The thread on screen is first among them; lists keep the order they were made in.
+        for view in &mut views {
+            view.threads.sort_by_key(|thread| thread.id);
+        }
+        views
+    }
+
+    /// What is worth keeping of the projects and threads: those with an agent session.
+    fn workspace(&self, cx: &App) -> workspace::Workspace {
+        // A PR is a throwaway checkout; it is not brought back.
+        let projects = self
+            .views()
+            .into_iter()
+            .filter(|view| view.project.pr.is_none())
+            .map(|view| {
+                let mut threads: Vec<&Thread> = view.threads.into_iter().filter(|t| t.agent.is_some() && t.session.is_some()).collect();
+                threads.sort_by_key(|t| t.id);
+                workspace::ProjectState {
+                    root: view.project.root.clone(),
+                    review: view.mode == Mode::Diff,
+                    worktree: view.project.worktree.as_ref().map(|wt| wt.spec.clone()),
+                    active: threads.iter().position(|t| t.id == view.shown).unwrap_or(0),
+                    threads: threads
+                        .into_iter()
+                        .filter_map(|t| {
+                            Some(workspace::ThreadState { agent: t.agent.clone()?, session: t.session.clone()?, title: t.title() })
+                        })
+                        .collect(),
+                }
+            })
+            .collect();
+        workspace::Workspace { projects, viewer_open: self.side_open, swapped: self.swapped, agent: self.chosen_agent.clone(), split: self.left_split.read(cx).top().map(f32::from), explorer_collapsed: self.left_split.read(cx).collapsed(), left_width: Some(self.sidebars.read(cx).widths().0.into()), right_width: self.sidebars.read(cx).widths().1.map(f32::from) }
+    }
+
+    /// Saves the workspace once the current change has settled, so that a thread that is
+    /// swapped in to handle an event isn't saved as the one on screen.
+    fn request_save(&mut self, cx: &mut Context<Self>) {
+        if self.save_pending {
+            return;
+        }
+        self.save_pending = true;
+        let this = cx.entity();
+        cx.defer(move |cx| {
+            this.update(cx, |reader, cx| {
+                reader.save_pending = false;
+                reader.workspace(cx).save(&reader.home);
+            })
+        });
+    }
+
+    /// Stops the agents of threads that have been idle in the background for too long.
+    fn sleep_idle(&mut self, cx: &mut Context<Self>) {
+        let Some(after) = self.idle_after else { return };
+        let mut slept = false;
+        for thread in self.background_threads().filter(|t| t.restful() && t.touched.elapsed() > after) {
+            log::info!("agent: stopping idle thread {}", thread.id);
+            thread.sleep();
+            slept = true;
+        }
+        if slept {
+            cx.notify();
+        }
+    }
+
+    /// Stops the longest idle agents in the background while more than `max_live` run.
+    fn enforce_cap(&mut self) {
+        let mut live = usize::from(self.thread.client.is_some());
+        live += self.background_threads().filter(|t| t.client.is_some()).count();
+        let Some(excess) = live.checked_sub(self.max_live).filter(|n| *n > 0) else { return };
+        let mut idle: Vec<&mut Thread> = self.background_threads().filter(|t| t.restful()).collect();
+        idle.sort_by_key(|t| t.touched);
+        for thread in idle.into_iter().take(excess) {
+            log::info!("agent: stopping thread {} to stay under the limit", thread.id);
+            thread.sleep();
+        }
+    }
+
+    /// Tells the desktop about `what` the thread on screen did, unless that is already in view.
+    fn alert(&self, window: &Window, visible: bool, what: &str) {
+        if self.notifications && !(visible && window.is_window_active()) {
+            alert::send(&format!("{} · {}", self.project.name(), self.thread.title()), what);
+        }
+    }
+
+    /// Brings up thread `tid` of project `pid`, whichever is on screen.
+    fn open_thread(&mut self, pid: u64, tid: u64, window: &mut Window, cx: &mut Context<Self>) {
+        if pid == self.project_id {
+            self.show_thread(tid, window, cx);
+        } else {
+            self.show_project_with(pid, Some(tid), window, cx);
+        }
+    }
+
+    /// Ends thread `tid` of project `pid`, whichever is on screen.
+    fn close_any_thread(&mut self, pid: u64, tid: u64, window: &mut Window, cx: &mut Context<Self>) {
+        if pid == self.project_id {
+            return self.close_thread(tid, window, cx);
+        }
+        let last = self.slots.iter().find(|slot| slot.id == pid).is_some_and(|slot| slot.thread.id == tid && slot.parked.is_empty());
+        let blank = last.then(|| self.blank_thread(window, cx));
+        let Some(slot) = self.slots.iter_mut().find(|slot| slot.id == pid) else { return };
+        if let Some(at) = slot.parked.iter().position(|thread| thread.id == tid) {
+            slot.parked.remove(at);
+        } else if slot.thread.id == tid
+            && let Some(next) = slot.parked.pop().or(blank)
+        {
+            slot.thread = next;
+        }
+        self.request_save(cx);
+        cx.notify();
+    }
+
+    /// Opens a blank thread in project `pid`.
+    fn start_thread_in(&mut self, pid: u64, window: &mut Window, cx: &mut Context<Self>) {
+        if pid != self.project_id {
+            self.show_project(pid, window, cx);
+        }
+        self.new_blank_thread(window, cx);
+    }
+
+    /// Ends thread `id`, stopping its agent. Closing the one on screen brings up another.
+    fn close_thread(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(at) = self.parked.iter().position(|thread| thread.id == id) {
+            self.parked.remove(at);
+        } else if self.thread.id == id {
+            let next = match self.parked.pop() {
+                Some(next) => next,
+                None => self.blank_thread(window, cx),
+            };
+            self.thread = next;
+            self.thread.unread = false;
+            self.wake_thread(window, cx);
+        }
+        self.request_save(cx);
+        cx.notify();
     }
 
     /// Opens a listed session; its history arrives as updates before the agent is ready.
-    fn resume_session(&mut self, id: &str, cx: &mut Context<Self>) {
-        let Some(client) = &self.client else { return };
-        if self.loading || !client.load(id) {
+    fn resume_session(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        // A session already open in a thread is shown rather than opened a second time, and the
+        // listing it was picked from goes away.
+        let open = self
+            .views()
+            .iter()
+            .find_map(|view| view.threads.iter().find(|t| t.session.as_deref() == Some(id)).map(|t| (view.id, t.id)));
+        if let Some((pid, tid)) = open {
+            let listing = (self.project_id, self.thread.id);
+            self.open_thread(pid, tid, window, cx);
+            if self.views().iter().any(|v| v.id == listing.0 && v.threads.iter().any(|t| t.id == listing.1)) {
+                self.close_any_thread(listing.0, listing.1, window, cx);
+            }
             return;
         }
-        self.loading = true;
-        self.sessions = None;
-        self.status = "loading session…".into();
+        let Some(client) = &self.thread.client else { return };
+        if self.thread.loading || !client.load(id) {
+            return;
+        }
+        self.thread.loading = true;
+        self.thread.sessions = None;
+        self.thread.status = "loading session…".into();
         cx.notify();
     }
 
     fn agent_label(&self) -> Option<&str> {
-        let key = self.agent.as_ref()?;
+        let key = self.thread.agent.as_ref()?;
         self.agents.iter().find(|agent| agent.id == *key).map(|agent| agent.name.as_str())
     }
 
-    fn fail(&mut self, text: String) {
-        self.busy = false;
-        self.thread.push(Msg::Agent(vec![Block::Text(format!("**Error:** {text}"))]));
-        self.relist(self.thread.len() - 1);
-    }
 
-    /// Tells the thread's list that messages from `from` on were added or changed, so it lays
-    /// them out again.
-    fn relist(&mut self, from: usize) {
-        let listed = self.thread_list.item_count();
-        let from = from.min(listed).min(self.thread.len());
-        self.thread_list.splice(from..listed, self.thread.len() - from);
-    }
 
-    fn blocks(&mut self) -> &mut Vec<Block> {
-        if !matches!(self.thread.last(), Some(Msg::Agent(_))) {
-            self.thread.push(Msg::Agent(vec![]));
-            self.relist(self.thread.len() - 1);
-        }
-        match self.thread.last_mut() {
-            Some(Msg::Agent(blocks)) => blocks,
-            _ => unreachable!("an agent message was just pushed"),
-        }
-    }
 
-    fn on_event(&mut self, event: Event, window: &mut Window, cx: &mut Context<Self>) {
+    /// `visible`: this thread is the one on screen, so its edits may move the viewer.
+    fn on_event(&mut self, event: Event, visible: bool, window: &mut Window, cx: &mut Context<Self>) {
         // Most events change the last message; a tool call update may change an earlier one.
-        let mut changed = self.thread.len().saturating_sub(1);
+        let mut changed = self.thread.messages.len().saturating_sub(1);
+        self.thread.touched = Instant::now();
         match event {
-            Event::Sessions(sessions) => {
-                self.status = if sessions.is_empty() { "no sessions".into() } else { "pick a session".into() };
-                self.sessions = Some(sessions);
-            }
+            Event::Sessions(sessions) => match self.thread.restore.take() {
+                // A thread being woken goes straight to its own session.
+                Some(id) => match &self.thread.client {
+                    Some(client) if client.load(&id) => {
+                        self.thread.loading = true;
+                        self.thread.status = "loading session…".into();
+                    }
+                    _ => {
+                        self.thread.status = "not running".into();
+                        self.thread.fail("The session could not be resumed.".into());
+                    }
+                },
+                None => {
+                    self.thread.status = if sessions.is_empty() { "no sessions".into() } else { "pick a session".into() };
+                    self.thread.sessions = Some(sessions);
+                }
+            },
             Event::Ready { agent } => {
-                self.ready = true;
-                self.loading = false;
-                self.picking = false;
+                self.thread.ready = true;
+                self.thread.loading = false;
+                self.thread.picking = false;
                 log::info!("agent: {agent} ready");
-                self.status = "ready".into();
+                self.thread.status = "ready".into();
+                self.thread.session = self.thread.client.as_ref().and_then(|client| client.session());
+                self.request_save(cx);
+                if let Some(prompt) = self.thread.pending.take()
+                    && !self.send_to_agent(&prompt)
+                {
+                    self.thread.pending = Some(prompt);
+                    self.return_pending();
+                    self.thread.fail("The agent has no session yet.".into());
+                    self.restore_queue(window, cx);
+                }
             }
             Event::Update(update) => {
-                if let Some(ix) = self.tool_message(&update) {
+                if let Some(ix) = self.thread.tool_message(&update) {
                     changed = changed.min(ix);
                 }
                 // A replayed history would otherwise open every file it ever touched.
-                if let Some((path, finished)) = self.update(&update).filter(|_| !self.loading) {
+                if let Some((path, finished)) = self.thread.update(&update).filter(|_| !self.thread.loading && visible) {
                     self.follow(&path, finished, window, cx);
                 }
             }
             Event::Permission { request, title, options } => {
-                self.blocks().push(Block::Permission(Ask { request, title, options, answered: None }));
+                self.alert(window, visible, &format!("Needs your approval: {title}"));
+                self.thread.blocks().push(Block::Permission(Ask { request, title, options, answered: None }));
             }
             Event::Stopped(reason) => {
-                self.busy = false;
+                self.thread.busy = false;
+                self.thread.unread = !visible;
+                self.alert(window, visible, "Finished");
                 log::info!("agent: stopped ({reason})");
                 // What the daemon didn't take into the turn is no longer in its queue.
-                for item in &mut self.queue {
+                for item in &mut self.thread.queue {
                     item.kind = None;
                 }
                 self.send_next(window, cx);
             }
             Event::Accepted { content, queue } => {
-                if let Some(at) = self.queue.iter().position(|q| q.kind == Some(queue) && q.content == content) {
-                    self.queue.remove(at);
+                if let Some(at) = self.thread.queue.iter().position(|q| q.kind == Some(queue) && q.content == content) {
+                    self.thread.queue.remove(at);
                 }
-                self.thread.push(Msg::User(content));
+                self.thread.messages.push(Msg::User(content));
             }
             Event::Rejected { content, queue } => {
                 // No turn to join: it waits for the turn to end like any other queued message.
-                if let Some(item) = self.queue.iter_mut().find(|q| q.kind == Some(queue) && q.content == content) {
+                if let Some(item) = self.thread.queue.iter_mut().find(|q| q.kind == Some(queue) && q.content == content) {
                     item.kind = None;
                 }
                 self.send_next(window, cx);
             }
             Event::Failed(error) => {
-                if !self.ready {
-                    self.status = "failed to start".into();
+                if !self.thread.ready {
+                    self.thread.status = "failed to start".into();
                 }
-                self.fail(error);
+                self.return_pending();
+                self.thread.fail(error);
                 self.restore_queue(window, cx);
             }
             Event::Exited(status) => {
                 log::warn!("agent exited: {status}");
-                self.ready = false;
-                self.status = "exited".into();
-                if self.busy {
-                    self.fail(format!("the agent exited ({status})"));
+                self.thread.ready = false;
+                self.thread.status = "exited".into();
+                if self.thread.busy {
+                    self.return_pending();
+                    self.thread.fail(format!("the agent exited ({status})"));
                     self.restore_queue(window, cx);
                 }
             }
         }
-        self.relist(changed);
-        self.thread_list.scroll_to_end();
+        self.thread.relist(changed);
+        self.thread.list.scroll_to_end();
         cx.notify();
     }
 
-    /// The message holding the tool call an update is for, if it updates one.
-    fn tool_message(&self, update: &Value) -> Option<usize> {
-        if update["sessionUpdate"].as_str() != Some("tool_call_update") {
-            return None;
-        }
-        let id = update["toolCallId"].as_str().unwrap_or_default();
-        self.thread.iter().rposition(|msg| match msg {
-            Msg::Agent(blocks) => blocks.iter().any(|b| matches!(b, Block::Tool(tool) if tool.id == id)),
-            Msg::User(_) => false,
-        })
-    }
 
-    fn update(&mut self, update: &Value) -> Option<(String, bool)> {
-        let text = update["content"]["text"].as_str().unwrap_or_default();
-        let mut known: Option<String> = None;
-        match update["sessionUpdate"].as_str() {
-            Some("agent_message_chunk") => match self.blocks().last_mut() {
-                Some(Block::Text(body)) => body.push_str(text),
-                _ => self.blocks().push(Block::Text(text.to_string())),
-            },
-            Some("user_message_chunk") if self.loading || !self.busy => {
-                let text = without_context(text);
-                match self.thread.last_mut() {
-                    Some(Msg::User(body)) => body.push_str(text),
-                    _ => {
-                        self.thread.push(Msg::User(text.to_string()));
-                        self.relist(self.thread.len() - 1);
-                    }
-                }
-            }
-            Some("agent_thought_chunk") => match self.blocks().last_mut() {
-                Some(Block::Thought(body)) => body.push_str(text),
-                _ => self.blocks().push(Block::Thought(text.to_string())),
-            },
-            Some("plan") => {
-                let entries = update["entries"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .map(|e| (e["content"].as_str().unwrap_or_default().to_string(), step(e["status"].as_str().unwrap_or("pending"))))
-                    .collect();
-                let blocks = self.blocks();
-                match blocks.iter_mut().find(|b| matches!(b, Block::Plan(_))) {
-                    Some(block) => *block = Block::Plan(entries),
-                    None => blocks.push(Block::Plan(entries)),
-                }
-            }
-            Some("tool_call") => self.blocks().push(Block::Tool(ToolBlock {
-                id: update["toolCallId"].as_str().unwrap_or_default().to_string(),
-                title: update["title"].as_str().unwrap_or("Tool").to_string(),
-                status: step(update["status"].as_str().unwrap_or("pending")),
-                open: false,
-                arguments: pretty(&update["rawInput"]),
-                result: tool_result(update),
-                path: touched(update),
-            })),
-            Some("tool_call_update") => {
-                let id = update["toolCallId"].as_str().unwrap_or_default();
-                known = None;
-                for msg in self.thread.iter_mut().rev() {
-                    let Msg::Agent(blocks) = msg else { continue };
-                    let found = blocks.iter_mut().rev().find_map(|b| match b {
-                        Block::Tool(tool) if tool.id == id => Some(tool),
-                        _ => None,
-                    });
-                    if let Some(tool) = found {
-                        if let Some(title) = update["title"].as_str() {
-                            tool.title = title.to_string();
-                        }
-                        if let Some(status) = update["status"].as_str() {
-                            tool.status = step(status);
-                        }
-                        if !update["rawInput"].is_null() {
-                            tool.arguments = pretty(&update["rawInput"]);
-                        }
-                        let result = tool_result(update);
-                        if !result.is_empty() {
-                            tool.result = result;
-                        }
-                        if let Some(path) = touched(update) {
-                            tool.path = Some(path);
-                        }
-                        known = tool.path.clone();
-                        break;
-                    }
-                }
-            }
-            _ => {}
-        }
-        let kind = update["sessionUpdate"].as_str()?;
-        if kind != "tool_call" && kind != "tool_call_update" {
-            return None;
-        }
-        let path = touched(update).or(known)?;
-        Some((path, update["status"].as_str() == Some("completed")))
-    }
 
     /// Shows the file a tool call touches; a finished call reloads it to show the change.
     fn follow(&mut self, path: &str, finished: bool, window: &mut Window, cx: &mut Context<Self>) {
         let path = Path::new(path);
-        let relative = path.strip_prefix(&self.root).unwrap_or(path);
-        if relative.is_absolute() || !self.root.join(relative).is_file() {
+        let relative = path.strip_prefix(&self.project.root).unwrap_or(path);
+        if relative.is_absolute() || !self.project.root.join(relative).is_file() {
             return;
         }
         let relative = relative.to_string_lossy().replace('\\', "/");
-        if !self.files.contains(&relative) {
+        if !self.project.files.contains(&relative) {
             self.rescan(cx);
         }
-        if self.current.as_deref() != Some(&relative) || finished {
+        if self.project.current.as_deref() != Some(&relative) || finished {
             log::info!("agent: showing {relative}");
             self.open(&relative, window, cx);
         }
@@ -1295,14 +2349,14 @@ impl Reader {
     }
 
     fn answer(&mut self, msg: usize, block: usize, option: usize, cx: &mut Context<Self>) {
-        let Some(Msg::Agent(blocks)) = self.thread.get_mut(msg) else { return };
+        let Some(Msg::Agent(blocks)) = self.thread.messages.get_mut(msg) else { return };
         let Some(Block::Permission(ask)) = blocks.get_mut(block) else { return };
         let (Some(choice), None) = (ask.options.get(option), &ask.answered) else { return };
-        if let Some(client) = &self.client {
+        if let Some(client) = &self.thread.client {
             client.answer(ask.request.clone(), Some(&choice.id));
         }
         ask.answered = Some(choice.name.clone());
-        self.relist(msg);
+        self.thread.relist(msg);
         cx.notify();
     }
 
@@ -1333,7 +2387,7 @@ impl Reader {
     /// Refilters the finder's matches for its query and rewinds the selection to the first.
     fn refind(&mut self, cx: &mut Context<Self>) {
         let query = self.finder.as_ref().map_or_else(String::new, |input| input.read(cx).value().to_string());
-        self.finder_matches = Rc::new(match_files(&self.files, &query));
+        self.finder_matches = Rc::new(match_files(&self.project.files, &query));
         self.finder_selected = 0;
         self.finder_list.reset(self.finder_matches.len());
         self.finder_list.scroll_to(gpui::ListOffset { item_ix: 0, offset_in_item: px(0.) });
@@ -1360,9 +2414,10 @@ impl Reader {
     fn accept_path(&mut self, path: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.open(path, window, cx);
         // A file that can't be shown leaves the finder up so the query isn't lost.
-        if self.notice.is_none() {
+        if self.project.notice.is_none() {
             self.hide_finder(window, cx);
             self.set_mode(Mode::Source, cx);
+            self.reveal_side(cx);
         }
     }
 
@@ -1437,7 +2492,7 @@ impl Reader {
                             .border_t_1()
                             .border_color(border)
                             .text_color(muted)
-                            .child(if self.files.len() >= MAX_FILES { format!("first {MAX_FILES} files only") } else { "↑↓ navigate".to_string() })
+                            .child(if self.project.files.len() >= MAX_FILES { format!("first {MAX_FILES} files only") } else { "↑↓ navigate".to_string() })
                             .child("↵ open · esc close"),
                     ),
             )
@@ -1445,32 +2500,32 @@ impl Reader {
     }
 
     fn open(&mut self, path: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let full = self.root.join(path);
+        let full = self.project.root.join(path);
         let too_big = std::fs::metadata(&full).map_or(false, |m| m.len() > 4 * 1024 * 1024);
         // A file too big to show isn't read at all.
         let read = if too_big { Ok(None) } else { std::fs::read_to_string(&full).map(Some) };
         match read {
-            Ok(None) => self.notice = Some(format!("{path} is too large to show")),
+            Ok(None) => self.project.notice = Some(format!("{path} is too large to show")),
             Ok(Some(text)) => {
-                match &self.code {
+                match &self.project.code {
                     // Same file: swap the text in place so the scroll position and caret survive.
-                    Some(code) if self.current.as_deref() == Some(path) => {
+                    Some(code) if self.project.current.as_deref() == Some(path) => {
                         code.update(cx, |state, cx| state.set_text(text, cx));
                     }
-                    _ => self.code = Some(cx.new(|cx| viewer::CodeViewState::new(text, syntax(path), window, cx))),
+                    _ => self.project.code = Some(cx.new(|cx| viewer::CodeViewState::new(text, syntax(path), window, cx))),
                 }
-                self.notice = None;
+                self.project.notice = None;
             }
             Err(error) => {
                 log::warn!("open {path}: {error}");
-                self.code = None;
-                self.notice = Some(format!("{path} is not a text file"));
+                self.project.code = None;
+                self.project.notice = Some(format!("{path} is not a text file"));
             }
         }
-        self.current = Some(path.to_string());
-        self.stamp = stamp(&full);
+        self.project.current = Some(path.to_string());
+        self.project.stamp = stamp(&full);
         let id = SharedString::from(path.to_string());
-        self.tree.update(cx, |tree, cx| {
+        self.project.tree.update(cx, |tree, cx| {
             if let Some(ix) = tree.index_of(&id) {
                 tree.set_selected_index(Some(ix), cx);
             }
@@ -1481,19 +2536,32 @@ impl Reader {
     /// Sends the draft: as a new turn, or, while the agent is working, into the queue
     /// (`later` for after the turn rather than into it).
     fn send(&mut self, later: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let prompt = self.draft.read(cx).value().trim().to_string();
+        let prompt = self.thread.draft.read(cx).value().trim().to_string();
         if prompt.is_empty() {
             return;
         }
-        if !self.busy {
+        if self.thread.agent.is_none() {
+            return self.start_thread(prompt, window, cx);
+        }
+        let starting = self.thread.client.is_some() && !self.thread.ready && !self.thread.loading && !self.thread.picking && self.thread.restore.is_none();
+        if starting && !self.thread.busy {
+            // The agent is still starting: the message waits for it, shown as sent.
+            self.thread.draft.update(cx, |input, cx| input.set_value("", window, cx));
+            self.begin_turn(&prompt);
+            self.thread.pending = Some(prompt);
+            cx.notify();
+            return;
+        }
+        if !self.thread.busy {
             if self.dispatch(prompt, cx) {
-                self.draft.update(cx, |input, cx| input.set_value("", window, cx));
+                self.thread.draft.update(cx, |input, cx| input.set_value("", window, cx));
             }
             return;
         }
-        self.draft.update(cx, |input, cx| input.set_value("", window, cx));
-        // An agent that can't take messages mid-turn gets them when the turn is over.
-        let kind = match self.client.as_ref().filter(|client| client.queues()) {
+        self.thread.draft.update(cx, |input, cx| input.set_value("", window, cx));
+        // An agent that can't take messages mid-turn gets them when the turn is over; neither
+        // can one that hasn't been given the first message yet.
+        let kind = match self.thread.client.as_ref().filter(|client| client.queues() && self.thread.pending.is_none()) {
             Some(client) => {
                 let kind = if later { Queue::Followup } else { Queue::Steer };
                 client.enqueue(&prompt, kind);
@@ -1501,90 +2569,98 @@ impl Reader {
             }
             None => None,
         };
-        self.queue.push(Queued { content: prompt, kind });
+        self.thread.queue.push(Queued { content: prompt, kind });
         cx.notify();
     }
 
     /// Takes a queued message back into the draft to edit.
     fn recall(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
-        if ix >= self.queue.len() {
+        if ix >= self.thread.queue.len() {
             return;
         }
-        let item = self.queue.remove(ix);
-        if let (Some(kind), Some(client)) = (item.kind, &self.client) {
+        let item = self.thread.queue.remove(ix);
+        if let (Some(kind), Some(client)) = (item.kind, &self.thread.client) {
             client.recall(&item.content, kind);
         }
-        let draft = self.draft.read(cx).value().to_string();
+        let draft = self.thread.draft.read(cx).value().to_string();
         let text = if draft.trim().is_empty() { item.content } else { format!("{}\n{draft}", item.content) };
-        self.draft.update(cx, |input, cx| input.set_value(text, window, cx));
+        self.thread.draft.update(cx, |input, cx| input.set_value(text, window, cx));
         cx.notify();
     }
 
     /// If no turn is running, sends the oldest queued message that waits here rather than in
     /// the daemon. A message that can't be sent goes back to the draft with the rest.
     fn send_next(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.busy {
+        if self.thread.busy {
             return;
         }
-        let Some(at) = self.queue.iter().position(|q| q.kind.is_none()) else { return };
-        let next = self.queue.remove(at);
+        let Some(at) = self.thread.queue.iter().position(|q| q.kind.is_none()) else { return };
+        let next = self.thread.queue.remove(at);
         if !self.dispatch(next.content.clone(), cx) {
-            self.queue.insert(0, next);
+            self.thread.queue.insert(0, next);
             self.restore_queue(window, cx);
         }
     }
 
     /// Moves everything queued back into the draft, taking back what the daemon still holds.
     fn restore_queue(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.queue.is_empty() {
+        if self.thread.queue.is_empty() {
             return;
         }
-        let items: Vec<Queued> = self.queue.drain(..).collect();
+        let items: Vec<Queued> = self.thread.queue.drain(..).collect();
         let mut text = Vec::new();
         for item in items {
-            if let (Some(kind), Some(client)) = (item.kind, &self.client) {
+            if let (Some(kind), Some(client)) = (item.kind, &self.thread.client) {
                 client.recall(&item.content, kind);
             }
             text.push(item.content);
         }
-        let draft = self.draft.read(cx).value().to_string();
+        let draft = self.thread.draft.read(cx).value().to_string();
         if !draft.trim().is_empty() {
             text.push(draft);
         }
-        self.draft.update(cx, |input, cx| input.set_value(text.join("\n\n"), window, cx));
+        self.thread.draft.update(cx, |input, cx| input.set_value(text.join("\n\n"), window, cx));
         cx.notify();
     }
 
     /// Sends `prompt` as a new turn; false if it could not be sent (the error is in the thread).
     fn dispatch(&mut self, prompt: String, cx: &mut Context<Self>) -> bool {
-        let Some(client) = self.client.as_ref().filter(|_| self.ready) else {
-            let why = if self.agent.is_some() { "The agent is not ready yet." } else { "Pick an agent from New Thread first." };
-            self.fail(why.into());
-            cx.notify();
-            return false;
-        };
-        let context = match &self.current {
-            Some(file) => format!("[The user has `{file}` open in the viewer.]\n\n{prompt}"),
-            None => prompt.clone(),
-        };
-        if !client.prompt(&context) {
-            self.fail("The agent has no session yet.".into());
+        if !self.thread.ready || !self.send_to_agent(&prompt) {
+            let why = if self.thread.client.is_some() && self.thread.ready { "The agent has no session yet." } else { "The agent is not ready yet." };
+            self.thread.fail(why.into());
             cx.notify();
             return false;
         }
-        self.busy = true;
-        self.thread.push(Msg::User(prompt));
-        self.thread.push(Msg::Agent(vec![]));
-        self.relist(self.thread.len() - 2);
-        self.thread_list.scroll_to_end();
+        self.begin_turn(&prompt);
+        self.request_save(cx);
         cx.notify();
         true
     }
 
+    /// Hands `prompt` to the agent, with the file in view as context. False if it can't take it.
+    fn send_to_agent(&self, prompt: &str) -> bool {
+        let Some(client) = &self.thread.client else { return false };
+        let context = match &self.project.current {
+            Some(file) => format!("[The user has `{file}` open in the viewer.]\n\n{prompt}"),
+            None => prompt.to_string(),
+        };
+        client.prompt(&context)
+    }
+
+    /// Shows `prompt` as the start of a turn the agent is working on.
+    fn begin_turn(&mut self, prompt: &str) {
+        self.thread.busy = true;
+        self.thread.touched = Instant::now();
+        self.thread.messages.push(Msg::User(prompt.to_string()));
+        self.thread.messages.push(Msg::Agent(vec![]));
+        self.thread.relist(self.thread.messages.len() - 2);
+        self.thread.list.scroll_to_end();
+    }
+
     fn stop(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(client) = &self.client else { return };
+        let Some(client) = &self.thread.client else { return };
         client.cancel();
-        for msg in &mut self.thread {
+        for msg in &mut self.thread.messages {
             let Msg::Agent(blocks) = msg else { continue };
             for block in blocks {
                 if let Block::Permission(ask) = block {
@@ -1595,17 +2671,17 @@ impl Reader {
                 }
             }
         }
-        self.relist(0);
+        self.thread.relist(0);
         // What was waiting goes back to the draft rather than being sent into a stopped turn.
         self.restore_queue(window, cx);
         cx.notify();
     }
 
     fn toggle_tool(&mut self, msg: usize, block: usize, cx: &mut Context<Self>) {
-        let Some(Msg::Agent(blocks)) = self.thread.get_mut(msg) else { return };
+        let Some(Msg::Agent(blocks)) = self.thread.messages.get_mut(msg) else { return };
         let Some(Block::Tool(tool)) = blocks.get_mut(block) else { return };
         tool.open = !tool.open;
-        self.relist(msg);
+        self.thread.relist(msg);
         cx.notify();
     }
 
@@ -1615,7 +2691,7 @@ impl Reader {
         let colors = cx.global::<Palette>();
         let (border, muted, danger) = (colors.border, colors.muted_foreground, colors.danger);
         let this = cx.entity();
-        let body: AnyElement = match &self.pr {
+        let body: AnyElement = match &self.project.pr {
             Some(pr) => div()
                 .flex()
                 .items_center()
@@ -1627,7 +2703,7 @@ impl Reader {
                         .truncate()
                         .text_xs()
                         .text_color(muted)
-                        .child(format!("PR #{} · {} files", pr.number, self.changes.len())),
+                        .child(format!("PR #{} · {} files", pr.number, self.project.changes.len())),
                 )
                 .child(
                     Button::new("pr-close")
@@ -1676,6 +2752,56 @@ impl Reader {
         div().flex_none().px_3().py_2().border_b_1().border_color(border).child(body)
     }
 
+    /// For a worktree project: its branch, and the ways to finish it.
+    fn worktree_strip(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        let wt = self.project.worktree.as_ref()?;
+        let colors = cx.global::<Palette>();
+        let (border, muted) = (colors.border, colors.muted_foreground);
+        let (merge, discard) = (cx.entity(), cx.entity());
+        let busy = self.finishing;
+        Some(
+            div()
+                .flex_none()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .px_3()
+                .py_2()
+                .border_b_1()
+                .border_color(border)
+                .child(div().truncate().text_xs().text_color(muted).child(format!("⎇ {}", wt.spec.branch)))
+                .child(
+                    div()
+                        .flex()
+                        .gap_2()
+                        .child(
+                            Button::new("worktree-merge")
+                                .label("Merge")
+                                .tooltip("Commit this branch's work and merge it into the checkout it came from")
+                                .small()
+                                .outline()
+                                .on_click(move |_, window, cx| {
+                                    if !busy {
+                                        merge.update(cx, |reader, cx| reader.finish_worktree(true, window, cx))
+                                    }
+                                }),
+                        )
+                        .child(
+                            Button::new("worktree-discard")
+                                .label(if self.confirm_discard { "Discard everything?" } else { "Discard" })
+                                .tooltip("Delete this branch and everything done in it")
+                                .small()
+                                .ghost()
+                                .on_click(move |_, window, cx| {
+                                    if !busy {
+                                        discard.update(cx, |reader, cx| reader.finish_worktree(false, window, cx))
+                                    }
+                                }),
+                        ),
+                ),
+        )
+    }
+
     fn explorer(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.global::<Palette>();
         let this = cx.entity();
@@ -1708,12 +2834,12 @@ impl Reader {
             Mode::Source => "Explorer",
             Mode::Diff => "Changes",
         };
-        let state = if mode == Mode::Diff { &self.changes_tree } else { &self.tree };
-        let marks = if mode == Mode::Diff { self.marks.clone() } else { Rc::default() };
+        let state = if mode == Mode::Diff { &self.project.changes_tree } else { &self.project.tree };
+        let marks = if mode == Mode::Diff { self.project.marks.clone() } else { Rc::default() };
         // Themes may lack a green (Rosé Pine's success is teal), so added files get their own.
         let (muted, danger) = (colors.muted_foreground, colors.danger);
         let kinds = [colors.primary, colors.warning, colors.info, gpui::hsla(0.37, 0.5, 0.5, 1.0)];
-        let body: AnyElement = if mode == Mode::Diff && self.changes.is_empty() {
+        let body: AnyElement = if mode == Mode::Diff && self.project.changes.is_empty() {
             centered("No changes".into(), cx)
         } else {
             tree(state, move |ix, entry, selected, right_clicked, _, _| {
@@ -1772,65 +2898,263 @@ impl Reader {
                         if folder {
                             return;
                         }
-                        this.update(cx, |reader, cx| match mode {
-                            Mode::Source => reader.open(&path, window, cx),
-                            Mode::Diff => reader.pick(&path, cx),
+                        this.update(cx, |reader, cx| {
+                            match mode {
+                                Mode::Source => reader.open(&path, window, cx),
+                                Mode::Diff => reader.pick(&path, cx),
+                            }
+                            reader.reveal_side(cx);
                         });
                     })
                     .into_any_element()
             })
             .into_any_element()
         };
+        // The explorer can be folded down to this header, so it has a chevron.
+        let title: AnyElement = {
+            let folded = self.left_split.read(cx).collapsed();
+            let fold = cx.entity();
+            div()
+                .id("explorer-fold")
+                .flex()
+                .items_center()
+                .gap_1()
+                .min_w_0()
+                .cursor_pointer()
+                .text_sm()
+                .font_weight(FontWeight::MEDIUM)
+                .on_click(move |_, _, cx| fold.update(cx, |reader, cx| reader.toggle_explorer(cx)))
+                .child(
+                    Icon::new(if folded { IconName::ChevronRight } else { IconName::ChevronDown })
+                        .size(IconSize::XSmall)
+                        .color(colors.muted_foreground),
+                )
+                .child(div().min_w_0().truncate().child(title.to_string()))
+                .into_any_element()
+        };
         div()
             .size_full()
             .flex()
             .flex_col()
             .bg(colors.sidebar)
-            .child(header_with(
+            .child(header_row(
                 title,
                 div()
                     .flex()
                     .items_center()
                     .gap_2()
                     .child(status_text(
-                        match &self.pr {
+                        match &self.project.pr {
                             Some(pr) => format!("PR #{} {}", pr.number, pr.title),
-                            None => self.root.file_name().map_or(String::new(), |n| n.to_string_lossy().to_string()),
+                            None => self.project.root.file_name().map_or(String::new(), |n| n.to_string_lossy().to_string()),
                         },
                         cx,
                     ))
                     .child(modes),
                 cx,
             ))
+            .children(self.worktree_strip(cx))
             .children((mode == Mode::Diff).then(|| self.pr_strip(cx)))
             .child(div().flex_1().min_h_0().p_1().child(body))
     }
 
-    fn diff_viewer(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// The left side: every project with its threads, and the active project's files below.
+    fn left_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let explorer = self.explorer(cx).into_any_element();
         let colors = cx.global::<Palette>();
-        let Some(path) = self.picked.clone() else {
+        let (hover, selected, muted, foreground, primary) =
+            (colors.list_hover, colors.list_selected, colors.muted_foreground, colors.foreground, colors.primary);
+        let views = self.views();
+        let (active_project, active_thread) = (self.project_id, self.thread.id);
+        let project_count = views.len();
+        let many = project_count > 1;
+        let add = cx.entity();
+        // Groups are spaced apart by more than anything inside one, so the eye reads them as units.
+        let mut tree = div().id("agents-tree").size_full().overflow_y_scroll().flex().flex_col().gap_2().p_1();
+        for view in &views {
+            let pid = view.id;
+            let (select, close, start) = (cx.entity(), cx.entity(), cx.entity());
+            // A project and its threads are one card. The one on screen has a soft tint and its name at
+            // full strength; the others have neither, but the same padding, so nothing shifts. Names
+            // and thread titles share one left edge, after a column for the folder or status mark.
+            let current = pid == active_project;
+            let mut group = div()
+                .flex()
+                .flex_col()
+                .gap_px()
+                .p_1()
+                .rounded_lg()
+                .when(current, |card| card.bg(hover));
+            // Inside the selected card the row under the pointer needs a different shade to show.
+            let over = if current { selected.opacity(0.6) } else { hover };
+            group = group.child(
+                div()
+                    .id(("agent-project", pid as usize))
+                    .group(row_group("agent-project", pid))
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .px_1p5()
+                    .h(rems(1.625))
+                    // A little air between the project and its threads.
+                    .mb_1()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .hover(move |row| row.bg(over))
+                    .on_click(move |_, window, cx| select.update(cx, |reader, cx| reader.show_project(pid, window, cx)))
+                    .child(
+                        div()
+                            .w(rems(1.))
+                            .flex_none()
+                            .flex()
+                            .justify_center()
+                            .child(Icon::new(IconName::Folder).size(IconSize::XSmall).color(project_tone(primary, current))),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(rems(0.9375))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(project_tone(primary, current))
+                            .child(view.project.name()),
+                    )
+                    // Starting a thread is on the project's own row, shown when it is hovered.
+                    .child(show_on_hover(
+                        row_group("agent-project", pid),
+                        Button::new(("agent-new-thread", pid as usize))
+                            .icon(IconName::Plus)
+                            .ghost()
+                            .xsmall()
+                            .tooltip("New thread in this project")
+                            .on_click(move |_, window, cx| start.update(cx, |reader, cx| reader.start_thread_in(pid, window, cx))),
+                    ))
+                    .when(many, |row| {
+                        row.child(show_on_hover(
+                            row_group("agent-project", pid),
+                            Button::new(("agent-project-close", pid as usize))
+                                .icon(IconName::Close)
+                                .ghost()
+                                .xsmall()
+                                .tooltip("Close project")
+                                .on_click(move |_, window, cx| close.update(cx, |reader, cx| reader.close_project(pid, window, cx))),
+                        ))
+                    }),
+            );
+            for thread in view.threads.iter().filter(|t| t.agent.is_some() || t.id == view.shown) {
+                let tid = thread.id;
+                let (glyph, tint) = thread.activity().mark(colors);
+                let (select, close) = (cx.entity(), cx.entity());
+                group = group.child(
+                    div()
+                        .id(("agent-thread", tid as usize))
+                        .group(row_group("agent-thread", tid))
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .px_1p5()
+                        .h(rems(1.625))
+                        .rounded_md()
+                        .cursor_pointer()
+                        .when((pid, tid) == (active_project, active_thread), |row| row.bg(selected))
+                        .hover(move |row| row.bg(over))
+                        .on_click(move |_, window, cx| select.update(cx, |reader, cx| reader.open_thread(pid, tid, window, cx)))
+                        .child(div().w(rems(1.)).flex_none().flex().justify_center().text_size(rems(0.875)).text_color(tint).child(glyph))
+                        .child(
+                            // Threads sit a step below their project: smaller and regular, bright only
+                            // for the one on screen.
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_size(rems(0.875))
+                                .text_color(if (pid, tid) == (active_project, active_thread) { foreground } else { muted })
+                                .child(thread.title()),
+                        )
+                        .child(show_on_hover(
+                            row_group("agent-thread", tid),
+                            Button::new(("agent-thread-close", tid as usize))
+                                .icon(IconName::Close)
+                                .ghost()
+                                .xsmall()
+                                .tooltip("Close thread")
+                                .on_click(move |_, window, cx| close.update(cx, |reader, cx| reader.close_any_thread(pid, tid, window, cx))),
+                        )),
+                );
+            }
+            tree = tree.child(group);
+        }
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .bg(colors.sidebar)
+            // The same kind of header as the explorer's below: a title, and what you can do here.
+            .child(header_row(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(div().text_sm().font_weight(FontWeight::MEDIUM).child("Projects"))
+                    .child(div().text_xs().text_color(muted).child(project_count.to_string())),
+                Button::new("agents-add")
+                    .icon(IconName::Plus)
+                    .tooltip("Add a project: open a folder (Ctrl+O)")
+                    .ghost()
+                    .small()
+                    .on_click(move |_, window, cx| add.update(cx, |reader, cx| reader.pick_project(window, cx))),
+                cx,
+            ))
+            .children(self.worktree_status.clone().map(|text| {
+                div().px_3().py_1().text_xs().text_color(muted).max_h(rems(5.)).overflow_hidden().child(text)
+            }))
+            .child(div().flex_1().min_h_0().child(vsplit(&self.left_split).top(tree).bottom(div().size_full().child(explorer))))
+    }
+
+    /// Folds the explorer on the agents view down to its header, or unfolds it to the height it
+    /// had.
+    fn toggle_explorer(&mut self, cx: &mut Context<Self>) {
+        self.left_split.update(cx, |split, cx| {
+            let folded = split.collapsed();
+            split.set_collapsed(!folded);
+            cx.notify();
+        });
+    }
+
+    /// The viewer or the diff viewer, as the project's mode says.
+    fn pane(&self, lead: Option<AnyElement>, trail: Option<AnyElement>, cx: &mut Context<Self>) -> AnyElement {
+        match self.mode {
+            Mode::Source => self.viewer(lead, trail, cx).into_any_element(),
+            Mode::Diff => self.diff_viewer(lead, trail, cx).into_any_element(),
+        }
+    }
+
+    fn diff_viewer(&self, lead: Option<AnyElement>, trail: Option<AnyElement>, cx: &mut Context<Self>) -> impl IntoElement {
+        let colors = cx.global::<Palette>();
+        let Some(path) = self.project.picked.clone() else {
             return div()
                 .size_full()
                 .flex()
                 .flex_col()
                 .bg(colors.background)
-                .child(header("Changes", String::new(), cx))
+                .child(pane_header("Changes", status_text(String::new(), cx), lead, trail, cx))
                 .child(div().flex_1().min_h_0().child(centered("Pick a changed file".into(), cx)));
         };
-        let (rows, pairs) = (self.rows.clone(), self.pairs.clone());
-        let (added, removed) = self.counts;
+        let (rows, pairs) = (self.project.rows.clone(), self.project.pairs.clone());
+        let (added, removed) = self.project.counts;
         // Themes may lack a green (Rosé Pine's success is teal), so added lines get their own.
         let (success, danger, muted, border) =
             (gpui::hsla(0.37, 0.5, 0.5, 1.0), colors.danger, colors.muted_foreground, colors.border);
         let font = cx.global::<Palette>().mono_font_family.clone();
         let split = self.split;
         // Only the rows in view are built, so a long diff costs no more than a short one.
-        let body: AnyElement = if rows.is_empty() && self.diffing.is_some() {
+        let body: AnyElement = if rows.is_empty() && self.project.diffing.is_some() {
             div().into_any_element()
         } else if rows.is_empty() {
             centered("No textual changes".into(), cx)
         } else {
-            list(self.diff_list.clone(), move |ix, _, _| {
+            list(self.project.diff_list.clone(), move |ix, _, _| {
                 let line = div().flex().w_full().min_h(rems(1.5)).items_start().font_family(font.clone()).text_sm();
                 if split {
                     let cell = |cell: &Option<diff::Cell>, first: bool| {
@@ -1921,14 +3245,14 @@ impl Reader {
             .flex()
             .flex_col()
             .bg(colors.background)
-            .child(header_with(&path, right, cx))
+            .child(pane_header(&path, right, lead, trail, cx))
             .child(div().flex_1().min_h_0().border_color(border).child(body))
     }
 
-    fn viewer(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn viewer(&self, lead: Option<AnyElement>, trail: Option<AnyElement>, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.global::<Palette>();
-        let title = self.current.clone().unwrap_or_else(|| "No file open".into());
-        let body: AnyElement = match (&self.code, &self.notice) {
+        let title = self.project.current.clone().unwrap_or_else(|| "No file open".into());
+        let body: AnyElement = match (&self.project.code, &self.project.notice) {
             (_, Some(notice)) => centered(notice.clone(), cx),
             // Cached: the viewer redraws when it changes, not with every agent update or caret blink elsewhere.
             (Some(code), None) => code.clone().cached(StyleRefinement::default().size_full()).into_any_element(),
@@ -1939,35 +3263,39 @@ impl Reader {
             .flex()
             .flex_col()
             .bg(colors.background)
-            .child(header(
+            .child(pane_header(
                 &title,
-                self.current.as_deref().map(language).unwrap_or("").to_string(),
+                status_text(self.project.current.as_deref().map(language).unwrap_or("").to_string(), cx),
+                lead,
+                trail,
                 cx,
             ))
             .child(div().flex_1().min_h_0().child(body))
     }
 
-    fn agent_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn agent_panel(&self, lead: Option<AnyElement>, trail: Option<AnyElement>, cx: &mut Context<Self>) -> impl IntoElement {
         let this = cx.entity();
-        self.selection.update(cx, |s, _| s.begin_frame());
+        self.thread.selection.update(cx, |s, _| s.begin_frame());
         // Only the messages in view are built and laid out, however long the thread gets.
-        let selection = self.selection.clone();
-        let thread: AnyElement = if self.agent.is_none() {
-            centered("Choose an agent from New Thread".into(), cx)
-        } else if self.picking && self.thread.is_empty() {
-            match &self.sessions {
-                Some(sessions) if !self.loading && !sessions.is_empty() => session_picker(sessions, &this, cx),
-                Some(sessions) if !self.loading => centered(format!("No sessions to resume in {}", self.root.display()), cx),
-                _ => centered(self.status.clone(), cx),
+        let selection = self.thread.selection.clone();
+        let thread: AnyElement = if self.thread.agent.is_none() {
+            centered("Pick an agent below, then send a message to start a thread".into(), cx)
+        } else if self.thread.picking && self.thread.messages.is_empty() {
+            match &self.thread.sessions {
+                Some(sessions) if !self.thread.loading && !sessions.is_empty() => session_picker(sessions, &this, cx),
+                Some(sessions) if !self.thread.loading => centered(format!("No sessions to resume in {}", self.project.root.display()), cx),
+                _ => centered(self.thread.status.clone(), cx),
             }
         } else {
             list(
-                self.thread_list.clone(),
+                self.thread.list.clone(),
                 cx.processor(move |reader: &mut Self, ix: usize, window, cx| {
-                    let Some(msg) = reader.thread.get(ix) else { return div().into_any_element() };
-                    let last = ix + 1 == reader.thread.len();
+                    let Some(msg) = reader.thread.messages.get(ix) else { return div().into_any_element() };
+                    let last = ix + 1 == reader.thread.messages.len();
+                    // The text is inset as far as the composer's is (its box padding plus the
+                    // input's own), so the two share a left edge.
                     div()
-                        .px_3()
+                        .px_5()
                         .pt_3()
                         .when(last, |this| this.pb_3())
                         .child(render_msg(ix, msg, &this, &selection, window, cx))
@@ -1978,9 +3306,11 @@ impl Reader {
             .into_any_element()
         };
         let colors = cx.global::<Palette>();
-        let (send, stop, picker) = (cx.entity(), cx.entity(), cx.entity());
+        let (send, stop, history, fresh) = (cx.entity(), cx.entity(), cx.entity(), cx.entity());
         let agents = self.agents.clone();
-        let typed = !self.draft.read(cx).value().trim().is_empty();
+        let in_repo = worktree::in_repo(&self.project.root);
+        let (pick, isolate) = (cx.entity(), cx.entity());
+        let typed = !self.thread.draft.read(cx).value().trim().is_empty();
         let stop_button = |stop: Entity<Reader>| {
             Button::new("stop")
                 .icon(IconName::Square)
@@ -2001,12 +3331,12 @@ impl Reader {
             // Quiet until there is something to send.
             if typed { button.primary() } else { button }
         };
-        let steer_tip = if self.client.as_ref().is_some_and(|client| client.queues()) {
+        let steer_tip = if self.thread.client.as_ref().is_some_and(|client| client.queues()) {
             "Steer: the agent reads it before its next step (Alt+Enter: after this turn)"
         } else {
             "Queue: sent when this turn is over"
         };
-        let action = if self.busy && typed {
+        let action = if self.thread.busy && typed {
             // Typing during a turn queues it; Stop stays one click away.
             div()
                 .flex()
@@ -2014,7 +3344,7 @@ impl Reader {
                 .child(stop_button(stop))
                 .child(send_button(send, steer_tip))
                 .into_any_element()
-        } else if self.busy {
+        } else if self.thread.busy {
             stop_button(stop).into_any_element()
         } else {
             send_button(send, "Send").into_any_element()
@@ -2022,6 +3352,7 @@ impl Reader {
         let muted = colors.muted_foreground;
         let (border, queue_this) = (colors.border, cx.entity());
         let queued: Vec<AnyElement> = self
+            .thread
             .queue
             .iter()
             .enumerate()
@@ -2051,56 +3382,94 @@ impl Reader {
                     .into_any_element()
             })
             .collect();
+        // Before the thread starts, what it starts with is chosen here; after, it is only named.
+        let chips: AnyElement = if self.thread.agent.is_none() {
+            let name = self.chosen().map_or_else(|| "No agent".to_string(), |agent| agent.name.clone());
+            let isolated = self.thread.isolate;
+            div()
+                .flex()
+                .items_center()
+                .gap_1()
+                .child(
+                    dropdown(
+                        "agent-chip",
+                        Button::new("agent-chip").label(name).tooltip("The agent this thread starts with").ghost().small().dropdown_caret(true),
+                        move || {
+                            agents
+                                .iter()
+                                .map(|agent| {
+                                    let (pick, key) = (pick.clone(), agent.id.clone());
+                                    MenuItem::new(agent.name.clone(), move |_, cx| {
+                                        pick.update(cx, |reader, cx| {
+                                            reader.chosen_agent = Some(key.clone());
+                                            cx.notify();
+                                        })
+                                    })
+                                })
+                                .collect()
+                        },
+                    )
+                    .menu(self.agent_menu.clone()),
+                )
+                .children(in_repo.then(|| {
+                    Button::new("worktree-chip")
+                        .label("⎇ Worktree")
+                        .tooltip("Work on a git branch of its own, to review and merge or discard")
+                        .ghost()
+                        .small()
+                        .selected(isolated)
+                        .on_click(move |_, _, cx| {
+                            isolate.update(cx, |reader, cx| {
+                                reader.thread.isolate = !reader.thread.isolate;
+                                cx.notify();
+                            })
+                        })
+                }))
+                .into_any_element()
+        } else {
+            div().pl_2().text_sm().text_color(muted).child(self.agent_label().unwrap_or("Agent").to_string()).into_any_element()
+        };
         div()
             .size_full()
             .flex()
             .flex_col()
-            .bg(colors.sidebar)
-            .child(header_with(
+            .bg(colors.background)
+            .child(pane_header(
                 self.agent_label().unwrap_or("Agent"),
                 div()
                     .flex()
                     .items_center()
                     .gap_2()
-                    .children(self.agent.is_some().then(|| status_text(self.status.clone(), cx)))
+                    .children((!self.thread.status.is_empty()).then(|| status_text(self.thread.status.clone(), cx)))
                     .child(
-                        dropdown(
-                            "agent-select",
-                            Button::new("agent-select")
-                                .label("New Thread")
-                                .tooltip("New thread (Ctrl+N)")
-                                .small()
-                                .outline()
-                                .dropdown_caret(true),
-                            move || {
-                                let new = agents.iter().map(|agent| {
-                                    let (picker, key) = (picker.clone(), agent.id.clone());
-                                    MenuItem::new(agent.name.clone(), move |window, cx| {
-                                        picker.update(cx, |reader, cx| reader.new_thread(&key, window, cx))
-                                    })
-                                });
-                                let resume = agents.iter().map(|agent| {
-                                    let (picker, key) = (picker.clone(), agent.id.clone());
-                                    MenuItem::new(format!("Resume with {}…", agent.name), move |window, cx| {
-                                        picker.update(cx, |reader, cx| reader.resume_thread(&key, window, cx))
-                                    })
-                                });
-                                new.chain([MenuItem::separator()]).chain(resume).collect()
-                            },
-                        )
-                        .menu(self.thread_menu.clone()),
+                        Button::new("history")
+                            .label("History")
+                            .tooltip("Resume an earlier session (Ctrl+Shift+H)")
+                            .ghost()
+                            .small()
+                            .on_click(move |_, window, cx| history.update(cx, |reader, cx| reader.resume_thread(window, cx))),
+                    )
+                    .child(
+                        Button::new("new-thread")
+                            .label("New Thread")
+                            .tooltip("New thread (Ctrl+N)")
+                            .small()
+                            .outline()
+                            .on_click(move |_, window, cx| fresh.update(cx, |reader, cx| reader.new_blank_thread(window, cx))),
                     ),
+                lead,
+                trail,
                 cx,
             ))
             .child(
                 div()
                     .id("thread")
                     .key_context("Markdown")
-                    .track_focus(&self.thread_focus)
+                    .track_focus(&self.thread.focus)
                     .on_action(cx.listener(|reader, _: &ui::markdown::Copy, _, cx| {
                         // Select All takes the replies scrolled out of view too, which aren't laid out.
-                        let text = if reader.selection.read(cx).is_all() {
-                            ui::markdown::all_text(reader.thread.iter().flat_map(|msg| match msg {
+                        let text = if reader.thread.selection.read(cx).is_all() {
+                            ui::markdown::all_text(reader.thread.messages.iter().flat_map(|msg| match msg {
                                 Msg::Agent(blocks) => blocks.as_slice(),
                                 Msg::User(_) => &[],
                             }).filter_map(|block| match block {
@@ -2108,7 +3477,7 @@ impl Reader {
                                 _ => None,
                             }))
                         } else {
-                            reader.selection.read(cx).selected_text()
+                            reader.thread.selection.read(cx).selected_text()
                         };
                         if text.is_empty() {
                             return cx.propagate();
@@ -2116,38 +3485,42 @@ impl Reader {
                         cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
                     }))
                     .on_action(cx.listener(|reader, _: &ui::markdown::SelectAll, _, cx| {
-                        reader.selection.update(cx, |s, _| s.select_all());
+                        reader.thread.selection.update(cx, |s, _| s.select_all());
                         cx.notify();
                     }))
                     .on_mouse_down(gpui::MouseButton::Left, cx.listener(|reader, event: &gpui::MouseDownEvent, window, cx| {
-                        reader.thread_focus.focus(window, cx);
-                        reader.selection.update(cx, |s, _| s.mouse_down(event.position, event.click_count));
+                        reader.thread.focus.focus(window, cx);
+                        reader.thread.selection.update(cx, |s, _| s.mouse_down(event.position, event.click_count));
                         cx.notify();
                     }))
                     .on_mouse_move(cx.listener(|reader, event: &gpui::MouseMoveEvent, _, cx| {
-                        if event.pressed_button == Some(gpui::MouseButton::Left) && reader.selection.read(cx).selecting {
-                            reader.selection.update(cx, |s, _| s.drag(event.position));
+                        if event.pressed_button == Some(gpui::MouseButton::Left) && reader.thread.selection.read(cx).selecting {
+                            reader.thread.selection.update(cx, |s, _| s.drag(event.position));
                             cx.notify();
                         }
                     }))
                     .on_mouse_up(gpui::MouseButton::Left, cx.listener(|reader, event: &gpui::MouseUpEvent, _, cx| {
-                        if let Some(url) = reader.selection.update(cx, |s, _| s.mouse_up(event.position)) {
+                        if let Some(url) = reader.thread.selection.update(cx, |s, _| s.mouse_up(event.position)) {
                             cx.open_url(&url);
                         }
                         cx.notify();
                     }))
                     .on_mouse_up_out(gpui::MouseButton::Left, cx.listener(|reader, event: &gpui::MouseUpEvent, _, cx| {
-                        reader.selection.update(cx, |s, _| {
+                        reader.thread.selection.update(cx, |s, _| {
                             s.mouse_up(event.position);
                         });
                     }))
                     .flex_1()
                     .min_h_0()
-                    .child(thread),
+                    // A long line of text is hard to read, so the conversation keeps to a column.
+                    // It has the composer's outer padding too, so both columns are the same width.
+                    .child(div().size_full().flex().justify_center().px_3().child(div().h_full().w_full().max_w(px(860.0)).child(thread))),
             )
             .child(
-                div().flex_none().p_3().child(
+                div().flex_none().p_3().flex().justify_center().child(
                     div()
+                        .w_full()
+                        .max_w(px(860.0))
                         .flex()
                         .flex_col()
                         .gap_1()
@@ -2155,12 +3528,16 @@ impl Reader {
                         .rounded_lg()
                         .border_1()
                         .border_color(colors.border)
-                        .bg(colors.background)
+                        .bg(colors.sidebar)
                         .when(!queued.is_empty(), |this| {
                             this.child(div().flex().flex_col().gap_1().pb_1().border_b_1().border_color(border).children(queued))
                         })
-                        .child(Input::new(&self.draft))
-                        .child(div().flex().justify_end().child(action)),
+                        .child(Input::new(&self.thread.draft).large())
+                        .child(
+                            // The input's text sits 0.75rem in; the chips' own padding (0.5rem) plus this
+                            // inset puts their text, and the label after the thread has started, on its edge.
+                            div().flex().items_center().justify_between().gap_2().pl_1().child(chips).child(action),
+                        ),
                 ),
             )
     }
@@ -2180,6 +3557,9 @@ fn render_msg(
             return div()
                 .flex()
                 .justify_end()
+                // A bubble is a box like the composer, so its edge lines up with that box's edge, not
+                // with the text column the agent's words follow.
+                .mr(px(-17.5))
                 .child(
                     div()
                         .max_w(gpui::relative(0.9))
@@ -2242,7 +3622,7 @@ fn session_picker(sessions: &[SessionInfo], this: &Entity<Reader>, cx: &App) -> 
                 .rounded_md()
                 .cursor_pointer()
                 .hover(|style| style.bg(colors.list_hover))
-                .on_click(move |_, _, cx| this.update(cx, |reader, cx| reader.resume_session(&id, cx)))
+                .on_click(move |_, window, cx| this.update(cx, |reader, cx| reader.resume_session(&id, window, cx)))
                 .child(div().text_sm().truncate().child(title))
                 .child(div().text_xs().text_color(colors.muted_foreground).child(when))
         }))
@@ -2270,6 +3650,8 @@ fn tool_card(ix: usize, n: usize, tool: &ToolBlock, this: &Entity<Reader>, cx: &
     let colors = cx.global::<Palette>();
     let (mark, tint) = step_mark(tool.status, colors);
     let toggle = this.clone();
+    let reveal = this.clone();
+    let path = tool.path.clone();
     let mut card = div()
         .flex()
         .flex_col()
@@ -2281,15 +3663,31 @@ fn tool_card(ix: usize, n: usize, tool: &ToolBlock, this: &Entity<Reader>, cx: &
         .bg(colors.background)
         .child(
             div()
-                .id(("tool", ix * 10_000 + n))
                 .flex()
                 .items_center()
                 .gap_2()
-                .cursor_pointer()
-                .text_sm()
-                .on_click(move |_, _, cx| toggle.update(cx, |reader, cx| reader.toggle_tool(ix, n, cx)))
-                .child(div().text_color(tint).child(mark))
-                .child(div().flex_1().min_w_0().truncate().child(tool.title.clone())),
+                .child(
+                    div()
+                        .id(("tool", ix * 10_000 + n))
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .cursor_pointer()
+                        .text_sm()
+                        .on_click(move |_, _, cx| toggle.update(cx, |reader, cx| reader.toggle_tool(ix, n, cx)))
+                        .child(div().text_color(tint).child(mark))
+                        .child(div().flex_1().min_w_0().truncate().child(tool.title.clone())),
+                )
+                .children(path.map(|path| {
+                    Button::new(("tool-open", ix * 10_000 + n))
+                        .label("Open")
+                        .tooltip("Show this file, or its changes")
+                        .ghost()
+                        .xsmall()
+                        .on_click(move |_, window, cx| reveal.update(cx, |reader, cx| reader.reveal(&path, window, cx)))
+                })),
         );
     if tool.open {
         for text in [&tool.arguments, &tool.result] {
@@ -2326,15 +3724,42 @@ fn permission(ix: usize, n: usize, ask: &Ask, this: &Entity<Reader>) -> impl Int
     div().flex().flex_col().gap_2().text_sm().child(format!("Permission: {}", ask.title)).child(row)
 }
 
-fn header(title: &str, detail: String, cx: &App) -> impl IntoElement {
-    header_with(title, status_text(detail, cx), cx)
-}
-
 fn status_text(text: String, cx: &App) -> impl IntoElement {
     div().flex_none().truncate().text_xs().text_color(cx.global::<Palette>().muted_foreground).child(text)
 }
 
-fn header_with(title: &str, right: impl IntoElement, cx: &App) -> impl IntoElement {
+/// The colour of a project's name and folder: the theme's primary, in full for the project on
+/// screen and softer for the rest, so projects read apart from the threads under them.
+fn project_tone(primary: gpui::Hsla, current: bool) -> gpui::Hsla {
+    if current { primary } else { primary.opacity(0.78) }
+}
+
+/// The name that ties a row to the controls that appear only while it is hovered.
+fn row_group(kind: &str, id: u64) -> SharedString {
+    format!("{kind}-row-{id}").into()
+}
+
+/// `control`, kept in the row's layout but drawn only while the row named `group` is hovered.
+fn show_on_hover(group: SharedString, control: impl IntoElement) -> gpui::Div {
+    div().invisible().group_hover(group, |style| style.visible()).child(control)
+}
+
+/// A pane's header. The window's own controls sit in the headers of the panes at its edges:
+/// `lead` before the title in the leftmost pane, `trail` after what is on the right in the
+/// rightmost one.
+fn pane_header(title: &str, right: impl IntoElement, lead: Option<AnyElement>, trail: Option<AnyElement>, cx: &App) -> impl IntoElement {
+    let colors = cx.global::<Palette>();
+    header_row(
+        div().flex().items_center().gap_1().min_w_0().children(lead).child(
+            div().min_w_0().truncate().text_sm().font_weight(FontWeight::MEDIUM).text_color(colors.foreground).child(title.to_string()),
+        ),
+        div().flex().items_center().gap_2().child(right).children(trail),
+        cx,
+    )
+}
+
+/// A pane header: `left` and `right` on a bar with a line under it.
+fn header_row(left: impl IntoElement, right: impl IntoElement, cx: &App) -> impl IntoElement {
     let colors = cx.global::<Palette>();
     div()
         .h_10()
@@ -2346,15 +3771,8 @@ fn header_with(title: &str, right: impl IntoElement, cx: &App) -> impl IntoEleme
         .px_3()
         .border_b_1()
         .border_color(colors.border)
-        .child(
-            div()
-                .min_w_0()
-                .truncate()
-                .text_sm()
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(colors.foreground)
-                .child(title.to_string()),
-        )
+        .text_color(colors.foreground)
+        .child(left)
         .child(right)
 }
 
@@ -2364,9 +3782,11 @@ fn centered(text: String, cx: &App) -> AnyElement {
         .flex()
         .items_center()
         .justify_center()
+        .px_4()
+        .text_center()
         .text_sm()
         .text_color(cx.global::<Palette>().muted_foreground)
-        .child(text)
+        .child(div().max_w_full().child(text))
         .into_any_element()
 }
 
@@ -2380,35 +3800,41 @@ impl Render for Reader {
             }
         }
         let colors = cx.global::<Palette>();
-        let (background, foreground, border, sidebar) = (colors.background, colors.foreground, colors.border, colors.sidebar);
-        let (left, right) = (cx.entity(), cx.entity());
-        let (left_open, right_open) = (self.left_open, self.right_open);
-        let bar = div()
-            .h_8()
-            .flex_none()
-            .flex()
-            .items_center()
-            .justify_between()
-            .px_2()
-            .border_t_1()
-            .border_color(border)
-            .bg(sidebar)
-            .child(
-                Button::new("toggle-left")
-                    .icon(if left_open { IconName::PanelLeftClose } else { IconName::PanelLeftOpen })
-                    .ghost()
-                    .small()
-                    .tooltip("Toggle left sidebar (Ctrl+B)")
-                    .on_click(move |_, _, cx| left.update(cx, |reader, cx| reader.toggle_left(cx))),
-            )
-            .child(
-                Button::new("toggle-right")
-                    .icon(if right_open { IconName::PanelRightClose } else { IconName::PanelRightOpen })
-                    .ghost()
-                    .small()
-                    .tooltip("Toggle right sidebar (Ctrl+Shift+B)")
-                    .on_click(move |_, _, cx| right.update(cx, |reader, cx| reader.toggle_right(cx))),
-            );
+        let (background, foreground) = (colors.background, colors.foreground);
+        let (left_open, side_open) = (self.left_open, self.side_open);
+        // The window's controls live in the headers of the panes at its edges: the sidebar toggle
+        // at the left of the leftmost pane, the viewer toggle (and the swap, while the viewer is
+        // open) at the right of the rightmost one.
+        let (left, right, swap) = (cx.entity(), cx.entity(), cx.entity());
+        let sidebar_toggle = Button::new("toggle-left")
+            .icon(if left_open { IconName::PanelLeftClose } else { IconName::PanelLeftOpen })
+            .ghost()
+            .small()
+            .tooltip("Toggle the sidebar (Ctrl+B)")
+            .on_click(move |_, _, cx| left.update(cx, |reader, cx| reader.toggle_left(cx)))
+            .into_any_element();
+        let swap_button = Button::new("swap-panes")
+            .icon(IconName::ArrowLeftRight)
+            .ghost()
+            .small()
+            .tooltip("Swap the viewer and the conversation (Ctrl+Shift+S)")
+            .on_click(move |_, _, cx| swap.update(cx, |reader, cx| reader.swap_panes(cx)));
+        let viewer_toggle = Button::new("toggle-right")
+            .icon(if side_open { IconName::PanelRightClose } else { IconName::PanelRightOpen })
+            .ghost()
+            .small()
+            .tooltip("Toggle the viewer (Ctrl+Shift+B)")
+            .on_click(move |_, _, cx| right.update(cx, |reader, cx| reader.toggle_right(cx)));
+        let trailing = div().flex().items_center().gap_1().children(side_open.then_some(swap_button)).child(viewer_toggle).into_any_element();
+        // With the viewer open they can trade places; with it closed the conversation is the middle
+        // either way, and has both controls.
+        let (middle, side) = if !side_open {
+            (self.agent_panel(Some(sidebar_toggle), Some(trailing), cx).into_any_element(), self.pane(None, None, cx))
+        } else if self.swapped {
+            (self.pane(Some(sidebar_toggle), None, cx), self.agent_panel(None, Some(trailing), cx).into_any_element())
+        } else {
+            (self.agent_panel(Some(sidebar_toggle), None, cx).into_any_element(), self.pane(None, Some(trailing), cx))
+        };
         div()
             .size_full()
             .flex()
@@ -2420,29 +3846,24 @@ impl Render for Reader {
             .on_action(cx.listener(|reader, _: &ShowFinder, window, cx| reader.show_finder(window, cx)))
             .on_action(cx.listener(|reader, _: &ToggleLeft, _, cx| reader.toggle_left(cx)))
             .on_action(cx.listener(|reader, _: &ToggleRight, _, cx| reader.toggle_right(cx)))
-            .on_action(cx.listener(|reader, _: &ShowSource, _, cx| reader.set_mode(Mode::Source, cx)))
-            .on_action(cx.listener(|reader, _: &ShowChanges, _, cx| reader.set_mode(Mode::Diff, cx)))
+            .on_action(cx.listener(|reader, _: &ShowSource, _, cx| reader.show_viewer(Mode::Source, cx)))
+            .on_action(cx.listener(|reader, _: &ShowChanges, _, cx| reader.show_viewer(Mode::Diff, cx)))
+            .on_action(cx.listener(|reader, _: &ShowChat, _, cx| reader.show_chat(cx)))
+            .on_action(cx.listener(|reader, _: &SwapPanes, _, cx| reader.swap_panes(cx)))
+            .on_action(cx.listener(|reader, _: &ShowHistory, window, cx| reader.resume_thread(window, cx)))
             .on_action(cx.listener(|reader, _: &ToggleSplit, _, cx| reader.set_split(!reader.split, cx)))
+            .on_action(cx.listener(|reader, _: &OpenProject, window, cx| reader.pick_project(window, cx)))
             .on_action(cx.listener(|reader, _: &NewThread, window, cx| {
-                // Opening the right sidebar first: the menu hangs off its header.
-                if !reader.right_open {
-                    reader.right_open = true;
-                    cx.notify();
-                }
-                reader.thread_menu.update(cx, |menu, cx| menu.toggle(window, cx));
+                reader.new_blank_thread(window, cx);
             }))
             .child(
                 div().flex_1().min_h_0().child(
                     sidebars(&self.sidebars)
-                        .left(left_open, px(160.0)..px(520.0), self.explorer(cx))
-                        .center(match self.mode {
-                            Mode::Source => self.viewer(cx).into_any_element(),
-                            Mode::Diff => self.diff_viewer(cx).into_any_element(),
-                        })
-                        .right(right_open, px(300.0)..px(760.0), self.agent_panel(cx)),
+                        .left(left_open, px(220.0)..px(520.0), self.left_sidebar(cx))
+                        .center(middle)
+                        .right(side_open, px(320.0)..px(900.0), side),
                 ),
             )
-            .child(bar)
             .when(self.finder_open, |this| this.child(self.finder(cx)))
     }
 }
@@ -2571,8 +3992,12 @@ fn main() {
             KeyBinding::new("ctrl-shift-b", ToggleRight, None),
             KeyBinding::new("ctrl-1", ShowSource, None),
             KeyBinding::new("ctrl-2", ShowChanges, None),
+            KeyBinding::new("ctrl-3", ShowChat, None),
+            KeyBinding::new("ctrl-shift-s", SwapPanes, None),
+            KeyBinding::new("ctrl-shift-h", ShowHistory, None),
             KeyBinding::new("ctrl-\\", ToggleSplit, None),
             KeyBinding::new("ctrl-n", NewThread, None),
+            KeyBinding::new("ctrl-o", OpenProject, None),
             KeyBinding::new("ctrl-p", ShowFinder, None),
             KeyBinding::new("escape", CloseFinder, Some("Finder")),
             // The Input binds up/down itself and swallows them when single-line, so these name it.

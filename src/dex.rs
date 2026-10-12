@@ -345,20 +345,35 @@ impl Mapper {
     }
 }
 
-/// The daemon po started, if any. `closed` is set when the client is dropped, so a daemon
-/// that finishes starting after that is killed rather than leaked.
+/// A daemon po started. Threads share one daemon per URL, so it belongs to the process rather
+/// than to the client that happened to start it, and goes away with the last client using it.
+struct Owned {
+    child: Child,
+    /// Dropped with the daemon; the worker that forked it waits on its other end, because the
+    /// kernel ties the daemon to that thread rather than to the process.
+    _release: std::sync::mpsc::Sender<()>,
+}
+
 #[derive(Default)]
-struct Daemon {
-    child: Option<Child>,
-    closed: bool,
+struct Registry {
+    /// Live clients per daemon URL.
+    users: HashMap<String, usize>,
+    owned: HashMap<String, Owned>,
+}
+
+static REGISTRY: Mutex<Option<Registry>> = Mutex::new(None);
+
+/// Held while a daemon is checked for and started, so threads opened together start one.
+static STARTUP_LOCK: Mutex<()> = Mutex::new(());
+
+fn registry<R>(work: impl FnOnce(&mut Registry) -> R) -> R {
+    work(REGISTRY.lock().expect("registry lock").get_or_insert_with(Registry::default))
 }
 
 pub struct Client {
     shared: Arc<Shared>,
-    /// Dropped with the client; the worker that started the daemon waits on its other end.
-    _alive: std::sync::mpsc::Sender<()>,
-    /// The daemon, when po started it; it goes away with the client.
-    daemon: Arc<Mutex<Daemon>>,
+    /// The URL this client counts as a user of.
+    url: String,
 }
 
 impl Client {
@@ -389,11 +404,13 @@ impl Client {
             events,
             batches: Mutex::new(HashMap::new()),
         });
-        let daemon = Arc::new(Mutex::new(Daemon::default()));
-        let (alive, hold) = std::sync::mpsc::channel::<()>();
-        let (worker, started, command, cwd) = (shared.clone(), daemon.clone(), command.to_string(), cwd.to_path_buf());
+        let url = shared.base.clone();
+        registry(|r| *r.users.entry(url.clone()).or_default() += 1);
+        let (worker, command, cwd) = (shared.clone(), command.to_string(), cwd.to_path_buf());
         std::thread::spawn(move || {
+            let mut held = None;
             let result = (|| -> Result<()> {
+                let _starting = STARTUP_LOCK.lock().expect("startup lock");
                 if !worker.healthy() {
                     let mut parts = command.split_whitespace();
                     let program = parts.next().context("the dex daemon isn't running and no command to start it is configured")?;
@@ -418,26 +435,39 @@ impl Client {
                         .stderr(Stdio::inherit())
                         .spawn()
                         .with_context(|| format!("could not start `{command}`"))?;
-                    {
-                        let mut daemon = started.lock().expect("daemon lock");
-                        if daemon.closed {
-                            let mut child = child;
-                            let _ = child.kill();
-                            let _ = child.wait();
-                            return Ok(());
+                    let (release, hold) = std::sync::mpsc::channel::<()>();
+                    let adopted = registry(|r| {
+                        // Every client using this daemon was dropped while it started.
+                        if r.users.get(&worker.base).copied().unwrap_or(0) == 0 {
+                            return Err(child);
                         }
-                        daemon.child = Some(child);
+                        r.owned.insert(worker.base.clone(), Owned { child, _release: release });
+                        Ok(())
+                    });
+                    if let Err(mut child) = adopted {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        return Ok(());
                     }
+                    held = Some(hold);
                     let deadline = Instant::now() + STARTUP;
                     while !worker.healthy() {
-                        {
-                            let mut daemon = started.lock().expect("daemon lock");
-                            if daemon.closed {
-                                return Ok(());
+                        let status = registry(|r| {
+                            if r.users.get(&worker.base).copied().unwrap_or(0) == 0 {
+                                return Err(None);
                             }
-                            if let Some(status) = daemon.child.as_mut().and_then(|child| child.try_wait().ok().flatten()) {
+                            match r.owned.get_mut(&worker.base).and_then(|o| o.child.try_wait().ok().flatten()) {
+                                Some(status) => Err(Some(status)),
+                                None => Ok(()),
+                            }
+                        });
+                        match status {
+                            Err(None) => return Ok(()),
+                            Err(Some(status)) => {
+                                registry(|r| r.owned.remove(&worker.base));
                                 return Err(anyhow!("`{command}` exited ({status}) before the daemon came up"));
                             }
+                            Ok(()) => {}
                         }
                         if Instant::now() > deadline {
                             return Err(anyhow!("the dex daemon didn't come up at {}", worker.base));
@@ -450,13 +480,12 @@ impl Client {
             if let Err(error) = result {
                 worker.fail(error);
             }
-            // The kernel ties the daemon to this thread, not to the process, so the thread
-            // that started it has to outlive the client.
-            if started.lock().expect("daemon lock").child.is_some() {
+            // Outlive the daemon this worker forked.
+            if let Some(hold) = held {
                 let _ = hold.recv();
             }
         });
-        Ok((Self { shared, _alive: alive, daemon }, receiver))
+        Ok((Self { shared, url }, receiver))
     }
 
     fn background(&self, work: impl FnOnce(&Shared) -> Result<()> + Send + 'static) {
@@ -481,6 +510,11 @@ impl Client {
         *self.shared.session.lock().expect("session lock") = Some(id.to_string());
         self.background(|shared| shared.replay());
         true
+    }
+
+    /// The session this client has open, once it has one.
+    pub fn session(&self) -> Option<String> {
+        self.shared.session.lock().expect("session lock").clone()
     }
 
     pub fn cancel(&self) {
@@ -555,11 +589,20 @@ impl Client {
 
 impl Drop for Client {
     fn drop(&mut self) {
-        let mut daemon = self.daemon.lock().expect("daemon lock");
-        daemon.closed = true;
-        if let Some(mut child) = daemon.child.take() {
-            let _ = child.kill();
-            let _ = child.wait();
+        // The daemon po started goes with its last user; one that was already running is left alone.
+        let last = registry(|r| match r.users.get_mut(&self.url) {
+            Some(n) if *n > 1 => {
+                *n -= 1;
+                None
+            }
+            _ => {
+                r.users.remove(&self.url);
+                r.owned.remove(&self.url)
+            }
+        });
+        if let Some(mut owned) = last {
+            let _ = owned.child.kill();
+            let _ = owned.child.wait();
         }
     }
 }
@@ -706,6 +749,30 @@ mod tests {
         client.enqueue("later", Queue::Followup);
         assert!(matches!(next(&mut events), Some(Event::Rejected { queue: Queue::Followup, .. })));
         drop(client);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Threads share one daemon: it outlives the client that started it and dies with the last.
+    #[test]
+    fn a_shared_daemon_goes_with_its_last_client() {
+        if Command::new("dex").arg("--version").stdout(Stdio::null()).stderr(Stdio::null()).status().is_err() {
+            eprintln!("skipped: no dex on PATH");
+            return;
+        }
+        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let dir = std::env::temp_dir().join(format!("po-dex-share-{port}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (url, command) = (format!("http://127.0.0.1:{port}"), format!("dex serve 127.0.0.1:{port}"));
+        let (first, mut first_events) = Client::spawn(&url, &command, &dir, false).unwrap();
+        let (second, mut second_events) = Client::spawn(&url, &command, &dir, false).unwrap();
+        assert!(matches!(next(&mut first_events), Some(Event::Ready { .. })));
+        assert!(matches!(next(&mut second_events), Some(Event::Ready { .. })));
+        let alive = || ureq::get(&format!("{url}/health")).call().is_ok();
+        drop(first);
+        assert!(alive(), "dropping the client that started the daemon killed it");
+        drop(second);
+        std::thread::sleep(Duration::from_millis(500));
+        assert!(!alive(), "the daemon outlived its last client");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

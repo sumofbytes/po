@@ -29,6 +29,9 @@ enum Side {
 pub struct SidebarsState {
     left: Pixels,
     right: Pixels,
+    /// The right width was set by a drag (or restored from one), so it is what the user wants and
+    /// is no longer replaced by a default.
+    right_chosen: bool,
     dragging: Option<Side>,
     /// The whole layout's bounds, from the last frame.
     bounds: Bounds<Pixels>,
@@ -36,7 +39,38 @@ pub struct SidebarsState {
 
 impl SidebarsState {
     pub fn new(left: Pixels, right: Pixels) -> Self {
-        Self { left, right, dragging: None, bounds: Bounds::default() }
+        Self { left, right, right_chosen: false, dragging: None, bounds: Bounds::default() }
+    }
+
+    /// The widths of the left and right sidebars, and the right one's only if it was chosen.
+    pub fn widths(&self) -> (Pixels, Option<Pixels>) {
+        (self.left, self.right_chosen.then_some(self.right))
+    }
+
+    /// Restores widths from an earlier run; a right width given this way counts as chosen.
+    pub fn set_widths(&mut self, left: Option<Pixels>, right: Option<Pixels>) {
+        if let Some(left) = left {
+            self.left = left;
+        }
+        if let Some(right) = right {
+            self.right = right;
+            self.right_chosen = true;
+        }
+    }
+
+    /// A handle is being dragged.
+    pub fn dragging(&self) -> bool {
+        self.dragging.is_some()
+    }
+
+    /// Gives the right sidebar `share` of the whole layout's width, within the range it is drawn
+    /// with, unless a width was chosen for it, which is kept. Does nothing until the layout has
+    /// been measured.
+    pub fn set_right_share(&mut self, share: f32) {
+        let width = self.bounds.size.width;
+        if width > px(0.) && !self.right_chosen {
+            self.right = width * share;
+        }
     }
 }
 
@@ -163,6 +197,7 @@ impl RenderOnce for Sidebars {
                                         Some(Side::Right) => {
                                             let width = left_shown.then_some(state.left).unwrap_or_default();
                                             state.right = dragged_width(Side::Right, event.position.x, state.bounds, width, &right_range);
+                                            state.right_chosen = true;
                                         }
                                         None => return,
                                     }
@@ -207,9 +242,173 @@ impl RenderOnce for Sidebars {
     }
 }
 
+/// The height of a folded [`VSplit`]'s bottom pane, in rems: that of a pane header.
+pub const COLLAPSED_REMS: f32 = 2.5;
+
+/// The least height either pane of a [`VSplit`] gets.
+const MIN_TOP: Pixels = px(72.);
+const MIN_BOTTOM: Pixels = px(120.);
+
+/// Where the boundary of a [`VSplit`] is. Until it is dragged, the panes share the height.
+pub struct VSplitState {
+    top: Option<Pixels>,
+    /// The bottom pane is folded down to its header, which sits at the bottom, and the top pane
+    /// takes the rest. `top` is kept, so unfolding goes back to where the boundary was.
+    collapsed: bool,
+    dragging: bool,
+    /// The whole split's bounds, from the last frame.
+    bounds: Bounds<Pixels>,
+}
+
+impl VSplitState {
+    pub fn new() -> Self {
+        Self { top: None, collapsed: false, dragging: false, bounds: Bounds::default() }
+    }
+
+    pub fn collapsed(&self) -> bool {
+        self.collapsed
+    }
+
+    pub fn set_collapsed(&mut self, collapsed: bool) {
+        self.collapsed = collapsed;
+    }
+
+    /// The height of the top pane once it has been set by a drag (or [`Self::set_top`]).
+    pub fn top(&self) -> Option<Pixels> {
+        self.top
+    }
+
+    pub fn set_top(&mut self, top: Pixels) {
+        self.top = Some(top);
+    }
+
+    /// The handle is being dragged.
+    pub fn dragging(&self) -> bool {
+        self.dragging
+    }
+}
+
+/// Two panes, one above the other, with the boundary between them dragged: the vertical
+/// counterpart of [`Sidebars`], drawn the same way.
+#[derive(IntoElement)]
+pub struct VSplit {
+    state: Entity<VSplitState>,
+    top: Option<AnyElement>,
+    bottom: Option<AnyElement>,
+}
+
+pub fn vsplit(state: &Entity<VSplitState>) -> VSplit {
+    VSplit { state: state.clone(), top: None, bottom: None }
+}
+
+impl VSplit {
+    pub fn top(mut self, element: impl IntoElement) -> Self {
+        self.top = Some(element.into_any_element());
+        self
+    }
+
+    pub fn bottom(mut self, element: impl IntoElement) -> Self {
+        self.bottom = Some(element.into_any_element());
+        self
+    }
+}
+
+/// The height a drag to `y` gives the top pane, leaving both panes their minimum.
+fn dragged_height(y: Pixels, bounds: Bounds<Pixels>) -> Pixels {
+    let most = (bounds.size.height - MIN_BOTTOM).max(MIN_TOP);
+    (y - bounds.top()).clamp(MIN_TOP, most)
+}
+
+impl RenderOnce for VSplit {
+    fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
+        let (top, dragging, collapsed) = {
+            let state = self.state.read(cx);
+            (state.top, state.dragging, state.collapsed)
+        };
+        let palette = cx.global::<Palette>();
+        let color = if dragging { palette.resize_handle_active } else { palette.resize_handle };
+        let tracker = self.state.clone();
+        let grab = self.state.clone();
+        let handle = div()
+            .id("vsplit-handle")
+            .occlude()
+            .absolute()
+            .left_0()
+            .top(-HANDLE_PADDING)
+            .w_full()
+            .h(px(1.) + HANDLE_PADDING * 2.)
+            .py(HANDLE_PADDING)
+            .cursor_row_resize()
+            .child(div().flex_none().w_full().h(px(1.)).bg(color))
+            .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                grab.update(cx, |state, cx| {
+                    state.dragging = true;
+                    cx.notify();
+                });
+                cx.stop_propagation();
+            });
+        let pane = div().min_h(MIN_TOP).max_h(gpui::relative(1.)).flex_grow(0.).flex_shrink(1.);
+        let pane = match top {
+            Some(height) => pane.flex_basis(height),
+            None => pane.flex_basis(gpui::relative(0.5)),
+        };
+        // Folded, the top pane fills the space and the bottom shows only its header-high strip.
+        let (pane, bottom) = if collapsed {
+            (
+                div().flex_1().min_h(MIN_TOP),
+                div().flex_none().h(gpui::rems(COLLAPSED_REMS)).overflow_hidden().border_t_1().border_color(palette.border),
+            )
+        } else {
+            (pane, div().flex_1().min_h(MIN_BOTTOM))
+        };
+
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .relative()
+            // Measures the split, and follows the pointer while the handle is held.
+            .child(
+                canvas(
+                    move |bounds, _, cx| tracker.update(cx, |state, _| state.bounds = bounds),
+                    {
+                        let state = self.state.clone();
+                        move |_, _, window, _| {
+                            if !dragging {
+                                return;
+                            }
+                            window.set_window_cursor_style(CursorStyle::ResizeUpDown);
+                            let (moving, released) = (state.clone(), state.clone());
+                            window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
+                                if phase.bubble() {
+                                    moving.update(cx, |state, cx| {
+                                        state.top = Some(dragged_height(event.position.y, state.bounds));
+                                        cx.notify();
+                                    });
+                                }
+                            });
+                            window.on_mouse_event(move |_: &MouseUpEvent, phase, _, cx| {
+                                if phase.bubble() {
+                                    released.update(cx, |state, cx| {
+                                        state.dragging = false;
+                                        cx.notify();
+                                    });
+                                }
+                            });
+                        }
+                    },
+                )
+                .absolute()
+                .size_full(),
+            )
+            .child(pane.relative().overflow_hidden().children(self.top))
+            .child(bottom.relative().children(self.bottom).when(!collapsed, |bottom| bottom.child(handle)))
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{MIN_CENTER, Side, dragged_width};
+    use super::{MIN_BOTTOM, MIN_CENTER, MIN_TOP, Side, SidebarsState, dragged_height, dragged_width};
     use gpui::{Bounds, point, px, size};
 
     #[test]
@@ -222,5 +421,30 @@ mod tests {
         // With a wide right sidebar, the left one stops where the center would get too narrow.
         assert_eq!(dragged_width(Side::Left, px(1000.), bounds, px(760.), &range), px(1200.) - px(760.) - MIN_CENTER);
         assert_eq!(dragged_width(Side::Right, px(900.), bounds, px(260.), &(px(300.)..px(760.))), px(400.));
+    }
+
+    #[test]
+    fn the_split_keeps_both_panes_their_minimum() {
+        let bounds = Bounds::new(point(px(0.), px(50.)), size(px(300.), px(800.)));
+        assert_eq!(dragged_height(px(350.), bounds), px(300.));
+        assert_eq!(dragged_height(px(60.), bounds), MIN_TOP);
+        assert_eq!(dragged_height(px(2000.), bounds), px(800.) - MIN_BOTTOM);
+        // A split too short for both minimums doesn't panic; the top gets its minimum.
+        let short = Bounds::new(point(px(0.), px(0.)), size(px(300.), px(100.)));
+        assert_eq!(dragged_height(px(90.), short), MIN_TOP);
+    }
+
+    #[test]
+    fn a_width_that_was_chosen_is_kept_when_the_sidebar_opens_again() {
+        let mut state = SidebarsState::new(px(280.), px(560.));
+        state.bounds = Bounds::new(point(px(0.), px(0.)), size(px(1000.), px(800.)));
+        // Not chosen: opening gives it its default share.
+        state.set_right_share(0.5);
+        assert_eq!(state.right, px(500.));
+        assert_eq!(state.widths().1, None);
+        // Chosen (dragged, or restored): opening leaves it alone.
+        state.set_widths(Some(px(300.)), Some(px(420.)));
+        state.set_right_share(0.5);
+        assert_eq!(state.widths(), (px(300.), Some(px(420.))));
     }
 }

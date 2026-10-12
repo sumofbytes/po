@@ -23,6 +23,16 @@ pub fn dir() -> Option<PathBuf> {
     Some(base.join("po"))
 }
 
+/// `$XDG_DATA_HOME/po`, or `~/.local/share/po`: where po keeps what it makes, like worktrees.
+pub fn data_dir() -> PathBuf {
+    std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share")))
+        .unwrap_or_else(std::env::temp_dir)
+        .join("po")
+}
+
 pub fn read_json(path: &Path) -> Option<Value> {
     let text = std::fs::read_to_string(path).ok()?;
     match serde_json::from_str(&text) {

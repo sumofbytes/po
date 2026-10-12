@@ -6,6 +6,9 @@
     "mono_family": "Noto Sans Mono",
     "mono_size": 13
   },
+  "notifications": true,
+  "idle_minutes": 15,
+  "max_live_agents": 8,
   "agents": [
     { "id": "opencode", "name": "OpenCode", "command": "opencode acp" },
     { "id": "mine", "name": "My agent", "command": "my-agent --acp" }
