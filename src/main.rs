@@ -2742,7 +2742,7 @@ impl Reader {
     /// The open projects, each marked with the busiest of its threads, and a way to add one.
     fn projects_strip(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.global::<Palette>();
-        let (border, hover, muted, foreground) = (colors.border, colors.list_hover, colors.muted_foreground, colors.foreground);
+        let (border, hover, muted, primary) = (colors.border, colors.list_hover, colors.muted_foreground, colors.primary);
         let busiest = |threads: &[&Thread]| threads.iter().map(|t| t.activity()).max().unwrap_or(Activity::Idle);
         let mut rows: Vec<(u64, String, Activity)> = std::iter::once((self.project_id, &self.project, &self.thread, &self.parked[..]))
             .chain(self.slots.iter().map(|slot| (slot.id, &slot.project, &slot.thread, &slot.parked[..])))
@@ -2777,7 +2777,7 @@ impl Reader {
                     .hover(|row| row.bg(hover))
                     .on_click(move |_, window, cx| select.update(cx, |reader, cx| reader.show_project(id, window, cx)))
                     .child(div().flex_none().text_xs().text_color(tint).child(glyph))
-                    .child(div().flex_1().min_w_0().truncate().text_sm().text_color(if id == active { foreground } else { muted }).child(name))
+                    .child(div().flex_1().min_w_0().truncate().text_sm().text_color(project_tone(primary, id == active)).child(name))
                     .when(many, |row| {
                         row.child(show_on_hover(
                             row_group("project", id),
@@ -2945,7 +2945,8 @@ impl Reader {
     fn agents_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let explorer = self.explorer(false, cx).into_any_element();
         let colors = cx.global::<Palette>();
-        let (hover, selected, muted, foreground) = (colors.list_hover, colors.list_selected, colors.muted_foreground, colors.foreground);
+        let (hover, selected, muted, foreground, primary) =
+            (colors.list_hover, colors.list_selected, colors.muted_foreground, colors.foreground, colors.primary);
         let views = self.views();
         let (active_project, active_thread) = (self.project_id, self.thread.id);
         let many = views.len() > 1;
@@ -2989,7 +2990,7 @@ impl Reader {
                             .flex_none()
                             .flex()
                             .justify_center()
-                            .child(Icon::new(IconName::Folder).size(IconSize::XSmall).color(if current { foreground } else { muted })),
+                            .child(Icon::new(IconName::Folder).size(IconSize::XSmall).color(project_tone(primary, current))),
                     )
                     .child(
                         div()
@@ -2998,7 +2999,7 @@ impl Reader {
                             .truncate()
                             .text_size(rems(0.9375))
                             .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(if current { foreground } else { muted })
+                            .text_color(project_tone(primary, current))
                             .child(view.project.name()),
                     )
                     // Starting a thread is on the project's own row, shown when it is hovered.
@@ -3728,6 +3729,12 @@ fn header(title: &str, detail: String, cx: &App) -> impl IntoElement {
 
 fn status_text(text: String, cx: &App) -> impl IntoElement {
     div().flex_none().truncate().text_xs().text_color(cx.global::<Palette>().muted_foreground).child(text)
+}
+
+/// The colour of a project's name and folder: the theme's primary, in full for the project on
+/// screen and softer for the rest, so projects read apart from the threads under them.
+fn project_tone(primary: gpui::Hsla, current: bool) -> gpui::Hsla {
+    if current { primary } else { primary.opacity(0.78) }
 }
 
 /// The name that ties a row to the controls that appear only while it is hovered.
