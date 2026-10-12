@@ -88,6 +88,23 @@ An entry with a `daemon` URL uses this path, and its `command` starts the
 daemon if nothing answers at the URL (po stops a daemon it started). Plain
 `http` only; set `DEX_DAEMON_TOKEN` if the daemon needs a bearer token.
 
+### Projects and threads
+
+Several projects can be open at once. **Add project…** (Ctrl+O) in the explorer
+opens a folder; each project keeps its own files, changes, open file and agent
+threads. Opening a PR adds it as a project too, and closing it removes the
+checkout.
+
+A project can run several agent threads. **New Thread** starts another without
+stopping the others, which keep working in the background; a list above the chat
+switches between them. A mark shows what each is doing (`●` running, `!` waiting
+for a permission answer, green `●` finished while you were elsewhere), and a
+project shows the busiest of its threads. Only the thread on screen moves the
+viewer to the files it edits.
+
+Threads and projects aren't remembered across restarts yet. Threads in the same
+project share a checkout, so two agents editing at once can step on each other.
+
 ### Themes
 
 Set `"theme"` to a theme name. On first start `po` copies the bundled themes

@@ -36,7 +36,7 @@ use gpui::{
     prelude::*, px, rems, size, KeyBinding,
 };
 
-gpui::actions!(po, [ToggleLeft, ToggleRight, ShowSource, ShowChanges, ToggleSplit, NewThread, ShowFinder, CloseFinder, FinderUp, FinderDown]);
+gpui::actions!(po, [ToggleLeft, ToggleRight, ShowSource, ShowChanges, ToggleSplit, NewThread, OpenProject, ShowFinder, CloseFinder, FinderUp, FinderDown]);
 
 const SKIP: [&str; 5] = ["target", "node_modules", "dist", "build", "__pycache__"];
 const MAX_FILES: usize = 5000;
@@ -445,6 +445,18 @@ struct Project {
     notice: Option<String>,
     tree: Entity<TreeState>,
     expanded: HashSet<SharedString>,
+    /// Keep the explorer and changes list wired to this project.
+    _subscriptions: Vec<Subscription>,
+}
+
+impl Project {
+    /// What the project is called in the list.
+    fn name(&self) -> String {
+        match &self.pr {
+            Some(pr) => format!("PR #{} {}", pr.number, pr.title),
+            None => self.root.file_name().map_or_else(|| self.root.display().to_string(), |n| n.to_string_lossy().to_string()),
+        }
+    }
 }
 
 /// One conversation with an agent: its messages, the process behind it and what is waiting to
@@ -603,14 +615,27 @@ impl Thread {
 }
 
 /// What a thread is up to, for the thread list.
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Activity {
     Idle,
+    /// Finished a turn nobody has looked at.
+    Unread,
     Running,
     /// Waiting for an answer to a permission request.
     Asking,
-    /// Finished a turn nobody has looked at.
-    Unread,
+}
+
+impl Activity {
+    /// The mark the thread and project lists draw, and its colour.
+    fn mark(self, colors: &Palette) -> (&'static str, gpui::Hsla) {
+        match self {
+            Activity::Idle => ("○", colors.muted_foreground),
+            Activity::Running => ("●", colors.primary),
+            Activity::Asking => ("!", colors.warning),
+            // Themes may lack a green (Rosé Pine's success is teal), so this has its own.
+            Activity::Unread => ("●", gpui::hsla(0.37, 0.5, 0.5, 1.0)),
+        }
+    }
 }
 
 impl Thread {
@@ -647,12 +672,28 @@ impl Thread {
     }
 }
 
-struct Reader {
+/// A project that isn't on screen, with its threads and view settings. They are swapped with
+/// the same fields of [`Reader`] when it is shown.
+struct Slot {
+    id: u64,
     mode: Mode,
     project: Project,
-    /// The thread on screen; its methods act on this one.
     thread: Thread,
-    /// The other threads, still running; swapped in with [`Self::with_thread`] to handle their events.
+    parked: Vec<Thread>,
+}
+
+struct Reader {
+    mode: Mode,
+    /// The project on screen; its methods act on this one.
+    project: Project,
+    project_id: u64,
+    /// The other projects, with their threads still running.
+    slots: Vec<Slot>,
+    next_project: u64,
+    /// The thread on screen in this project; its methods act on this one.
+    thread: Thread,
+    /// This project's other threads, still running; swapped in with [`Self::with_thread`] to
+    /// handle their events.
     parked: Vec<Thread>,
     next_thread: u64,
     /// The directory `po` was started in: where PRs are checked out from and where Close returns to.
@@ -713,41 +754,10 @@ impl Reader {
                 .submit_on_enter(true)
                 .placeholder("Message the agent")
         });
-        let tree = cx.new(|cx| TreeState::new(cx));
-        let changes_tree = cx.new(|cx| TreeState::new(cx));
         let subscriptions = vec![
             // Switching modes unmounts whatever was focused (the explorer, the viewer), which
             // leaves nothing focused and the shortcuts unrouted, so take focus back.
             cx.on_focus_lost(window, |reader, window, cx| reader.focus.focus(window, cx)),
-            cx.subscribe(&tree, |reader, _, event: &TreeEvent, _| match event {
-                TreeEvent::Expanded(id) => {
-                    reader.project.expanded.insert(id.clone());
-                }
-                TreeEvent::Collapsed(id) => {
-                    reader.project.expanded.remove(id);
-                }
-            }),
-            cx.subscribe(&changes_tree, |reader, _, event: &TreeEvent, _| match event {
-                TreeEvent::Expanded(id) => {
-                    reader.project.collapsed.remove(id);
-                }
-                TreeEvent::Collapsed(id) => {
-                    reader.project.collapsed.insert(id.clone());
-                }
-            }),
-            // Moving the selection with the keyboard opens the file too, like a click.
-            cx.observe_in(&tree, window, |reader, tree, window, cx| {
-                let path = tree.read(cx).selected_entry().filter(|e| !e.folder).map(|e| e.id.to_string());
-                if let Some(path) = path.filter(|p| reader.mode == Mode::Source && reader.project.current.as_deref() != Some(p)) {
-                    reader.open(&path, window, cx);
-                }
-            }),
-            cx.observe(&changes_tree, |reader, tree, cx| {
-                let path = tree.read(cx).selected_entry().filter(|e| !e.folder).map(|e| e.id.to_string());
-                if let Some(path) = path.filter(|p| reader.mode == Mode::Diff && reader.project.picked.as_deref() != Some(p)) {
-                    reader.pick(&path, cx);
-                }
-            }),
             cx.subscribe_in(&pr_input, window, |reader, _, event: &InputEvent, window, cx| {
                 if matches!(event, InputEvent::PressEnter { shift: false, alt: false }) {
                     reader.open_pr(window, cx);
@@ -759,31 +769,7 @@ impl Reader {
         if let Some(command) = command.as_ref().filter(|c| !agents.iter().any(|agent| agent.id == **c)) {
             agents.push(config::Agent { id: command.clone(), name: "Custom".into(), command: command.clone(), daemon: None });
         }
-        let project = Project {
-            root,
-            base: pr.as_ref().map_or_else(|| "HEAD".to_string(), |pr| pr.base.clone()),
-            pr,
-            files,
-            changes: vec![],
-            marks: Rc::default(),
-            diffing: None,
-            listing: None,
-            scanning: None,
-            watching: None,
-            changes_tree,
-            collapsed: HashSet::new(),
-            picked: None,
-            rows: Rc::new(vec![]),
-            pairs: Rc::new(vec![]),
-            counts: (0, 0),
-            diff_list: ListState::new(0, ListAlignment::Top, px(400.)),
-            current: None,
-            stamp: None,
-            code: None,
-            notice: None,
-            tree,
-            expanded: HashSet::new(),
-        };
+        let project = Self::build_project(root, pr, files, window, cx);
         let thread = Thread {
             id: 0,
             unread: false,
@@ -807,6 +793,9 @@ impl Reader {
         let mut reader = Self {
             mode: Mode::Source,
             project,
+            project_id: 0,
+            slots: vec![],
+            next_project: 1,
             thread,
             parked: vec![],
             next_thread: 1,
@@ -841,6 +830,87 @@ impl Reader {
         reader.watch(watch, window, cx);
         trace::mark("watch");
         reader
+    }
+
+    /// A project over `root`, showing `files` in its explorer until the next walk.
+    fn build_project(root: PathBuf, pr: Option<pr::Pr>, files: Vec<String>, window: &mut Window, cx: &mut Context<Self>) -> Project {
+        let tree = cx.new(|cx| TreeState::new(cx));
+        let changes_tree = cx.new(|cx| TreeState::new(cx));
+        // Only the project on screen has its trees touched, so these act on `reader.project`;
+        // the check keeps a stray event from another project's tree off it.
+        let subscriptions = vec![
+            cx.subscribe(&tree, |reader, tree, event: &TreeEvent, _| {
+                if reader.project.tree != tree {
+                    return;
+                }
+                match event {
+                    TreeEvent::Expanded(id) => {
+                        reader.project.expanded.insert(id.clone());
+                    }
+                    TreeEvent::Collapsed(id) => {
+                        reader.project.expanded.remove(id);
+                    }
+                }
+            }),
+            cx.subscribe(&changes_tree, |reader, tree, event: &TreeEvent, _| {
+                if reader.project.changes_tree != tree {
+                    return;
+                }
+                match event {
+                    TreeEvent::Expanded(id) => {
+                        reader.project.collapsed.remove(id);
+                    }
+                    TreeEvent::Collapsed(id) => {
+                        reader.project.collapsed.insert(id.clone());
+                    }
+                }
+            }),
+            // Moving the selection with the keyboard opens the file too, like a click.
+            cx.observe_in(&tree, window, |reader, tree, window, cx| {
+                if reader.project.tree != tree {
+                    return;
+                }
+                let path = tree.read(cx).selected_entry().filter(|e| !e.folder).map(|e| e.id.to_string());
+                if let Some(path) = path.filter(|p| reader.mode == Mode::Source && reader.project.current.as_deref() != Some(p)) {
+                    reader.open(&path, window, cx);
+                }
+            }),
+            cx.observe(&changes_tree, |reader, tree, cx| {
+                if reader.project.changes_tree != tree {
+                    return;
+                }
+                let path = tree.read(cx).selected_entry().filter(|e| !e.folder).map(|e| e.id.to_string());
+                if let Some(path) = path.filter(|p| reader.mode == Mode::Diff && reader.project.picked.as_deref() != Some(p)) {
+                    reader.pick(&path, cx);
+                }
+            }),
+        ];
+        Project {
+            root,
+            base: pr.as_ref().map_or_else(|| "HEAD".to_string(), |pr| pr.base.clone()),
+            pr,
+            files,
+            changes: vec![],
+            marks: Rc::default(),
+            diffing: None,
+            listing: None,
+            scanning: None,
+            watching: None,
+            changes_tree,
+            collapsed: HashSet::new(),
+            picked: None,
+            rows: Rc::new(vec![]),
+            pairs: Rc::new(vec![]),
+            counts: (0, 0),
+            diff_list: ListState::new(0, ListAlignment::Top, px(400.)),
+            current: None,
+            stamp: None,
+            code: None,
+            notice: None,
+            tree,
+            expanded: HashSet::new(),
+            _subscriptions: subscriptions,
+        }
     }
 
     /// Rebuilds the explorer from `files`, keeping folders open and the current file selected.
@@ -993,10 +1063,11 @@ impl Reader {
         self.opening = true;
         self.pr_status = Some(format!("Checking out {spec}…"));
         cx.notify();
-        let home = self.home.clone();
+        // Reviewed from the checkout on screen, or from where `po` started if that is a PR.
+        let repo = if self.project.pr.is_none() { self.project.root.clone() } else { self.home.clone() };
         let handle = window.window_handle();
         cx.spawn(async move |this, cx| {
-            let result = cx.background_executor().spawn(async move { pr::Pr::open(&home, &spec) }).await;
+            let result = cx.background_executor().spawn(async move { pr::Pr::open(&repo, &spec) }).await;
             handle
                 .update(cx, |_, window, cx| {
                     this.update(cx, |reader, cx| {
@@ -1006,7 +1077,7 @@ impl Reader {
                                 reader.pr_status = None;
                                 reader.pr_input.update(cx, |input, cx| input.set_value("", window, cx));
                                 let root = pr.worktree.clone();
-                                reader.switch_root(root, Some(pr), window, cx);
+                                reader.add_project(root, Some(pr), window, cx);
                             }
                             Err(error) => {
                                 log::warn!("open PR: {error}");
@@ -1021,45 +1092,127 @@ impl Reader {
         .detach();
     }
 
-    /// Leaves the PR review and goes back to the directory `po` started in.
+    /// Closes the PR review, going back to another project, or to the directory `po` started in
+    /// if this was the only one.
     fn close_pr(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let home = self.home.clone();
-        self.switch_root(home, None, window, cx);
+        let id = self.project_id;
+        if self.slots.is_empty() {
+            let home = self.home.clone();
+            self.add_project(home, None, window, cx);
+        }
+        self.close_project(id, window, cx);
     }
 
-    /// Points the whole window (explorer, viewer, watcher, agent) at `root`, which is
-    /// `pr`'s worktree when reviewing one. The previous PR's worktree is removed.
-    fn switch_root(&mut self, root: PathBuf, pr: Option<pr::Pr>, window: &mut Window, cx: &mut Context<Self>) {
-        // Stop watching the old tree before it can be deleted.
-        self.project.watching = None;
-        self.project.base = pr.as_ref().map_or_else(|| "HEAD".to_string(), |pr| pr.base.clone());
-        self.project.root = root;
-        drop(std::mem::replace(&mut self.project.pr, pr));
-        self.project.files.clear();
-        self.project.expanded.clear();
-        self.project.collapsed.clear();
-        self.project.current = None;
-        self.project.stamp = None;
-        self.project.code = None;
-        self.project.notice = None;
-        self.project.picked = None;
-        self.project.diffing = None;
-        self.set_rows(vec![]);
-        self.project.changes.clear();
-        self.project.marks = Rc::default();
+    /// Swaps the project on screen, with its threads and mode, for `slots[at]`.
+    fn swap_slot(&mut self, at: usize) {
+        let slot = &mut self.slots[at];
+        std::mem::swap(&mut self.project_id, &mut slot.id);
+        std::mem::swap(&mut self.mode, &mut slot.mode);
+        std::mem::swap(&mut self.project, &mut slot.project);
+        std::mem::swap(&mut self.thread, &mut slot.thread);
+        std::mem::swap(&mut self.parked, &mut slot.parked);
+    }
+
+    /// Stops what only the project on screen needs (its watcher, `git` runs and the finder), so
+    /// that nothing keeps updating it once another is shown. Its threads are not touched.
+    fn suspend_project(&mut self) {
+        let project = &mut self.project;
+        project.watching = None;
+        project.listing = None;
+        project.scanning = None;
+        project.diffing = None;
+        self.finder_open = false;
+    }
+
+    /// Brings a project that was swapped in up to date with the disk, and starts watching it.
+    fn resume_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.refresh_tree(cx);
         self.rescan(cx);
-        // The other threads work in the old directory, so they end; the one on screen restarts
-        // in the new one.
-        self.parked.clear();
-        if let Some(agent) = self.thread.agent.clone() {
+        self.watch(None, window, cx);
+        if self.mode == Mode::Diff {
+            self.apply_changes(self.project.changes.clone(), true, false, cx);
+            self.refresh_changes(true, None, cx);
+        }
+        if let Some(path) = self.project.current.clone() {
+            self.open(&path, window, cx);
+        }
+        self.thread.unread = false;
+        self.pr_status = None;
+        self.focus.focus(window, cx);
+        cx.notify();
+    }
+
+    /// Shows project `id`; its threads keep going wherever they were.
+    fn show_project(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(at) = self.slots.iter().position(|slot| slot.id == id) else { return };
+        self.suspend_project();
+        self.swap_slot(at);
+        self.resume_project(window, cx);
+    }
+
+    /// Adds a project over `root` (a PR's worktree when `pr` is given) and shows it. If it is
+    /// already open, that one is shown. An agent starts in it, the same one as in the project
+    /// it was opened from.
+    fn add_project(&mut self, root: PathBuf, pr: Option<pr::Pr>, window: &mut Window, cx: &mut Context<Self>) {
+        if pr.is_none() {
+            if self.project.pr.is_none() && self.project.root == root {
+                return;
+            }
+            if let Some(id) = self.slots.iter().find(|slot| slot.project.pr.is_none() && slot.project.root == root).map(|slot| slot.id) {
+                return self.show_project(id, window, cx);
+            }
+        }
+        let agent = self.thread.agent.clone();
+        let review = pr.is_some();
+        let project = Self::build_project(root, pr, vec![], window, cx);
+        let thread = self.blank_thread(window, cx);
+        self.suspend_project();
+        let id = self.next_project;
+        self.next_project += 1;
+        // The project on screen goes into a slot, and the new one takes its fields.
+        self.slots.push(Slot {
+            id,
+            mode: if review { Mode::Diff } else { Mode::Source },
+            project,
+            thread,
+            parked: vec![],
+        });
+        let at = self.slots.len() - 1;
+        self.swap_slot(at);
+        self.resume_project(window, cx);
+        if let Some(agent) = agent {
             self.connect(&agent, false, window, cx);
         }
-        self.watch(None, window, cx);
-        if self.project.pr.is_some() {
-            self.mode = Mode::Diff;
+    }
+
+    /// Asks for a folder and opens it as a project.
+    fn pick_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let picked = cx.prompt_for_paths(gpui::PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Open project".into()),
+        });
+        let handle = window.window_handle();
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(paths))) = picked.await else { return };
+            let Some(root) = paths.into_iter().next().and_then(|path| path.canonicalize().ok()) else { return };
+            handle.update(cx, |_, window, cx| this.update(cx, |reader, cx| reader.add_project(root, None, window, cx))).ok();
+        })
+        .detach();
+    }
+
+    /// Closes project `id`: its agents stop, and a PR's worktree is removed. Never the last one.
+    fn close_project(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
+        if self.slots.is_empty() {
+            return;
         }
-        self.refresh_changes(true, None, cx);
+        if self.project_id == id {
+            // Show another first; the closed project is then the one in the slot.
+            let Some(other) = self.slots.last().map(|slot| slot.id) else { return };
+            self.show_project(other, window, cx);
+        }
+        self.slots.retain(|slot| slot.id != id);
         cx.notify();
     }
 
@@ -1326,9 +1479,21 @@ impl Reader {
         }
     }
 
-    /// Runs `work` with thread `id` as [`Self::thread`], and whether it is the one on screen.
-    /// `None` if there is no such thread.
+    /// Runs `work` with thread `id` as [`Self::thread`] (in whichever project it belongs to), and
+    /// whether it is the one on screen. `None` if there is no such thread.
     fn with_thread<R>(&mut self, id: u64, work: impl FnOnce(&mut Self, bool) -> R) -> Option<R> {
+        if self.thread.id == id || self.parked.iter().any(|thread| thread.id == id) {
+            return self.with_thread_here(id, work);
+        }
+        let at = self.slots.iter().position(|slot| slot.thread.id == id || slot.parked.iter().any(|thread| thread.id == id))?;
+        self.swap_slot(at);
+        let out = self.with_thread_here(id, |reader, _| work(reader, false));
+        self.swap_slot(at);
+        out
+    }
+
+    /// [`Self::with_thread`] for a thread of the project on screen.
+    fn with_thread_here<R>(&mut self, id: u64, work: impl FnOnce(&mut Self, bool) -> R) -> Option<R> {
         if self.thread.id == id {
             return Some(work(self, true));
         }
@@ -1860,6 +2025,67 @@ impl Reader {
         div().flex_none().px_3().py_2().border_b_1().border_color(border).child(body)
     }
 
+    /// The open projects, each marked with the busiest of its threads, and a way to add one.
+    fn projects_strip(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let colors = cx.global::<Palette>();
+        let (border, hover) = (colors.border, colors.list_hover);
+        let busiest = |threads: &[&Thread]| threads.iter().map(|t| t.activity()).max().unwrap_or(Activity::Idle);
+        let mut rows: Vec<(u64, String, Activity)> = std::iter::once((self.project_id, &self.project, &self.thread, &self.parked[..]))
+            .chain(self.slots.iter().map(|slot| (slot.id, &slot.project, &slot.thread, &slot.parked[..])))
+            .map(|(id, project, thread, parked)| {
+                let threads: Vec<&Thread> = std::iter::once(thread).chain(parked).collect();
+                (id, project.name(), busiest(&threads))
+            })
+            .collect();
+        rows.sort_by_key(|(id, ..)| *id);
+        let (active, many) = (self.project_id, rows.len() > 1);
+        let add = cx.entity();
+        div()
+            .flex_none()
+            .flex()
+            .flex_col()
+            .p_1()
+            .border_b_1()
+            .border_color(border)
+            .children(rows.into_iter().map(|(id, name, activity)| {
+                let (select, close) = (cx.entity(), cx.entity());
+                let (glyph, tint) = activity.mark(colors);
+                div()
+                    .id(("project", id as usize))
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .pl_2()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .when(id == active, |row| row.bg(hover))
+                    .hover(|row| row.bg(hover))
+                    .on_click(move |_, window, cx| select.update(cx, |reader, cx| reader.show_project(id, window, cx)))
+                    .child(div().flex_none().text_xs().text_color(tint).child(glyph))
+                    .child(div().flex_1().min_w_0().truncate().text_sm().child(name))
+                    .when(many, |row| {
+                        row.child(
+                            Button::new(("project-close", id as usize))
+                                .icon(IconName::Close)
+                                .ghost()
+                                .xsmall()
+                                .tooltip("Close project")
+                                .on_click(move |_, window, cx| close.update(cx, |reader, cx| reader.close_project(id, window, cx))),
+                        )
+                    })
+            }))
+            .child(
+                div().pt_1().child(
+                    Button::new("project-add")
+                        .label("Add project…")
+                        .tooltip("Open a folder as a project (Ctrl+O)")
+                        .ghost()
+                        .small()
+                        .on_click(move |_, window, cx| add.update(cx, |reader, cx| reader.pick_project(window, cx))),
+                ),
+            )
+    }
+
     fn explorer(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.global::<Palette>();
         let this = cx.entity();
@@ -1986,6 +2212,7 @@ impl Reader {
                     .child(modes),
                 cx,
             ))
+            .child(self.projects_strip(cx))
             .children((mode == Mode::Diff).then(|| self.pr_strip(cx)))
             .child(div().flex_1().min_h_0().p_1().child(body))
     }
@@ -2240,18 +2467,13 @@ impl Reader {
         let mut tabs: Vec<(u64, String, Activity)> =
             std::iter::once(&self.thread).chain(&self.parked).map(|t| (t.id, t.title(), t.activity())).collect();
         tabs.sort_by_key(|(id, ..)| *id);
-        let (primary, warning, done, hover) = (colors.primary, colors.warning, gpui::hsla(0.37, 0.5, 0.5, 1.0), colors.list_hover);
+        let hover = colors.list_hover;
         // With one thread there is nothing to choose between.
         let tabs = (tabs.len() > 1).then(|| {
             div().flex_none().flex().flex_wrap().gap_1().px_2().py_1().border_b_1().border_color(border).children(
                 tabs.into_iter().map(|(id, title, activity)| {
                     let (select, close) = (cx.entity(), cx.entity());
-                    let (glyph, tint) = match activity {
-                        Activity::Idle => ("○", muted),
-                        Activity::Running => ("●", primary),
-                        Activity::Asking => ("!", warning),
-                        Activity::Unread => ("●", done),
-                    };
+                    let (glyph, tint) = activity.mark(colors);
                     div()
                         .id(("thread-tab", id as usize))
                         .flex()
@@ -2649,6 +2871,7 @@ impl Render for Reader {
             .on_action(cx.listener(|reader, _: &ShowSource, _, cx| reader.set_mode(Mode::Source, cx)))
             .on_action(cx.listener(|reader, _: &ShowChanges, _, cx| reader.set_mode(Mode::Diff, cx)))
             .on_action(cx.listener(|reader, _: &ToggleSplit, _, cx| reader.set_split(!reader.split, cx)))
+            .on_action(cx.listener(|reader, _: &OpenProject, window, cx| reader.pick_project(window, cx)))
             .on_action(cx.listener(|reader, _: &NewThread, window, cx| {
                 // Opening the right sidebar first: the menu hangs off its header.
                 if !reader.right_open {
@@ -2799,6 +3022,7 @@ fn main() {
             KeyBinding::new("ctrl-2", ShowChanges, None),
             KeyBinding::new("ctrl-\\", ToggleSplit, None),
             KeyBinding::new("ctrl-n", NewThread, None),
+            KeyBinding::new("ctrl-o", OpenProject, None),
             KeyBinding::new("ctrl-p", ShowFinder, None),
             KeyBinding::new("escape", CloseFinder, Some("Finder")),
             // The Input binds up/down itself and swallows them when single-line, so these name it.
