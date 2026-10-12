@@ -32,7 +32,7 @@ use gpui::{
     prelude::*, px, rems, size, KeyBinding,
 };
 
-gpui::actions!(po, [ToggleLeft, ToggleRight, ShowSource, ShowChanges, ToggleSplit, NewThread]);
+gpui::actions!(po, [ToggleLeft, ToggleRight, ShowSource, ShowChanges, ToggleSplit, NewThread, ShowFinder, CloseFinder, FinderUp, FinderDown]);
 
 const SKIP: [&str; 5] = ["target", "node_modules", "dist", "build", "__pycache__"];
 const MAX_FILES: usize = 5000;
@@ -344,6 +344,28 @@ fn diff_text(item: &Value) -> String {
     out.join("\n")
 }
 
+/// Files matching `query`: name hits first (shorter names first), then path hits, each in
+/// walk order; ASCII-case-insensitive substring, like the viewer's search.
+/// shortcut: substring only — no fuzzy/typo-tolerant ranking; add it if finding a file by a
+/// scrambled query (typing `cvs` for `code_view_state.rs`) matters.
+fn match_files(files: &[String], query: &str) -> Vec<String> {
+    let query = query.to_ascii_lowercase();
+    if query.is_empty() {
+        return files.to_vec();
+    }
+    let mut hits: Vec<(u8, usize, &String)> = files
+        .iter()
+        .filter_map(|file| {
+            let path = file.to_ascii_lowercase();
+            let name_start = path.rfind('/').map_or(0, |slash| slash + 1);
+            let rank = if path[name_start..].contains(&query) { 0 } else if path.contains(&query) { 1 } else { return None };
+            Some((rank, path.len() - name_start, file))
+        })
+        .collect();
+    hits.sort_by_key(|&(rank, name_len, _)| (rank, name_len));
+    hits.into_iter().map(|(_, _, file)| file.clone()).collect()
+}
+
 /// A prompt as the user typed it, without the note `send` puts in front about the open file.
 fn without_context(text: &str) -> &str {
     text.strip_prefix("[The user has `")
@@ -413,6 +435,14 @@ struct Reader {
     current: Option<String>,
     stamp: Option<Stamp>,
     code: Option<Entity<viewer::CodeViewState>>,
+    /// The Ctrl+P finder, when open: its query field, the matching files and which is picked.
+    finder: Option<Entity<InputState>>,
+    finder_matches: Rc<Vec<String>>,
+    finder_selected: usize,
+    finder_list: ListState,
+    finder_open: bool,
+    /// Keeps the finder input's event subscription alive for the reader's lifetime.
+    finder_events: Option<Subscription>,
     notice: Option<String>,
     tree: Entity<TreeState>,
     expanded: HashSet<SharedString>,
@@ -554,6 +584,12 @@ impl Reader {
             current: None,
             stamp: None,
             code: None,
+            finder: None,
+            finder_matches: Rc::new(vec![]),
+            finder_selected: 0,
+            finder_list: ListState::new(0, ListAlignment::Top, px(400.)),
+            finder_open: false,
+            finder_events: None,
             notice: None,
             tree,
             expanded: HashSet::new(),
@@ -1218,6 +1254,139 @@ impl Reader {
         ask.answered = Some(choice.name.clone());
         self.relist(msg);
         cx.notify();
+    }
+
+    /// Ctrl+P: shows the finder over the workspace's files, query and selection preserved.
+    fn show_finder(&mut self, _: &ShowFinder, window: &mut Window, cx: &mut Context<Self>) {
+        if self.finder.is_none() {
+            let input = cx.new(|cx| InputState::new(window, cx).placeholder("Search files…"));
+            // Every keystroke refilters the matches; Enter picks the selected file.
+            self.finder_events = Some(cx.subscribe_in(&input, window, |this, _, event: &InputEvent, window, cx| match event {
+                InputEvent::Change => {
+                    this.refind(cx);
+                    cx.notify();
+                }
+                InputEvent::PressEnter { .. } => this.accept_picked(window, cx),
+            }));
+            self.finder = Some(input);
+        }
+        self.finder_open = true;
+        self.refind(cx);
+        self.finder.as_ref().unwrap().update(cx, |input, cx| {
+            input.select_all(window, cx);
+            input.focus(window, cx);
+        });
+        cx.notify();
+    }
+
+    /// Refilters the finder's matches for its query and rewinds the selection to the first.
+    fn refind(&mut self, cx: &mut Context<Self>) {
+        let query = self.finder.as_ref().map_or_else(String::new, |input| input.read(cx).value().to_string());
+        self.finder_matches = Rc::new(match_files(&self.files, &query));
+        self.finder_selected = 0;
+        self.finder_list.reset(self.finder_matches.len());
+    }
+
+    /// Moves the finder's selection by `delta` rows, wrapping, and keeps it in view.
+    fn step_finder(&mut self, delta: isize, cx: &mut Context<Self>) {
+        if self.finder_matches.is_empty() {
+            return;
+        }
+        let len = self.finder_matches.len() as isize;
+        self.finder_selected = (self.finder_selected as isize + delta).rem_euclid(len) as usize;
+        self.finder_list.scroll_to_reveal_item(self.finder_selected);
+        cx.notify();
+    }
+
+    /// Opens the file under the finder's selection and closes the finder.
+    fn accept_picked(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(path) = self.finder_matches.get(self.finder_selected).cloned() else { return };
+        self.accept_path(&path, window, cx);
+    }
+
+    /// Opens `path` in the viewer and closes the finder.
+    fn accept_path(&mut self, path: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.hide_finder(window, cx);
+        self.set_mode(Mode::Source, cx);
+        self.open(path, window, cx);
+    }
+
+    /// Hides the finder and gives the keys back to the reader.
+    fn hide_finder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.finder_open = false;
+        self.focus.focus(window, cx);
+        cx.notify();
+    }
+
+    /// The finder overlay, while Ctrl+P is open: a query field over the matching files.
+    fn finder(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let palette = cx.global::<Palette>();
+        let (popover, border, muted, radius) = (palette.popover, palette.border, palette.muted_foreground, palette.radius);
+        let Some(input) = self.finder.clone() else { return div().into_any_element() };
+        let matches = self.finder_matches.clone();
+        let this = cx.entity();
+        div()
+            .absolute()
+            .inset_0()
+            .id("finder-backdrop")
+            .occlude()
+            .on_click(cx.listener(|reader, _: &gpui::ClickEvent, window, cx| reader.hide_finder(window, cx)))
+            .flex()
+            .justify_center()
+            .pt_2()
+            .child(
+                div()
+                    .id("finder")
+                    .occlude()
+                    .w(px(560.0))
+                    .flex()
+                    .flex_col()
+                    .key_context("Finder")
+                    .on_action(cx.listener(|reader, _: &CloseFinder, window, cx| reader.hide_finder(window, cx)))
+                    .on_action(cx.listener(|reader, _: &FinderUp, _, cx| reader.step_finder(-1, cx)))
+                    .on_action(cx.listener(|reader, _: &FinderDown, _, cx| reader.step_finder(1, cx)))
+                    .rounded(radius)
+                    .border_1()
+                    .border_color(border)
+                    .bg(popover)
+                    .overflow_hidden()
+                    .child(Input::new(&input).field())
+                    .child(if matches.is_empty() {
+                        div().h(px(380.0)).flex().justify_center().pt_3().text_color(muted).child("No matching files").into_any_element()
+                    } else {
+                        div().h(px(380.0)).border_t_1().border_color(border).child(list(
+                            self.finder_list.clone(),
+                            cx.processor(move |reader: &mut Reader, ix, _, _| {
+                                let Some(path): Option<&String> = matches.get(ix) else { return div().into_any_element() };
+                                let name = path.rsplit('/').next().unwrap_or(path).to_string();
+                                let dir = path.strip_suffix(name.as_str()).unwrap_or("").to_string();
+                                let path = path.clone();
+                                let this = this.clone();
+                                ListItem::new(("file", ix))
+                                    .selected(ix == reader.finder_selected)
+                                    .on_click(move |_, window, cx| this.update(cx, |reader, cx| reader.accept_path(&path, window, cx)))
+                                    .child(name)
+                                    .when(!dir.is_empty(), |row| row.child(div().text_color(muted).child(dir)))
+                                    .into_any_element()
+                            }),
+                        )
+                        .size_full())
+                        .into_any_element()
+                    })
+                    .child(
+                        div()
+                            .flex()
+                            .justify_between()
+                            .px_3()
+                            .py_1()
+                            .border_t_1()
+                            .border_color(border)
+                            .text_color(muted)
+                            .child("↑↓ navigate")
+                            .child("↵ open · esc close"),
+                    ),
+            )
+            .into_any_element()
     }
 
     fn open(&mut self, path: &str, window: &mut Window, cx: &mut Context<Self>) {
@@ -2060,7 +2229,9 @@ impl Render for Reader {
             .flex_col()
             .bg(background)
             .text_color(foreground)
+            .relative()
             .track_focus(&self.focus)
+            .on_action(cx.listener(|reader, _: &ShowFinder, window, cx| reader.show_finder(&ShowFinder, window, cx)))
             .on_action(cx.listener(|reader, _: &ToggleLeft, _, cx| reader.toggle_left(cx)))
             .on_action(cx.listener(|reader, _: &ToggleRight, _, cx| reader.toggle_right(cx)))
             .on_action(cx.listener(|reader, _: &ShowSource, _, cx| reader.set_mode(Mode::Source, cx)))
@@ -2086,6 +2257,7 @@ impl Render for Reader {
                 ),
             )
             .child(bar)
+            .when(self.finder_open, |this| this.child(self.finder(cx)))
     }
 }
 
@@ -2215,6 +2387,10 @@ fn main() {
             KeyBinding::new("ctrl-2", ShowChanges, None),
             KeyBinding::new("ctrl-\\", ToggleSplit, None),
             KeyBinding::new("ctrl-n", NewThread, None),
+            KeyBinding::new("ctrl-p", ShowFinder, None),
+            KeyBinding::new("escape", CloseFinder, Some("Finder")),
+            KeyBinding::new("up", FinderUp, Some("Finder")),
+            KeyBinding::new("down", FinderDown, Some("Finder")),
         ]);
         let bounds = Bounds::centered(None, size(px(1360.0), px(840.0)), cx);
         cx.open_window(
@@ -2236,7 +2412,26 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{language, syntax};
+    use super::{language, match_files, syntax};
+
+    #[test]
+    fn file_matches_rank_names_before_paths() {
+        let files = vec![
+            "src/none.txt".to_string(),
+            "needle/lib/a.rs".to_string(),
+            "needle.rs".to_string(),
+            "deep/needlemod.rs".to_string(),
+            "src/Needle-ish.rs".to_string(),
+        ];
+        // Name hits first (shorter names first), then path-only hits, each in walk order.
+        assert_eq!(
+            match_files(&files, "needle"),
+            vec!["needle.rs", "deep/needlemod.rs", "src/Needle-ish.rs", "needle/lib/a.rs"]
+        );
+        assert!(match_files(&files, "needs").is_empty());
+        // An empty query lists everything in walk order.
+        assert_eq!(match_files(&files, ""), files);
+    }
 
     #[test]
     fn elixir_files_highlight() {
