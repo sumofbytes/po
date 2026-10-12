@@ -110,8 +110,12 @@ The bar at the bottom (or Ctrl+1, 2 and 3) picks how it is used:
 - **Chat** (Ctrl+3): the viewer closed, so the conversation has the middle to
   itself. Ctrl+Shift+B also toggles the viewer, and Ctrl+B the left side.
 
-Widths, the split, whether the explorer is folded and whether the viewer is open
-come back with your workspace.
+With the viewer open, **⇄** in the bar (Ctrl+Shift+S) swaps it with the
+conversation, putting the viewer in the middle and the chat on the right, for
+when you are reading code more than talking to an agent.
+
+Widths, the split, whether the explorer is folded, whether the viewer is open and
+which way round they are come back with your workspace.
 
 ### Projects and threads
 

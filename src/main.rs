@@ -39,7 +39,7 @@ use gpui::{
     prelude::*, px, rems, size, KeyBinding,
 };
 
-gpui::actions!(po, [ToggleLeft, ToggleRight, ShowSource, ShowChanges, ShowChat, ToggleSplit, NewThread, OpenProject, ShowFinder, CloseFinder, FinderUp, FinderDown]);
+gpui::actions!(po, [ToggleLeft, ToggleRight, ShowSource, ShowChanges, ShowChat, SwapPanes, ToggleSplit, NewThread, OpenProject, ShowFinder, CloseFinder, FinderUp, FinderDown]);
 
 const SKIP: [&str; 5] = ["target", "node_modules", "dist", "build", "__pycache__"];
 const MAX_FILES: usize = 5000;
@@ -786,6 +786,9 @@ struct Reader {
     left_split: Entity<VSplitState>,
     /// The viewer pane (a file or a diff) on the right is shown.
     side_open: bool,
+    /// The viewer is in the middle and the conversation on the right, instead of the reverse.
+    /// Only matters while the viewer is open.
+    swapped: bool,
     /// The agent picker in the input box.
     agent_menu: Entity<MenuState>,
     /// The agent new threads start with: the one last chosen.
@@ -911,6 +914,7 @@ impl Reader {
             left_open: true,
             left_split,
             side_open: true,
+            swapped: false,
             agent_menu: cx.new(MenuState::new),
             chosen_agent: command.clone(),
             split: false,
@@ -1548,6 +1552,13 @@ impl Reader {
         cx.notify();
     }
 
+    /// Puts the viewer in the middle and the conversation on the right, or back.
+    fn swap_panes(&mut self, cx: &mut Context<Self>) {
+        self.swapped = !self.swapped;
+        self.request_save(cx);
+        cx.notify();
+    }
+
     fn toggle_right(&mut self, cx: &mut Context<Self>) {
         self.side_open = !self.side_open;
         self.request_save(cx);
@@ -1930,6 +1941,7 @@ impl Reader {
         let mut resumed = false;
         let mut seen = HashSet::new();
         self.side_open = saved.viewer_open;
+        self.swapped = saved.swapped;
         self.chosen_agent = saved.agent.clone().or(self.chosen_agent.take());
         if let Some(height) = saved.split {
             self.left_split.update(cx, |split, _| split.set_top(px(height)));
@@ -2022,7 +2034,7 @@ impl Reader {
                 }
             })
             .collect();
-        workspace::Workspace { projects, viewer_open: self.side_open, agent: self.chosen_agent.clone(), split: self.left_split.read(cx).top().map(f32::from), explorer_collapsed: self.left_split.read(cx).collapsed() }
+        workspace::Workspace { projects, viewer_open: self.side_open, swapped: self.swapped, agent: self.chosen_agent.clone(), split: self.left_split.read(cx).top().map(f32::from), explorer_collapsed: self.left_split.read(cx).collapsed() }
     }
 
     /// Saves the workspace once the current change has settled, so that a thread that is
@@ -3719,7 +3731,7 @@ impl Render for Reader {
         }
         let colors = cx.global::<Palette>();
         let (background, foreground, border, sidebar) = (colors.background, colors.foreground, colors.border, colors.sidebar);
-        let (left, right) = (cx.entity(), cx.entity());
+        let (left, right, swap) = (cx.entity(), cx.entity(), cx.entity());
         let (left_open, right_open) = (self.left_open, self.side_open);
         // Three views of one layout: the viewer pane open on files, open on changes, or closed.
         let views = [
@@ -3757,12 +3769,27 @@ impl Render for Reader {
             )
             .child(switcher)
             .child(
-                Button::new("toggle-right")
-                    .icon(if right_open { IconName::PanelRightClose } else { IconName::PanelRightOpen })
-                    .ghost()
-                    .small()
-                    .tooltip("Toggle the viewer (Ctrl+Shift+B)")
-                    .on_click(move |_, _, cx| right.update(cx, |reader, cx| reader.toggle_right(cx))),
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .child(
+                        Button::new("swap-panes")
+                            .icon(IconName::ArrowLeftRight)
+                            .ghost()
+                            .small()
+                            .disabled(!self.side_open)
+                            .tooltip("Swap the viewer and the conversation (Ctrl+Shift+S)")
+                            .on_click(move |_, _, cx| swap.update(cx, |reader, cx| reader.swap_panes(cx))),
+                    )
+                    .child(
+                        Button::new("toggle-right")
+                            .icon(if right_open { IconName::PanelRightClose } else { IconName::PanelRightOpen })
+                            .ghost()
+                            .small()
+                            .tooltip("Toggle the viewer (Ctrl+Shift+B)")
+                            .on_click(move |_, _, cx| right.update(cx, |reader, cx| reader.toggle_right(cx))),
+                    ),
             );
         div()
             .size_full()
@@ -3778,6 +3805,7 @@ impl Render for Reader {
             .on_action(cx.listener(|reader, _: &ShowSource, _, cx| reader.show_viewer(Mode::Source, cx)))
             .on_action(cx.listener(|reader, _: &ShowChanges, _, cx| reader.show_viewer(Mode::Diff, cx)))
             .on_action(cx.listener(|reader, _: &ShowChat, _, cx| reader.show_chat(cx)))
+            .on_action(cx.listener(|reader, _: &SwapPanes, _, cx| reader.swap_panes(cx)))
             .on_action(cx.listener(|reader, _: &ToggleSplit, _, cx| reader.set_split(!reader.split, cx)))
             .on_action(cx.listener(|reader, _: &OpenProject, window, cx| reader.pick_project(window, cx)))
             .on_action(cx.listener(|reader, _: &NewThread, window, cx| {
@@ -3785,10 +3813,19 @@ impl Render for Reader {
             }))
             .child(
                 div().flex_1().min_h_0().child(
-                    sidebars(&self.sidebars)
-                        .left(left_open, px(220.0)..px(520.0), self.left_sidebar(cx))
-                        .center(self.agent_panel(cx))
-                        .right(right_open, px(320.0)..px(900.0), self.pane(cx)),
+                    {
+                        // With the viewer open they can trade places; with it closed the
+                        // conversation is the middle either way.
+                        let (middle, side) = if self.swapped && self.side_open {
+                            (self.pane(cx), self.agent_panel(cx).into_any_element())
+                        } else {
+                            (self.agent_panel(cx).into_any_element(), self.pane(cx))
+                        };
+                        sidebars(&self.sidebars)
+                            .left(left_open, px(220.0)..px(520.0), self.left_sidebar(cx))
+                            .center(middle)
+                            .right(right_open, px(320.0)..px(900.0), side)
+                    },
                 ),
             )
             .child(bar)
@@ -3921,6 +3958,7 @@ fn main() {
             KeyBinding::new("ctrl-1", ShowSource, None),
             KeyBinding::new("ctrl-2", ShowChanges, None),
             KeyBinding::new("ctrl-3", ShowChat, None),
+            KeyBinding::new("ctrl-shift-s", SwapPanes, None),
             KeyBinding::new("ctrl-\\", ToggleSplit, None),
             KeyBinding::new("ctrl-n", NewThread, None),
             KeyBinding::new("ctrl-o", OpenProject, None),

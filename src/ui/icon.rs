@@ -4,6 +4,7 @@ use gpui::{App, IntoElement, ParentElement as _, Rems, RenderOnce, Styled as _, 
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum IconName {
+    ArrowLeftRight,
     ArrowUp,
     CaseSensitive,
     ChevronDown,
@@ -28,6 +29,7 @@ impl IconName {
             };
         }
         match self {
+            Self::ArrowLeftRight => icon!("arrow-left-right"),
             Self::ArrowUp => icon!("arrow-up"),
             Self::CaseSensitive => icon!("case-sensitive"),
             Self::ChevronDown => icon!("chevron-down"),
