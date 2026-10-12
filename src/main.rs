@@ -2953,8 +2953,6 @@ impl Reader {
         let mut tree = div().id("agents-tree").size_full().overflow_y_scroll().flex().flex_col().p_1();
         for view in &views {
             let pid = view.id;
-            let activity = view.threads.iter().map(|t| t.activity()).max().unwrap_or(Activity::Idle);
-            let (glyph, tint) = activity.mark(colors);
             let (select, close, start) = (cx.entity(), cx.entity(), cx.entity());
             // The project on screen is quietly marked: its name at full strength and a thin rail down
             // the left of the whole group, its threads included. The others are muted, and their rail
@@ -2978,14 +2976,14 @@ impl Reader {
                     .cursor_pointer()
                     .hover(|row| row.bg(hover))
                     .on_click(move |_, window, cx| select.update(cx, |reader, cx| reader.show_project(pid, window, cx)))
-                    .child(div().flex_none().text_xs().text_color(tint).child(glyph))
+                    .child(Icon::new(IconName::Folder).size(IconSize::XSmall).color(if current { foreground } else { muted }))
                     .child(
                         div()
                             .flex_1()
                             .min_w_0()
                             .truncate()
                             .text_sm()
-                            .font_weight(FontWeight::MEDIUM)
+                            .font_weight(FontWeight::SEMIBOLD)
                             .text_color(if current { foreground } else { muted })
                             .child(view.project.name()),
                     )
@@ -3029,7 +3027,17 @@ impl Reader {
                         .hover(|row| row.bg(hover))
                         .on_click(move |_, window, cx| select.update(cx, |reader, cx| reader.open_thread(pid, tid, window, cx)))
                         .child(div().flex_none().text_xs().text_color(tint).child(glyph))
-                        .child(div().flex_1().min_w_0().truncate().text_sm().child(thread.title()))
+                        .child(
+                            // Threads sit a step below their project: smaller and regular, bright only
+                            // for the one on screen.
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_xs()
+                                .text_color(if (pid, tid) == (active_project, active_thread) { foreground } else { muted })
+                                .child(thread.title()),
+                        )
                         .child(show_on_hover(
                             row_group("agent-thread", tid),
                             Button::new(("agent-thread-close", tid as usize))
