@@ -558,7 +558,7 @@ impl Reader {
                 }
             }),
             cx.subscribe_in(&pr_input, window, |reader, _, event: &InputEvent, window, cx| {
-                if matches!(event, InputEvent::PressEnter { shift: false, .. }) {
+                if matches!(event, InputEvent::PressEnter { shift: false, alt: false }) {
                     reader.open_pr(window, cx);
                 }
             }),
@@ -1083,7 +1083,6 @@ impl Reader {
 
     fn fail(&mut self, text: String) {
         self.busy = false;
-        self.queue.clear();
         self.thread.push(Msg::Agent(vec![Block::Text(format!("**Error:** {text}"))]));
         self.relist(self.thread.len() - 1);
     }
@@ -1137,7 +1136,11 @@ impl Reader {
             Event::Stopped(reason) => {
                 self.busy = false;
                 log::info!("agent: stopped ({reason})");
-                self.drain_queue(cx);
+                // What the daemon didn't take into the turn is no longer in its queue.
+                for item in &mut self.queue {
+                    item.kind = None;
+                }
+                self.send_next(window, cx);
             }
             Event::Accepted { content, queue } => {
                 if let Some(at) = self.queue.iter().position(|q| q.kind == Some(queue) && q.content == content) {
@@ -1150,13 +1153,14 @@ impl Reader {
                 if let Some(item) = self.queue.iter_mut().find(|q| q.kind == Some(queue) && q.content == content) {
                     item.kind = None;
                 }
-                self.drain_queue(cx);
+                self.send_next(window, cx);
             }
             Event::Failed(error) => {
                 if !self.ready {
                     self.status = "failed to start".into();
                 }
                 self.fail(error);
+                self.restore_queue(window, cx);
             }
             Event::Exited(status) => {
                 log::warn!("agent exited: {status}");
@@ -1164,6 +1168,7 @@ impl Reader {
                 self.status = "exited".into();
                 if self.busy {
                     self.fail(format!("the agent exited ({status})"));
+                    self.restore_queue(window, cx);
                 }
             }
         }
@@ -1311,7 +1316,8 @@ impl Reader {
                     this.refind(cx);
                     cx.notify();
                 }
-                InputEvent::PressEnter { .. } => this.accept_picked(window, cx),
+                InputEvent::PressEnter { alt: false, .. } => this.accept_picked(window, cx),
+                InputEvent::PressEnter { .. } => {}
             }));
             self.finder = Some(input);
         }
@@ -1514,16 +1520,39 @@ impl Reader {
         cx.notify();
     }
 
-    /// Once a turn is over, sends the oldest message still waiting. What the agent didn't
-    /// take during the turn is no longer in its queue, so the rest wait here.
-    fn drain_queue(&mut self, cx: &mut Context<Self>) {
-        for item in &mut self.queue {
-            item.kind = None;
+    /// If no turn is running, sends the oldest queued message that waits here rather than in
+    /// the daemon. A message that can't be sent goes back to the draft with the rest.
+    fn send_next(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.busy {
+            return;
         }
-        if !self.busy && !self.queue.is_empty() {
-            let next = self.queue.remove(0);
-            self.dispatch(next.content, cx);
+        let Some(at) = self.queue.iter().position(|q| q.kind.is_none()) else { return };
+        let next = self.queue.remove(at);
+        if !self.dispatch(next.content.clone(), cx) {
+            self.queue.insert(0, next);
+            self.restore_queue(window, cx);
         }
+    }
+
+    /// Moves everything queued back into the draft, taking back what the daemon still holds.
+    fn restore_queue(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.queue.is_empty() {
+            return;
+        }
+        let items: Vec<Queued> = self.queue.drain(..).collect();
+        let mut text = Vec::new();
+        for item in items {
+            if let (Some(kind), Some(client)) = (item.kind, &self.client) {
+                client.recall(&item.content, kind);
+            }
+            text.push(item.content);
+        }
+        let draft = self.draft.read(cx).value().to_string();
+        if !draft.trim().is_empty() {
+            text.push(draft);
+        }
+        self.draft.update(cx, |input, cx| input.set_value(text.join("\n\n"), window, cx));
+        cx.notify();
     }
 
     /// Sends `prompt` as a new turn; false if it could not be sent (the error is in the thread).
@@ -1568,14 +1597,7 @@ impl Reader {
         }
         self.relist(0);
         // What was waiting goes back to the draft rather than being sent into a stopped turn.
-        if !self.queue.is_empty() {
-            let mut text: Vec<String> = self.queue.drain(..).map(|q| q.content).collect();
-            let draft = self.draft.read(cx).value().to_string();
-            if !draft.trim().is_empty() {
-                text.push(draft);
-            }
-            self.draft.update(cx, |input, cx| input.set_value(text.join("\n\n"), window, cx));
-        }
+        self.restore_queue(window, cx);
         cx.notify();
     }
 

@@ -427,7 +427,9 @@ impl InputState {
         }
     }
     fn alt_enter(&mut self, _: &AltEnter, _: &mut Window, cx: &mut Context<Self>) {
-        cx.emit(InputEvent::PressEnter { shift: false, alt: true });
+        if self.submit_on_enter {
+            cx.emit(InputEvent::PressEnter { shift: false, alt: true });
+        }
     }
     fn shift_enter(&mut self, _: &ShiftEnter, _: &mut Window, cx: &mut Context<Self>) {
         if self.multi_line {

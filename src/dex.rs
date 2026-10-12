@@ -91,7 +91,7 @@ impl Shared {
     }
 
     fn healthy(&self) -> bool {
-        self.quick.get(self.url("/health")).call().is_ok()
+        self.get(&self.url("/health")).is_ok()
     }
 
     /// Opens a session, or lists the resumable ones.
@@ -127,8 +127,14 @@ impl Shared {
         Ok(())
     }
 
-    /// Reads one turn's SSE stream to its end.
+    /// Reads one turn's SSE stream to its end, then forgets any questions it left unanswered.
     fn run_turn(&self, prompt: &str) -> Result<()> {
+        let result = self.stream_turn(prompt);
+        self.batches.lock().expect("batches lock").clear();
+        result
+    }
+
+    fn stream_turn(&self, prompt: &str) -> Result<()> {
         let url = self.session_url("chat")?;
         let response = match self.post(&self.stream, &url, &json!({ "prompt": prompt })) {
             Ok(response) => response,
@@ -205,6 +211,20 @@ impl Shared {
             }
         }
     }
+}
+
+/// Whether a bearer token may be sent to `url`: https, or a loopback address.
+fn private_transport(url: &str) -> bool {
+    if url.starts_with("https://") {
+        return true;
+    }
+    let Some(rest) = url.strip_prefix("http://") else { return false };
+    let host = rest.split(['/', '?']).next().unwrap_or_default();
+    let host = match host.strip_prefix('[') {
+        Some(v6) => v6.split(']').next().unwrap_or_default(),
+        None => host.split(':').next().unwrap_or_default(),
+    };
+    matches!(host, "localhost" | "127.0.0.1" | "::1")
 }
 
 fn is_status(error: &anyhow::Error, code: u16) -> bool {
@@ -325,10 +345,18 @@ impl Mapper {
     }
 }
 
+/// The daemon po started, if any. `closed` is set when the client is dropped, so a daemon
+/// that finishes starting after that is killed rather than leaked.
+#[derive(Default)]
+struct Daemon {
+    child: Option<Child>,
+    closed: bool,
+}
+
 pub struct Client {
     shared: Arc<Shared>,
-    /// The daemon, when po started it; it goes away with the thread.
-    daemon: Arc<Mutex<Option<Child>>>,
+    /// The daemon, when po started it; it goes away with the client.
+    daemon: Arc<Mutex<Daemon>>,
 }
 
 impl Client {
@@ -340,7 +368,17 @@ impl Client {
         };
         let shared = Arc::new(Shared {
             base: url.trim_end_matches('/').to_string(),
-            token: std::env::var("DEX_DAEMON_TOKEN").ok().map(|t| t.trim().to_string()).filter(|t| !t.is_empty()),
+            token: std::env::var("DEX_DAEMON_TOKEN")
+                .ok()
+                .map(|t| t.trim().to_string())
+                .filter(|t| !t.is_empty())
+                .filter(|_| {
+                    let safe = private_transport(url);
+                    if !safe {
+                        log::warn!("dex: not sending DEX_DAEMON_TOKEN over plain http to {url}");
+                    }
+                    safe
+                }),
             cwd: cwd.to_path_buf(),
             resume,
             quick: agent(Some(Duration::from_secs(15))),
@@ -349,7 +387,7 @@ impl Client {
             events,
             batches: Mutex::new(HashMap::new()),
         });
-        let daemon = Arc::new(Mutex::new(None));
+        let daemon = Arc::new(Mutex::new(Daemon::default()));
         let (worker, started, command, cwd) = (shared.clone(), daemon.clone(), command.to_string(), cwd.to_path_buf());
         std::thread::spawn(move || {
             let result = (|| -> Result<()> {
@@ -364,9 +402,27 @@ impl Client {
                         .stderr(Stdio::inherit())
                         .spawn()
                         .with_context(|| format!("could not start `{command}`"))?;
-                    *started.lock().expect("daemon lock") = Some(child);
+                    {
+                        let mut daemon = started.lock().expect("daemon lock");
+                        if daemon.closed {
+                            let mut child = child;
+                            let _ = child.kill();
+                            let _ = child.wait();
+                            return Ok(());
+                        }
+                        daemon.child = Some(child);
+                    }
                     let deadline = Instant::now() + STARTUP;
                     while !worker.healthy() {
+                        {
+                            let mut daemon = started.lock().expect("daemon lock");
+                            if daemon.closed {
+                                return Ok(());
+                            }
+                            if let Some(status) = daemon.child.as_mut().and_then(|child| child.try_wait().ok().flatten()) {
+                                return Err(anyhow!("`{command}` exited ({status}) before the daemon came up"));
+                            }
+                        }
                         if Instant::now() > deadline {
                             return Err(anyhow!("the dex daemon didn't come up at {}", worker.base));
                         }
@@ -449,9 +505,16 @@ impl Client {
             let sent = shared
                 .session_url(queue.route())
                 .and_then(|url| shared.post(&shared.quick, &url, &json!({ "content": content })));
-            if let Err(error) = sent {
+            let Err(error) = sent else { return };
+            // Only a refusal means the daemon didn't take it. After a timeout or a dropped
+            // connection it may have, and `Event::Accepted` will say so; if it never does, the
+            // message is sent when the turn ends.
+            let refused = error.downcast_ref::<ureq::Error>().is_none_or(|e| matches!(e, ureq::Error::StatusCode(_)));
+            if refused {
                 log::warn!("dex: {} not accepted: {error:#}", queue.route());
                 shared.emit(Event::Rejected { content, queue });
+            } else {
+                log::warn!("dex: {} may not have been accepted: {error:#}", queue.route());
             }
         });
     }
@@ -471,7 +534,9 @@ impl Client {
 
 impl Drop for Client {
     fn drop(&mut self) {
-        if let Some(mut child) = self.daemon.lock().expect("daemon lock").take() {
+        let mut daemon = self.daemon.lock().expect("daemon lock");
+        daemon.closed = true;
+        if let Some(mut child) = daemon.child.take() {
             let _ = child.kill();
             let _ = child.wait();
         }
@@ -528,6 +593,16 @@ mod tests {
         assert_eq!(result["toolCallId"], "t1");
         assert_eq!(result["status"], "failed");
         assert_eq!(result["content"][0]["content"]["text"], "ok\na");
+    }
+
+    #[test]
+    fn tokens_only_go_to_private_transports() {
+        assert!(private_transport("http://127.0.0.1:8420"));
+        assert!(private_transport("http://localhost/x"));
+        assert!(private_transport("http://[::1]:8420"));
+        assert!(private_transport("https://dex.example.com"));
+        assert!(!private_transport("http://dex.example.com:8420"));
+        assert!(!private_transport("http://127.0.0.1.evil.com"));
     }
 
     #[test]
