@@ -72,6 +72,112 @@ one replaces it, so you can change flags or the binary path. `command` is split
 on whitespace into program and arguments (no shell quoting). Choose the agent
 in the app, or pass `--agent` / `PO_AGENT`.
 
+#### Steering and follow-ups (dex daemon)
+
+ACP has no way to add to a turn that is already running, so with an ACP agent a
+message typed while it works is queued and sent when the turn ends. The `dex
+(daemon)` entry talks to a [`dex serve` daemon over HTTP
+and SSE instead, which can take messages mid-turn:
+
+- **Enter** steers: the agent reads the message before its next model call.
+- **Alt+Enter** queues a follow-up that runs after the current turn.
+- Queued messages are listed above the input until the agent takes them; the
+  **×** takes one back into the input to edit.
+
+An entry with a `daemon` URL uses this path, and its `command` starts the
+daemon if nothing answers at the URL (po stops a daemon it started). Plain
+`http` only; set `DEX_DAEMON_TOKEN` if the daemon needs a bearer token.
+
+### Layout
+
+One layout, in three columns:
+
+- **Left:** every project with its threads and their status marks, and below
+  them the active project's files (or changes). The line between the two can be
+  dragged, and the chevron beside **Explorer** folds it down to its header at
+  the bottom, which gives the projects the rest of the height; unfolding puts it
+  back where it was.
+- **Middle:** the conversation of the thread you are in.
+- **Right:** the viewer, for a file or a diff. Open it from the explorer, the
+  Ctrl+P finder, or **Open** on a tool call.
+
+The window's own controls sit in the pane headers, at the edges: the sidebar
+toggle (Ctrl+B) at the left of the leftmost pane, and the viewer toggle
+(Ctrl+Shift+B) at the right of the rightmost one, with **⇄** beside it (Ctrl+Shift+S)
+while the viewer is open. **⇄** swaps the viewer with the conversation, putting
+the viewer in the middle and the chat on the right, for when you are reading
+code more than talking to an agent.
+
+Three shortcuts set how the layout is used:
+
+- **Browse** (Ctrl+1): the viewer open on files. It opens wide, since reading
+  code wants room.
+- **Review** (Ctrl+2): the viewer open on changes and diffs. This is where a PR
+  or a worktree thread's work is read.
+- **Chat** (Ctrl+3): the viewer closed, so the conversation has the middle to
+  itself.
+
+Widths, the split, whether the explorer is folded, whether the viewer is open and
+which way round they are come back with your workspace.
+
+### Projects and threads
+
+Several projects can be open at once. **Add project…** (Ctrl+O, or the **+** in the Projects header)
+opens a folder; each project keeps its own files, changes, open file and agent
+threads. Opening a PR adds it as a project too, and closing it removes the
+checkout.
+
+A project can run several agent threads. **New Thread** (Ctrl+N) opens a blank
+one without stopping the others, which keep working in the background; pick
+between them in the list on the left. Under the input box, a blank thread shows
+the agent it will start with (a dropdown; the last one you used is remembered)
+and, in a git repository, a **Worktree** toggle. The agent starts when you send
+the first message, which waits for it if it is slow to start. **History** in the
+thread's header (Ctrl+Shift+H) lists the earlier sessions of the thread's agent
+to resume, newest first; one already open in a thread is shown instead of opened
+twice, and a listing you leave without picking is not kept.
+
+A mark on each thread shows what it is doing (`●` running, `!` waiting
+for a permission answer, green `●` finished while you were elsewhere), and a
+project shows the busiest of its threads. Only the thread on screen moves the
+viewer to the files it edits.
+
+#### Worktrees
+
+Threads in one project share its checkout, so two agents editing at once can step
+on each other. In a git repository, turning on **Worktree** under a blank thread's input gives
+the thread a checkout of its own: a new branch `po/<id>` under
+`~/.local/share/po/worktrees/`, shown as a project of its own whose Changes view
+is everything the thread did since it branched. Two buttons finish it:
+
+- **Merge** commits what is in the worktree and merges the branch into the
+  checkout it came from, then removes the worktree. If the merge conflicts it is
+  undone and the branch is kept.
+- **Discard** (click twice) deletes the branch and everything in it.
+
+Closing a worktree project with × never loses work: what is left is committed
+and the branch is kept if it has anything on it. The worktree starts from the
+last commit, so uncommitted changes and untracked files in the original checkout
+aren't in it.
+
+#### Coming back, and background agents
+
+`po` remembers the projects and threads of each window, by the directory it was
+started in (in `~/.local/share/po/workspaces/`). Starting `po` there again brings
+them back: the project you started on is shown, the others wait in the
+background, and every thread resumes its agent session when you first show it.
+A resumed agent has to support listing and loading sessions. PR reviews aren't
+remembered, and worktrees stay on disk until you merge, discard or close them.
+
+Agents nobody is talking to don't have to keep running. A thread in the
+background with nothing going on has its agent stopped after `idle_minutes`
+(default 15, `0` to never) and is resumed when shown; beyond `max_live_agents`
+(default 8) the longest idle are stopped first. A thread mid-turn, waiting for
+a permission answer or with messages queued is never stopped. When a thread
+finishes or asks for permission out of view, `po` sends a desktop notification
+(`notify-send` on Linux, `osascript` on macOS); set `"notifications": false` to
+turn that off.
+
 ### Themes
 
 Set `"theme"` to a theme name. On first start `po` copies the bundled themes

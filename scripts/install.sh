@@ -46,12 +46,12 @@ if [ "$VERSION" = "latest" ]; then
     # and `-w '%{url_effective}'` echoes the *original* URL on failure, which
     # used to leak into the asset name.
     tag_file="$(mktemp)"
+    trap 'rm -f "$tag_file"' EXIT
     if ! fetch -o /dev/null -w '%{url_effective}' \
             "https://github.com/$REPO/releases/latest" >"$tag_file"; then
         rm -f "$tag_file"
         err "cannot determine latest release (none published yet?)"
     fi
-    # shellcheck disable=SC2116
     VERSION="$(sed 's|.*/tag/||' "$tag_file")"
     rm -f "$tag_file"
 fi

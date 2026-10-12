@@ -38,6 +38,10 @@ pub enum Event {
     Update(Value),
     Permission { request: Value, title: String, options: Vec<PermissionOption> },
     Stopped(String),
+    /// The agent took a steering or follow-up message into the turn (dex daemon only).
+    Accepted { content: String, queue: crate::dex::Queue },
+    /// The daemon had no turn to add a steering or follow-up message to (dex daemon only).
+    Rejected { content: String, queue: crate::dex::Queue },
     Failed(String),
     Exited(String),
 }
@@ -317,6 +321,11 @@ impl Client {
         let cwd = self.shared.cwd.to_string_lossy().to_string();
         self.shared.request("session/load", json!({ "sessionId": id, "cwd": cwd, "mcpServers": [] }), Pending::Load);
         true
+    }
+
+    /// The session this client has open, once it has one.
+    pub fn session(&self) -> Option<String> {
+        self.shared.session.lock().expect("session lock").clone()
     }
 
     pub fn cancel(&self) {

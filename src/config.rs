@@ -9,7 +9,10 @@ const DEFAULT_AGENTS: &str = include_str!("../agents.json");
 pub struct Agent {
     pub id: String,
     pub name: String,
+    /// Either an ACP agent's command, or, with `daemon`, the command that starts it.
     pub command: String,
+    /// URL of a dex daemon to talk to instead of ACP.
+    pub daemon: Option<String>,
 }
 
 /// `$XDG_CONFIG_HOME/po`, or `~/.config/po`.
@@ -18,6 +21,16 @@ pub fn dir() -> Option<PathBuf> {
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))?;
     Some(base.join("po"))
+}
+
+/// `$XDG_DATA_HOME/po`, or `~/.local/share/po`: where po keeps what it makes, like worktrees.
+pub fn data_dir() -> PathBuf {
+    std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share")))
+        .unwrap_or_else(std::env::temp_dir)
+        .join("po")
 }
 
 pub fn read_json(path: &Path) -> Option<Value> {
@@ -44,7 +57,8 @@ fn parse(list: &Value) -> Vec<Agent> {
             let id = entry["id"].as_str()?.to_string();
             let command = entry["command"].as_str()?.to_string();
             let name = entry["name"].as_str().unwrap_or(&id).to_string();
-            Some(Agent { id, name, command })
+            let daemon = entry["daemon"].as_str().map(String::from);
+            Some(Agent { id, name, command, daemon })
         })
         .collect()
 }
