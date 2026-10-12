@@ -88,6 +88,23 @@ An entry with a `daemon` URL uses this path, and its `command` starts the
 daemon if nothing answers at the URL (po stops a daemon it started). Plain
 `http` only; set `DEX_DAEMON_TOKEN` if the daemon needs a bearer token.
 
+### Views
+
+Three views, switched from the bar at the bottom or with Ctrl+1, 2 and 3:
+
+- **Browse** (Ctrl+1): the explorer on the left, the file viewer in the middle,
+  the agent chat on the right.
+- **Review** (Ctrl+2): the same, showing changed files and their diffs. This is
+  where a PR or a worktree thread's work is read.
+- **Agents** (Ctrl+3): for running several agents. The left side lists every
+  project with its threads and their status marks, with the active project's
+  files below. The conversation takes the middle. The viewer or diff opens in a
+  pane on the right when you open a file, use **Open** on a tool call, or
+  toggle it with Ctrl+Shift+B; it stays out of the way until then.
+
+Each view keeps its own sidebar widths, and the view you were in comes back
+with your workspace.
+
 ### Projects and threads
 
 Several projects can be open at once. **Add project…** (Ctrl+O) in the explorer

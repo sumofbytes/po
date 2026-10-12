@@ -39,7 +39,7 @@ use gpui::{
     prelude::*, px, rems, size, KeyBinding,
 };
 
-gpui::actions!(po, [ToggleLeft, ToggleRight, ShowSource, ShowChanges, ToggleSplit, NewThread, OpenProject, ShowFinder, CloseFinder, FinderUp, FinderDown]);
+gpui::actions!(po, [ToggleLeft, ToggleRight, ShowSource, ShowChanges, ShowAgents, ToggleSplit, NewThread, OpenProject, ShowFinder, CloseFinder, FinderUp, FinderDown]);
 
 const SKIP: [&str; 5] = ["target", "node_modules", "dist", "build", "__pycache__"];
 const MAX_FILES: usize = 5000;
@@ -713,6 +713,16 @@ impl Thread {
     }
 }
 
+/// A project and its threads, wherever they are kept.
+struct View<'a> {
+    id: u64,
+    mode: Mode,
+    project: &'a Project,
+    /// The thread that is, or would be, on screen.
+    shown: u64,
+    threads: Vec<&'a Thread>,
+}
+
 /// A project that isn't on screen, with its threads and view settings. They are swapped with
 /// the same fields of [`Reader`] when it is shown.
 struct Slot {
@@ -723,8 +733,18 @@ struct Slot {
     parked: Vec<Thread>,
 }
 
+/// How the window is arranged. `Files` is the explorer beside the viewer (as `Mode` picks) with the
+/// agent in a sidebar; `Agents` puts the conversation in the middle, the projects and their
+/// threads on the left, and the viewer in a pane on the right.
+#[derive(Clone, Copy, PartialEq)]
+enum Layout {
+    Files,
+    Agents,
+}
+
 struct Reader {
     mode: Mode,
+    layout: Layout,
     /// The project on screen; its methods act on this one.
     project: Project,
     project_id: u64,
@@ -766,6 +786,11 @@ struct Reader {
     /// Agents that may run at once; beyond it the longest idle in the background are stopped.
     max_live: usize,
     sidebars: Entity<SidebarsState>,
+    /// Widths for the agents layout, which wants a wider left and right than the files layout.
+    agents_sidebars: Entity<SidebarsState>,
+    agents_left_open: bool,
+    /// The agents layout's pane for the viewer or diff, which stays out of the way until used.
+    side_open: bool,
     /// The New Thread menu, so a shortcut can open it.
     thread_menu: Entity<MenuState>,
     left_open: bool,
@@ -853,6 +878,7 @@ impl Reader {
         };
         let mut reader = Self {
             mode: Mode::Source,
+            layout: Layout::Files,
             project,
             project_id: 0,
             slots: vec![],
@@ -879,6 +905,9 @@ impl Reader {
             idle_after: (idle_minutes > 0).then(|| Duration::from_secs(idle_minutes * 60)),
             max_live: settings["max_live_agents"].as_u64().unwrap_or(8).max(1) as usize,
             sidebars: cx.new(|_| SidebarsState::new(px(260.0), px(460.0))),
+            agents_sidebars: cx.new(|_| SidebarsState::new(px(280.0), px(560.0))),
+            agents_left_open: true,
+            side_open: false,
             thread_menu: cx.new(MenuState::new),
             left_open: true,
             right_open: true,
@@ -1229,9 +1258,17 @@ impl Reader {
 
     /// Shows project `id`; its threads keep going wherever they were.
     fn show_project(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
+        self.show_project_with(id, None, window, cx);
+    }
+
+    /// [`Self::show_project`], with thread `thread` of it on screen if it has one.
+    fn show_project_with(&mut self, id: u64, thread: Option<u64>, window: &mut Window, cx: &mut Context<Self>) {
         let Some(at) = self.slots.iter().position(|slot| slot.id == id) else { return };
         self.suspend_project();
         self.swap_slot(at);
+        if let Some(parked) = thread.and_then(|id| self.parked.iter().position(|t| t.id == id)) {
+            std::mem::swap(&mut self.thread, &mut self.parked[parked]);
+        }
         self.resume_project(window, cx);
         self.wake_thread(window, cx);
         self.request_save(cx);
@@ -1439,8 +1476,48 @@ impl Reader {
     }
 
     fn toggle_left(&mut self, cx: &mut Context<Self>) {
-        self.left_open = !self.left_open;
+        match self.layout {
+            Layout::Files => self.left_open = !self.left_open,
+            Layout::Agents => self.agents_left_open = !self.agents_left_open,
+        }
         cx.notify();
+    }
+
+    /// Switches between the files and agents layouts.
+    fn set_layout(&mut self, layout: Layout, cx: &mut Context<Self>) {
+        if self.layout != layout {
+            self.layout = layout;
+            self.request_save(cx);
+        }
+        cx.notify();
+    }
+
+    /// Browse (the explorer and viewer) or Review (changes and diffs), in the files layout.
+    fn show_files(&mut self, mode: Mode, cx: &mut Context<Self>) {
+        self.set_layout(Layout::Files, cx);
+        self.set_mode(mode, cx);
+    }
+
+    /// In the agents layout, shows the pane with the viewer or diff, which a file just opened for.
+    fn reveal_side(&mut self, cx: &mut Context<Self>) {
+        if self.layout == Layout::Agents && !self.side_open {
+            self.side_open = true;
+            cx.notify();
+        }
+    }
+
+    /// Shows `path` where it is most useful: its diff if it has changes, the file otherwise.
+    fn reveal(&mut self, path: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let full = Path::new(path);
+        let relative = full.strip_prefix(&self.project.root).unwrap_or(full).to_string_lossy().replace('\\', "/");
+        if self.project.changes.iter().any(|change| change.path == relative) {
+            self.set_mode(Mode::Diff, cx);
+            self.pick(&relative, cx);
+        } else if self.project.root.join(&relative).is_file() {
+            self.set_mode(Mode::Source, cx);
+            self.open(&relative, window, cx);
+        }
+        self.reveal_side(cx);
     }
 
     fn set_split(&mut self, split: bool, cx: &mut Context<Self>) {
@@ -1452,7 +1529,10 @@ impl Reader {
     }
 
     fn toggle_right(&mut self, cx: &mut Context<Self>) {
-        self.right_open = !self.right_open;
+        match self.layout {
+            Layout::Files => self.right_open = !self.right_open,
+            Layout::Agents => self.side_open = !self.side_open,
+        }
         cx.notify();
     }
 
@@ -1775,6 +1855,7 @@ impl Reader {
     fn restore(&mut self, saved: workspace::Workspace, window: &mut Window, cx: &mut Context<Self>) -> bool {
         let mut resumed = false;
         let mut seen = HashSet::new();
+        self.layout = if saved.agents { Layout::Agents } else { Layout::Files };
         for state in saved.projects {
             let worktree = match state.worktree {
                 Some(spec) => match worktree::Worktree::adopt(spec) {
@@ -1814,15 +1895,8 @@ impl Reader {
         resumed
     }
 
-    /// What is worth keeping of the projects and threads: those with an agent session.
-    fn workspace(&self) -> workspace::Workspace {
-        struct View<'a> {
-            id: u64,
-            mode: Mode,
-            project: &'a Project,
-            shown: u64,
-            threads: Vec<&'a Thread>,
-        }
+    /// Every open project with its threads, oldest first.
+    fn views(&self) -> Vec<View<'_>> {
         let mut views = vec![View {
             id: self.project_id,
             mode: self.mode,
@@ -1838,8 +1912,14 @@ impl Reader {
             threads: std::iter::once(&slot.thread).chain(&slot.parked).collect(),
         }));
         views.sort_by_key(|view| view.id);
+        views
+    }
+
+    /// What is worth keeping of the projects and threads: those with an agent session.
+    fn workspace(&self) -> workspace::Workspace {
         // A PR is a throwaway checkout; it is not brought back.
-        let projects = views
+        let projects = self
+            .views()
             .into_iter()
             .filter(|view| view.project.pr.is_none())
             .map(|view| {
@@ -1859,7 +1939,7 @@ impl Reader {
                 }
             })
             .collect();
-        workspace::Workspace { projects }
+        workspace::Workspace { projects, agents: self.layout == Layout::Agents }
     }
 
     /// Saves the workspace once the current change has settled, so that a thread that is
@@ -1909,6 +1989,45 @@ impl Reader {
     fn alert(&self, window: &Window, visible: bool, what: &str) {
         if self.notifications && !(visible && window.is_window_active()) {
             alert::send(&format!("{} · {}", self.project.name(), self.thread.title()), what);
+        }
+    }
+
+    /// Brings up thread `tid` of project `pid`, whichever is on screen.
+    fn open_thread(&mut self, pid: u64, tid: u64, window: &mut Window, cx: &mut Context<Self>) {
+        if pid == self.project_id {
+            self.show_thread(tid, window, cx);
+        } else {
+            self.show_project_with(pid, Some(tid), window, cx);
+        }
+    }
+
+    /// Ends thread `tid` of project `pid`, whichever is on screen.
+    fn close_any_thread(&mut self, pid: u64, tid: u64, window: &mut Window, cx: &mut Context<Self>) {
+        if pid == self.project_id {
+            return self.close_thread(tid, window, cx);
+        }
+        let last = self.slots.iter().find(|slot| slot.id == pid).is_some_and(|slot| slot.thread.id == tid && slot.parked.is_empty());
+        let blank = last.then(|| self.blank_thread(window, cx));
+        let Some(slot) = self.slots.iter_mut().find(|slot| slot.id == pid) else { return };
+        if let Some(at) = slot.parked.iter().position(|thread| thread.id == tid) {
+            slot.parked.remove(at);
+        } else if slot.thread.id == tid
+            && let Some(next) = slot.parked.pop().or(blank)
+        {
+            slot.thread = next;
+        }
+        self.request_save(cx);
+        cx.notify();
+    }
+
+    /// Starts another thread in project `pid`, with the agent its current thread uses.
+    fn start_thread_in(&mut self, pid: u64, window: &mut Window, cx: &mut Context<Self>) {
+        if pid != self.project_id {
+            self.show_project(pid, window, cx);
+        }
+        let key = self.thread.agent.clone().or_else(|| self.agents.first().map(|agent| agent.id.clone()));
+        if let Some(key) = key {
+            self.new_thread(&key, window, cx);
         }
     }
 
@@ -2131,6 +2250,7 @@ impl Reader {
         if self.project.notice.is_none() {
             self.hide_finder(window, cx);
             self.set_mode(Mode::Source, cx);
+            self.reveal_side(cx);
         }
     }
 
@@ -2560,7 +2680,7 @@ impl Reader {
             )
     }
 
-    fn explorer(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn explorer(&self, with_projects: bool, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.global::<Palette>();
         let this = cx.entity();
         let mode = self.mode;
@@ -2656,9 +2776,12 @@ impl Reader {
                         if folder {
                             return;
                         }
-                        this.update(cx, |reader, cx| match mode {
-                            Mode::Source => reader.open(&path, window, cx),
-                            Mode::Diff => reader.pick(&path, cx),
+                        this.update(cx, |reader, cx| {
+                            match mode {
+                                Mode::Source => reader.open(&path, window, cx),
+                                Mode::Diff => reader.pick(&path, cx),
+                            }
+                            reader.reveal_side(cx);
                         });
                     })
                     .into_any_element()
@@ -2686,10 +2809,123 @@ impl Reader {
                     .child(modes),
                 cx,
             ))
-            .child(self.projects_strip(cx))
+            .children(with_projects.then(|| self.projects_strip(cx)))
             .children(self.worktree_strip(cx))
             .children((mode == Mode::Diff).then(|| self.pr_strip(cx)))
             .child(div().flex_1().min_h_0().p_1().child(body))
+    }
+
+    /// The agents layout's left side: every project with its threads, and the active
+    /// project's files below.
+    fn agents_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let explorer = self.explorer(false, cx).into_any_element();
+        let colors = cx.global::<Palette>();
+        let (border, hover, muted) = (colors.border, colors.list_hover, colors.muted_foreground);
+        let views = self.views();
+        let (active_project, active_thread) = (self.project_id, self.thread.id);
+        let many = views.len() > 1;
+        let add = cx.entity();
+        let mut tree = div().id("agents-tree").flex_1().min_h_0().overflow_y_scroll().flex().flex_col().p_1();
+        for view in &views {
+            let pid = view.id;
+            let activity = view.threads.iter().map(|t| t.activity()).max().unwrap_or(Activity::Idle);
+            let (glyph, tint) = activity.mark(colors);
+            let (select, close, start) = (cx.entity(), cx.entity(), cx.entity());
+            tree = tree.child(
+                div()
+                    .id(("agent-project", pid as usize))
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .pl_2()
+                    .mt_1()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .hover(|row| row.bg(hover))
+                    .on_click(move |_, window, cx| select.update(cx, |reader, cx| reader.show_project(pid, window, cx)))
+                    .child(div().flex_none().text_xs().text_color(tint).child(glyph))
+                    .child(div().flex_1().min_w_0().truncate().text_sm().font_weight(FontWeight::MEDIUM).child(view.project.name()))
+                    .when(many, |row| {
+                        row.child(
+                            Button::new(("agent-project-close", pid as usize))
+                                .icon(IconName::Close)
+                                .ghost()
+                                .xsmall()
+                                .tooltip("Close project")
+                                .on_click(move |_, window, cx| close.update(cx, |reader, cx| reader.close_project(pid, window, cx))),
+                        )
+                    }),
+            );
+            for thread in view.threads.iter().filter(|t| t.agent.is_some() || t.id == view.shown) {
+                let tid = thread.id;
+                let (glyph, tint) = thread.activity().mark(colors);
+                let (select, close) = (cx.entity(), cx.entity());
+                tree = tree.child(
+                    div()
+                        .id(("agent-thread", tid as usize))
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .pl_6()
+                        .rounded_md()
+                        .cursor_pointer()
+                        .when((pid, tid) == (active_project, active_thread), |row| row.bg(hover))
+                        .hover(|row| row.bg(hover))
+                        .on_click(move |_, window, cx| select.update(cx, |reader, cx| reader.open_thread(pid, tid, window, cx)))
+                        .child(div().flex_none().text_xs().text_color(tint).child(glyph))
+                        .child(div().flex_1().min_w_0().truncate().text_sm().child(thread.title()))
+                        .child(
+                            Button::new(("agent-thread-close", tid as usize))
+                                .icon(IconName::Close)
+                                .ghost()
+                                .xsmall()
+                                .tooltip("Close thread")
+                                .on_click(move |_, window, cx| close.update(cx, |reader, cx| reader.close_any_thread(pid, tid, window, cx))),
+                        ),
+                );
+            }
+            tree = tree.child(
+                div()
+                    .id(("agent-new-thread", pid as usize))
+                    .pl_6()
+                    .py_px()
+                    .rounded_md()
+                    .cursor_pointer()
+                    .text_xs()
+                    .text_color(muted)
+                    .hover(|row| row.bg(hover))
+                    .on_click(move |_, window, cx| start.update(cx, |reader, cx| reader.start_thread_in(pid, window, cx)))
+                    .child("+ New thread"),
+            );
+        }
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .bg(colors.sidebar)
+            .child(header_with(
+                "Agents",
+                Button::new("agents-add")
+                    .label("Add project…")
+                    .tooltip("Open a folder as a project (Ctrl+O)")
+                    .ghost()
+                    .xsmall()
+                    .on_click(move |_, window, cx| add.update(cx, |reader, cx| reader.pick_project(window, cx))),
+                cx,
+            ))
+            .children(self.worktree_status.clone().map(|text| {
+                div().px_3().py_1().text_xs().text_color(muted).max_h(rems(5.)).overflow_hidden().child(text)
+            }))
+            .child(tree)
+            .child(div().flex_1().min_h_0().border_t_1().border_color(border).child(explorer))
+    }
+
+    /// The viewer or the diff viewer, as the project's mode says.
+    fn pane(&self, cx: &mut Context<Self>) -> AnyElement {
+        match self.mode {
+            Mode::Source => self.viewer(cx).into_any_element(),
+            Mode::Diff => self.diff_viewer(cx).into_any_element(),
+        }
     }
 
     fn diff_viewer(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -2945,7 +3181,8 @@ impl Reader {
         tabs.sort_by_key(|(id, ..)| *id);
         let hover = colors.list_hover;
         // With one thread there is nothing to choose between.
-        let tabs = (tabs.len() > 1).then(|| {
+        let wide = self.layout == Layout::Agents;
+        let tabs = (tabs.len() > 1 && !wide).then(|| {
             div().flex_none().flex().flex_wrap().gap_1().px_2().py_1().border_b_1().border_color(border).children(
                 tabs.into_iter().map(|(id, title, activity)| {
                     let (select, close) = (cx.entity(), cx.entity());
@@ -2978,7 +3215,7 @@ impl Reader {
             .size_full()
             .flex()
             .flex_col()
-            .bg(colors.sidebar)
+            .bg(if wide { colors.background } else { colors.sidebar })
             .child(header_with(
                 self.agent_label().unwrap_or("Agent"),
                 div()
@@ -3078,11 +3315,18 @@ impl Reader {
                     }))
                     .flex_1()
                     .min_h_0()
-                    .child(thread),
+                    .child(if wide {
+                        // A long line of text is hard to read, so the conversation keeps to a column.
+                        div().size_full().flex().justify_center().child(div().h_full().w_full().max_w(px(860.0)).child(thread)).into_any_element()
+                    } else {
+                        thread
+                    }),
             )
             .child(
-                div().flex_none().p_3().child(
+                div().flex_none().p_3().flex().justify_center().child(
                     div()
+                        .w_full()
+                        .when(wide, |this| this.max_w(px(860.0)))
                         .flex()
                         .flex_col()
                         .gap_1()
@@ -3090,7 +3334,7 @@ impl Reader {
                         .rounded_lg()
                         .border_1()
                         .border_color(colors.border)
-                        .bg(colors.background)
+                        .bg(if wide { colors.sidebar } else { colors.background })
                         .when(!queued.is_empty(), |this| {
                             this.child(div().flex().flex_col().gap_1().pb_1().border_b_1().border_color(border).children(queued))
                         })
@@ -3205,6 +3449,8 @@ fn tool_card(ix: usize, n: usize, tool: &ToolBlock, this: &Entity<Reader>, cx: &
     let colors = cx.global::<Palette>();
     let (mark, tint) = step_mark(tool.status, colors);
     let toggle = this.clone();
+    let reveal = this.clone();
+    let path = tool.path.clone();
     let mut card = div()
         .flex()
         .flex_col()
@@ -3216,15 +3462,31 @@ fn tool_card(ix: usize, n: usize, tool: &ToolBlock, this: &Entity<Reader>, cx: &
         .bg(colors.background)
         .child(
             div()
-                .id(("tool", ix * 10_000 + n))
                 .flex()
                 .items_center()
                 .gap_2()
-                .cursor_pointer()
-                .text_sm()
-                .on_click(move |_, _, cx| toggle.update(cx, |reader, cx| reader.toggle_tool(ix, n, cx)))
-                .child(div().text_color(tint).child(mark))
-                .child(div().flex_1().min_w_0().truncate().child(tool.title.clone())),
+                .child(
+                    div()
+                        .id(("tool", ix * 10_000 + n))
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .cursor_pointer()
+                        .text_sm()
+                        .on_click(move |_, _, cx| toggle.update(cx, |reader, cx| reader.toggle_tool(ix, n, cx)))
+                        .child(div().text_color(tint).child(mark))
+                        .child(div().flex_1().min_w_0().truncate().child(tool.title.clone())),
+                )
+                .children(path.map(|path| {
+                    Button::new(("tool-open", ix * 10_000 + n))
+                        .label("Open")
+                        .tooltip("Show this file, or its changes")
+                        .ghost()
+                        .xsmall()
+                        .on_click(move |_, window, cx| reveal.update(cx, |reader, cx| reader.reveal(&path, window, cx)))
+                })),
         );
     if tool.open {
         for text in [&tool.arguments, &tool.result] {
@@ -3317,7 +3579,23 @@ impl Render for Reader {
         let colors = cx.global::<Palette>();
         let (background, foreground, border, sidebar) = (colors.background, colors.foreground, colors.border, colors.sidebar);
         let (left, right) = (cx.entity(), cx.entity());
-        let (left_open, right_open) = (self.left_open, self.right_open);
+        let agents = self.layout == Layout::Agents;
+        let (left_open, right_open) = if agents { (self.agents_left_open, self.side_open) } else { (self.left_open, self.right_open) };
+        let views = [
+            ("view-browse", "Browse", "Files and the viewer (Ctrl+1)", !agents && self.mode == Mode::Source, 0),
+            ("view-review", "Review", "Changes and diffs (Ctrl+2)", !agents && self.mode == Mode::Diff, 1),
+            ("view-agents", "Agents", "Projects and their agent threads (Ctrl+3)", agents, 2),
+        ];
+        let switcher = div().flex().items_center().gap_1().children(views.into_iter().map(|(id, label, tip, selected, which)| {
+            let this = cx.entity();
+            Button::new(id).label(label).tooltip(tip).ghost().xsmall().selected(selected).on_click(move |_, _, cx| {
+                this.update(cx, |reader, cx| match which {
+                    0 => reader.show_files(Mode::Source, cx),
+                    1 => reader.show_files(Mode::Diff, cx),
+                    _ => reader.set_layout(Layout::Agents, cx),
+                })
+            })
+        }));
         let bar = div()
             .h_8()
             .flex_none()
@@ -3336,12 +3614,13 @@ impl Render for Reader {
                     .tooltip("Toggle left sidebar (Ctrl+B)")
                     .on_click(move |_, _, cx| left.update(cx, |reader, cx| reader.toggle_left(cx))),
             )
+            .child(switcher)
             .child(
                 Button::new("toggle-right")
                     .icon(if right_open { IconName::PanelRightClose } else { IconName::PanelRightOpen })
                     .ghost()
                     .small()
-                    .tooltip("Toggle right sidebar (Ctrl+Shift+B)")
+                    .tooltip(if agents { "Toggle the file pane (Ctrl+Shift+B)" } else { "Toggle right sidebar (Ctrl+Shift+B)" })
                     .on_click(move |_, _, cx| right.update(cx, |reader, cx| reader.toggle_right(cx))),
             );
         div()
@@ -3355,28 +3634,32 @@ impl Render for Reader {
             .on_action(cx.listener(|reader, _: &ShowFinder, window, cx| reader.show_finder(window, cx)))
             .on_action(cx.listener(|reader, _: &ToggleLeft, _, cx| reader.toggle_left(cx)))
             .on_action(cx.listener(|reader, _: &ToggleRight, _, cx| reader.toggle_right(cx)))
-            .on_action(cx.listener(|reader, _: &ShowSource, _, cx| reader.set_mode(Mode::Source, cx)))
-            .on_action(cx.listener(|reader, _: &ShowChanges, _, cx| reader.set_mode(Mode::Diff, cx)))
+            .on_action(cx.listener(|reader, _: &ShowSource, _, cx| reader.show_files(Mode::Source, cx)))
+            .on_action(cx.listener(|reader, _: &ShowChanges, _, cx| reader.show_files(Mode::Diff, cx)))
+            .on_action(cx.listener(|reader, _: &ShowAgents, _, cx| reader.set_layout(Layout::Agents, cx)))
             .on_action(cx.listener(|reader, _: &ToggleSplit, _, cx| reader.set_split(!reader.split, cx)))
             .on_action(cx.listener(|reader, _: &OpenProject, window, cx| reader.pick_project(window, cx)))
             .on_action(cx.listener(|reader, _: &NewThread, window, cx| {
                 // Opening the right sidebar first: the menu hangs off its header.
-                if !reader.right_open {
+                if reader.layout == Layout::Files && !reader.right_open {
                     reader.right_open = true;
                     cx.notify();
                 }
                 reader.thread_menu.update(cx, |menu, cx| menu.toggle(window, cx));
             }))
             .child(
-                div().flex_1().min_h_0().child(
-                    sidebars(&self.sidebars)
-                        .left(left_open, px(160.0)..px(520.0), self.explorer(cx))
-                        .center(match self.mode {
-                            Mode::Source => self.viewer(cx).into_any_element(),
-                            Mode::Diff => self.diff_viewer(cx).into_any_element(),
-                        })
-                        .right(right_open, px(300.0)..px(760.0), self.agent_panel(cx)),
-                ),
+                div().flex_1().min_h_0().child(match self.layout {
+                    Layout::Files => sidebars(&self.sidebars)
+                        .left(left_open, px(160.0)..px(520.0), self.explorer(true, cx))
+                        .center(self.pane(cx))
+                        .right(right_open, px(300.0)..px(760.0), self.agent_panel(cx))
+                        .into_any_element(),
+                    Layout::Agents => sidebars(&self.agents_sidebars)
+                        .left(left_open, px(220.0)..px(520.0), self.agents_sidebar(cx))
+                        .center(self.agent_panel(cx))
+                        .right(right_open, px(320.0)..px(900.0), self.pane(cx))
+                        .into_any_element(),
+                }),
             )
             .child(bar)
             .when(self.finder_open, |this| this.child(self.finder(cx)))
@@ -3507,6 +3790,7 @@ fn main() {
             KeyBinding::new("ctrl-shift-b", ToggleRight, None),
             KeyBinding::new("ctrl-1", ShowSource, None),
             KeyBinding::new("ctrl-2", ShowChanges, None),
+            KeyBinding::new("ctrl-3", ShowAgents, None),
             KeyBinding::new("ctrl-\\", ToggleSplit, None),
             KeyBinding::new("ctrl-n", NewThread, None),
             KeyBinding::new("ctrl-o", OpenProject, None),

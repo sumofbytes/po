@@ -28,6 +28,8 @@ pub struct ProjectState {
 #[derive(Default)]
 pub struct Workspace {
     pub projects: Vec<ProjectState>,
+    /// The window was showing the agents view rather than files.
+    pub agents: bool,
 }
 
 /// The file for the window started in `start`.
@@ -65,7 +67,7 @@ impl Workspace {
                 })
             })
             .collect();
-        json!({ "version": 1, "projects": projects })
+        json!({ "version": 1, "layout": if self.agents { "agents" } else { "files" }, "projects": projects })
     }
 
     fn from_json(value: &Value) -> Option<Self> {
@@ -99,7 +101,7 @@ impl Workspace {
                 })
             })
             .collect();
-        Some(Self { projects })
+        Some(Self { projects, agents: value["layout"].as_str() == Some("agents") })
     }
 
     /// What the window started in `start` saved last, if anything.
@@ -129,6 +131,7 @@ mod tests {
     #[test]
     fn a_workspace_survives_a_round_trip() {
         let saved = Workspace {
+            agents: true,
             projects: vec![
                 ProjectState {
                     root: "/work/po".into(),
@@ -150,6 +153,7 @@ mod tests {
             ],
         };
         let back = Workspace::from_json(&saved.to_json()).expect("parses");
+        assert!(back.agents);
         assert_eq!(back.projects.len(), 2);
         assert_eq!(back.projects[0].active, 1);
         assert_eq!(back.projects[0].threads[1].title, "quote \"this\"");
