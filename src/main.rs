@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::{Duration, SystemTime};
 
-use acp::{Client, Event, PermissionOption};
+use acp::{Client, Event, PermissionOption, SessionInfo};
 use diff::{Change, Kind, Pair, Row};
 use theme::Palette;
 use ui::button::Button;
@@ -344,6 +344,13 @@ fn diff_text(item: &Value) -> String {
     out.join("\n")
 }
 
+/// A prompt as the user typed it, without the note `send` puts in front about the open file.
+fn without_context(text: &str) -> &str {
+    text.strip_prefix("[The user has `")
+        .and_then(|rest| rest.split_once("]\n\n"))
+        .map_or(text, |(_, prompt)| prompt)
+}
+
 /// The text a tool call carries: content blocks, diffs, then its raw output.
 fn tool_result(update: &Value) -> String {
     let mut out = Vec::new();
@@ -413,6 +420,11 @@ struct Reader {
     thread: Vec<Msg>,
     busy: bool,
     ready: bool,
+    /// A resumed session's history is being replayed.
+    loading: bool,
+    /// Choosing a session to resume: the agent's list once it arrives.
+    picking: bool,
+    sessions: Option<Vec<SessionInfo>>,
     painted: bool,
     status: String,
     client: Option<Client>,
@@ -549,6 +561,9 @@ impl Reader {
             thread: vec![],
             busy: false,
             ready: false,
+            loading: false,
+            picking: false,
+            sessions: None,
             painted: false,
             status: String::new(),
             client: None,
@@ -571,7 +586,7 @@ impl Reader {
         reader.refresh_tree(cx);
         trace::mark("tree");
         if let Some(command) = command {
-            reader.connect(&command, window, cx);
+            reader.connect(&command, false, window, cx);
             trace::mark("connect");
         }
         reader.watch(watch, window, cx);
@@ -776,7 +791,7 @@ impl Reader {
         self.rescan(cx);
         // The agent works in the old directory, so it restarts in the new one.
         if let Some(agent) = self.agent.clone() {
-            self.connect(&agent, window, cx);
+            self.connect(&agent, false, window, cx);
         }
         self.watch(None, window, cx);
         if self.pr.is_some() {
@@ -909,8 +924,9 @@ impl Reader {
         }));
     }
 
-    /// Replaces the running agent with `key`'s, with a fresh thread.
-    fn connect(&mut self, key: &str, window: &mut Window, cx: &mut Context<Self>) {
+    /// Replaces the running agent with `key`'s, with a fresh thread, or with the agent's session
+    /// list to resume from when `resume`.
+    fn connect(&mut self, key: &str, resume: bool, window: &mut Window, cx: &mut Context<Self>) {
         self.generation += 1;
         let generation = self.generation;
         self.client = None;
@@ -920,9 +936,12 @@ impl Reader {
         self.selection.update(cx, |s, _| s.clear());
         self.busy = false;
         self.ready = false;
+        self.loading = false;
+        self.picking = resume;
+        self.sessions = None;
         let command = self.agents.iter().find(|agent| agent.id == key).map_or(key.to_string(), |agent| agent.command.clone());
-        self.status = "starting…".into();
-        match Client::spawn(&command, &self.root) {
+        self.status = if resume { "listing sessions…" } else { "starting…" }.into();
+        match Client::spawn(&command, &self.root, resume) {
             Ok((client, mut events)) => {
                 self.client = Some(client);
                 let handle = window.window_handle();
@@ -970,7 +989,25 @@ impl Reader {
     /// Starts a new thread with `key`'s agent, replacing any running one.
     fn new_thread(&mut self, key: &str, window: &mut Window, cx: &mut Context<Self>) {
         log::info!("agent: new thread with {key}");
-        self.connect(key, window, cx);
+        self.connect(key, false, window, cx);
+    }
+
+    /// Replaces the running agent with `key`'s, offering its sessions to resume.
+    fn resume_thread(&mut self, key: &str, window: &mut Window, cx: &mut Context<Self>) {
+        log::info!("agent: resuming with {key}");
+        self.connect(key, true, window, cx);
+    }
+
+    /// Opens a listed session; its history arrives as updates before the agent is ready.
+    fn resume_session(&mut self, id: &str, cx: &mut Context<Self>) {
+        let Some(client) = &self.client else { return };
+        if self.loading || !client.load(id) {
+            return;
+        }
+        self.loading = true;
+        self.sessions = None;
+        self.status = "loading session…".into();
+        cx.notify();
     }
 
     fn agent_label(&self) -> Option<&str> {
@@ -1007,8 +1044,14 @@ impl Reader {
         // Most events change the last message; a tool call update may change an earlier one.
         let mut changed = self.thread.len().saturating_sub(1);
         match event {
+            Event::Sessions(sessions) => {
+                self.status = if sessions.is_empty() { "no sessions".into() } else { "pick a session".into() };
+                self.sessions = Some(sessions);
+            }
             Event::Ready { agent } => {
                 self.ready = true;
+                self.loading = false;
+                self.picking = false;
                 log::info!("agent: {agent} ready");
                 self.status = "ready".into();
             }
@@ -1016,7 +1059,8 @@ impl Reader {
                 if let Some(ix) = self.tool_message(&update) {
                     changed = changed.min(ix);
                 }
-                if let Some((path, finished)) = self.update(&update) {
+                // A replayed history would otherwise open every file it ever touched.
+                if let Some((path, finished)) = self.update(&update).filter(|_| !self.loading) {
                     self.follow(&path, finished, window, cx);
                 }
             }
@@ -1067,6 +1111,16 @@ impl Reader {
                 Some(Block::Text(body)) => body.push_str(text),
                 _ => self.blocks().push(Block::Text(text.to_string())),
             },
+            Some("user_message_chunk") if self.loading || !self.busy => {
+                let text = without_context(text);
+                match self.thread.last_mut() {
+                    Some(Msg::User(body)) => body.push_str(text),
+                    _ => {
+                        self.thread.push(Msg::User(text.to_string()));
+                        self.relist(self.thread.len() - 1);
+                    }
+                }
+            }
             Some("agent_thought_chunk") => match self.blocks().last_mut() {
                 Some(Block::Thought(body)) => body.push_str(text),
                 _ => self.blocks().push(Block::Thought(text.to_string())),
@@ -1600,6 +1654,12 @@ impl Reader {
         let selection = self.selection.clone();
         let thread: AnyElement = if self.agent.is_none() {
             centered("Choose an agent from New Thread".into(), cx)
+        } else if self.picking && self.thread.is_empty() {
+            match &self.sessions {
+                Some(sessions) if !self.loading && !sessions.is_empty() => session_picker(sessions, &this, cx),
+                Some(sessions) if !self.loading => centered(format!("No sessions to resume in {}", self.root.display()), cx),
+                _ => centered(self.status.clone(), cx),
+            }
         } else {
             list(
                 self.thread_list.clone(),
@@ -1661,15 +1721,19 @@ impl Reader {
                                 .outline()
                                 .dropdown_caret(true),
                             move || {
-                                agents
-                                    .iter()
-                                    .map(|agent| {
-                                        let (picker, key) = (picker.clone(), agent.id.clone());
-                                        MenuItem::new(agent.name.clone(), move |window, cx| {
-                                            picker.update(cx, |reader, cx| reader.new_thread(&key, window, cx))
-                                        })
+                                let new = agents.iter().map(|agent| {
+                                    let (picker, key) = (picker.clone(), agent.id.clone());
+                                    MenuItem::new(agent.name.clone(), move |window, cx| {
+                                        picker.update(cx, |reader, cx| reader.new_thread(&key, window, cx))
                                     })
-                                    .collect()
+                                });
+                                let resume = agents.iter().map(|agent| {
+                                    let (picker, key) = (picker.clone(), agent.id.clone());
+                                    MenuItem::new(format!("Resume with {}…", agent.name), move |window, cx| {
+                                        picker.update(cx, |reader, cx| reader.resume_thread(&key, window, cx))
+                                    })
+                                });
+                                new.chain([MenuItem::separator()]).chain(resume).collect()
                             },
                         )
                         .menu(self.thread_menu.clone()),
@@ -1798,6 +1862,36 @@ fn render_msg(
         };
     }
     column.into_any_element()
+}
+
+/// The sessions an agent offers to resume, newest first.
+fn session_picker(sessions: &[SessionInfo], this: &Entity<Reader>, cx: &App) -> AnyElement {
+    let colors = cx.global::<Palette>();
+    div()
+        .id("sessions")
+        .size_full()
+        .overflow_y_scroll()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .p_3()
+        .children(sessions.iter().enumerate().map(|(ix, session)| {
+            let (this, id) = (this.clone(), session.id.clone());
+            let title = if session.title.is_empty() { format!("Session {}", session.id.chars().take(8).collect::<String>()) } else { session.title.clone() };
+            let when = session.updated.get(..16).unwrap_or_default().replace('T', " ");
+            div()
+                .id(("session", ix))
+                .flex()
+                .flex_col()
+                .p_2()
+                .rounded_md()
+                .cursor_pointer()
+                .hover(|style| style.bg(colors.list_hover))
+                .on_click(move |_, _, cx| this.update(cx, |reader, cx| reader.resume_session(&id, cx)))
+                .child(div().text_sm().truncate().child(title))
+                .child(div().text_xs().text_color(colors.muted_foreground).child(when))
+        }))
+        .into_any_element()
 }
 
 fn step_mark(status: Step, colors: &Palette) -> (&'static str, gpui::Hsla) {
