@@ -374,7 +374,15 @@ fn word_at(text: &str, ix: usize) -> Range<usize> {
 
 /// Renders `source` as a reply. `id` must be unique among replies shown together.
 pub fn markdown(id: impl Into<ElementId>, source: &str, selection: &Entity<Selection>, window: &mut Window, cx: &mut App) -> AnyElement {
-    let id = id.into();
+    render(id.into(), source, selection, false, window, cx)
+}
+
+/// Like [`markdown`], with the text in italics, as for the agent's thoughts.
+pub fn italic(id: impl Into<ElementId>, source: &str, selection: &Entity<Selection>, window: &mut Window, cx: &mut App) -> AnyElement {
+    render(id.into(), source, selection, true, window, cx)
+}
+
+fn render(id: ElementId, source: &str, selection: &Entity<Selection>, italic: bool, window: &mut Window, cx: &mut App) -> AnyElement {
     let (blocks, colors) = selection.update(cx, |s, _| match s.parsed.get(&id) {
         Some(parsed) if parsed.source == source => (parsed.blocks.clone(), parsed.colors.clone()),
         old => {
@@ -392,7 +400,11 @@ pub fn markdown(id: impl Into<ElementId>, source: &str, selection: &Entity<Selec
             (blocks, colors)
         }
     });
-    let mut cx2 = Render { id: format!("{id:?}"), leaf: 0, selection: selection.clone(), style: window.text_style(), colors };
+    let mut style = window.text_style();
+    if italic {
+        style.font_style = FontStyle::Italic;
+    }
+    let mut cx2 = Render { id: format!("{id:?}"), leaf: 0, selection: selection.clone(), style, colors };
     let count = blocks.len();
     div()
         .children(blocks.iter().enumerate().map(|(ix, b)| cx2.block(b, ix + 1 == count, false, 0, window, cx)))
@@ -436,8 +448,8 @@ impl Render {
                     2 => (1.5, FontWeight::SEMIBOLD),
                     3 => (1.25, FontWeight::SEMIBOLD),
                     4 => (1.125, FontWeight::SEMIBOLD),
-                    5 => (1., FontWeight::SEMIBOLD),
-                    6 => (1., FontWeight::MEDIUM),
+                    5 => (1., FontWeight::BOLD),
+                    6 => (0.9, FontWeight::SEMIBOLD),
                     _ => (1., FontWeight::NORMAL),
                 };
                 // Headings scale from the base text size, like everything else.
@@ -446,7 +458,15 @@ impl Render {
                     .whitespace_normal()
                     .text_size(rems(size))
                     .font_weight(weight)
-                    .child(self.styled(|s| s.font_weight = weight, |this| this.text(inline, window, cx)))
+                    .child(self.styled(
+                        |s| {
+                            s.font_weight = weight;
+                            if *level == 6 {
+                                s.color = muted;
+                            }
+                        },
+                        |this| this.text(inline, window, cx),
+                    ))
                     .into_any_element()
             }
             Block::Quote(children) => {
@@ -483,6 +503,7 @@ impl Render {
                     |s| {
                         s.font_family = mono.clone();
                         s.font_weight = FontWeight::NORMAL;
+                        s.font_style = FontStyle::Normal;
                     },
                     |this| this.leaf(&text, highlights, window, cx),
                 );
@@ -502,7 +523,7 @@ impl Render {
                 )
             }
             Block::Rule => gapped(div().bg(border).h(px(2.)).into_any_element(), gap_last),
-            Block::Table { align, rows } => self.table(align, rows, window, cx),
+            Block::Table { align, rows } => self.table(align, rows, gap_last, window, cx),
         }
     }
 
@@ -555,7 +576,7 @@ impl Render {
         div().w_full().min_w_0().children(rows).into_any_element()
     }
 
-    fn table(&mut self, align: &[AlignKind], rows: &[Vec<Inline>], window: &mut Window, cx: &mut App) -> AnyElement {
+    fn table(&mut self, align: &[AlignKind], rows: &[Vec<Inline>], last: bool, window: &mut Window, cx: &mut App) -> AnyElement {
         let palette = cx.global::<Palette>();
         let (border, head_bg, head_fg, surface) = (palette.border, palette.table_head, palette.table_head_foreground, palette.popover);
         let columns = rows.iter().map(|r| r.len()).max().unwrap_or(0);
@@ -601,7 +622,7 @@ impl Render {
             })
             .collect();
         div()
-            .pb(rems(1.))
+            .when(!last, |this| this.pb(rems(1.)))
             .w_full()
             .child(div().w_full().bg(surface).border_1().border_color(border).overflow_hidden().children(rendered))
             .into_any_element()
