@@ -3235,8 +3235,10 @@ impl Reader {
                 cx.processor(move |reader: &mut Self, ix: usize, window, cx| {
                     let Some(msg) = reader.thread.messages.get(ix) else { return div().into_any_element() };
                     let last = ix + 1 == reader.thread.messages.len();
+                    // The text is inset as far as the composer's is (its box padding plus the
+                    // input's own), so the two share a left edge.
                     div()
-                        .px_3()
+                        .px_5()
                         .pt_3()
                         .when(last, |this| this.pb_3())
                         .child(render_msg(ix, msg, &this, &selection, window, cx))
@@ -3454,7 +3456,8 @@ impl Reader {
                     .flex_1()
                     .min_h_0()
                     // A long line of text is hard to read, so the conversation keeps to a column.
-                    .child(div().size_full().flex().justify_center().child(div().h_full().w_full().max_w(px(860.0)).child(thread))),
+                    // It has the composer's outer padding too, so both columns are the same width.
+                    .child(div().size_full().flex().justify_center().px_3().child(div().h_full().w_full().max_w(px(860.0)).child(thread))),
             )
             .child(
                 div().flex_none().p_3().flex().justify_center().child(
@@ -3497,6 +3500,9 @@ fn render_msg(
             return div()
                 .flex()
                 .justify_end()
+                // A bubble is a box like the composer, so its edge lines up with that box's edge, not
+                // with the text column the agent's words follow.
+                .mr(px(-17.5))
                 .child(
                     div()
                         .max_w(gpui::relative(0.9))
