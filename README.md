@@ -120,7 +120,23 @@ and the branch is kept if it has anything on it. The worktree starts from the
 last commit, so uncommitted changes and untracked files in the original checkout
 aren't in it.
 
-Threads and projects aren't remembered across restarts yet.
+#### Coming back, and background agents
+
+`po` remembers the projects and threads of each window, by the directory it was
+started in (in `~/.local/share/po/workspaces/`). Starting `po` there again brings
+them back: the project you started on is shown, the others wait in the
+background, and every thread resumes its agent session when you first show it.
+A resumed agent has to support listing and loading sessions. PR reviews aren't
+remembered, and worktrees stay on disk until you merge, discard or close them.
+
+Agents nobody is talking to don't have to keep running. A thread in the
+background with nothing going on has its agent stopped after `idle_minutes`
+(default 15, `0` to never) and is resumed when shown; beyond `max_live_agents`
+(default 8) the longest idle are stopped first. A thread mid-turn, waiting for
+a permission answer or with messages queued is never stopped. When a thread
+finishes or asks for permission out of view, `po` sends a desktop notification
+(`notify-send` on Linux, `osascript` on macOS); set `"notifications": false` to
+turn that off.
 
 ### Themes
 

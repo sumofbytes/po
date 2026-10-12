@@ -3,6 +3,8 @@
 //!
 //! Nothing here loses work behind the user's back: closing a worktree commits what is left in
 //! it and keeps the branch if it has anything on it. Only [`Worktree::discard`] deletes work.
+//! Dropping a `Worktree` does nothing, so one that is open when po quits is still there to be
+//! picked up again by the next run.
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -21,7 +23,7 @@ pub struct Spec {
 
 pub struct Worktree {
     pub spec: Spec,
-    /// The worktree was merged, discarded or retired, so dropping it has nothing left to do.
+    /// The worktree was merged, discarded or retired.
     done: bool,
 }
 
@@ -40,16 +42,6 @@ fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
         let why = if stderr.trim().is_empty() { stdout } else { stderr };
         Err(format!("git {}: {}", args.first().copied().unwrap_or_default(), why.trim()))
     }
-}
-
-/// `$XDG_DATA_HOME/po` (default `~/.local/share/po`).
-fn data_dir() -> PathBuf {
-    std::env::var_os("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .filter(|path| path.is_absolute())
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share")))
-        .unwrap_or_else(std::env::temp_dir)
-        .join("po")
 }
 
 /// The top of the repository `dir` is in, if it is in one.
@@ -97,7 +89,7 @@ impl Worktree {
     /// A new worktree on a new branch off the `HEAD` of the repository `from` is in. Work in
     /// `from` that isn't committed isn't in it.
     pub fn create(from: &Path) -> Result<Self, String> {
-        Self::create_in(from, &data_dir().join("worktrees"))
+        Self::create_in(from, &crate::config::data_dir().join("worktrees"))
     }
 
     /// [`Self::create`], with the worktree under `parent`.
@@ -113,6 +105,11 @@ impl Worktree {
         std::fs::create_dir_all(path.parent().expect("under the data directory")).map_err(|err| err.to_string())?;
         git(&repo, &["worktree", "add", "-b", &branch, &path.to_string_lossy(), &base])?;
         Ok(Self { spec: Spec { path, branch, base, repo }, done: false })
+    }
+
+    /// Takes over a worktree made earlier (by a previous run), if it is still there.
+    pub fn adopt(spec: Spec) -> Option<Self> {
+        spec.path.join(".git").exists().then_some(Self { spec, done: false })
     }
 
     /// Commits what is in the worktree and merges its branch into the repository's checkout,
@@ -156,12 +153,6 @@ impl Worktree {
         let keep = ahead(&self.spec) > 0;
         remove(&self.spec, !keep);
         keep.then(|| self.spec.branch.clone())
-    }
-}
-
-impl Drop for Worktree {
-    fn drop(&mut self) {
-        self.retire();
     }
 }
 

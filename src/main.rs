@@ -10,6 +10,7 @@ mod theme;
 mod trace;
 mod ui;
 mod viewer;
+mod workspace;
 mod worktree;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -773,6 +774,8 @@ struct Reader {
     split: bool,
     /// Keeps the shortcuts routed to the reader when no input is focused.
     focus: gpui::FocusHandle,
+    /// The workspace is about to be saved, so asking again changes nothing.
+    save_pending: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -881,13 +884,18 @@ impl Reader {
             right_open: true,
             split: false,
             focus: cx.focus_handle(),
+            save_pending: false,
             _subscriptions: subscriptions,
         };
         reader.focus.focus(window, cx);
         trace::mark("reader built");
         reader.refresh_tree(cx);
         trace::mark("tree");
-        if let Some(command) = command {
+        let resumed = workspace::Workspace::load(&reader.home).is_some_and(|saved| reader.restore(saved, window, cx));
+        trace::mark("restore");
+        if resumed {
+            reader.wake_thread(window, cx);
+        } else if let Some(command) = command {
             reader.connect(&command, false, window, cx);
             trace::mark("connect");
         }
@@ -1226,6 +1234,7 @@ impl Reader {
         self.swap_slot(at);
         self.resume_project(window, cx);
         self.wake_thread(window, cx);
+        self.request_save(cx);
     }
 
     /// Adds a project over `root` (a PR's worktree when `pr` is given) and shows it. If it is
@@ -1261,6 +1270,7 @@ impl Reader {
         if let Some(agent) = agent {
             self.connect(&agent, false, window, cx);
         }
+        self.request_save(cx);
     }
 
     /// Starts a thread with `key`'s agent in a git worktree of its own, shown as a project:
@@ -1424,6 +1434,7 @@ impl Reader {
             self.worktree_status = Some(format!("Closed. Its work is kept on branch {branch}"));
         }
         self.slots.retain(|slot| slot.id != id);
+        self.request_save(cx);
         cx.notify();
     }
 
@@ -1726,6 +1737,7 @@ impl Reader {
             std::mem::swap(&mut self.thread, &mut self.parked[at]);
             self.thread.unread = false;
             self.wake_thread(window, cx);
+            self.request_save(cx);
             cx.notify();
         }
     }
@@ -1745,6 +1757,125 @@ impl Reader {
     /// The threads not on screen, in every project.
     fn background_threads(&mut self) -> impl Iterator<Item = &mut Thread> {
         self.parked.iter_mut().chain(self.slots.iter_mut().flat_map(|slot| std::iter::once(&mut slot.thread).chain(slot.parked.iter_mut())))
+    }
+
+    /// A thread with no agent running, to be resumed from `saved`'s session when it is shown.
+    fn sleeping_thread(&mut self, saved: workspace::ThreadState, window: &mut Window, cx: &mut Context<Self>) -> Thread {
+        let mut thread = self.blank_thread(window, cx);
+        thread.agent = Some(saved.agent);
+        thread.session = Some(saved.session);
+        thread.saved_title = Some(saved.title).filter(|title| !title.is_empty());
+        thread.status = "asleep".into();
+        thread
+    }
+
+    /// Brings back the projects and threads the last window started here left. The project on
+    /// screen is the one `po` was started on; the others wait in the background and the
+    /// threads sleep until shown. True if the project on screen got its threads back.
+    fn restore(&mut self, saved: workspace::Workspace, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let mut resumed = false;
+        let mut seen = HashSet::new();
+        for state in saved.projects {
+            let worktree = match state.worktree {
+                Some(spec) => match worktree::Worktree::adopt(spec) {
+                    Some(wt) => Some(wt),
+                    None => continue,
+                },
+                None => None,
+            };
+            let start = worktree.is_none() && self.project.pr.is_none() && self.project.worktree.is_none() && state.root == self.project.root;
+            if !start && (!state.root.is_dir() || !seen.insert(state.root.clone()) || state.root == self.project.root) {
+                continue;
+            }
+            let mut threads: Vec<Thread> = state.threads.into_iter().map(|t| self.sleeping_thread(t, window, cx)).collect();
+            let shown = (!threads.is_empty()).then(|| threads.remove(state.active.min(threads.len() - 1)));
+            if start {
+                if let Some(shown) = shown {
+                    self.thread = shown;
+                    self.parked = threads;
+                    resumed = true;
+                }
+                continue;
+            }
+            let mut project = Self::build_project(state.root, None, vec![], window, cx);
+            if let Some(wt) = worktree {
+                project.base = wt.spec.base.clone();
+                project.worktree = Some(wt);
+            }
+            let thread = match shown {
+                Some(thread) => thread,
+                None => self.blank_thread(window, cx),
+            };
+            let id = self.next_project;
+            self.next_project += 1;
+            let mode = if state.review { Mode::Diff } else { Mode::Source };
+            self.slots.push(Slot { id, mode, project, thread, parked: threads });
+        }
+        resumed
+    }
+
+    /// What is worth keeping of the projects and threads: those with an agent session.
+    fn workspace(&self) -> workspace::Workspace {
+        struct View<'a> {
+            id: u64,
+            mode: Mode,
+            project: &'a Project,
+            shown: u64,
+            threads: Vec<&'a Thread>,
+        }
+        let mut views = vec![View {
+            id: self.project_id,
+            mode: self.mode,
+            project: &self.project,
+            shown: self.thread.id,
+            threads: std::iter::once(&self.thread).chain(&self.parked).collect(),
+        }];
+        views.extend(self.slots.iter().map(|slot| View {
+            id: slot.id,
+            mode: slot.mode,
+            project: &slot.project,
+            shown: slot.thread.id,
+            threads: std::iter::once(&slot.thread).chain(&slot.parked).collect(),
+        }));
+        views.sort_by_key(|view| view.id);
+        // A PR is a throwaway checkout; it is not brought back.
+        let projects = views
+            .into_iter()
+            .filter(|view| view.project.pr.is_none())
+            .map(|view| {
+                let mut threads: Vec<&Thread> = view.threads.into_iter().filter(|t| t.agent.is_some() && t.session.is_some()).collect();
+                threads.sort_by_key(|t| t.id);
+                workspace::ProjectState {
+                    root: view.project.root.clone(),
+                    review: view.mode == Mode::Diff,
+                    worktree: view.project.worktree.as_ref().map(|wt| wt.spec.clone()),
+                    active: threads.iter().position(|t| t.id == view.shown).unwrap_or(0),
+                    threads: threads
+                        .into_iter()
+                        .filter_map(|t| {
+                            Some(workspace::ThreadState { agent: t.agent.clone()?, session: t.session.clone()?, title: t.title() })
+                        })
+                        .collect(),
+                }
+            })
+            .collect();
+        workspace::Workspace { projects }
+    }
+
+    /// Saves the workspace once the current change has settled, so that a thread that is
+    /// swapped in to handle an event isn't saved as the one on screen.
+    fn request_save(&mut self, cx: &mut Context<Self>) {
+        if self.save_pending {
+            return;
+        }
+        self.save_pending = true;
+        let this = cx.entity();
+        cx.defer(move |cx| {
+            this.update(cx, |reader, _| {
+                reader.save_pending = false;
+                reader.workspace().save(&reader.home);
+            })
+        });
     }
 
     /// Stops the agents of threads that have been idle in the background for too long.
@@ -1794,6 +1925,7 @@ impl Reader {
             self.thread.unread = false;
             self.wake_thread(window, cx);
         }
+        self.request_save(cx);
         cx.notify();
     }
 
@@ -1847,6 +1979,7 @@ impl Reader {
                 log::info!("agent: {agent} ready");
                 self.thread.status = "ready".into();
                 self.thread.session = self.thread.client.as_ref().and_then(|client| client.session());
+                self.request_save(cx);
             }
             Event::Update(update) => {
                 if let Some(ix) = self.thread.tool_message(&update) {
@@ -2209,6 +2342,7 @@ impl Reader {
         }
         self.thread.busy = true;
         self.thread.touched = Instant::now();
+        self.request_save(cx);
         self.thread.messages.push(Msg::User(prompt));
         self.thread.messages.push(Msg::Agent(vec![]));
         self.thread.relist(self.thread.messages.len() - 2);
