@@ -355,6 +355,8 @@ struct Daemon {
 
 pub struct Client {
     shared: Arc<Shared>,
+    /// Dropped with the client; the worker that started the daemon waits on its other end.
+    _alive: std::sync::mpsc::Sender<()>,
     /// The daemon, when po started it; it goes away with the client.
     daemon: Arc<Mutex<Daemon>>,
 }
@@ -388,14 +390,28 @@ impl Client {
             batches: Mutex::new(HashMap::new()),
         });
         let daemon = Arc::new(Mutex::new(Daemon::default()));
+        let (alive, hold) = std::sync::mpsc::channel::<()>();
         let (worker, started, command, cwd) = (shared.clone(), daemon.clone(), command.to_string(), cwd.to_path_buf());
         std::thread::spawn(move || {
             let result = (|| -> Result<()> {
                 if !worker.healthy() {
                     let mut parts = command.split_whitespace();
                     let program = parts.next().context("the dex daemon isn't running and no command to start it is configured")?;
-                    let child = Command::new(program)
-                        .args(parts)
+                    let mut process = Command::new(program);
+                    process.args(parts);
+                    // The daemon dies with po even when po is killed and never runs `Drop`.
+                    #[cfg(target_os = "linux")]
+                    {
+                        use std::os::unix::process::CommandExt;
+                        // SAFETY: only async-signal-safe `prctl` runs between fork and exec.
+                        unsafe {
+                            process.pre_exec(|| {
+                                libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
+                                Ok(())
+                            });
+                        }
+                    }
+                    let child = process
                         .current_dir(&cwd)
                         .stdin(Stdio::null())
                         .stdout(Stdio::null())
@@ -434,8 +450,13 @@ impl Client {
             if let Err(error) = result {
                 worker.fail(error);
             }
+            // The kernel ties the daemon to this thread, not to the process, so the thread
+            // that started it has to outlive the client.
+            if started.lock().expect("daemon lock").child.is_some() {
+                let _ = hold.recv();
+            }
         });
-        Ok((Self { shared, daemon }, receiver))
+        Ok((Self { shared, _alive: alive, daemon }, receiver))
     }
 
     fn background(&self, work: impl FnOnce(&Shared) -> Result<()> + Send + 'static) {
