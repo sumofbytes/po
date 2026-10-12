@@ -112,9 +112,13 @@ opens a folder; each project keeps its own files, changes, open file and agent
 threads. Opening a PR adds it as a project too, and closing it removes the
 checkout.
 
-A project can run several agent threads. **New Thread** starts another without
-stopping the others, which keep working in the background; a list above the chat
-switches between them. A mark shows what each is doing (`●` running, `!` waiting
+A project can run several agent threads. **New Thread** (Ctrl+N) opens a blank
+one without stopping the others, which keep working in the background; a list
+above the chat switches between them. Under the input box, a blank thread shows
+the agent it will start with (a dropdown; the last one you used is remembered)
+and, in a git repository, a **Worktree** toggle. The agent starts when you send
+the first message, which waits for it if it is slow to start. **History** in the
+thread's header lists an agent's earlier sessions to resume. A mark shows what each is doing (`●` running, `!` waiting
 for a permission answer, green `●` finished while you were elsewhere), and a
 project shows the busiest of its threads. Only the thread on screen moves the
 viewer to the files it edits.
@@ -122,8 +126,8 @@ viewer to the files it edits.
 #### Worktrees
 
 Threads in one project share its checkout, so two agents editing at once can step
-on each other. In a git repository, **New Thread → … in a worktree** gives the
-thread a checkout of its own: a new branch `po/<id>` under
+on each other. In a git repository, turning on **Worktree** under a blank thread's input gives
+the thread a checkout of its own: a new branch `po/<id>` under
 `~/.local/share/po/worktrees/`, shown as a project of its own whose Changes view
 is everything the thread did since it branched. Two buttons finish it:
 

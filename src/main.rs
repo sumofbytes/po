@@ -485,6 +485,10 @@ struct Thread {
     saved_title: Option<String>,
     /// When the thread last did anything; an idle one in the background is put to sleep.
     touched: Instant,
+    /// A first message waiting for the agent to be ready, already shown in the thread.
+    pending: Option<String>,
+    /// Start the thread in a git worktree of its own. Only asked before it has started.
+    isolate: bool,
     messages: Vec<Msg>,
     busy: bool,
     /// Messages typed during a turn, shown above the input until they are taken.
@@ -791,8 +795,10 @@ struct Reader {
     agents_left_open: bool,
     /// The agents layout's pane for the viewer or diff, which stays out of the way until used.
     side_open: bool,
-    /// The New Thread menu, so a shortcut can open it.
-    thread_menu: Entity<MenuState>,
+    /// The agent picker in the input box.
+    agent_menu: Entity<MenuState>,
+    /// The agent new threads start with: the one last chosen.
+    chosen_agent: Option<String>,
     left_open: bool,
     right_open: bool,
     /// Whether diffs show old and new side by side instead of inline.
@@ -859,6 +865,8 @@ impl Reader {
             restore: None,
             saved_title: None,
             touched: Instant::now(),
+            pending: None,
+            isolate: false,
             _enter: enter,
             messages: vec![],
             busy: false,
@@ -908,7 +916,8 @@ impl Reader {
             agents_sidebars: cx.new(|_| SidebarsState::new(px(280.0), px(560.0))),
             agents_left_open: true,
             side_open: false,
-            thread_menu: cx.new(MenuState::new),
+            agent_menu: cx.new(MenuState::new),
+            chosen_agent: command.clone(),
             left_open: true,
             right_open: true,
             split: false,
@@ -1312,7 +1321,9 @@ impl Reader {
 
     /// Starts a thread with `key`'s agent in a git worktree of its own, shown as a project:
     /// a branch whose changes can be reviewed here, then merged or discarded.
-    fn new_worktree_thread(&mut self, key: &str, window: &mut Window, cx: &mut Context<Self>) {
+    /// With `first`, the message to start it with and the blank thread it was typed in, which
+    /// goes away once the worktree is up.
+    fn new_worktree_thread(&mut self, key: &str, first: Option<(String, (u64, u64))>, window: &mut Window, cx: &mut Context<Self>) {
         if self.finishing {
             return;
         }
@@ -1334,11 +1345,14 @@ impl Reader {
                         match made {
                             Ok(wt) => {
                                 reader.worktree_status = None;
-                                reader.open_worktree(wt, key, window, cx);
+                                reader.open_worktree(wt, key, first, window, cx);
                             }
                             Err(error) => {
                                 log::warn!("worktree: {error}");
                                 reader.worktree_status = Some(error);
+                                if let Some((_, (_, tid))) = first {
+                                    reader.with_thread(tid, |reader, _| reader.thread.status.clear());
+                                }
                                 cx.notify();
                             }
                         }
@@ -1349,13 +1363,22 @@ impl Reader {
         .detach();
     }
 
-    fn open_worktree(&mut self, wt: worktree::Worktree, agent: String, window: &mut Window, cx: &mut Context<Self>) {
+    fn open_worktree(&mut self, wt: worktree::Worktree, agent: String, first: Option<(String, (u64, u64))>, window: &mut Window, cx: &mut Context<Self>) {
         log::info!("worktree: {} for {agent}", wt.spec.branch);
         let mut project = Self::build_project(wt.spec.path.clone(), None, vec![], window, cx);
         project.base = wt.spec.base.clone();
         project.worktree = Some(wt);
         self.confirm_discard = false;
         self.open_project(project, Mode::Diff, Some(agent), window, cx);
+        if let Some((prompt, (pid, tid))) = first {
+            self.begin_turn(&prompt);
+            self.thread.pending = Some(prompt);
+            // The thread it was typed in stays only if something has happened to it since.
+            let blank = self.views().iter().any(|v| v.id == pid && v.threads.iter().any(|t| t.id == tid && t.agent.is_none()));
+            if blank {
+                self.close_any_thread(pid, tid, window, cx);
+            }
+        }
     }
 
     /// Merges the worktree on screen into the checkout it came from, or throws it away.
@@ -1718,19 +1741,73 @@ impl Reader {
         cx.notify();
     }
 
-    /// Starts a new thread with `key`'s agent. The thread on screen keeps running in the
-    /// background, unless it is empty, in which case the new one takes its place.
-    fn new_thread(&mut self, key: &str, window: &mut Window, cx: &mut Context<Self>) {
-        log::info!("agent: new thread with {key}");
-        self.add_thread(window, cx);
-        self.connect(key, false, window, cx);
+    /// Opens a thread that has no agent yet, ready for a message. The thread on screen keeps
+    /// running in the background; if it is itself still blank it is used instead. The agent
+    /// starts when the first message is sent.
+    fn new_blank_thread(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.thread.agent.is_some() {
+            self.add_thread(window, cx);
+        }
+        self.focus_draft(window, cx);
+        cx.notify();
     }
 
-    /// Like [`Self::new_thread`], offering `key`'s sessions to resume.
-    fn resume_thread(&mut self, key: &str, window: &mut Window, cx: &mut Context<Self>) {
+    fn focus_draft(&self, window: &mut Window, cx: &mut Context<Self>) {
+        self.thread.draft.update(cx, |input, cx| input.focus(window, cx));
+    }
+
+    /// The agent a new thread would start with.
+    fn chosen(&self) -> Option<&config::Agent> {
+        self.chosen_agent.as_ref().and_then(|key| self.agents.iter().find(|agent| agent.id == *key)).or(self.agents.first())
+    }
+
+    /// Lists the chosen agent's sessions in a new thread, to resume one.
+    fn resume_thread(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(key) = self.chosen().map(|agent| agent.id.clone()) else { return };
         log::info!("agent: resuming with {key}");
         self.add_thread(window, cx);
-        self.connect(key, true, window, cx);
+        self.connect(&key, true, window, cx);
+    }
+
+    /// Starts the blank thread on screen: the chosen agent runs `prompt` as its first message,
+    /// which is shown at once and sent when the agent is ready. In a worktree of its own if
+    /// that was asked for.
+    fn start_thread(&mut self, prompt: String, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(key) = self.chosen().map(|agent| agent.id.clone()) else {
+            self.thread.fail("No agents are configured.".into());
+            cx.notify();
+            return;
+        };
+        if self.finishing {
+            return;
+        }
+        self.chosen_agent = Some(key.clone());
+        if self.thread.isolate && worktree::in_repo(&self.project.root) {
+            // The draft stays until the worktree exists, so a failure loses nothing.
+            let blank = (self.project_id, self.thread.id);
+            self.thread.status = "creating worktree…".into();
+            self.new_worktree_thread(&key, Some((prompt, blank)), window, cx);
+            return;
+        }
+        self.thread.draft.update(cx, |input, cx| input.set_value("", window, cx));
+        log::info!("agent: new thread with {key}");
+        self.connect(&key, false, window, cx);
+        self.begin_turn(&prompt);
+        self.thread.pending = Some(prompt);
+        self.request_save(cx);
+        cx.notify();
+    }
+
+    /// Puts a first message back in the draft after the agent failed before it could be sent.
+    fn return_pending(&mut self) {
+        let Some(prompt) = self.thread.pending.take() else { return };
+        let shown = matches!(self.thread.messages.as_slice(), [.., Msg::User(text), Msg::Agent(blocks)] if *text == prompt && blocks.is_empty());
+        if shown {
+            let keep = self.thread.messages.len() - 2;
+            self.thread.messages.truncate(keep);
+            self.thread.relist(keep);
+        }
+        self.thread.queue.insert(0, Queued { content: prompt, kind: None });
     }
 
     /// Sends the draft on Enter, while its thread is the one on screen.
@@ -1758,6 +1835,8 @@ impl Reader {
             restore: None,
             saved_title: None,
             touched: Instant::now(),
+            pending: None,
+            isolate: false,
             _enter: Self::send_on_enter(&draft, window, cx),
             messages: vec![],
             busy: false,
@@ -1856,6 +1935,7 @@ impl Reader {
         let mut resumed = false;
         let mut seen = HashSet::new();
         self.layout = if saved.agents { Layout::Agents } else { Layout::Files };
+        self.chosen_agent = saved.agent.clone().or(self.chosen_agent.take());
         for state in saved.projects {
             let worktree = match state.worktree {
                 Some(spec) => match worktree::Worktree::adopt(spec) {
@@ -1939,7 +2019,7 @@ impl Reader {
                 }
             })
             .collect();
-        workspace::Workspace { projects, agents: self.layout == Layout::Agents }
+        workspace::Workspace { projects, agents: self.layout == Layout::Agents, agent: self.chosen_agent.clone() }
     }
 
     /// Saves the workspace once the current change has settled, so that a thread that is
@@ -2020,15 +2100,12 @@ impl Reader {
         cx.notify();
     }
 
-    /// Starts another thread in project `pid`, with the agent its current thread uses.
+    /// Opens a blank thread in project `pid`.
     fn start_thread_in(&mut self, pid: u64, window: &mut Window, cx: &mut Context<Self>) {
         if pid != self.project_id {
             self.show_project(pid, window, cx);
         }
-        let key = self.thread.agent.clone().or_else(|| self.agents.first().map(|agent| agent.id.clone()));
-        if let Some(key) = key {
-            self.new_thread(&key, window, cx);
-        }
+        self.new_blank_thread(window, cx);
     }
 
     /// Ends thread `id`, stopping its agent. Closing the one on screen brings up another.
@@ -2099,6 +2176,14 @@ impl Reader {
                 self.thread.status = "ready".into();
                 self.thread.session = self.thread.client.as_ref().and_then(|client| client.session());
                 self.request_save(cx);
+                if let Some(prompt) = self.thread.pending.take()
+                    && !self.send_to_agent(&prompt)
+                {
+                    self.thread.pending = Some(prompt);
+                    self.return_pending();
+                    self.thread.fail("The agent has no session yet.".into());
+                    self.restore_queue(window, cx);
+                }
             }
             Event::Update(update) => {
                 if let Some(ix) = self.thread.tool_message(&update) {
@@ -2141,6 +2226,7 @@ impl Reader {
                 if !self.thread.ready {
                     self.thread.status = "failed to start".into();
                 }
+                self.return_pending();
                 self.thread.fail(error);
                 self.restore_queue(window, cx);
             }
@@ -2149,6 +2235,7 @@ impl Reader {
                 self.thread.ready = false;
                 self.thread.status = "exited".into();
                 if self.thread.busy {
+                    self.return_pending();
                     self.thread.fail(format!("the agent exited ({status})"));
                     self.restore_queue(window, cx);
                 }
@@ -2373,6 +2460,18 @@ impl Reader {
         if prompt.is_empty() {
             return;
         }
+        if self.thread.agent.is_none() {
+            return self.start_thread(prompt, window, cx);
+        }
+        let starting = self.thread.client.is_some() && !self.thread.ready && !self.thread.loading && !self.thread.picking && self.thread.restore.is_none();
+        if starting && !self.thread.busy {
+            // The agent is still starting: the message waits for it, shown as sent.
+            self.thread.draft.update(cx, |input, cx| input.set_value("", window, cx));
+            self.begin_turn(&prompt);
+            self.thread.pending = Some(prompt);
+            cx.notify();
+            return;
+        }
         if !self.thread.busy {
             if self.dispatch(prompt, cx) {
                 self.thread.draft.update(cx, |input, cx| input.set_value("", window, cx));
@@ -2380,8 +2479,9 @@ impl Reader {
             return;
         }
         self.thread.draft.update(cx, |input, cx| input.set_value("", window, cx));
-        // An agent that can't take messages mid-turn gets them when the turn is over.
-        let kind = match self.thread.client.as_ref().filter(|client| client.queues()) {
+        // An agent that can't take messages mid-turn gets them when the turn is over; neither
+        // can one that hasn't been given the first message yet.
+        let kind = match self.thread.client.as_ref().filter(|client| client.queues() && self.thread.pending.is_none()) {
             Some(client) => {
                 let kind = if later { Queue::Followup } else { Queue::Steer };
                 client.enqueue(&prompt, kind);
@@ -2445,30 +2545,36 @@ impl Reader {
 
     /// Sends `prompt` as a new turn; false if it could not be sent (the error is in the thread).
     fn dispatch(&mut self, prompt: String, cx: &mut Context<Self>) -> bool {
-        let Some(client) = self.thread.client.as_ref().filter(|_| self.thread.ready) else {
-            let why = if self.thread.agent.is_some() { "The agent is not ready yet." } else { "Pick an agent from New Thread first." };
+        if !self.thread.ready || !self.send_to_agent(&prompt) {
+            let why = if self.thread.client.is_some() && self.thread.ready { "The agent has no session yet." } else { "The agent is not ready yet." };
             self.thread.fail(why.into());
             cx.notify();
             return false;
-        };
+        }
+        self.begin_turn(&prompt);
+        self.request_save(cx);
+        cx.notify();
+        true
+    }
+
+    /// Hands `prompt` to the agent, with the file in view as context. False if it can't take it.
+    fn send_to_agent(&self, prompt: &str) -> bool {
+        let Some(client) = &self.thread.client else { return false };
         let context = match &self.project.current {
             Some(file) => format!("[The user has `{file}` open in the viewer.]\n\n{prompt}"),
-            None => prompt.clone(),
+            None => prompt.to_string(),
         };
-        if !client.prompt(&context) {
-            self.thread.fail("The agent has no session yet.".into());
-            cx.notify();
-            return false;
-        }
+        client.prompt(&context)
+    }
+
+    /// Shows `prompt` as the start of a turn the agent is working on.
+    fn begin_turn(&mut self, prompt: &str) {
         self.thread.busy = true;
         self.thread.touched = Instant::now();
-        self.request_save(cx);
-        self.thread.messages.push(Msg::User(prompt));
+        self.thread.messages.push(Msg::User(prompt.to_string()));
         self.thread.messages.push(Msg::Agent(vec![]));
         self.thread.relist(self.thread.messages.len() - 2);
         self.thread.list.scroll_to_end();
-        cx.notify();
-        true
     }
 
     fn stop(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -3075,7 +3181,7 @@ impl Reader {
         // Only the messages in view are built and laid out, however long the thread gets.
         let selection = self.thread.selection.clone();
         let thread: AnyElement = if self.thread.agent.is_none() {
-            centered("Choose an agent from New Thread".into(), cx)
+            centered("Pick an agent below, then send a message to start a thread".into(), cx)
         } else if self.thread.picking && self.thread.messages.is_empty() {
             match &self.thread.sessions {
                 Some(sessions) if !self.thread.loading && !sessions.is_empty() => session_picker(sessions, &this, cx),
@@ -3100,9 +3206,10 @@ impl Reader {
             .into_any_element()
         };
         let colors = cx.global::<Palette>();
-        let (send, stop, picker) = (cx.entity(), cx.entity(), cx.entity());
+        let (send, stop, history, fresh) = (cx.entity(), cx.entity(), cx.entity(), cx.entity());
         let agents = self.agents.clone();
         let in_repo = worktree::in_repo(&self.project.root);
+        let (pick, isolate) = (cx.entity(), cx.entity());
         let typed = !self.thread.draft.read(cx).value().trim().is_empty();
         let stop_button = |stop: Entity<Reader>| {
             Button::new("stop")
@@ -3211,6 +3318,53 @@ impl Reader {
                 }),
             )
         });
+        // Before the thread starts, what it starts with is chosen here; after, it is only named.
+        let chips: AnyElement = if self.thread.agent.is_none() {
+            let name = self.chosen().map_or_else(|| "No agent".to_string(), |agent| agent.name.clone());
+            let isolated = self.thread.isolate;
+            div()
+                .flex()
+                .items_center()
+                .gap_1()
+                .child(
+                    dropdown(
+                        "agent-chip",
+                        Button::new("agent-chip").label(name).tooltip("The agent this thread starts with").ghost().small().dropdown_caret(true),
+                        move || {
+                            agents
+                                .iter()
+                                .map(|agent| {
+                                    let (pick, key) = (pick.clone(), agent.id.clone());
+                                    MenuItem::new(agent.name.clone(), move |_, cx| {
+                                        pick.update(cx, |reader, cx| {
+                                            reader.chosen_agent = Some(key.clone());
+                                            cx.notify();
+                                        })
+                                    })
+                                })
+                                .collect()
+                        },
+                    )
+                    .menu(self.agent_menu.clone()),
+                )
+                .children(in_repo.then(|| {
+                    Button::new("worktree-chip")
+                        .label("⎇ Worktree")
+                        .tooltip("Work on a git branch of its own, to review and merge or discard")
+                        .ghost()
+                        .small()
+                        .selected(isolated)
+                        .on_click(move |_, _, cx| {
+                            isolate.update(cx, |reader, cx| {
+                                reader.thread.isolate = !reader.thread.isolate;
+                                cx.notify();
+                            })
+                        })
+                }))
+                .into_any_element()
+        } else {
+            div().text_xs().text_color(muted).child(self.agent_label().unwrap_or("Agent").to_string()).into_any_element()
+        };
         div()
             .size_full()
             .flex()
@@ -3222,44 +3376,22 @@ impl Reader {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .children(self.thread.agent.is_some().then(|| status_text(self.thread.status.clone(), cx)))
+                    .children((!self.thread.status.is_empty()).then(|| status_text(self.thread.status.clone(), cx)))
                     .child(
-                        dropdown(
-                            "agent-select",
-                            Button::new("agent-select")
-                                .label("New Thread")
-                                .tooltip("New thread (Ctrl+N)")
-                                .small()
-                                .outline()
-                                .dropdown_caret(true),
-                            move || {
-                                let new = agents.iter().map(|agent| {
-                                    let (picker, key) = (picker.clone(), agent.id.clone());
-                                    MenuItem::new(agent.name.clone(), move |window, cx| {
-                                        picker.update(cx, |reader, cx| reader.new_thread(&key, window, cx))
-                                    })
-                                });
-                                let isolated = in_repo.then(|| {
-                                    agents.iter().map(|agent| {
-                                        let (picker, key) = (picker.clone(), agent.id.clone());
-                                        MenuItem::new(format!("{} in a worktree", agent.name), move |window, cx| {
-                                            picker.update(cx, |reader, cx| reader.new_worktree_thread(&key, window, cx))
-                                        })
-                                    })
-                                });
-                                let resume = agents.iter().map(|agent| {
-                                    let (picker, key) = (picker.clone(), agent.id.clone());
-                                    MenuItem::new(format!("Resume with {}…", agent.name), move |window, cx| {
-                                        picker.update(cx, |reader, cx| reader.resume_thread(&key, window, cx))
-                                    })
-                                });
-                                new.chain([MenuItem::separator()])
-                                    .chain(isolated.into_iter().flatten().chain(in_repo.then(MenuItem::separator)))
-                                    .chain(resume)
-                                    .collect()
-                            },
-                        )
-                        .menu(self.thread_menu.clone()),
+                        Button::new("history")
+                            .label("History")
+                            .tooltip("Resume an earlier session")
+                            .ghost()
+                            .small()
+                            .on_click(move |_, window, cx| history.update(cx, |reader, cx| reader.resume_thread(window, cx))),
+                    )
+                    .child(
+                        Button::new("new-thread")
+                            .label("New Thread")
+                            .tooltip("New thread (Ctrl+N)")
+                            .small()
+                            .outline()
+                            .on_click(move |_, window, cx| fresh.update(cx, |reader, cx| reader.new_blank_thread(window, cx))),
                     ),
                 cx,
             ))
@@ -3339,7 +3471,7 @@ impl Reader {
                             this.child(div().flex().flex_col().gap_1().pb_1().border_b_1().border_color(border).children(queued))
                         })
                         .child(Input::new(&self.thread.draft))
-                        .child(div().flex().justify_end().child(action)),
+                        .child(div().flex().items_center().justify_between().gap_2().child(chips).child(action)),
                 ),
             )
     }
@@ -3640,12 +3772,11 @@ impl Render for Reader {
             .on_action(cx.listener(|reader, _: &ToggleSplit, _, cx| reader.set_split(!reader.split, cx)))
             .on_action(cx.listener(|reader, _: &OpenProject, window, cx| reader.pick_project(window, cx)))
             .on_action(cx.listener(|reader, _: &NewThread, window, cx| {
-                // Opening the right sidebar first: the menu hangs off its header.
+                // The thread's input is in the right sidebar, so it has to be open to type in.
                 if reader.layout == Layout::Files && !reader.right_open {
                     reader.right_open = true;
-                    cx.notify();
                 }
-                reader.thread_menu.update(cx, |menu, cx| menu.toggle(window, cx));
+                reader.new_blank_thread(window, cx);
             }))
             .child(
                 div().flex_1().min_h_0().child(match self.layout {
