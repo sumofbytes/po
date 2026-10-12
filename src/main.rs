@@ -349,17 +349,18 @@ fn diff_text(item: &Value) -> String {
 /// shortcut: substring only — no fuzzy/typo-tolerant ranking; add it if finding a file by a
 /// scrambled query (typing `cvs` for `code_view_state.rs`) matters.
 fn match_files(files: &[String], query: &str) -> Vec<String> {
-    let query = query.to_ascii_lowercase();
     if query.is_empty() {
         return files.to_vec();
     }
+    let query = query.as_bytes();
+    // Windows compared with eq_ignore_ascii_case, so no lowercase copy of each path is made.
+    let contains = |text: &str| text.as_bytes().windows(query.len()).any(|window| window.eq_ignore_ascii_case(query));
     let mut hits: Vec<(u8, usize, &String)> = files
         .iter()
         .filter_map(|file| {
-            let path = file.to_ascii_lowercase();
-            let name_start = path.rfind('/').map_or(0, |slash| slash + 1);
-            let rank = if path[name_start..].contains(&query) { 0 } else if path.contains(&query) { 1 } else { return None };
-            Some((rank, path.len() - name_start, file))
+            let name_start = file.rfind('/').map_or(0, |slash| slash + 1);
+            let rank = if contains(&file[name_start..]) { 0 } else if contains(file) { 1 } else { return None };
+            Some((rank, file.len() - name_start, file))
         })
         .collect();
     hits.sort_by_key(|&(rank, name_len, _)| (rank, name_len));
@@ -705,14 +706,25 @@ impl Reader {
                 })
                 .await;
             this.update(cx, |reader, cx| {
-                if reader.files != files {
-                    reader.files = files;
-                    reader.refresh_tree(cx);
-                    cx.notify();
-                }
+                reader.set_files(files, cx);
             })
             .ok();
         }));
+    }
+
+    /// Adopts a fresh walk of the workspace, if it changed, in the explorer and an open finder.
+    fn set_files(&mut self, files: Vec<String>, cx: &mut Context<Self>) {
+        if self.files == files {
+            return;
+        }
+        self.files = files;
+        self.refresh_tree(cx);
+        if self.finder_open {
+            let picked = self.finder_selected;
+            self.refind(cx);
+            self.finder_selected = picked.min(self.finder_matches.len().saturating_sub(1));
+        }
+        cx.notify();
     }
 
     /// Shows the diff `rows`, and works out their side-by-side pairs and counts once.
@@ -937,10 +949,8 @@ impl Reader {
                     .await;
                 let alive = handle.update(cx, |_, window, cx| {
                     this.update(cx, |reader, cx| {
-                        if let Some(files) = files.filter(|files| reader.files != *files) {
-                            reader.files = files;
-                            reader.refresh_tree(cx);
-                            cx.notify();
+                        if let Some(files) = files {
+                            reader.set_files(files, cx);
                         }
                         let rediff = reader.picked.as_ref().is_some_and(|path| touched.contains(path));
                         reader.apply_changes(changes, false, rediff, cx);
@@ -1257,7 +1267,7 @@ impl Reader {
     }
 
     /// Ctrl+P: shows the finder over the workspace's files, query and selection preserved.
-    fn show_finder(&mut self, _: &ShowFinder, window: &mut Window, cx: &mut Context<Self>) {
+    fn show_finder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.finder.is_none() {
             let input = cx.new(|cx| InputState::new(window, cx).placeholder("Search files…"));
             // Every keystroke refilters the matches; Enter picks the selected file.
@@ -1386,7 +1396,7 @@ impl Reader {
                             .border_t_1()
                             .border_color(border)
                             .text_color(muted)
-                            .child("↑↓ navigate")
+                            .child(if self.files.len() >= MAX_FILES { format!("first {MAX_FILES} files only") } else { "↑↓ navigate".to_string() })
                             .child("↵ open · esc close"),
                     ),
             )
@@ -2235,7 +2245,7 @@ impl Render for Reader {
             .text_color(foreground)
             .relative()
             .track_focus(&self.focus)
-            .on_action(cx.listener(|reader, _: &ShowFinder, window, cx| reader.show_finder(&ShowFinder, window, cx)))
+            .on_action(cx.listener(|reader, _: &ShowFinder, window, cx| reader.show_finder(window, cx)))
             .on_action(cx.listener(|reader, _: &ToggleLeft, _, cx| reader.toggle_left(cx)))
             .on_action(cx.listener(|reader, _: &ToggleRight, _, cx| reader.toggle_right(cx)))
             .on_action(cx.listener(|reader, _: &ShowSource, _, cx| reader.set_mode(Mode::Source, cx)))
