@@ -15,6 +15,7 @@ pub enum IconName {
     PanelLeftOpen,
     PanelRightClose,
     PanelRightOpen,
+    Plus,
     Replace,
     Square,
 }
@@ -38,6 +39,7 @@ impl IconName {
             Self::PanelLeftOpen => icon!("panel-left-open"),
             Self::PanelRightClose => icon!("panel-right-close"),
             Self::PanelRightOpen => icon!("panel-right-open"),
+            Self::Plus => icon!("plus"),
             Self::Replace => icon!("replace"),
             Self::Square => icon!("square"),
         }

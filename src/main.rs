@@ -2989,6 +2989,16 @@ impl Reader {
                             .text_color(if current { foreground } else { muted })
                             .child(view.project.name()),
                     )
+                    // Starting a thread is on the project's own row, shown when it is hovered.
+                    .child(show_on_hover(
+                        row_group("agent-project", pid),
+                        Button::new(("agent-new-thread", pid as usize))
+                            .icon(IconName::Plus)
+                            .ghost()
+                            .xsmall()
+                            .tooltip("New thread in this project")
+                            .on_click(move |_, window, cx| start.update(cx, |reader, cx| reader.start_thread_in(pid, window, cx))),
+                    ))
                     .when(many, |row| {
                         row.child(show_on_hover(
                             row_group("agent-project", pid),
@@ -3031,19 +3041,6 @@ impl Reader {
                         )),
                 );
             }
-            group = group.child(
-                div()
-                    .id(("agent-new-thread", pid as usize))
-                    .pl_6()
-                    .py_px()
-                    .rounded_md()
-                    .cursor_pointer()
-                    .text_xs()
-                    .text_color(muted)
-                    .hover(|row| row.bg(hover))
-                    .on_click(move |_, window, cx| start.update(cx, |reader, cx| reader.start_thread_in(pid, window, cx)))
-                    .child("+ New thread"),
-            );
             tree = tree.child(group);
         }
         div()
