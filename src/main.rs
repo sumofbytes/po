@@ -413,9 +413,23 @@ enum Mode {
     Diff,
 }
 
-struct Reader {
-    mode: Mode,
+/// Everything about one checkout: its files and git state, and what the explorer, viewer and
+/// diff viewer are showing of them.
+struct Project {
+    root: PathBuf,
+    /// What Changes mode diffs against: `HEAD`, or a PR's merge-base when reviewing.
+    base: String,
+    pr: Option<pr::Pr>,
+    files: Vec<String>,
     changes: Vec<Change>,
+    /// Change marks for the explorer, by path.
+    marks: Rc<HashMap<String, char>>,
+    /// The latest `git diff` for the picked file and `git status`, run off the UI thread;
+    /// replacing one drops the stale run.
+    diffing: Option<Task<()>>,
+    listing: Option<Task<()>>,
+    scanning: Option<Task<()>>,
+    watching: Option<gpui::Task<()>>,
     changes_tree: Entity<TreeState>,
     collapsed: HashSet<SharedString>,
     picked: Option<String>,
@@ -425,41 +439,18 @@ struct Reader {
     counts: (usize, usize),
     /// The diff's rows as laid out, inline or split; only those in view are drawn.
     diff_list: ListState,
-    /// Change marks for the explorer, by path.
-    marks: Rc<HashMap<String, char>>,
-    /// The latest `git diff` for the picked file and `git status`, run off the UI thread;
-    /// replacing one drops the stale run.
-    diffing: Option<Task<()>>,
-    listing: Option<Task<()>>,
-    scanning: Option<Task<()>>,
-    root: PathBuf,
-    /// What Changes mode diffs against: `HEAD`, or a PR's merge-base when reviewing.
-    base: String,
-    pr: Option<pr::Pr>,
-    /// The directory `po` was started in: where PRs are checked out from and where Close returns to.
-    home: PathBuf,
-    pr_input: Entity<InputState>,
-    /// Progress or failure of the last attempt to open a PR.
-    pr_status: Option<String>,
-    opening: bool,
-    watching: Option<gpui::Task<()>>,
-    files: Vec<String>,
     current: Option<String>,
     stamp: Option<Stamp>,
     code: Option<Entity<viewer::CodeViewState>>,
-    /// The Ctrl+P finder, when open: its query field, the matching files and which is picked.
-    finder: Option<Entity<InputState>>,
-    finder_matches: Rc<Vec<String>>,
-    finder_selected: usize,
-    finder_list: ListState,
-    finder_open: bool,
-    /// Keeps the finder input's event subscription alive for the reader's lifetime.
-    finder_events: Option<Subscription>,
     notice: Option<String>,
     tree: Entity<TreeState>,
     expanded: HashSet<SharedString>,
-    draft: Entity<InputState>,
-    thread: Vec<Msg>,
+}
+
+/// One conversation with an agent: its messages, the process behind it and what is waiting to
+/// be sent to it.
+struct Thread {
+    messages: Vec<Msg>,
     busy: bool,
     /// Messages typed during a turn, shown above the input until they are taken.
     queue: Vec<Queued>,
@@ -469,18 +460,163 @@ struct Reader {
     /// Choosing a session to resume: the agent's list once it arrives.
     picking: bool,
     sessions: Option<Vec<SessionInfo>>,
-    painted: bool,
     status: String,
     client: Option<Client>,
     agent: Option<String>,
-    agents: Vec<config::Agent>,
     generation: u64,
-    /// The thread's messages as laid out; only those in view are drawn.
-    thread_list: ListState,
-    sidebars: Entity<SidebarsState>,
+    draft: Entity<InputState>,
+    /// The messages as laid out; only those in view are drawn.
+    list: ListState,
     /// The selection across the agent's replies.
     selection: Entity<ui::markdown::Selection>,
-    thread_focus: gpui::FocusHandle,
+    focus: gpui::FocusHandle,
+}
+
+impl Thread {
+    fn fail(&mut self, text: String) {
+        self.busy = false;
+        self.messages.push(Msg::Agent(vec![Block::Text(format!("**Error:** {text}"))]));
+        self.relist(self.messages.len() - 1);
+    }
+
+    /// Tells the thread's list that messages from `from` on were added or changed, so it lays
+    /// them out again.
+    fn relist(&mut self, from: usize) {
+        let listed = self.list.item_count();
+        let from = from.min(listed).min(self.messages.len());
+        self.list.splice(from..listed, self.messages.len() - from);
+    }
+
+    fn blocks(&mut self) -> &mut Vec<Block> {
+        if !matches!(self.messages.last(), Some(Msg::Agent(_))) {
+            self.messages.push(Msg::Agent(vec![]));
+            self.relist(self.messages.len() - 1);
+        }
+        match self.messages.last_mut() {
+            Some(Msg::Agent(blocks)) => blocks,
+            _ => unreachable!("an agent message was just pushed"),
+        }
+    }
+
+    /// The message holding the tool call an update is for, if it updates one.
+    fn tool_message(&self, update: &Value) -> Option<usize> {
+        if update["sessionUpdate"].as_str() != Some("tool_call_update") {
+            return None;
+        }
+        let id = update["toolCallId"].as_str().unwrap_or_default();
+        self.messages.iter().rposition(|msg| match msg {
+            Msg::Agent(blocks) => blocks.iter().any(|b| matches!(b, Block::Tool(tool) if tool.id == id)),
+            Msg::User(_) => false,
+        })
+    }
+
+    fn update(&mut self, update: &Value) -> Option<(String, bool)> {
+        let text = update["content"]["text"].as_str().unwrap_or_default();
+        let mut known: Option<String> = None;
+        match update["sessionUpdate"].as_str() {
+            Some("agent_message_chunk") => match self.blocks().last_mut() {
+                Some(Block::Text(body)) => body.push_str(text),
+                _ => self.blocks().push(Block::Text(text.to_string())),
+            },
+            Some("user_message_chunk") if self.loading || !self.busy => {
+                let text = without_context(text);
+                match self.messages.last_mut() {
+                    Some(Msg::User(body)) => body.push_str(text),
+                    _ => {
+                        self.messages.push(Msg::User(text.to_string()));
+                        self.relist(self.messages.len() - 1);
+                    }
+                }
+            }
+            Some("agent_thought_chunk") => match self.blocks().last_mut() {
+                Some(Block::Thought(body)) => body.push_str(text),
+                _ => self.blocks().push(Block::Thought(text.to_string())),
+            },
+            Some("plan") => {
+                let entries = update["entries"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|e| (e["content"].as_str().unwrap_or_default().to_string(), step(e["status"].as_str().unwrap_or("pending"))))
+                    .collect();
+                let blocks = self.blocks();
+                match blocks.iter_mut().find(|b| matches!(b, Block::Plan(_))) {
+                    Some(block) => *block = Block::Plan(entries),
+                    None => blocks.push(Block::Plan(entries)),
+                }
+            }
+            Some("tool_call") => self.blocks().push(Block::Tool(ToolBlock {
+                id: update["toolCallId"].as_str().unwrap_or_default().to_string(),
+                title: update["title"].as_str().unwrap_or("Tool").to_string(),
+                status: step(update["status"].as_str().unwrap_or("pending")),
+                open: false,
+                arguments: pretty(&update["rawInput"]),
+                result: tool_result(update),
+                path: touched(update),
+            })),
+            Some("tool_call_update") => {
+                let id = update["toolCallId"].as_str().unwrap_or_default();
+                known = None;
+                for msg in self.messages.iter_mut().rev() {
+                    let Msg::Agent(blocks) = msg else { continue };
+                    let found = blocks.iter_mut().rev().find_map(|b| match b {
+                        Block::Tool(tool) if tool.id == id => Some(tool),
+                        _ => None,
+                    });
+                    if let Some(tool) = found {
+                        if let Some(title) = update["title"].as_str() {
+                            tool.title = title.to_string();
+                        }
+                        if let Some(status) = update["status"].as_str() {
+                            tool.status = step(status);
+                        }
+                        if !update["rawInput"].is_null() {
+                            tool.arguments = pretty(&update["rawInput"]);
+                        }
+                        let result = tool_result(update);
+                        if !result.is_empty() {
+                            tool.result = result;
+                        }
+                        if let Some(path) = touched(update) {
+                            tool.path = Some(path);
+                        }
+                        known = tool.path.clone();
+                        break;
+                    }
+                }
+            }
+            _ => {}
+        }
+        let kind = update["sessionUpdate"].as_str()?;
+        if kind != "tool_call" && kind != "tool_call_update" {
+            return None;
+        }
+        let path = touched(update).or(known)?;
+        Some((path, update["status"].as_str() == Some("completed")))
+    }
+}
+
+struct Reader {
+    mode: Mode,
+    project: Project,
+    thread: Thread,
+    /// The directory `po` was started in: where PRs are checked out from and where Close returns to.
+    home: PathBuf,
+    pr_input: Entity<InputState>,
+    /// Progress or failure of the last attempt to open a PR.
+    pr_status: Option<String>,
+    opening: bool,
+    /// The Ctrl+P finder, when open: its query field, the matching files and which is picked.
+    finder: Option<Entity<InputState>>,
+    finder_matches: Rc<Vec<String>>,
+    finder_selected: usize,
+    finder_list: ListState,
+    finder_open: bool,
+    /// Keeps the finder input's event subscription alive for the reader's lifetime.
+    finder_events: Option<Subscription>,
+    painted: bool,
+    agents: Vec<config::Agent>,
+    sidebars: Entity<SidebarsState>,
     /// The New Thread menu, so a shortcut can open it.
     thread_menu: Entity<MenuState>,
     left_open: bool,
@@ -530,30 +666,30 @@ impl Reader {
             cx.on_focus_lost(window, |reader, window, cx| reader.focus.focus(window, cx)),
             cx.subscribe(&tree, |reader, _, event: &TreeEvent, _| match event {
                 TreeEvent::Expanded(id) => {
-                    reader.expanded.insert(id.clone());
+                    reader.project.expanded.insert(id.clone());
                 }
                 TreeEvent::Collapsed(id) => {
-                    reader.expanded.remove(id);
+                    reader.project.expanded.remove(id);
                 }
             }),
             cx.subscribe(&changes_tree, |reader, _, event: &TreeEvent, _| match event {
                 TreeEvent::Expanded(id) => {
-                    reader.collapsed.remove(id);
+                    reader.project.collapsed.remove(id);
                 }
                 TreeEvent::Collapsed(id) => {
-                    reader.collapsed.insert(id.clone());
+                    reader.project.collapsed.insert(id.clone());
                 }
             }),
             // Moving the selection with the keyboard opens the file too, like a click.
             cx.observe_in(&tree, window, |reader, tree, window, cx| {
                 let path = tree.read(cx).selected_entry().filter(|e| !e.folder).map(|e| e.id.to_string());
-                if let Some(path) = path.filter(|p| reader.mode == Mode::Source && reader.current.as_deref() != Some(p)) {
+                if let Some(path) = path.filter(|p| reader.mode == Mode::Source && reader.project.current.as_deref() != Some(p)) {
                     reader.open(&path, window, cx);
                 }
             }),
             cx.observe(&changes_tree, |reader, tree, cx| {
                 let path = tree.read(cx).selected_entry().filter(|e| !e.folder).map(|e| e.id.to_string());
-                if let Some(path) = path.filter(|p| reader.mode == Mode::Diff && reader.picked.as_deref() != Some(p)) {
+                if let Some(path) = path.filter(|p| reader.mode == Mode::Diff && reader.project.picked.as_deref() != Some(p)) {
                     reader.pick(&path, cx);
                 }
             }),
@@ -572,9 +708,17 @@ impl Reader {
         if let Some(command) = command.as_ref().filter(|c| !agents.iter().any(|agent| agent.id == **c)) {
             agents.push(config::Agent { id: command.clone(), name: "Custom".into(), command: command.clone(), daemon: None });
         }
-        let mut reader = Self {
-            mode: Mode::Source,
+        let project = Project {
+            root,
+            base: pr.as_ref().map_or_else(|| "HEAD".to_string(), |pr| pr.base.clone()),
+            pr,
+            files,
             changes: vec![],
+            marks: Rc::default(),
+            diffing: None,
+            listing: None,
+            scanning: None,
+            watching: None,
             changes_tree,
             collapsed: HashSet::new(),
             picked: None,
@@ -582,49 +726,47 @@ impl Reader {
             pairs: Rc::new(vec![]),
             counts: (0, 0),
             diff_list: ListState::new(0, ListAlignment::Top, px(400.)),
-            marks: Rc::default(),
-            diffing: None,
-            listing: None,
-            scanning: None,
-            root,
-            base: pr.as_ref().map_or_else(|| "HEAD".to_string(), |pr| pr.base.clone()),
-            pr,
-            home,
-            pr_input,
-            pr_status: None,
-            opening: false,
-            watching: None,
-            files,
             current: None,
             stamp: None,
             code: None,
-            finder: None,
-            finder_matches: Rc::new(vec![]),
-            finder_selected: 0,
-            finder_list: ListState::new(0, ListAlignment::Top, px(400.)),
-            finder_open: false,
-            finder_events: None,
             notice: None,
             tree,
             expanded: HashSet::new(),
-            draft,
-            thread: vec![],
+        };
+        let thread = Thread {
+            messages: vec![],
             busy: false,
             queue: vec![],
             ready: false,
             loading: false,
             picking: false,
             sessions: None,
-            painted: false,
             status: String::new(),
             client: None,
             agent: None,
-            agents,
             generation: 0,
-            thread_list: ListState::new(0, ListAlignment::Top, px(400.)),
-            sidebars: cx.new(|_| SidebarsState::new(px(260.0), px(460.0))),
+            draft,
+            list: ListState::new(0, ListAlignment::Top, px(400.)),
             selection: cx.new(|_| ui::markdown::Selection::default()),
-            thread_focus: cx.focus_handle(),
+            focus: cx.focus_handle(),
+        };
+        let mut reader = Self {
+            mode: Mode::Source,
+            project,
+            thread,
+            home,
+            pr_input,
+            pr_status: None,
+            opening: false,
+            finder: None,
+            finder_matches: Rc::new(vec![]),
+            finder_selected: 0,
+            finder_list: ListState::new(0, ListAlignment::Top, px(400.)),
+            finder_open: false,
+            finder_events: None,
+            painted: false,
+            agents,
+            sidebars: cx.new(|_| SidebarsState::new(px(260.0), px(460.0))),
             thread_menu: cx.new(MenuState::new),
             left_open: true,
             right_open: true,
@@ -647,9 +789,9 @@ impl Reader {
 
     /// Rebuilds the explorer from `files`, keeping folders open and the current file selected.
     fn refresh_tree(&mut self, cx: &mut Context<Self>) {
-        let items = explorer_items(&self.files, &self.expanded);
-        let current = self.current.clone().map(SharedString::from);
-        self.tree.update(cx, |tree, cx| {
+        let items = explorer_items(&self.project.files, &self.project.expanded);
+        let current = self.project.current.clone().map(SharedString::from);
+        self.project.tree.update(cx, |tree, cx| {
             tree.set_items(items, cx);
             if let Some(ix) = current.and_then(|id| tree.index_of(&id)) {
                 tree.set_selected_index(Some(ix), cx);
@@ -660,30 +802,30 @@ impl Reader {
     /// Takes a fresh list of changed files. In diff mode it picks a file if none is, and
     /// reloads the picked file's diff when `rediff` says it may have changed.
     fn apply_changes(&mut self, changes: Vec<Change>, rebuild: bool, rediff: bool, cx: &mut Context<Self>) {
-        let listed = rebuild || self.changes != changes;
-        self.changes = changes;
+        let listed = rebuild || self.project.changes != changes;
+        self.project.changes = changes;
         if listed {
-            self.marks = Rc::new(self.changes.iter().map(|c| (c.path.clone(), c.status)).collect());
+            self.project.marks = Rc::new(self.project.changes.iter().map(|c| (c.path.clone(), c.status)).collect());
         }
         if self.mode != Mode::Diff {
             return;
         }
         if listed {
-            let paths: Vec<String> = self.changes.iter().map(|c| c.path.clone()).collect();
+            let paths: Vec<String> = self.project.changes.iter().map(|c| c.path.clone()).collect();
             let mut expanded = folders(&paths);
-            expanded.retain(|id| !self.collapsed.contains(id));
+            expanded.retain(|id| !self.project.collapsed.contains(id));
             let items = explorer_items(&paths, &expanded);
-            self.changes_tree.update(cx, |tree, cx| tree.set_items(items, cx));
+            self.project.changes_tree.update(cx, |tree, cx| tree.set_items(items, cx));
         }
-        let keep = self.picked.clone().filter(|path| self.changes.iter().any(|c| &c.path == path));
+        let keep = self.project.picked.clone().filter(|path| self.project.changes.iter().any(|c| &c.path == path));
         match keep {
             Some(path) if rediff || listed => self.pick(&path, cx),
             Some(_) => {}
-            None => match self.changes.first().map(|c| c.path.clone()) {
+            None => match self.project.changes.first().map(|c| c.path.clone()) {
                 Some(path) => self.pick(&path, cx),
                 None => {
-                    self.picked = None;
-                    self.diffing = None;
+                    self.project.picked = None;
+                    self.project.diffing = None;
                     self.set_rows(vec![]);
                 }
             },
@@ -694,8 +836,8 @@ impl Reader {
     /// Lists the changed files with `git` off the UI thread, then applies them as
     /// [`Self::apply_changes`] does and picks `then`, if given.
     fn refresh_changes(&mut self, rebuild: bool, then: Option<String>, cx: &mut Context<Self>) {
-        let (root, base) = (self.root.clone(), self.base.clone());
-        self.listing = Some(cx.spawn(async move |this, cx| {
+        let (root, base) = (self.project.root.clone(), self.project.base.clone());
+        self.project.listing = Some(cx.spawn(async move |this, cx| {
             let changes = cx.background_executor().spawn(async move { diff::changes(&root, &base) }).await;
             this.update(cx, |reader, cx| {
                 reader.apply_changes(changes, rebuild, true, cx);
@@ -709,8 +851,8 @@ impl Reader {
 
     /// Re-walks the workspace off the UI thread and refreshes the explorer.
     fn rescan(&mut self, cx: &mut Context<Self>) {
-        let root = self.root.clone();
-        self.scanning = Some(cx.spawn(async move |this, cx| {
+        let root = self.project.root.clone();
+        self.project.scanning = Some(cx.spawn(async move |this, cx| {
             let files = cx
                 .background_executor()
                 .spawn(async move {
@@ -728,10 +870,10 @@ impl Reader {
 
     /// Adopts a fresh walk of the workspace, if it changed, in the explorer and an open finder.
     fn set_files(&mut self, files: Vec<String>, cx: &mut Context<Self>) {
-        if self.files == files {
+        if self.project.files == files {
             return;
         }
-        self.files = files;
+        self.project.files = files;
         self.refresh_tree(cx);
         if self.finder_open {
             let picked = self.finder_selected;
@@ -743,41 +885,41 @@ impl Reader {
 
     /// Shows the diff `rows`, and works out their side-by-side pairs and counts once.
     fn set_rows(&mut self, rows: Vec<Row>) {
-        self.counts = rows.iter().fold((0, 0), |(a, r), row| match row.kind {
+        self.project.counts = rows.iter().fold((0, 0), |(a, r), row| match row.kind {
             Kind::Added => (a + 1, r),
             Kind::Removed => (a, r + 1),
             _ => (a, r),
         });
-        self.pairs = Rc::new(diff::split(&rows));
-        self.rows = Rc::new(rows);
+        self.project.pairs = Rc::new(diff::split(&rows));
+        self.project.rows = Rc::new(rows);
         self.relist_diff();
     }
 
     fn relist_diff(&mut self) {
-        self.diff_list.reset(if self.split { self.pairs.len() } else { self.rows.len() });
+        self.project.diff_list.reset(if self.split { self.project.pairs.len() } else { self.project.rows.len() });
     }
 
     /// Shows `path`'s diff in the viewer, once `git` has produced it off the UI thread.
     fn pick(&mut self, path: &str, cx: &mut Context<Self>) {
-        let Some(change) = self.changes.iter().find(|c| c.path == path).cloned() else { return };
-        if self.picked.as_deref() != Some(path) {
-            self.picked = Some(path.to_string());
+        let Some(change) = self.project.changes.iter().find(|c| c.path == path).cloned() else { return };
+        if self.project.picked.as_deref() != Some(path) {
+            self.project.picked = Some(path.to_string());
             // The last file's diff isn't shown under this one's name while this one loads.
             self.set_rows(vec![]);
             let id = SharedString::from(path.to_string());
-            self.changes_tree.update(cx, |tree, cx| {
+            self.project.changes_tree.update(cx, |tree, cx| {
                 if let Some(ix) = tree.index_of(&id) {
                     tree.set_selected_index(Some(ix), cx);
                 }
             });
         }
-        let (root, base, path) = (self.root.clone(), self.base.clone(), path.to_string());
-        self.diffing = Some(cx.spawn(async move |this, cx| {
+        let (root, base, path) = (self.project.root.clone(), self.project.base.clone(), path.to_string());
+        self.project.diffing = Some(cx.spawn(async move |this, cx| {
             let rows = cx.background_executor().spawn(async move { diff::file_diff(&root, &base, &change) }).await;
             this.update(cx, |reader, cx| {
-                if reader.picked.as_deref() == Some(&path) {
+                if reader.project.picked.as_deref() == Some(&path) {
                     reader.set_rows(rows);
-                    reader.diffing = None;
+                    reader.project.diffing = None;
                     cx.notify();
                 }
             })
@@ -833,30 +975,30 @@ impl Reader {
     /// `pr`'s worktree when reviewing one. The previous PR's worktree is removed.
     fn switch_root(&mut self, root: PathBuf, pr: Option<pr::Pr>, window: &mut Window, cx: &mut Context<Self>) {
         // Stop watching the old tree before it can be deleted.
-        self.watching = None;
-        self.base = pr.as_ref().map_or_else(|| "HEAD".to_string(), |pr| pr.base.clone());
-        self.root = root;
-        drop(std::mem::replace(&mut self.pr, pr));
-        self.files.clear();
-        self.expanded.clear();
-        self.collapsed.clear();
-        self.current = None;
-        self.stamp = None;
-        self.code = None;
-        self.notice = None;
-        self.picked = None;
-        self.diffing = None;
+        self.project.watching = None;
+        self.project.base = pr.as_ref().map_or_else(|| "HEAD".to_string(), |pr| pr.base.clone());
+        self.project.root = root;
+        drop(std::mem::replace(&mut self.project.pr, pr));
+        self.project.files.clear();
+        self.project.expanded.clear();
+        self.project.collapsed.clear();
+        self.project.current = None;
+        self.project.stamp = None;
+        self.project.code = None;
+        self.project.notice = None;
+        self.project.picked = None;
+        self.project.diffing = None;
         self.set_rows(vec![]);
-        self.changes.clear();
-        self.marks = Rc::default();
+        self.project.changes.clear();
+        self.project.marks = Rc::default();
         self.refresh_tree(cx);
         self.rescan(cx);
         // The agent works in the old directory, so it restarts in the new one.
-        if let Some(agent) = self.agent.clone() {
+        if let Some(agent) = self.thread.agent.clone() {
             self.connect(&agent, false, window, cx);
         }
         self.watch(None, window, cx);
-        if self.pr.is_some() {
+        if self.project.pr.is_some() {
             self.mode = Mode::Diff;
         }
         self.refresh_changes(true, None, cx);
@@ -888,7 +1030,7 @@ impl Reader {
         self.mode = mode;
         if mode == Mode::Diff {
             // Show the last known changes at once; `git` confirms them in the background.
-            self.apply_changes(self.changes.clone(), true, false, cx);
+            self.apply_changes(self.project.changes.clone(), true, false, cx);
             self.refresh_changes(true, None, cx);
         }
         cx.notify();
@@ -898,10 +1040,10 @@ impl Reader {
     /// reloads the open file when it changes on disk.
     fn watch(&mut self, prepared: Option<futures::channel::oneshot::Receiver<Option<Watch>>>, window: &Window, cx: &mut Context<Self>) {
         use notify::Watcher;
-        let root = self.root.clone();
+        let root = self.project.root.clone();
         let handle = window.window_handle();
         // Kept so the watcher stops when the root changes.
-        self.watching = Some(cx.spawn(async move |this, cx| {
+        self.project.watching = Some(cx.spawn(async move |this, cx| {
             // Adding the watches takes a while on a big tree; the window doesn't wait for it.
             let watch = match prepared {
                 Some(prepared) => prepared.await.ok().flatten(),
@@ -946,9 +1088,9 @@ impl Reader {
                 if !changed {
                     continue;
                 }
-                let Ok(current) = this.read_with(cx, |reader, _| reader.current.clone()) else { break };
+                let Ok(current) = this.read_with(cx, |reader, _| reader.project.current.clone()) else { break };
                 let scan_root = root.clone();
-                let Ok(base) = this.read_with(cx, |reader, _| reader.base.clone()) else { break };
+                let Ok(base) = this.read_with(cx, |reader, _| reader.project.base.clone()) else { break };
                 let (files, seen, changes) = cx
                     .background_executor()
                     .spawn(async move {
@@ -966,10 +1108,10 @@ impl Reader {
                         if let Some(files) = files {
                             reader.set_files(files, cx);
                         }
-                        let rediff = reader.picked.as_ref().is_some_and(|path| touched.contains(path));
+                        let rediff = reader.project.picked.as_ref().is_some_and(|path| touched.contains(path));
                         reader.apply_changes(changes, false, rediff, cx);
-                        if let (Some(path), Some(seen)) = (reader.current.clone(), seen) {
-                            if reader.stamp != Some(seen) {
+                        if let (Some(path), Some(seen)) = (reader.project.current.clone(), seen) {
+                            if reader.project.stamp != Some(seen) {
                                 log::info!("reloading {path}");
                                 reader.open(&path, window, cx);
                             }
@@ -987,29 +1129,29 @@ impl Reader {
     /// Replaces the running agent with `key`'s, with a fresh thread, or with the agent's session
     /// list to resume from when `resume`.
     fn connect(&mut self, key: &str, resume: bool, window: &mut Window, cx: &mut Context<Self>) {
-        self.generation += 1;
-        let generation = self.generation;
-        self.client = None;
-        self.agent = Some(key.to_string());
-        self.thread.clear();
-        self.relist(0);
-        self.selection.update(cx, |s, _| s.clear());
-        self.busy = false;
-        self.queue.clear();
-        self.ready = false;
-        self.loading = false;
-        self.picking = resume;
-        self.sessions = None;
+        self.thread.generation += 1;
+        let generation = self.thread.generation;
+        self.thread.client = None;
+        self.thread.agent = Some(key.to_string());
+        self.thread.messages.clear();
+        self.thread.relist(0);
+        self.thread.selection.update(cx, |s, _| s.clear());
+        self.thread.busy = false;
+        self.thread.queue.clear();
+        self.thread.ready = false;
+        self.thread.loading = false;
+        self.thread.picking = resume;
+        self.thread.sessions = None;
         let agent = self.agents.iter().find(|agent| agent.id == key).cloned().unwrap_or_else(|| config::Agent {
             id: key.to_string(),
             name: key.to_string(),
             command: key.to_string(),
             daemon: None,
         });
-        self.status = if resume { "listing sessions…" } else { "starting…" }.into();
-        match Client::spawn(&agent, &self.root, resume) {
+        self.thread.status = if resume { "listing sessions…" } else { "starting…" }.into();
+        match Client::spawn(&agent, &self.project.root, resume) {
             Ok((client, mut events)) => {
-                self.client = Some(client);
+                self.thread.client = Some(client);
                 let handle = window.window_handle();
                 cx.spawn(async move |this, cx| {
                     // An agent that never answers the handshake would leave the thread on "starting…".
@@ -1018,9 +1160,9 @@ impl Reader {
                         cx.background_executor().timer(Duration::from_secs(20)).await;
                         watchdog
                             .update(cx, |reader, cx| {
-                                if reader.generation == generation && !reader.ready && reader.client.is_some() {
-                                    reader.status = "not responding".into();
-                                    reader.fail("The agent did not answer the handshake. Check that its command speaks ACP.".into());
+                                if reader.thread.generation == generation && !reader.thread.ready && reader.thread.client.is_some() {
+                                    reader.thread.status = "not responding".into();
+                                    reader.thread.fail("The agent did not answer the handshake. Check that its command speaks ACP.".into());
                                     cx.notify();
                                 }
                             })
@@ -1030,10 +1172,10 @@ impl Reader {
                     while let Some(event) = events.next().await {
                         let done = handle.update(cx, |_, window, cx| {
                             this.update(cx, |reader, cx| {
-                                if reader.generation == generation {
+                                if reader.thread.generation == generation {
                                     reader.on_event(event, window, cx);
                                 }
-                                reader.generation == generation
+                                reader.thread.generation == generation
                             })
                         });
                         if !matches!(done, Ok(Ok(true))) {
@@ -1045,8 +1187,8 @@ impl Reader {
             }
             Err(error) => {
                 log::error!("agent: {error:#}");
-                self.status = "not running".into();
-                self.fail(format!("{error:#}"));
+                self.thread.status = "not running".into();
+                self.thread.fail(format!("{error:#}"));
             }
         }
         cx.notify();
@@ -1066,226 +1208,109 @@ impl Reader {
 
     /// Opens a listed session; its history arrives as updates before the agent is ready.
     fn resume_session(&mut self, id: &str, cx: &mut Context<Self>) {
-        let Some(client) = &self.client else { return };
-        if self.loading || !client.load(id) {
+        let Some(client) = &self.thread.client else { return };
+        if self.thread.loading || !client.load(id) {
             return;
         }
-        self.loading = true;
-        self.sessions = None;
-        self.status = "loading session…".into();
+        self.thread.loading = true;
+        self.thread.sessions = None;
+        self.thread.status = "loading session…".into();
         cx.notify();
     }
 
     fn agent_label(&self) -> Option<&str> {
-        let key = self.agent.as_ref()?;
+        let key = self.thread.agent.as_ref()?;
         self.agents.iter().find(|agent| agent.id == *key).map(|agent| agent.name.as_str())
     }
 
-    fn fail(&mut self, text: String) {
-        self.busy = false;
-        self.thread.push(Msg::Agent(vec![Block::Text(format!("**Error:** {text}"))]));
-        self.relist(self.thread.len() - 1);
-    }
 
-    /// Tells the thread's list that messages from `from` on were added or changed, so it lays
-    /// them out again.
-    fn relist(&mut self, from: usize) {
-        let listed = self.thread_list.item_count();
-        let from = from.min(listed).min(self.thread.len());
-        self.thread_list.splice(from..listed, self.thread.len() - from);
-    }
 
-    fn blocks(&mut self) -> &mut Vec<Block> {
-        if !matches!(self.thread.last(), Some(Msg::Agent(_))) {
-            self.thread.push(Msg::Agent(vec![]));
-            self.relist(self.thread.len() - 1);
-        }
-        match self.thread.last_mut() {
-            Some(Msg::Agent(blocks)) => blocks,
-            _ => unreachable!("an agent message was just pushed"),
-        }
-    }
 
     fn on_event(&mut self, event: Event, window: &mut Window, cx: &mut Context<Self>) {
         // Most events change the last message; a tool call update may change an earlier one.
-        let mut changed = self.thread.len().saturating_sub(1);
+        let mut changed = self.thread.messages.len().saturating_sub(1);
         match event {
             Event::Sessions(sessions) => {
-                self.status = if sessions.is_empty() { "no sessions".into() } else { "pick a session".into() };
-                self.sessions = Some(sessions);
+                self.thread.status = if sessions.is_empty() { "no sessions".into() } else { "pick a session".into() };
+                self.thread.sessions = Some(sessions);
             }
             Event::Ready { agent } => {
-                self.ready = true;
-                self.loading = false;
-                self.picking = false;
+                self.thread.ready = true;
+                self.thread.loading = false;
+                self.thread.picking = false;
                 log::info!("agent: {agent} ready");
-                self.status = "ready".into();
+                self.thread.status = "ready".into();
             }
             Event::Update(update) => {
-                if let Some(ix) = self.tool_message(&update) {
+                if let Some(ix) = self.thread.tool_message(&update) {
                     changed = changed.min(ix);
                 }
                 // A replayed history would otherwise open every file it ever touched.
-                if let Some((path, finished)) = self.update(&update).filter(|_| !self.loading) {
+                if let Some((path, finished)) = self.thread.update(&update).filter(|_| !self.thread.loading) {
                     self.follow(&path, finished, window, cx);
                 }
             }
             Event::Permission { request, title, options } => {
-                self.blocks().push(Block::Permission(Ask { request, title, options, answered: None }));
+                self.thread.blocks().push(Block::Permission(Ask { request, title, options, answered: None }));
             }
             Event::Stopped(reason) => {
-                self.busy = false;
+                self.thread.busy = false;
                 log::info!("agent: stopped ({reason})");
                 // What the daemon didn't take into the turn is no longer in its queue.
-                for item in &mut self.queue {
+                for item in &mut self.thread.queue {
                     item.kind = None;
                 }
                 self.send_next(window, cx);
             }
             Event::Accepted { content, queue } => {
-                if let Some(at) = self.queue.iter().position(|q| q.kind == Some(queue) && q.content == content) {
-                    self.queue.remove(at);
+                if let Some(at) = self.thread.queue.iter().position(|q| q.kind == Some(queue) && q.content == content) {
+                    self.thread.queue.remove(at);
                 }
-                self.thread.push(Msg::User(content));
+                self.thread.messages.push(Msg::User(content));
             }
             Event::Rejected { content, queue } => {
                 // No turn to join: it waits for the turn to end like any other queued message.
-                if let Some(item) = self.queue.iter_mut().find(|q| q.kind == Some(queue) && q.content == content) {
+                if let Some(item) = self.thread.queue.iter_mut().find(|q| q.kind == Some(queue) && q.content == content) {
                     item.kind = None;
                 }
                 self.send_next(window, cx);
             }
             Event::Failed(error) => {
-                if !self.ready {
-                    self.status = "failed to start".into();
+                if !self.thread.ready {
+                    self.thread.status = "failed to start".into();
                 }
-                self.fail(error);
+                self.thread.fail(error);
                 self.restore_queue(window, cx);
             }
             Event::Exited(status) => {
                 log::warn!("agent exited: {status}");
-                self.ready = false;
-                self.status = "exited".into();
-                if self.busy {
-                    self.fail(format!("the agent exited ({status})"));
+                self.thread.ready = false;
+                self.thread.status = "exited".into();
+                if self.thread.busy {
+                    self.thread.fail(format!("the agent exited ({status})"));
                     self.restore_queue(window, cx);
                 }
             }
         }
-        self.relist(changed);
-        self.thread_list.scroll_to_end();
+        self.thread.relist(changed);
+        self.thread.list.scroll_to_end();
         cx.notify();
     }
 
-    /// The message holding the tool call an update is for, if it updates one.
-    fn tool_message(&self, update: &Value) -> Option<usize> {
-        if update["sessionUpdate"].as_str() != Some("tool_call_update") {
-            return None;
-        }
-        let id = update["toolCallId"].as_str().unwrap_or_default();
-        self.thread.iter().rposition(|msg| match msg {
-            Msg::Agent(blocks) => blocks.iter().any(|b| matches!(b, Block::Tool(tool) if tool.id == id)),
-            Msg::User(_) => false,
-        })
-    }
 
-    fn update(&mut self, update: &Value) -> Option<(String, bool)> {
-        let text = update["content"]["text"].as_str().unwrap_or_default();
-        let mut known: Option<String> = None;
-        match update["sessionUpdate"].as_str() {
-            Some("agent_message_chunk") => match self.blocks().last_mut() {
-                Some(Block::Text(body)) => body.push_str(text),
-                _ => self.blocks().push(Block::Text(text.to_string())),
-            },
-            Some("user_message_chunk") if self.loading || !self.busy => {
-                let text = without_context(text);
-                match self.thread.last_mut() {
-                    Some(Msg::User(body)) => body.push_str(text),
-                    _ => {
-                        self.thread.push(Msg::User(text.to_string()));
-                        self.relist(self.thread.len() - 1);
-                    }
-                }
-            }
-            Some("agent_thought_chunk") => match self.blocks().last_mut() {
-                Some(Block::Thought(body)) => body.push_str(text),
-                _ => self.blocks().push(Block::Thought(text.to_string())),
-            },
-            Some("plan") => {
-                let entries = update["entries"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .map(|e| (e["content"].as_str().unwrap_or_default().to_string(), step(e["status"].as_str().unwrap_or("pending"))))
-                    .collect();
-                let blocks = self.blocks();
-                match blocks.iter_mut().find(|b| matches!(b, Block::Plan(_))) {
-                    Some(block) => *block = Block::Plan(entries),
-                    None => blocks.push(Block::Plan(entries)),
-                }
-            }
-            Some("tool_call") => self.blocks().push(Block::Tool(ToolBlock {
-                id: update["toolCallId"].as_str().unwrap_or_default().to_string(),
-                title: update["title"].as_str().unwrap_or("Tool").to_string(),
-                status: step(update["status"].as_str().unwrap_or("pending")),
-                open: false,
-                arguments: pretty(&update["rawInput"]),
-                result: tool_result(update),
-                path: touched(update),
-            })),
-            Some("tool_call_update") => {
-                let id = update["toolCallId"].as_str().unwrap_or_default();
-                known = None;
-                for msg in self.thread.iter_mut().rev() {
-                    let Msg::Agent(blocks) = msg else { continue };
-                    let found = blocks.iter_mut().rev().find_map(|b| match b {
-                        Block::Tool(tool) if tool.id == id => Some(tool),
-                        _ => None,
-                    });
-                    if let Some(tool) = found {
-                        if let Some(title) = update["title"].as_str() {
-                            tool.title = title.to_string();
-                        }
-                        if let Some(status) = update["status"].as_str() {
-                            tool.status = step(status);
-                        }
-                        if !update["rawInput"].is_null() {
-                            tool.arguments = pretty(&update["rawInput"]);
-                        }
-                        let result = tool_result(update);
-                        if !result.is_empty() {
-                            tool.result = result;
-                        }
-                        if let Some(path) = touched(update) {
-                            tool.path = Some(path);
-                        }
-                        known = tool.path.clone();
-                        break;
-                    }
-                }
-            }
-            _ => {}
-        }
-        let kind = update["sessionUpdate"].as_str()?;
-        if kind != "tool_call" && kind != "tool_call_update" {
-            return None;
-        }
-        let path = touched(update).or(known)?;
-        Some((path, update["status"].as_str() == Some("completed")))
-    }
 
     /// Shows the file a tool call touches; a finished call reloads it to show the change.
     fn follow(&mut self, path: &str, finished: bool, window: &mut Window, cx: &mut Context<Self>) {
         let path = Path::new(path);
-        let relative = path.strip_prefix(&self.root).unwrap_or(path);
-        if relative.is_absolute() || !self.root.join(relative).is_file() {
+        let relative = path.strip_prefix(&self.project.root).unwrap_or(path);
+        if relative.is_absolute() || !self.project.root.join(relative).is_file() {
             return;
         }
         let relative = relative.to_string_lossy().replace('\\', "/");
-        if !self.files.contains(&relative) {
+        if !self.project.files.contains(&relative) {
             self.rescan(cx);
         }
-        if self.current.as_deref() != Some(&relative) || finished {
+        if self.project.current.as_deref() != Some(&relative) || finished {
             log::info!("agent: showing {relative}");
             self.open(&relative, window, cx);
         }
@@ -1295,14 +1320,14 @@ impl Reader {
     }
 
     fn answer(&mut self, msg: usize, block: usize, option: usize, cx: &mut Context<Self>) {
-        let Some(Msg::Agent(blocks)) = self.thread.get_mut(msg) else { return };
+        let Some(Msg::Agent(blocks)) = self.thread.messages.get_mut(msg) else { return };
         let Some(Block::Permission(ask)) = blocks.get_mut(block) else { return };
         let (Some(choice), None) = (ask.options.get(option), &ask.answered) else { return };
-        if let Some(client) = &self.client {
+        if let Some(client) = &self.thread.client {
             client.answer(ask.request.clone(), Some(&choice.id));
         }
         ask.answered = Some(choice.name.clone());
-        self.relist(msg);
+        self.thread.relist(msg);
         cx.notify();
     }
 
@@ -1333,7 +1358,7 @@ impl Reader {
     /// Refilters the finder's matches for its query and rewinds the selection to the first.
     fn refind(&mut self, cx: &mut Context<Self>) {
         let query = self.finder.as_ref().map_or_else(String::new, |input| input.read(cx).value().to_string());
-        self.finder_matches = Rc::new(match_files(&self.files, &query));
+        self.finder_matches = Rc::new(match_files(&self.project.files, &query));
         self.finder_selected = 0;
         self.finder_list.reset(self.finder_matches.len());
         self.finder_list.scroll_to(gpui::ListOffset { item_ix: 0, offset_in_item: px(0.) });
@@ -1360,7 +1385,7 @@ impl Reader {
     fn accept_path(&mut self, path: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.open(path, window, cx);
         // A file that can't be shown leaves the finder up so the query isn't lost.
-        if self.notice.is_none() {
+        if self.project.notice.is_none() {
             self.hide_finder(window, cx);
             self.set_mode(Mode::Source, cx);
         }
@@ -1437,7 +1462,7 @@ impl Reader {
                             .border_t_1()
                             .border_color(border)
                             .text_color(muted)
-                            .child(if self.files.len() >= MAX_FILES { format!("first {MAX_FILES} files only") } else { "↑↓ navigate".to_string() })
+                            .child(if self.project.files.len() >= MAX_FILES { format!("first {MAX_FILES} files only") } else { "↑↓ navigate".to_string() })
                             .child("↵ open · esc close"),
                     ),
             )
@@ -1445,32 +1470,32 @@ impl Reader {
     }
 
     fn open(&mut self, path: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let full = self.root.join(path);
+        let full = self.project.root.join(path);
         let too_big = std::fs::metadata(&full).map_or(false, |m| m.len() > 4 * 1024 * 1024);
         // A file too big to show isn't read at all.
         let read = if too_big { Ok(None) } else { std::fs::read_to_string(&full).map(Some) };
         match read {
-            Ok(None) => self.notice = Some(format!("{path} is too large to show")),
+            Ok(None) => self.project.notice = Some(format!("{path} is too large to show")),
             Ok(Some(text)) => {
-                match &self.code {
+                match &self.project.code {
                     // Same file: swap the text in place so the scroll position and caret survive.
-                    Some(code) if self.current.as_deref() == Some(path) => {
+                    Some(code) if self.project.current.as_deref() == Some(path) => {
                         code.update(cx, |state, cx| state.set_text(text, cx));
                     }
-                    _ => self.code = Some(cx.new(|cx| viewer::CodeViewState::new(text, syntax(path), window, cx))),
+                    _ => self.project.code = Some(cx.new(|cx| viewer::CodeViewState::new(text, syntax(path), window, cx))),
                 }
-                self.notice = None;
+                self.project.notice = None;
             }
             Err(error) => {
                 log::warn!("open {path}: {error}");
-                self.code = None;
-                self.notice = Some(format!("{path} is not a text file"));
+                self.project.code = None;
+                self.project.notice = Some(format!("{path} is not a text file"));
             }
         }
-        self.current = Some(path.to_string());
-        self.stamp = stamp(&full);
+        self.project.current = Some(path.to_string());
+        self.project.stamp = stamp(&full);
         let id = SharedString::from(path.to_string());
-        self.tree.update(cx, |tree, cx| {
+        self.project.tree.update(cx, |tree, cx| {
             if let Some(ix) = tree.index_of(&id) {
                 tree.set_selected_index(Some(ix), cx);
             }
@@ -1481,19 +1506,19 @@ impl Reader {
     /// Sends the draft: as a new turn, or, while the agent is working, into the queue
     /// (`later` for after the turn rather than into it).
     fn send(&mut self, later: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let prompt = self.draft.read(cx).value().trim().to_string();
+        let prompt = self.thread.draft.read(cx).value().trim().to_string();
         if prompt.is_empty() {
             return;
         }
-        if !self.busy {
+        if !self.thread.busy {
             if self.dispatch(prompt, cx) {
-                self.draft.update(cx, |input, cx| input.set_value("", window, cx));
+                self.thread.draft.update(cx, |input, cx| input.set_value("", window, cx));
             }
             return;
         }
-        self.draft.update(cx, |input, cx| input.set_value("", window, cx));
+        self.thread.draft.update(cx, |input, cx| input.set_value("", window, cx));
         // An agent that can't take messages mid-turn gets them when the turn is over.
-        let kind = match self.client.as_ref().filter(|client| client.queues()) {
+        let kind = match self.thread.client.as_ref().filter(|client| client.queues()) {
             Some(client) => {
                 let kind = if later { Queue::Followup } else { Queue::Steer };
                 client.enqueue(&prompt, kind);
@@ -1501,90 +1526,90 @@ impl Reader {
             }
             None => None,
         };
-        self.queue.push(Queued { content: prompt, kind });
+        self.thread.queue.push(Queued { content: prompt, kind });
         cx.notify();
     }
 
     /// Takes a queued message back into the draft to edit.
     fn recall(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
-        if ix >= self.queue.len() {
+        if ix >= self.thread.queue.len() {
             return;
         }
-        let item = self.queue.remove(ix);
-        if let (Some(kind), Some(client)) = (item.kind, &self.client) {
+        let item = self.thread.queue.remove(ix);
+        if let (Some(kind), Some(client)) = (item.kind, &self.thread.client) {
             client.recall(&item.content, kind);
         }
-        let draft = self.draft.read(cx).value().to_string();
+        let draft = self.thread.draft.read(cx).value().to_string();
         let text = if draft.trim().is_empty() { item.content } else { format!("{}\n{draft}", item.content) };
-        self.draft.update(cx, |input, cx| input.set_value(text, window, cx));
+        self.thread.draft.update(cx, |input, cx| input.set_value(text, window, cx));
         cx.notify();
     }
 
     /// If no turn is running, sends the oldest queued message that waits here rather than in
     /// the daemon. A message that can't be sent goes back to the draft with the rest.
     fn send_next(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.busy {
+        if self.thread.busy {
             return;
         }
-        let Some(at) = self.queue.iter().position(|q| q.kind.is_none()) else { return };
-        let next = self.queue.remove(at);
+        let Some(at) = self.thread.queue.iter().position(|q| q.kind.is_none()) else { return };
+        let next = self.thread.queue.remove(at);
         if !self.dispatch(next.content.clone(), cx) {
-            self.queue.insert(0, next);
+            self.thread.queue.insert(0, next);
             self.restore_queue(window, cx);
         }
     }
 
     /// Moves everything queued back into the draft, taking back what the daemon still holds.
     fn restore_queue(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.queue.is_empty() {
+        if self.thread.queue.is_empty() {
             return;
         }
-        let items: Vec<Queued> = self.queue.drain(..).collect();
+        let items: Vec<Queued> = self.thread.queue.drain(..).collect();
         let mut text = Vec::new();
         for item in items {
-            if let (Some(kind), Some(client)) = (item.kind, &self.client) {
+            if let (Some(kind), Some(client)) = (item.kind, &self.thread.client) {
                 client.recall(&item.content, kind);
             }
             text.push(item.content);
         }
-        let draft = self.draft.read(cx).value().to_string();
+        let draft = self.thread.draft.read(cx).value().to_string();
         if !draft.trim().is_empty() {
             text.push(draft);
         }
-        self.draft.update(cx, |input, cx| input.set_value(text.join("\n\n"), window, cx));
+        self.thread.draft.update(cx, |input, cx| input.set_value(text.join("\n\n"), window, cx));
         cx.notify();
     }
 
     /// Sends `prompt` as a new turn; false if it could not be sent (the error is in the thread).
     fn dispatch(&mut self, prompt: String, cx: &mut Context<Self>) -> bool {
-        let Some(client) = self.client.as_ref().filter(|_| self.ready) else {
-            let why = if self.agent.is_some() { "The agent is not ready yet." } else { "Pick an agent from New Thread first." };
-            self.fail(why.into());
+        let Some(client) = self.thread.client.as_ref().filter(|_| self.thread.ready) else {
+            let why = if self.thread.agent.is_some() { "The agent is not ready yet." } else { "Pick an agent from New Thread first." };
+            self.thread.fail(why.into());
             cx.notify();
             return false;
         };
-        let context = match &self.current {
+        let context = match &self.project.current {
             Some(file) => format!("[The user has `{file}` open in the viewer.]\n\n{prompt}"),
             None => prompt.clone(),
         };
         if !client.prompt(&context) {
-            self.fail("The agent has no session yet.".into());
+            self.thread.fail("The agent has no session yet.".into());
             cx.notify();
             return false;
         }
-        self.busy = true;
-        self.thread.push(Msg::User(prompt));
-        self.thread.push(Msg::Agent(vec![]));
-        self.relist(self.thread.len() - 2);
-        self.thread_list.scroll_to_end();
+        self.thread.busy = true;
+        self.thread.messages.push(Msg::User(prompt));
+        self.thread.messages.push(Msg::Agent(vec![]));
+        self.thread.relist(self.thread.messages.len() - 2);
+        self.thread.list.scroll_to_end();
         cx.notify();
         true
     }
 
     fn stop(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(client) = &self.client else { return };
+        let Some(client) = &self.thread.client else { return };
         client.cancel();
-        for msg in &mut self.thread {
+        for msg in &mut self.thread.messages {
             let Msg::Agent(blocks) = msg else { continue };
             for block in blocks {
                 if let Block::Permission(ask) = block {
@@ -1595,17 +1620,17 @@ impl Reader {
                 }
             }
         }
-        self.relist(0);
+        self.thread.relist(0);
         // What was waiting goes back to the draft rather than being sent into a stopped turn.
         self.restore_queue(window, cx);
         cx.notify();
     }
 
     fn toggle_tool(&mut self, msg: usize, block: usize, cx: &mut Context<Self>) {
-        let Some(Msg::Agent(blocks)) = self.thread.get_mut(msg) else { return };
+        let Some(Msg::Agent(blocks)) = self.thread.messages.get_mut(msg) else { return };
         let Some(Block::Tool(tool)) = blocks.get_mut(block) else { return };
         tool.open = !tool.open;
-        self.relist(msg);
+        self.thread.relist(msg);
         cx.notify();
     }
 
@@ -1615,7 +1640,7 @@ impl Reader {
         let colors = cx.global::<Palette>();
         let (border, muted, danger) = (colors.border, colors.muted_foreground, colors.danger);
         let this = cx.entity();
-        let body: AnyElement = match &self.pr {
+        let body: AnyElement = match &self.project.pr {
             Some(pr) => div()
                 .flex()
                 .items_center()
@@ -1627,7 +1652,7 @@ impl Reader {
                         .truncate()
                         .text_xs()
                         .text_color(muted)
-                        .child(format!("PR #{} · {} files", pr.number, self.changes.len())),
+                        .child(format!("PR #{} · {} files", pr.number, self.project.changes.len())),
                 )
                 .child(
                     Button::new("pr-close")
@@ -1708,12 +1733,12 @@ impl Reader {
             Mode::Source => "Explorer",
             Mode::Diff => "Changes",
         };
-        let state = if mode == Mode::Diff { &self.changes_tree } else { &self.tree };
-        let marks = if mode == Mode::Diff { self.marks.clone() } else { Rc::default() };
+        let state = if mode == Mode::Diff { &self.project.changes_tree } else { &self.project.tree };
+        let marks = if mode == Mode::Diff { self.project.marks.clone() } else { Rc::default() };
         // Themes may lack a green (Rosé Pine's success is teal), so added files get their own.
         let (muted, danger) = (colors.muted_foreground, colors.danger);
         let kinds = [colors.primary, colors.warning, colors.info, gpui::hsla(0.37, 0.5, 0.5, 1.0)];
-        let body: AnyElement = if mode == Mode::Diff && self.changes.is_empty() {
+        let body: AnyElement = if mode == Mode::Diff && self.project.changes.is_empty() {
             centered("No changes".into(), cx)
         } else {
             tree(state, move |ix, entry, selected, right_clicked, _, _| {
@@ -1793,9 +1818,9 @@ impl Reader {
                     .items_center()
                     .gap_2()
                     .child(status_text(
-                        match &self.pr {
+                        match &self.project.pr {
                             Some(pr) => format!("PR #{} {}", pr.number, pr.title),
-                            None => self.root.file_name().map_or(String::new(), |n| n.to_string_lossy().to_string()),
+                            None => self.project.root.file_name().map_or(String::new(), |n| n.to_string_lossy().to_string()),
                         },
                         cx,
                     ))
@@ -1808,7 +1833,7 @@ impl Reader {
 
     fn diff_viewer(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.global::<Palette>();
-        let Some(path) = self.picked.clone() else {
+        let Some(path) = self.project.picked.clone() else {
             return div()
                 .size_full()
                 .flex()
@@ -1817,20 +1842,20 @@ impl Reader {
                 .child(header("Changes", String::new(), cx))
                 .child(div().flex_1().min_h_0().child(centered("Pick a changed file".into(), cx)));
         };
-        let (rows, pairs) = (self.rows.clone(), self.pairs.clone());
-        let (added, removed) = self.counts;
+        let (rows, pairs) = (self.project.rows.clone(), self.project.pairs.clone());
+        let (added, removed) = self.project.counts;
         // Themes may lack a green (Rosé Pine's success is teal), so added lines get their own.
         let (success, danger, muted, border) =
             (gpui::hsla(0.37, 0.5, 0.5, 1.0), colors.danger, colors.muted_foreground, colors.border);
         let font = cx.global::<Palette>().mono_font_family.clone();
         let split = self.split;
         // Only the rows in view are built, so a long diff costs no more than a short one.
-        let body: AnyElement = if rows.is_empty() && self.diffing.is_some() {
+        let body: AnyElement = if rows.is_empty() && self.project.diffing.is_some() {
             div().into_any_element()
         } else if rows.is_empty() {
             centered("No textual changes".into(), cx)
         } else {
-            list(self.diff_list.clone(), move |ix, _, _| {
+            list(self.project.diff_list.clone(), move |ix, _, _| {
                 let line = div().flex().w_full().min_h(rems(1.5)).items_start().font_family(font.clone()).text_sm();
                 if split {
                     let cell = |cell: &Option<diff::Cell>, first: bool| {
@@ -1927,8 +1952,8 @@ impl Reader {
 
     fn viewer(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.global::<Palette>();
-        let title = self.current.clone().unwrap_or_else(|| "No file open".into());
-        let body: AnyElement = match (&self.code, &self.notice) {
+        let title = self.project.current.clone().unwrap_or_else(|| "No file open".into());
+        let body: AnyElement = match (&self.project.code, &self.project.notice) {
             (_, Some(notice)) => centered(notice.clone(), cx),
             // Cached: the viewer redraws when it changes, not with every agent update or caret blink elsewhere.
             (Some(code), None) => code.clone().cached(StyleRefinement::default().size_full()).into_any_element(),
@@ -1941,7 +1966,7 @@ impl Reader {
             .bg(colors.background)
             .child(header(
                 &title,
-                self.current.as_deref().map(language).unwrap_or("").to_string(),
+                self.project.current.as_deref().map(language).unwrap_or("").to_string(),
                 cx,
             ))
             .child(div().flex_1().min_h_0().child(body))
@@ -1949,23 +1974,23 @@ impl Reader {
 
     fn agent_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let this = cx.entity();
-        self.selection.update(cx, |s, _| s.begin_frame());
+        self.thread.selection.update(cx, |s, _| s.begin_frame());
         // Only the messages in view are built and laid out, however long the thread gets.
-        let selection = self.selection.clone();
-        let thread: AnyElement = if self.agent.is_none() {
+        let selection = self.thread.selection.clone();
+        let thread: AnyElement = if self.thread.agent.is_none() {
             centered("Choose an agent from New Thread".into(), cx)
-        } else if self.picking && self.thread.is_empty() {
-            match &self.sessions {
-                Some(sessions) if !self.loading && !sessions.is_empty() => session_picker(sessions, &this, cx),
-                Some(sessions) if !self.loading => centered(format!("No sessions to resume in {}", self.root.display()), cx),
-                _ => centered(self.status.clone(), cx),
+        } else if self.thread.picking && self.thread.messages.is_empty() {
+            match &self.thread.sessions {
+                Some(sessions) if !self.thread.loading && !sessions.is_empty() => session_picker(sessions, &this, cx),
+                Some(sessions) if !self.thread.loading => centered(format!("No sessions to resume in {}", self.project.root.display()), cx),
+                _ => centered(self.thread.status.clone(), cx),
             }
         } else {
             list(
-                self.thread_list.clone(),
+                self.thread.list.clone(),
                 cx.processor(move |reader: &mut Self, ix: usize, window, cx| {
-                    let Some(msg) = reader.thread.get(ix) else { return div().into_any_element() };
-                    let last = ix + 1 == reader.thread.len();
+                    let Some(msg) = reader.thread.messages.get(ix) else { return div().into_any_element() };
+                    let last = ix + 1 == reader.thread.messages.len();
                     div()
                         .px_3()
                         .pt_3()
@@ -1980,7 +2005,7 @@ impl Reader {
         let colors = cx.global::<Palette>();
         let (send, stop, picker) = (cx.entity(), cx.entity(), cx.entity());
         let agents = self.agents.clone();
-        let typed = !self.draft.read(cx).value().trim().is_empty();
+        let typed = !self.thread.draft.read(cx).value().trim().is_empty();
         let stop_button = |stop: Entity<Reader>| {
             Button::new("stop")
                 .icon(IconName::Square)
@@ -2001,12 +2026,12 @@ impl Reader {
             // Quiet until there is something to send.
             if typed { button.primary() } else { button }
         };
-        let steer_tip = if self.client.as_ref().is_some_and(|client| client.queues()) {
+        let steer_tip = if self.thread.client.as_ref().is_some_and(|client| client.queues()) {
             "Steer: the agent reads it before its next step (Alt+Enter: after this turn)"
         } else {
             "Queue: sent when this turn is over"
         };
-        let action = if self.busy && typed {
+        let action = if self.thread.busy && typed {
             // Typing during a turn queues it; Stop stays one click away.
             div()
                 .flex()
@@ -2014,7 +2039,7 @@ impl Reader {
                 .child(stop_button(stop))
                 .child(send_button(send, steer_tip))
                 .into_any_element()
-        } else if self.busy {
+        } else if self.thread.busy {
             stop_button(stop).into_any_element()
         } else {
             send_button(send, "Send").into_any_element()
@@ -2022,6 +2047,7 @@ impl Reader {
         let muted = colors.muted_foreground;
         let (border, queue_this) = (colors.border, cx.entity());
         let queued: Vec<AnyElement> = self
+            .thread
             .queue
             .iter()
             .enumerate()
@@ -2062,7 +2088,7 @@ impl Reader {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .children(self.agent.is_some().then(|| status_text(self.status.clone(), cx)))
+                    .children(self.thread.agent.is_some().then(|| status_text(self.thread.status.clone(), cx)))
                     .child(
                         dropdown(
                             "agent-select",
@@ -2096,11 +2122,11 @@ impl Reader {
                 div()
                     .id("thread")
                     .key_context("Markdown")
-                    .track_focus(&self.thread_focus)
+                    .track_focus(&self.thread.focus)
                     .on_action(cx.listener(|reader, _: &ui::markdown::Copy, _, cx| {
                         // Select All takes the replies scrolled out of view too, which aren't laid out.
-                        let text = if reader.selection.read(cx).is_all() {
-                            ui::markdown::all_text(reader.thread.iter().flat_map(|msg| match msg {
+                        let text = if reader.thread.selection.read(cx).is_all() {
+                            ui::markdown::all_text(reader.thread.messages.iter().flat_map(|msg| match msg {
                                 Msg::Agent(blocks) => blocks.as_slice(),
                                 Msg::User(_) => &[],
                             }).filter_map(|block| match block {
@@ -2108,7 +2134,7 @@ impl Reader {
                                 _ => None,
                             }))
                         } else {
-                            reader.selection.read(cx).selected_text()
+                            reader.thread.selection.read(cx).selected_text()
                         };
                         if text.is_empty() {
                             return cx.propagate();
@@ -2116,28 +2142,28 @@ impl Reader {
                         cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
                     }))
                     .on_action(cx.listener(|reader, _: &ui::markdown::SelectAll, _, cx| {
-                        reader.selection.update(cx, |s, _| s.select_all());
+                        reader.thread.selection.update(cx, |s, _| s.select_all());
                         cx.notify();
                     }))
                     .on_mouse_down(gpui::MouseButton::Left, cx.listener(|reader, event: &gpui::MouseDownEvent, window, cx| {
-                        reader.thread_focus.focus(window, cx);
-                        reader.selection.update(cx, |s, _| s.mouse_down(event.position, event.click_count));
+                        reader.thread.focus.focus(window, cx);
+                        reader.thread.selection.update(cx, |s, _| s.mouse_down(event.position, event.click_count));
                         cx.notify();
                     }))
                     .on_mouse_move(cx.listener(|reader, event: &gpui::MouseMoveEvent, _, cx| {
-                        if event.pressed_button == Some(gpui::MouseButton::Left) && reader.selection.read(cx).selecting {
-                            reader.selection.update(cx, |s, _| s.drag(event.position));
+                        if event.pressed_button == Some(gpui::MouseButton::Left) && reader.thread.selection.read(cx).selecting {
+                            reader.thread.selection.update(cx, |s, _| s.drag(event.position));
                             cx.notify();
                         }
                     }))
                     .on_mouse_up(gpui::MouseButton::Left, cx.listener(|reader, event: &gpui::MouseUpEvent, _, cx| {
-                        if let Some(url) = reader.selection.update(cx, |s, _| s.mouse_up(event.position)) {
+                        if let Some(url) = reader.thread.selection.update(cx, |s, _| s.mouse_up(event.position)) {
                             cx.open_url(&url);
                         }
                         cx.notify();
                     }))
                     .on_mouse_up_out(gpui::MouseButton::Left, cx.listener(|reader, event: &gpui::MouseUpEvent, _, cx| {
-                        reader.selection.update(cx, |s, _| {
+                        reader.thread.selection.update(cx, |s, _| {
                             s.mouse_up(event.position);
                         });
                     }))
@@ -2159,7 +2185,7 @@ impl Reader {
                         .when(!queued.is_empty(), |this| {
                             this.child(div().flex().flex_col().gap_1().pb_1().border_b_1().border_color(border).children(queued))
                         })
-                        .child(Input::new(&self.draft))
+                        .child(Input::new(&self.thread.draft))
                         .child(div().flex().justify_end().child(action)),
                 ),
             )
