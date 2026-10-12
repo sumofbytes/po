@@ -111,7 +111,7 @@ it had. Whether it is folded is remembered too.
 
 ### Projects and threads
 
-Several projects can be open at once. **Add project…** (Ctrl+O) in the explorer
+Several projects can be open at once. **Add project…** (Ctrl+O, or the **+** in the Projects header)
 opens a folder; each project keeps its own files, changes, open file and agent
 threads. Opening a PR adds it as a project too, and closing it removes the
 checkout.

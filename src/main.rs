@@ -2974,7 +2974,8 @@ impl Reader {
             (colors.list_hover, colors.list_selected, colors.muted_foreground, colors.foreground, colors.primary);
         let views = self.views();
         let (active_project, active_thread) = (self.project_id, self.thread.id);
-        let many = views.len() > 1;
+        let project_count = views.len();
+        let many = project_count > 1;
         let add = cx.entity();
         // Groups are spaced apart by more than anything inside one, so the eye reads them as units.
         let mut tree = div().id("agents-tree").size_full().overflow_y_scroll().flex().flex_col().gap_2().p_1();
@@ -3097,13 +3098,19 @@ impl Reader {
             .flex()
             .flex_col()
             .bg(colors.sidebar)
-            .child(header_with(
-                "Agents",
+            // The same kind of header as the explorer's below: a title, and what you can do here.
+            .child(header_row(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(div().text_sm().font_weight(FontWeight::MEDIUM).child("Projects"))
+                    .child(div().text_xs().text_color(muted).child(project_count.to_string())),
                 Button::new("agents-add")
-                    .label("Add project…")
-                    .tooltip("Open a folder as a project (Ctrl+O)")
+                    .icon(IconName::Plus)
+                    .tooltip("Add a project: open a folder (Ctrl+O)")
                     .ghost()
-                    .xsmall()
+                    .small()
                     .on_click(move |_, window, cx| add.update(cx, |reader, cx| reader.pick_project(window, cx))),
                 cx,
             ))
