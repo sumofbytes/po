@@ -2945,25 +2945,29 @@ impl Reader {
     fn agents_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let explorer = self.explorer(false, cx).into_any_element();
         let colors = cx.global::<Palette>();
-        let (hover, muted, foreground, accent) = (colors.list_hover, colors.muted_foreground, colors.foreground, colors.primary);
+        let (hover, selected, muted, foreground) = (colors.list_hover, colors.list_selected, colors.muted_foreground, colors.foreground);
         let views = self.views();
         let (active_project, active_thread) = (self.project_id, self.thread.id);
         let many = views.len() > 1;
         let add = cx.entity();
-        let mut tree = div().id("agents-tree").size_full().overflow_y_scroll().flex().flex_col().p_1();
+        // Groups are spaced apart by more than anything inside one, so the eye reads them as units.
+        let mut tree = div().id("agents-tree").size_full().overflow_y_scroll().flex().flex_col().gap_2().p_1();
         for view in &views {
             let pid = view.id;
             let (select, close, start) = (cx.entity(), cx.entity(), cx.entity());
-            // The project on screen is quietly marked: its name at full strength and a thin rail down
-            // the left of the whole group, its threads included. The others are muted, and their rail
-            // is there but invisible, so nothing shifts.
+            // A project and its threads are one card. The one on screen has a soft tint and its name at
+            // full strength; the others have neither, but the same padding, so nothing shifts. Names
+            // and thread titles share one left edge, after a column for the folder or status mark.
             let current = pid == active_project;
             let mut group = div()
                 .flex()
                 .flex_col()
-                .mt_1()
-                .border_l_2()
-                .border_color(if current { accent.opacity(0.5) } else { gpui::transparent_black() });
+                .gap_px()
+                .p_1()
+                .rounded_lg()
+                .when(current, |card| card.bg(hover));
+            // Inside the selected card the row under the pointer needs a different shade to show.
+            let over = if current { selected.opacity(0.6) } else { hover };
             group = group.child(
                 div()
                     .id(("agent-project", pid as usize))
@@ -2971,12 +2975,22 @@ impl Reader {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .pl_2()
+                    .px_1p5()
+                    .h(rems(1.625))
+                    // A little air between the project and its threads.
+                    .mb_1()
                     .rounded_md()
                     .cursor_pointer()
-                    .hover(|row| row.bg(hover))
+                    .hover(move |row| row.bg(over))
                     .on_click(move |_, window, cx| select.update(cx, |reader, cx| reader.show_project(pid, window, cx)))
-                    .child(Icon::new(IconName::Folder).size(IconSize::XSmall).color(if current { foreground } else { muted }))
+                    .child(
+                        div()
+                            .w(rems(1.))
+                            .flex_none()
+                            .flex()
+                            .justify_center()
+                            .child(Icon::new(IconName::Folder).size(IconSize::XSmall).color(if current { foreground } else { muted })),
+                    )
                     .child(
                         div()
                             .flex_1()
@@ -3020,13 +3034,14 @@ impl Reader {
                         .flex()
                         .items_center()
                         .gap_2()
-                        .pl_6()
+                        .px_1p5()
+                        .h(rems(1.625))
                         .rounded_md()
                         .cursor_pointer()
-                        .when((pid, tid) == (active_project, active_thread), |row| row.bg(hover))
-                        .hover(|row| row.bg(hover))
+                        .when((pid, tid) == (active_project, active_thread), |row| row.bg(selected))
+                        .hover(move |row| row.bg(over))
                         .on_click(move |_, window, cx| select.update(cx, |reader, cx| reader.open_thread(pid, tid, window, cx)))
-                        .child(div().flex_none().text_size(rems(0.875)).text_color(tint).child(glyph))
+                        .child(div().w(rems(1.)).flex_none().flex().justify_center().text_size(rems(0.875)).text_color(tint).child(glyph))
                         .child(
                             // Threads sit a step below their project: smaller and regular, bright only
                             // for the one on screen.
