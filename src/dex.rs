@@ -512,6 +512,11 @@ impl Client {
         true
     }
 
+    /// The session this client has open, once it has one.
+    pub fn session(&self) -> Option<String> {
+        self.shared.session.lock().expect("session lock").clone()
+    }
+
     pub fn cancel(&self) {
         let shared = self.shared.clone();
         std::thread::spawn(move || {

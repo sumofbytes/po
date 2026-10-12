@@ -323,6 +323,11 @@ impl Client {
         true
     }
 
+    /// The session this client has open, once it has one.
+    pub fn session(&self) -> Option<String> {
+        self.shared.session.lock().expect("session lock").clone()
+    }
+
     pub fn cancel(&self) {
         if let Some(session) = self.shared.session.lock().expect("session lock").clone() {
             self.shared.write(&json!({ "jsonrpc": "2.0", "method": "session/cancel", "params": { "sessionId": session } }));

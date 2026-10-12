@@ -1,6 +1,7 @@
 #![recursion_limit = "1024"]
 mod acp;
 mod agent;
+mod alert;
 mod config;
 mod dex;
 mod diff;
@@ -14,7 +15,7 @@ mod worktree;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use acp::{Event, PermissionOption, SessionInfo};
 use agent::Client;
@@ -475,6 +476,14 @@ struct Thread {
     id: u64,
     /// It finished a turn while another thread was on screen.
     unread: bool,
+    /// The agent's session, once it has one; what a thread without a running agent is resumed from.
+    session: Option<String>,
+    /// A session to load as soon as the agent has listed its sessions, instead of showing them.
+    restore: Option<String>,
+    /// What the thread was about before it was loaded back, since it has no messages yet.
+    saved_title: Option<String>,
+    /// When the thread last did anything; an idle one in the background is put to sleep.
+    touched: Instant,
     messages: Vec<Msg>,
     busy: bool,
     /// Messages typed during a turn, shown above the input until they are taken.
@@ -676,8 +685,30 @@ impl Thread {
                 let short: String = line.chars().take(28).collect();
                 if short.len() < line.len() { format!("{short}…") } else { short }
             }
-            None => "New thread".into(),
+            None => self.saved_title.clone().unwrap_or_else(|| "New thread".into()),
         }
+    }
+
+    /// An agent was started for it and then stopped (or never started after a restart), so it
+    /// can be resumed from its session.
+    fn asleep(&self) -> bool {
+        self.client.is_none() && self.agent.is_some() && self.session.is_some()
+    }
+
+    /// Whether stopping its agent would lose nothing: no turn, no question and nothing queued.
+    fn restful(&self) -> bool {
+        self.client.is_some() && self.session.is_some() && self.activity() != Activity::Asking && !self.busy && self.queue.is_empty()
+    }
+
+    /// Stops the agent, keeping what has been said so it can be shown and resumed.
+    fn sleep(&mut self) {
+        self.client = None;
+        self.ready = false;
+        self.loading = false;
+        self.picking = false;
+        // The events of the stopped agent are no longer this thread's.
+        self.generation += 1;
+        self.status = "asleep".into();
     }
 }
 
@@ -727,6 +758,12 @@ struct Reader {
     finder_events: Option<Subscription>,
     painted: bool,
     agents: Vec<config::Agent>,
+    /// Tell the desktop when a thread finishes or asks while it isn't being looked at.
+    notifications: bool,
+    /// How long a thread in the background can sit idle before its agent is stopped.
+    idle_after: Option<Duration>,
+    /// Agents that may run at once; beyond it the longest idle in the background are stopped.
+    max_live: usize,
     sidebars: Entity<SidebarsState>,
     /// The New Thread menu, so a shortcut can open it.
     thread_menu: Entity<MenuState>,
@@ -780,7 +817,9 @@ impl Reader {
             }),
         ];
         let enter = Self::send_on_enter(&draft, window, cx);
-        let mut agents = config::agents(&config::load());
+        let settings = config::load();
+        let mut agents = config::agents(&settings);
+        let idle_minutes = settings["idle_minutes"].as_u64().unwrap_or(15);
         if let Some(command) = command.as_ref().filter(|c| !agents.iter().any(|agent| agent.id == **c)) {
             agents.push(config::Agent { id: command.clone(), name: "Custom".into(), command: command.clone(), daemon: None });
         }
@@ -788,6 +827,10 @@ impl Reader {
         let thread = Thread {
             id: 0,
             unread: false,
+            session: None,
+            restore: None,
+            saved_title: None,
+            touched: Instant::now(),
             _enter: enter,
             messages: vec![],
             busy: false,
@@ -829,6 +872,9 @@ impl Reader {
             finder_events: None,
             painted: false,
             agents,
+            notifications: settings["notifications"].as_bool().unwrap_or(true),
+            idle_after: (idle_minutes > 0).then(|| Duration::from_secs(idle_minutes * 60)),
+            max_live: settings["max_live_agents"].as_u64().unwrap_or(8).max(1) as usize,
             sidebars: cx.new(|_| SidebarsState::new(px(260.0), px(460.0))),
             thread_menu: cx.new(MenuState::new),
             left_open: true,
@@ -847,6 +893,16 @@ impl Reader {
         }
         reader.watch(watch, window, cx);
         trace::mark("watch");
+        // Agents nobody is talking to are stopped now and then; their threads wake on demand.
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(Duration::from_secs(60)).await;
+                if this.update(cx, |reader, cx| reader.sleep_idle(cx)).is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
         reader
     }
 
@@ -1169,6 +1225,7 @@ impl Reader {
         self.suspend_project();
         self.swap_slot(at);
         self.resume_project(window, cx);
+        self.wake_thread(window, cx);
     }
 
     /// Adds a project over `root` (a PR's worktree when `pr` is given) and shows it. If it is
@@ -1566,6 +1623,7 @@ impl Reader {
                 self.thread.fail(format!("{error:#}"));
             }
         }
+        self.enforce_cap();
         cx.notify();
     }
 
@@ -1605,6 +1663,10 @@ impl Reader {
         Thread {
             id,
             unread: false,
+            session: None,
+            restore: None,
+            saved_title: None,
+            touched: Instant::now(),
             _enter: Self::send_on_enter(&draft, window, cx),
             messages: vec![],
             busy: false,
@@ -1659,11 +1721,63 @@ impl Reader {
     }
 
     /// Brings thread `id` on screen.
-    fn show_thread(&mut self, id: u64, cx: &mut Context<Self>) {
+    fn show_thread(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(at) = self.parked.iter().position(|thread| thread.id == id) {
             std::mem::swap(&mut self.thread, &mut self.parked[at]);
             self.thread.unread = false;
+            self.wake_thread(window, cx);
             cx.notify();
+        }
+    }
+
+    /// Starts the agent of the thread on screen again if it was stopped, resuming its session.
+    fn wake_thread(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.thread.asleep() {
+            return;
+        }
+        let (Some(key), Some(session)) = (self.thread.agent.clone(), self.thread.session.clone()) else { return };
+        log::info!("agent: waking {key} session {session}");
+        self.connect(&key, true, window, cx);
+        self.thread.restore = Some(session);
+        self.thread.status = "waking…".into();
+    }
+
+    /// The threads not on screen, in every project.
+    fn background_threads(&mut self) -> impl Iterator<Item = &mut Thread> {
+        self.parked.iter_mut().chain(self.slots.iter_mut().flat_map(|slot| std::iter::once(&mut slot.thread).chain(slot.parked.iter_mut())))
+    }
+
+    /// Stops the agents of threads that have been idle in the background for too long.
+    fn sleep_idle(&mut self, cx: &mut Context<Self>) {
+        let Some(after) = self.idle_after else { return };
+        let mut slept = false;
+        for thread in self.background_threads().filter(|t| t.restful() && t.touched.elapsed() > after) {
+            log::info!("agent: stopping idle thread {}", thread.id);
+            thread.sleep();
+            slept = true;
+        }
+        if slept {
+            cx.notify();
+        }
+    }
+
+    /// Stops the longest idle agents in the background while more than `max_live` run.
+    fn enforce_cap(&mut self) {
+        let mut live = usize::from(self.thread.client.is_some());
+        live += self.background_threads().filter(|t| t.client.is_some()).count();
+        let Some(excess) = live.checked_sub(self.max_live).filter(|n| *n > 0) else { return };
+        let mut idle: Vec<&mut Thread> = self.background_threads().filter(|t| t.restful()).collect();
+        idle.sort_by_key(|t| t.touched);
+        for thread in idle.into_iter().take(excess) {
+            log::info!("agent: stopping thread {} to stay under the limit", thread.id);
+            thread.sleep();
+        }
+    }
+
+    /// Tells the desktop about `what` the thread on screen did, unless that is already in view.
+    fn alert(&self, window: &Window, visible: bool, what: &str) {
+        if self.notifications && !(visible && window.is_window_active()) {
+            alert::send(&format!("{} · {}", self.project.name(), self.thread.title()), what);
         }
     }
 
@@ -1678,6 +1792,7 @@ impl Reader {
             };
             self.thread = next;
             self.thread.unread = false;
+            self.wake_thread(window, cx);
         }
         cx.notify();
     }
@@ -1706,17 +1821,32 @@ impl Reader {
     fn on_event(&mut self, event: Event, visible: bool, window: &mut Window, cx: &mut Context<Self>) {
         // Most events change the last message; a tool call update may change an earlier one.
         let mut changed = self.thread.messages.len().saturating_sub(1);
+        self.thread.touched = Instant::now();
         match event {
-            Event::Sessions(sessions) => {
-                self.thread.status = if sessions.is_empty() { "no sessions".into() } else { "pick a session".into() };
-                self.thread.sessions = Some(sessions);
-            }
+            Event::Sessions(sessions) => match self.thread.restore.take() {
+                // A thread being woken goes straight to its own session.
+                Some(id) => match &self.thread.client {
+                    Some(client) if client.load(&id) => {
+                        self.thread.loading = true;
+                        self.thread.status = "loading session…".into();
+                    }
+                    _ => {
+                        self.thread.status = "not running".into();
+                        self.thread.fail("The session could not be resumed.".into());
+                    }
+                },
+                None => {
+                    self.thread.status = if sessions.is_empty() { "no sessions".into() } else { "pick a session".into() };
+                    self.thread.sessions = Some(sessions);
+                }
+            },
             Event::Ready { agent } => {
                 self.thread.ready = true;
                 self.thread.loading = false;
                 self.thread.picking = false;
                 log::info!("agent: {agent} ready");
                 self.thread.status = "ready".into();
+                self.thread.session = self.thread.client.as_ref().and_then(|client| client.session());
             }
             Event::Update(update) => {
                 if let Some(ix) = self.thread.tool_message(&update) {
@@ -1728,11 +1858,13 @@ impl Reader {
                 }
             }
             Event::Permission { request, title, options } => {
+                self.alert(window, visible, &format!("Needs your approval: {title}"));
                 self.thread.blocks().push(Block::Permission(Ask { request, title, options, answered: None }));
             }
             Event::Stopped(reason) => {
                 self.thread.busy = false;
                 self.thread.unread = !visible;
+                self.alert(window, visible, "Finished");
                 log::info!("agent: stopped ({reason})");
                 // What the daemon didn't take into the turn is no longer in its queue.
                 for item in &mut self.thread.queue {
@@ -2076,6 +2208,7 @@ impl Reader {
             return false;
         }
         self.thread.busy = true;
+        self.thread.touched = Instant::now();
         self.thread.messages.push(Msg::User(prompt));
         self.thread.messages.push(Msg::Agent(vec![]));
         self.thread.relist(self.thread.messages.len() - 2);
@@ -2693,7 +2826,7 @@ impl Reader {
                         .cursor_pointer()
                         .when(id == active, |tab| tab.bg(hover))
                         .hover(|tab| tab.bg(hover))
-                        .on_click(move |_, _, cx| select.update(cx, |reader, cx| reader.show_thread(id, cx)))
+                        .on_click(move |_, window, cx| select.update(cx, |reader, cx| reader.show_thread(id, window, cx)))
                         .child(div().text_xs().text_color(tint).child(glyph))
                         .child(div().text_xs().max_w(px(160.0)).truncate().child(title))
                         .child(
