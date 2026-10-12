@@ -3363,7 +3363,7 @@ impl Reader {
                 }))
                 .into_any_element()
         } else {
-            div().text_xs().text_color(muted).child(self.agent_label().unwrap_or("Agent").to_string()).into_any_element()
+            div().pl_2().text_sm().text_color(muted).child(self.agent_label().unwrap_or("Agent").to_string()).into_any_element()
         };
         div()
             .size_full()
@@ -3471,7 +3471,11 @@ impl Reader {
                             this.child(div().flex().flex_col().gap_1().pb_1().border_b_1().border_color(border).children(queued))
                         })
                         .child(Input::new(&self.thread.draft))
-                        .child(div().flex().items_center().justify_between().gap_2().child(chips).child(action)),
+                        .child(
+                            // The input's text sits 0.75rem in; the chips' own padding (0.5rem) plus this
+                            // inset puts their text, and the label after the thread has started, on its edge.
+                            div().flex().items_center().justify_between().gap_2().pl_1().child(chips).child(action),
+                        ),
                 ),
             )
     }
