@@ -40,7 +40,7 @@ use gpui::{
     prelude::*, px, rems, size, KeyBinding,
 };
 
-gpui::actions!(po, [ToggleLeft, ToggleRight, ShowSource, ShowChanges, ShowChat, SwapPanes, ShowHistory, ToggleSplit, NewThread, OpenProject, ShowFinder, CloseFinder, FinderUp, FinderDown]);
+gpui::actions!(po, [ToggleLeft, ToggleRight, ShowSource, ShowChanges, ShowChat, SwapPanes, ShowHistory, ToggleSplit, ToggleRendered, NewThread, OpenProject, ShowFinder, CloseFinder, FinderUp, FinderDown]);
 
 const SKIP: [&str; 5] = ["target", "node_modules", "dist", "build", "__pycache__"];
 const MAX_FILES: usize = 5000;
@@ -416,6 +416,19 @@ enum Mode {
     Diff,
 }
 
+/// A markdown file as the viewer shows it rendered: cut into pieces so that only those in view
+/// are laid out, with a selection and focus of its own.
+struct Doc {
+    chunks: Rc<Vec<String>>,
+    list: ListState,
+    selection: Entity<ui::markdown::Selection>,
+    focus: gpui::FocusHandle,
+}
+
+fn is_markdown(path: &str) -> bool {
+    path.rsplit_once('.').is_some_and(|(_, ext)| ext.eq_ignore_ascii_case("md") || ext.eq_ignore_ascii_case("markdown"))
+}
+
 /// Everything about one checkout: its files and git state, and what the explorer, viewer and
 /// diff viewer are showing of them.
 struct Project {
@@ -445,6 +458,8 @@ struct Project {
     current: Option<String>,
     stamp: Option<Stamp>,
     code: Option<Entity<viewer::CodeViewState>>,
+    /// The current file rendered, when it is markdown.
+    doc: Option<Doc>,
     notice: Option<String>,
     tree: Entity<TreeState>,
     expanded: HashSet<SharedString>,
@@ -802,6 +817,8 @@ struct Reader {
     chosen_agent: Option<String>,
     /// Whether diffs show old and new side by side instead of inline.
     split: bool,
+    /// Markdown files show rendered rather than as source.
+    rendered: bool,
     /// Keeps the shortcuts routed to the reader when no input is focused.
     focus: gpui::FocusHandle,
     /// The workspace is about to be saved, so asking again changes nothing.
@@ -933,6 +950,7 @@ impl Reader {
             agent_menu: cx.new(MenuState::new),
             chosen_agent: command.clone(),
             split: false,
+            rendered: true,
             focus: cx.focus_handle(),
             save_pending: false,
             _subscriptions: subscriptions,
@@ -1038,6 +1056,7 @@ impl Reader {
             current: None,
             stamp: None,
             code: None,
+            doc: None,
             notice: None,
             tree,
             expanded: HashSet::new(),
@@ -2516,14 +2535,48 @@ impl Reader {
             .into_any_element()
     }
 
+    /// The rendered form of `text` if `path` is markdown, keeping the scroll position and
+    /// selection when it's the file already open being read again.
+    fn markdown_doc(&mut self, path: &str, text: &str, cx: &mut Context<Self>) -> Option<Doc> {
+        if !is_markdown(path) {
+            return None;
+        }
+        let chunks = Rc::new(ui::markdown::chunks(text));
+        match self.project.doc.take().filter(|_| self.project.current.as_deref() == Some(path)) {
+            Some(doc) if *doc.chunks == *chunks => Some(doc),
+            Some(doc) => {
+                // Splicing resets the scroll to the top, so put it back, and drop a selection
+                // that may now point at different text.
+                let mut top = doc.list.logical_scroll_top();
+                doc.list.splice(0..doc.list.item_count(), chunks.len());
+                if top.item_ix >= chunks.len() {
+                    top = gpui::ListOffset { item_ix: chunks.len().saturating_sub(1), offset_in_item: px(0.) };
+                }
+                doc.list.scroll_to(top);
+                doc.selection.update(cx, |s, _| s.clear());
+                Some(Doc { chunks, ..doc })
+            }
+            None => Some(Doc {
+                list: ListState::new(chunks.len(), ListAlignment::Top, px(400.)),
+                chunks,
+                selection: cx.new(|_| ui::markdown::Selection::default()),
+                focus: cx.focus_handle(),
+            }),
+        }
+    }
+
     fn open(&mut self, path: &str, window: &mut Window, cx: &mut Context<Self>) {
         let full = self.project.root.join(path);
         let too_big = std::fs::metadata(&full).is_ok_and(|m| m.len() > 4 * 1024 * 1024);
         // A file too big to show isn't read at all.
         let read = if too_big { Ok(None) } else { std::fs::read_to_string(&full).map(Some) };
         match read {
-            Ok(None) => self.project.notice = Some(format!("{path} is too large to show")),
+            Ok(None) => {
+                self.project.doc = None;
+                self.project.notice = Some(format!("{path} is too large to show"));
+            }
             Ok(Some(text)) => {
+                self.project.doc = self.markdown_doc(path, &text, cx);
                 match &self.project.code {
                     // Same file: swap the text in place so the scroll position and caret survive.
                     Some(code) if self.project.current.as_deref() == Some(path) => {
@@ -2536,6 +2589,7 @@ impl Reader {
             Err(error) => {
                 log::warn!("open {path}: {error}");
                 self.project.code = None;
+                self.project.doc = None;
                 self.project.notice = Some(format!("{path} is not a text file"));
             }
         }
@@ -3266,10 +3320,12 @@ impl Reader {
     }
 
     fn viewer(&self, lead: Option<AnyElement>, trail: Option<AnyElement>, cx: &mut Context<Self>) -> impl IntoElement {
-        let colors = cx.global::<Palette>();
+        let background = cx.global::<Palette>().background;
         let title = self.project.current.clone().unwrap_or_else(|| "No file open".into());
+        let doc = self.project.doc.as_ref().filter(|_| self.rendered);
         let body: AnyElement = match (&self.project.code, &self.project.notice) {
             (_, Some(notice)) => centered(notice.clone(), cx),
+            (_, None) if let Some(doc) = doc => self.markdown_view(doc, cx),
             // Cached: the viewer redraws when it changes, not with every agent update or caret blink elsewhere.
             (Some(code), None) => code.clone().cached(StyleRefinement::default().size_full()).into_any_element(),
             (None, None) => centered("Pick a file in the explorer".into(), cx),
@@ -3278,15 +3334,128 @@ impl Reader {
             .size_full()
             .flex()
             .flex_col()
-            .bg(colors.background)
+            .bg(background)
             .child(pane_header(
                 &title,
-                status_text(self.project.current.as_deref().map(language).unwrap_or("").to_string(), cx),
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(status_text(self.project.current.as_deref().map(language).unwrap_or("").to_string(), cx))
+                    .children(self.project.doc.as_ref().map(|_| {
+                        let this = cx.entity();
+                        Button::new("toggle-rendered")
+                            .label(if self.rendered { "Source" } else { "Preview" })
+                            .tooltip(if self.rendered { "Show the markdown source (Ctrl+Shift+M)" } else { "Show the rendered markdown (Ctrl+Shift+M)" })
+                            .ghost()
+                            .small()
+                            .on_click(move |_, _, cx| this.update(cx, |reader, cx| reader.toggle_rendered(cx)))
+                    })),
                 lead,
                 trail,
                 cx,
             ))
             .child(div().flex_1().min_h_0().child(body))
+    }
+
+    fn toggle_rendered(&mut self, cx: &mut Context<Self>) {
+        self.rendered = !self.rendered;
+        cx.notify();
+    }
+
+    /// A markdown file rendered, scrolling a piece at a time like the thread.
+    fn markdown_view(&self, doc: &Doc, cx: &mut Context<Self>) -> AnyElement {
+        doc.selection.update(cx, |s, _| s.begin_frame());
+        let (chunks, selection, focus) = (doc.chunks.clone(), doc.selection.clone(), doc.focus.clone());
+        let background = cx.global::<Palette>().background;
+        div()
+            .id("markdown-file")
+            .key_context("Markdown")
+            .track_focus(&focus)
+            .size_full()
+            .bg(background)
+            .on_action(cx.listener({
+                let (chunks, selection) = (chunks.clone(), selection.clone());
+                move |_, _: &ui::markdown::Copy, _, cx| {
+                    // Select All takes the pieces scrolled out of view too, which aren't laid out.
+                    let text = if selection.read(cx).is_all() {
+                        ui::markdown::all_text(chunks.iter().map(String::as_str))
+                    } else {
+                        selection.read(cx).selected_text()
+                    };
+                    if text.is_empty() {
+                        return cx.propagate();
+                    }
+                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+                }
+            }))
+            .on_action(cx.listener({
+                let selection = selection.clone();
+                move |_, _: &ui::markdown::SelectAll, _, cx| {
+                    selection.update(cx, |s, _| s.select_all());
+                    cx.notify();
+                }
+            }))
+            .on_mouse_down(gpui::MouseButton::Left, cx.listener({
+                let (selection, focus) = (selection.clone(), focus.clone());
+                move |_, event: &gpui::MouseDownEvent, window, cx| {
+                    focus.focus(window, cx);
+                    selection.update(cx, |s, _| s.mouse_down(event.position, event.click_count));
+                    cx.notify();
+                }
+            }))
+            .on_mouse_move(cx.listener({
+                let selection = selection.clone();
+                move |_, event: &gpui::MouseMoveEvent, _, cx| {
+                    if event.pressed_button == Some(gpui::MouseButton::Left) && selection.read(cx).selecting {
+                        selection.update(cx, |s, _| s.drag(event.position));
+                        cx.notify();
+                    }
+                }
+            }))
+            .on_mouse_up(gpui::MouseButton::Left, cx.listener({
+                let selection = selection.clone();
+                move |_, event: &gpui::MouseUpEvent, _, cx| {
+                    if let Some(url) = selection.update(cx, |s, _| s.mouse_up(event.position)) {
+                        cx.open_url(&url);
+                    }
+                    cx.notify();
+                }
+            }))
+            .on_mouse_up_out(gpui::MouseButton::Left, cx.listener({
+                let selection = selection.clone();
+                move |_, event: &gpui::MouseUpEvent, _, cx| {
+                    selection.update(cx, |s, _| {
+                        s.mouse_up(event.position);
+                    });
+                }
+            }))
+            .child(
+                list(
+                    doc.list.clone(),
+                    cx.processor(move |_, ix: usize, window, cx| {
+                        let Some(chunk) = chunks.get(ix) else { return div().into_any_element() };
+                        // A readable column rather than the pane's whole width.
+                        div()
+                            .w_full()
+                            .flex()
+                            .justify_center()
+                            .px_6()
+                            .when(ix == 0, |this| this.pt_5())
+                            .when(ix + 1 == chunks.len(), |this| this.pb_5())
+                            .child(
+                                div()
+                                    .w_full()
+                                    .max_w(px(820.))
+                                    .pb(rems(1.))
+                                    .child(ui::markdown::markdown(("file", ix), chunk, &selection, window, cx)),
+                            )
+                            .into_any_element()
+                    }),
+                )
+                .size_full(),
+            )
+            .into_any_element()
     }
 
     fn agent_panel(&self, lead: Option<AnyElement>, trail: Option<AnyElement>, cx: &mut Context<Self>) -> impl IntoElement {
@@ -3877,6 +4046,7 @@ impl Render for Reader {
             .on_action(cx.listener(|reader, _: &SwapPanes, _, cx| reader.swap_panes(cx)))
             .on_action(cx.listener(|reader, _: &ShowHistory, window, cx| reader.resume_thread(window, cx)))
             .on_action(cx.listener(|reader, _: &ToggleSplit, _, cx| reader.set_split(!reader.split, cx)))
+            .on_action(cx.listener(|reader, _: &ToggleRendered, _, cx| reader.toggle_rendered(cx)))
             .on_action(cx.listener(|reader, _: &OpenProject, window, cx| reader.pick_project(window, cx)))
             .on_action(cx.listener(|reader, _: &NewThread, window, cx| {
                 reader.new_blank_thread(window, cx);
@@ -4037,6 +4207,7 @@ fn main() {
             KeyBinding::new("ctrl-shift-s", SwapPanes, None),
             KeyBinding::new("ctrl-shift-h", ShowHistory, None),
             KeyBinding::new("ctrl-\\", ToggleSplit, None),
+            KeyBinding::new("ctrl-shift-m", ToggleRendered, None),
             KeyBinding::new("ctrl-n", NewThread, None),
             KeyBinding::new("ctrl-o", OpenProject, None),
             KeyBinding::new("ctrl-p", ShowFinder, None),
