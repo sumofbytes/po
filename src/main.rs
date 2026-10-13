@@ -9,6 +9,7 @@ mod pr;
 mod theme;
 mod trace;
 mod ui;
+mod update;
 mod viewer;
 mod workspace;
 mod worktree;
@@ -3955,6 +3956,18 @@ impl Render for Shell {
 }
 
 fn main() {
+    // `po update` is a terminal command, not a window: it runs to completion and
+    // exits before any GUI is set up (like `dex update`).
+    if std::env::args().nth(1).as_deref() == Some("update") {
+        match update::update() {
+            Ok(message) => println!("{message}"),
+            Err(message) => {
+                eprintln!("po-update: {message}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
     trace::init();
     let mut args = std::env::args().skip(1);
     let mut path = None;
