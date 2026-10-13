@@ -505,6 +505,13 @@ struct Thread {
     pending: Option<String>,
     /// Start the thread in a git worktree of its own. Only asked before it has started.
     isolate: bool,
+    /// Nothing has been sent in it and no session was picked for it. Its agent runs only to
+    /// offer the session's settings, so its session is never kept or resumed.
+    blank: bool,
+    /// The settings still to carry over from earlier threads, last first, while the agent takes
+    /// them one at a time: a model can change what the other settings offer. A first message
+    /// waits for them.
+    applying: Option<Vec<String>>,
     messages: Vec<Msg>,
     busy: bool,
     /// Messages typed during a turn, shown above the input until they are taken.
@@ -752,14 +759,24 @@ impl Thread {
 
     /// Stops the agent, keeping what has been said so it can be shown and resumed.
     fn sleep(&mut self) {
+        self.drop_agent();
+        self.status = if self.blank { String::new() } else { "asleep".into() };
+    }
+
+    /// Stops the agent and forgets what it was doing. A blank thread's session was never used,
+    /// so it goes too, and the thread starts a new one when it is shown.
+    fn drop_agent(&mut self) {
         self.client = None;
         self.ready = false;
         self.options.clear();
+        self.applying = None;
         self.loading = false;
         self.picking = false;
+        if self.blank {
+            self.session = None;
+        }
         // The events of the stopped agent are no longer this thread's.
         self.generation += 1;
-        self.status = "asleep".into();
     }
 }
 
@@ -926,6 +943,8 @@ impl Reader {
             touched: Instant::now(),
             pending: None,
             isolate: false,
+            blank: true,
+            applying: None,
             _enter: enter,
             messages: vec![],
             busy: false,
@@ -992,12 +1011,11 @@ impl Reader {
         trace::mark("tree");
         let resumed = workspace::Workspace::load(&reader.home).is_some_and(|saved| reader.restore(saved, window, cx));
         trace::mark("restore");
-        if resumed {
-            reader.wake_thread(window, cx);
-        } else if let Some(command) = command {
-            reader.connect(&command, false, window, cx);
-            trace::mark("connect");
+        match command.filter(|_| !resumed) {
+            Some(command) => reader.connect(&command, false, window, cx),
+            None => reader.wake_thread(window, cx),
         }
+        trace::mark("connect");
         reader.watch(watch, window, cx);
         trace::mark("watch");
         // Agents nobody is talking to are stopped now and then; their threads wake on demand.
@@ -1382,8 +1400,9 @@ impl Reader {
         let at = self.slots.len() - 1;
         self.swap_slot(at);
         self.resume_project(window, cx);
-        if let Some(agent) = agent {
-            self.connect(&agent, false, window, cx);
+        match agent {
+            Some(agent) => self.connect(&agent, false, window, cx),
+            None => self.wake_thread(window, cx),
         }
         self.request_save(cx);
     }
@@ -1443,7 +1462,7 @@ impl Reader {
             self.begin_turn(&prompt);
             self.thread.pending = Some(prompt);
             // The thread it was typed in stays only if something has happened to it since.
-            let blank = self.views().iter().any(|v| v.id == pid && v.threads.iter().any(|t| t.id == tid && t.agent.is_none()));
+            let blank = self.views().iter().any(|v| v.id == pid && v.threads.iter().any(|t| t.id == tid && t.blank));
             if blank {
                 self.close_any_thread(pid, tid, window, cx);
             }
@@ -1788,8 +1807,11 @@ impl Reader {
         self.thread.queue.clear();
         self.thread.ready = false;
         self.thread.options.clear();
+        self.thread.applying = None;
         self.thread.loading = false;
         self.thread.picking = resume;
+        // Listing sessions to resume is not a blank thread, even before one is picked.
+        self.thread.blank &= !resume;
         self.thread.sessions = None;
         let agent = self.agents.iter().find(|agent| agent.id == key).cloned().unwrap_or_else(|| config::Agent {
             id: key.to_string(),
@@ -1814,6 +1836,9 @@ impl Reader {
                                     if thread.generation == generation && !thread.ready && thread.client.is_some() {
                                         thread.status = "not responding".into();
                                         thread.fail("The agent did not answer the handshake. Check that its command speaks ACP.".into());
+                                        if thread.blank {
+                                            thread.drop_agent();
+                                        }
                                     }
                                 });
                                 cx.notify();
@@ -1853,13 +1878,14 @@ impl Reader {
         cx.notify();
     }
 
-    /// Opens a thread that has no agent yet, ready for a message. The thread on screen keeps
-    /// running in the background; if it is itself still blank it is used instead. The agent
-    /// starts when the first message is sent.
+    /// Opens a blank thread, ready for a message, with its agent starting so that its settings
+    /// can be chosen first. The thread on screen keeps running in the background; if it is
+    /// itself still blank it is used instead.
     fn new_blank_thread(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.thread.agent.is_some() {
+        if !self.thread.blank {
             self.add_thread(window, cx);
         }
+        self.wake_thread(window, cx);
         self.focus_draft(window, cx);
         cx.notify();
     }
@@ -1873,18 +1899,60 @@ impl Reader {
         self.chosen_agent.as_ref().and_then(|key| self.agents.iter().find(|agent| agent.id == *key)).or(self.agents.first())
     }
 
-    /// Sets a new thread's settings to what was last chosen for its agent.
-    fn apply_choices(&mut self) {
-        if !self.thread.messages.is_empty() {
-            return;
-        }
-        let (Some(key), Some(client)) = (&self.thread.agent, &self.thread.client) else { return };
-        let Some(chosen) = self.choices.get(key) else { return };
-        for option in &self.thread.options {
-            if let Some(value) = chosen.get(&option.id).filter(|v| **v != option.current && option.choices.iter().any(|(c, _)| c == *v)) {
-                client.set_option(&option.id, value);
+    /// Sets a new session's settings to what was last chosen for its agent: the model first,
+    /// then the others in the agent's order. A first message waits until they are taken.
+    fn apply_choices(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let mut options: Vec<&ConfigOption> = self.thread.options.iter().collect();
+        options.sort_by_key(|option| option.category != "model");
+        self.thread.applying = Some(options.into_iter().rev().map(|option| option.id.clone()).collect());
+        self.apply_next(window, cx);
+    }
+
+    /// Asks the agent for the next setting to carry over that it doesn't already have, judged
+    /// by what it offers now. Once none are left, the first message goes.
+    fn apply_next(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        while let Some(id) = self.thread.applying.as_mut().and_then(Vec::pop) {
+            let (Some(key), Some(client)) = (&self.thread.agent, &self.thread.client) else { break };
+            let Some(value) = self.choices.get(key).and_then(|chosen| chosen.get(&id)) else { continue };
+            let Some(option) = self.thread.options.iter().find(|option| option.id == id) else { continue };
+            if *value != option.current && option.choices.iter().any(|(choice, _)| choice == value) && client.set_option(&id, value) {
+                return;
             }
         }
+        self.thread.applying = None;
+        self.send_pending(window, cx);
+    }
+
+    /// Sends the first message, once the agent is ready and has the settings it starts with.
+    fn send_pending(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.thread.ready || self.thread.applying.is_some() {
+            return;
+        }
+        if let Some(prompt) = self.thread.pending.take()
+            && !self.send_to_agent(&prompt)
+        {
+            self.thread.pending = Some(prompt);
+            self.return_pending();
+            self.thread.fail("The agent has no session yet.".into());
+            self.restore_queue(window, cx);
+        }
+    }
+
+    /// The agent answered a change of setting: the next one carried over follows, if any.
+    fn took_setting(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.thread.applying.is_some() {
+            self.apply_next(window, cx);
+        }
+    }
+
+    /// Chooses the agent new threads start with. A blank thread on screen switches to it.
+    fn pick_agent(&mut self, key: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.chosen_agent = Some(key.clone());
+        if self.thread.blank && self.thread.agent.as_ref() != Some(&key) {
+            log::info!("agent: blank thread switches to {key}");
+            self.connect(&key, false, window, cx);
+        }
+        cx.notify();
     }
 
     /// Asks the agent to change a setting of the thread's session. Once it accepts, the choice is
@@ -1904,11 +1972,11 @@ impl Reader {
         self.connect(&key, true, window, cx);
     }
 
-    /// Starts the blank thread on screen: the chosen agent runs `prompt` as its first message,
-    /// which is shown at once and sent when the agent is ready. In a worktree of its own if
-    /// that was asked for.
-    fn start_thread(&mut self, prompt: String, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(key) = self.chosen().map(|agent| agent.id.clone()) else {
+    /// Starts the blank thread on screen with `prompt`, the draft, as its first message: in
+    /// the session its agent already has open, or in a worktree of its own if that was asked
+    /// for. `later` is as for [`Self::send`].
+    fn start_thread(&mut self, prompt: String, later: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(key) = self.thread.agent.clone().or_else(|| self.chosen().map(|agent| agent.id.clone())) else {
             self.thread.fail("No agents are configured.".into());
             cx.notify();
             return;
@@ -1924,13 +1992,14 @@ impl Reader {
             self.new_worktree_thread(&key, Some((prompt, blank)), window, cx);
             return;
         }
-        self.thread.draft.update(cx, |input, cx| input.set_value("", window, cx));
         log::info!("agent: new thread with {key}");
-        self.connect(&key, false, window, cx);
-        self.begin_turn(&prompt);
-        self.thread.pending = Some(prompt);
+        // An agent that failed or was stopped starts again, without the error it left.
+        if self.thread.client.is_none() {
+            self.connect(&key, false, window, cx);
+        }
+        self.thread.blank = false;
+        self.send(later, window, cx);
         self.request_save(cx);
-        cx.notify();
     }
 
     /// Puts a first message back in the draft after the agent failed before it could be sent.
@@ -1972,6 +2041,8 @@ impl Reader {
             touched: Instant::now(),
             pending: None,
             isolate: false,
+            blank: true,
+            applying: None,
             _enter: Self::send_on_enter(&draft, window, cx),
             messages: vec![],
             busy: false,
@@ -1997,7 +2068,7 @@ impl Reader {
         let fresh = self.blank_thread(window, cx);
         let old = std::mem::replace(&mut self.thread, fresh);
         // A blank thread, or a session listing nothing was picked from, isn't kept.
-        if old.agent.is_some() && !old.is_listing() {
+        if !old.blank && !old.is_listing() {
             self.parked.push(old);
         }
     }
@@ -2041,7 +2112,14 @@ impl Reader {
     }
 
     /// Starts the agent of the thread on screen again if it was stopped, resuming its session.
+    /// A blank thread's agent starts afresh, with its own agent or else the chosen one.
     fn wake_thread(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.thread.blank && self.thread.client.is_none() {
+            if let Some(key) = self.thread.agent.clone().or_else(|| self.chosen().map(|agent| agent.id.clone())) {
+                self.connect(&key, false, window, cx);
+            }
+            return;
+        }
         if !self.thread.asleep() {
             return;
         }
@@ -2063,6 +2141,7 @@ impl Reader {
         thread.agent = Some(saved.agent);
         thread.session = Some(saved.session);
         thread.saved_title = Some(saved.title).filter(|title| !title.is_empty());
+        thread.blank = false;
         thread.status = "asleep".into();
         thread
     }
@@ -2160,7 +2239,7 @@ impl Reader {
             .into_iter()
             .filter(|view| view.project.pr.is_none())
             .map(|view| {
-                let mut threads: Vec<&Thread> = view.threads.into_iter().filter(|t| t.agent.is_some() && t.session.is_some()).collect();
+                let mut threads: Vec<&Thread> = view.threads.into_iter().filter(|t| !t.blank && t.agent.is_some() && t.session.is_some()).collect();
                 threads.sort_by_key(|t| t.id);
                 workspace::ProjectState {
                     root: view.project.root.clone(),
@@ -2215,7 +2294,8 @@ impl Reader {
         live += self.background_threads().filter(|t| t.client.is_some()).count();
         let Some(excess) = live.checked_sub(self.max_live).filter(|n| *n > 0) else { return };
         let mut idle: Vec<&mut Thread> = self.background_threads().filter(|t| t.restful()).collect();
-        idle.sort_by_key(|t| t.touched);
+        // Blank threads lose nothing by stopping, so they go first.
+        idle.sort_by_key(|t| (!t.blank, t.touched));
         for thread in idle.into_iter().take(excess) {
             log::info!("agent: stopping thread {} to stay under the limit", thread.id);
             thread.sleep();
@@ -2347,9 +2427,11 @@ impl Reader {
                     self.choices.entry(key.clone()).or_default().insert(id.clone(), value.clone());
                     cx.background_spawn(async move { config::save_choice(&key, &id, &value) }).detach();
                 }
+                self.took_setting(window, cx);
             }
             Event::Refused(text) => {
                 self.thread.status = text;
+                self.took_setting(window, cx);
             }
             Event::Ready { agent, fresh } => {
                 self.thread.ready = true;
@@ -2358,17 +2440,11 @@ impl Reader {
                 log::info!("agent: {agent} ready");
                 self.thread.status = "ready".into();
                 self.thread.session = self.thread.client.as_ref().and_then(|client| client.session());
-                if fresh {
-                    self.apply_choices();
-                }
                 self.request_save(cx);
-                if let Some(prompt) = self.thread.pending.take()
-                    && !self.send_to_agent(&prompt)
-                {
-                    self.thread.pending = Some(prompt);
-                    self.return_pending();
-                    self.thread.fail("The agent has no session yet.".into());
-                    self.restore_queue(window, cx);
+                if fresh {
+                    self.apply_choices(window, cx);
+                } else {
+                    self.send_pending(window, cx);
                 }
             }
             Event::Update(update) => {
@@ -2415,6 +2491,10 @@ impl Reader {
                 self.return_pending();
                 self.thread.fail(error);
                 self.restore_queue(window, cx);
+                // A blank thread starts its agent again when it is next shown or sent to.
+                if self.thread.blank {
+                    self.thread.drop_agent();
+                }
             }
             Event::Exited(status) => {
                 log::warn!("agent exited: {status}");
@@ -2424,6 +2504,9 @@ impl Reader {
                     self.return_pending();
                     self.thread.fail(format!("the agent exited ({status})"));
                     self.restore_queue(window, cx);
+                }
+                if self.thread.blank {
+                    self.thread.drop_agent();
                 }
             }
         }
@@ -2681,12 +2764,15 @@ impl Reader {
         if prompt.is_empty() {
             return;
         }
-        if self.thread.agent.is_none() {
-            return self.start_thread(prompt, window, cx);
+        if self.thread.blank {
+            return self.start_thread(prompt, later, window, cx);
         }
-        let starting = self.thread.client.is_some() && !self.thread.ready && !self.thread.loading && !self.thread.picking && self.thread.restore.is_none();
+        let thread = &self.thread;
+        let starting = thread.client.is_some()
+            && (thread.applying.is_some() || !thread.ready && !thread.loading && !thread.picking && thread.restore.is_none());
         if starting && !self.thread.busy {
-            // The agent is still starting: the message waits for it, shown as sent.
+            // The agent is still starting, or taking its settings: the message waits for it,
+            // shown as sent.
             self.thread.draft.update(cx, |input, cx| input.set_value("", window, cx));
             self.begin_turn(&prompt);
             self.thread.pending = Some(prompt);
@@ -2790,6 +2876,7 @@ impl Reader {
 
     /// Shows `prompt` as the start of a turn the agent is working on.
     fn begin_turn(&mut self, prompt: &str) {
+        self.thread.blank = false;
         self.thread.busy = true;
         self.thread.touched = Instant::now();
         self.thread.messages.push(Msg::User(prompt.to_string()));
@@ -3182,7 +3269,7 @@ impl Reader {
                         ))
                     }),
             );
-            for thread in view.threads.iter().filter(|t| t.agent.is_some() || t.id == view.shown) {
+            for thread in view.threads.iter().filter(|t| !t.blank || t.id == view.shown) {
                 let tid = thread.id;
                 let (glyph, tint) = thread.activity().mark(colors);
                 let (select, close) = (cx.entity(), cx.entity());
@@ -3528,13 +3615,46 @@ impl Reader {
             .into_any_element()
     }
 
+    /// A menu for each of the thread's session settings: the model first, then the agent's
+    /// others in the order it gave them.
+    fn setting_menus(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let this = cx.entity();
+        let (busy, id) = (self.thread.busy, self.thread.id);
+        let mut options: Vec<&ConfigOption> = self.thread.options.iter().collect();
+        options.sort_by_key(|option| option.category != "model");
+        options
+            .into_iter()
+            .map(|option| {
+                let key = SharedString::from(format!("option-{id}-{}", option.id));
+                let (this, setting) = (this.clone(), option.clone());
+                let button = Button::new(key.clone()).label(option.current_name().to_string()).ghost().small().dropdown_caret(true);
+                if busy {
+                    // Agents differ on changing settings mid-turn, so it waits for the turn to end.
+                    return button.tooltip(format!("{}: available when the agent is idle", option.name)).into_any_element();
+                }
+                dropdown(key, button.tooltip(option.name.clone()), move || {
+                    setting
+                        .choices
+                        .iter()
+                        .map(|(value, name)| {
+                            let (this, setting_id, value) = (this.clone(), setting.id.clone(), value.clone());
+                            let label = if *value == setting.current { format!("✓ {name}") } else { name.clone() };
+                            MenuItem::new(label, move |_, cx| this.update(cx, |reader, _| reader.choose_option(&setting_id, &value)))
+                        })
+                        .collect()
+                })
+                .into_any_element()
+            })
+            .collect()
+    }
+
     fn agent_panel(&self, lead: Option<AnyElement>, trail: Option<AnyElement>, cx: &mut Context<Self>) -> impl IntoElement {
         let this = cx.entity();
         self.thread.selection.update(cx, |s, _| s.begin_frame());
         // Only the messages in view are built and laid out, however long the thread gets.
         let selection = self.thread.selection.clone();
-        let thread: AnyElement = if self.thread.agent.is_none() {
-            centered("Pick an agent below, then send a message to start a thread".into(), cx)
+        let thread: AnyElement = if self.thread.blank && self.thread.messages.is_empty() {
+            centered("Pick an agent and its settings below, then send a message to start a thread".into(), cx)
         } else if self.thread.picking && self.thread.messages.is_empty() {
             match &self.thread.sessions {
                 Some(sessions) if !self.thread.loading && !sessions.is_empty() => session_picker(sessions, &this, cx),
@@ -3559,6 +3679,8 @@ impl Reader {
             .size_full()
             .into_any_element()
         };
+        // The session's settings, which can be changed before the thread starts and after.
+        let settings = self.setting_menus(cx);
         let colors = cx.global::<Palette>();
         let (send, stop, history, fresh) = (cx.entity(), cx.entity(), cx.entity(), cx.entity());
         let agents = self.agents.clone();
@@ -3636,9 +3758,10 @@ impl Reader {
                     .into_any_element()
             })
             .collect();
-        // Before the thread starts, what it starts with is chosen here; after, it is only named.
-        let chips: AnyElement = if self.thread.agent.is_none() {
-            let name = self.chosen().map_or_else(|| "No agent".to_string(), |agent| agent.name.clone());
+        // Before the thread starts, its agent is chosen here; after, it is only named.
+        let chips: AnyElement = if self.thread.blank {
+            let name = self.agent_label().map(str::to_string).or_else(|| self.chosen().map(|agent| agent.name.clone()));
+            let name = name.unwrap_or_else(|| "No agent".to_string());
             let isolated = self.thread.isolate;
             div()
                 .flex()
@@ -3653,11 +3776,8 @@ impl Reader {
                                 .iter()
                                 .map(|agent| {
                                     let (pick, key) = (pick.clone(), agent.id.clone());
-                                    MenuItem::new(agent.name.clone(), move |_, cx| {
-                                        pick.update(cx, |reader, cx| {
-                                            reader.chosen_agent = Some(key.clone());
-                                            cx.notify();
-                                        })
+                                    MenuItem::new(agent.name.clone(), move |window, cx| {
+                                        pick.update(cx, |reader, cx| reader.pick_agent(key.clone(), window, cx))
                                     })
                                 })
                                 .collect()
@@ -3665,6 +3785,7 @@ impl Reader {
                     )
                     .menu(self.agent_menu.clone()),
                 )
+                .children(settings)
                 .children(in_repo.then(|| {
                     Button::new("worktree-chip")
                         .label("⎇ Worktree")
@@ -3681,37 +3802,12 @@ impl Reader {
                 }))
                 .into_any_element()
         } else {
-            let this = cx.entity();
-            let (busy, id) = (self.thread.busy, self.thread.id);
-            // The model first, then the agent's other settings in the order it gave them.
-            let mut options: Vec<&ConfigOption> = self.thread.options.iter().collect();
-            options.sort_by_key(|option| option.category != "model");
             div()
                 .flex()
                 .items_center()
                 .gap_1()
                 .child(div().pl_2().text_sm().text_color(muted).child(self.agent_label().unwrap_or("Agent").to_string()))
-                .children(options.into_iter().map(|option| {
-                    let key = SharedString::from(format!("option-{id}-{}", option.id));
-                    let (this, setting) = (this.clone(), option.clone());
-                    let button = Button::new(key.clone()).label(option.current_name().to_string()).ghost().small().dropdown_caret(true);
-                    if busy {
-                        // Agents differ on changing settings mid-turn, so it waits for the turn to end.
-                        return button.tooltip(format!("{}: available when the agent is idle", option.name)).into_any_element();
-                    }
-                    dropdown(key, button.tooltip(option.name.clone()), move || {
-                        setting
-                            .choices
-                            .iter()
-                            .map(|(value, name)| {
-                                let (this, setting_id, value) = (this.clone(), setting.id.clone(), value.clone());
-                                let label = if *value == setting.current { format!("✓ {name}") } else { name.clone() };
-                                MenuItem::new(label, move |_, cx| this.update(cx, |reader, _| reader.choose_option(&setting_id, &value)))
-                            })
-                            .collect()
-                    })
-                    .into_any_element()
-                }))
+                .children(settings)
                 .into_any_element()
         };
         div()
