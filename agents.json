@@ -1,7 +1,7 @@
 [
   { "id": "claude", "name": "Claude Code", "command": "claude-agent-acp" },
   { "id": "codex", "name": "Codex", "command": "codex-acp" },
-  { "id": "gemini", "name": "Gemini CLI", "command": "gemini --experimental-acp" },
+  { "id": "gemini", "name": "Gemini CLI", "command": "gemini --acp" },
   { "id": "opencode", "name": "OpenCode", "command": "opencode acp" },
   { "id": "cursor", "name": "Cursor", "command": "cursor-agent acp" },
   { "id": "copilot", "name": "GitHub Copilot", "command": "copilot --acp" },
