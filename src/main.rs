@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::{Duration, Instant, SystemTime};
 
-use acp::{Event, PermissionOption, SessionInfo};
+use acp::{ConfigOption, Event, PermissionOption, SessionInfo};
 use agent::Client;
 use dex::Queue;
 use diff::{Change, Kind, Pair, Row};
@@ -510,6 +510,8 @@ struct Thread {
     /// Messages typed during a turn, shown above the input until they are taken.
     queue: Vec<Queued>,
     ready: bool,
+    /// The agent's settings for the session, like its model, once it has said what they are.
+    options: Vec<ConfigOption>,
     /// A resumed session's history is being replayed.
     loading: bool,
     /// Choosing a session to resume: the agent's list once it arrives.
@@ -752,6 +754,7 @@ impl Thread {
     fn sleep(&mut self) {
         self.client = None;
         self.ready = false;
+        self.options.clear();
         self.loading = false;
         self.picking = false;
         // The events of the stopped agent are no longer this thread's.
@@ -837,6 +840,8 @@ struct Reader {
     agent_open: bool,
     /// The agent picker in the input box.
     agent_menu: Entity<MenuState>,
+    /// What was chosen for each agent's settings, such as its model.
+    choices: config::Choices,
     /// The agent new threads start with: the one last chosen.
     chosen_agent: Option<String>,
     /// Whether diffs show old and new side by side instead of inline.
@@ -926,6 +931,7 @@ impl Reader {
             busy: false,
             queue: vec![],
             ready: false,
+            options: Vec::new(),
             loading: false,
             picking: false,
             sessions: None,
@@ -972,6 +978,7 @@ impl Reader {
             swapped: false,
             agent_open: true,
             agent_menu: cx.new(MenuState::new),
+            choices: config::load_choices(),
             chosen_agent: command.clone(),
             split: false,
             rendered: true,
@@ -1780,6 +1787,7 @@ impl Reader {
         self.thread.busy = false;
         self.thread.queue.clear();
         self.thread.ready = false;
+        self.thread.options.clear();
         self.thread.loading = false;
         self.thread.picking = resume;
         self.thread.sessions = None;
@@ -1865,6 +1873,28 @@ impl Reader {
         self.chosen_agent.as_ref().and_then(|key| self.agents.iter().find(|agent| agent.id == *key)).or(self.agents.first())
     }
 
+    /// Sets a new thread's settings to what was last chosen for its agent.
+    fn apply_choices(&mut self) {
+        if !self.thread.messages.is_empty() {
+            return;
+        }
+        let (Some(key), Some(client)) = (&self.thread.agent, &self.thread.client) else { return };
+        let Some(chosen) = self.choices.get(key) else { return };
+        for option in &self.thread.options {
+            if let Some(value) = chosen.get(&option.id).filter(|v| **v != option.current && option.choices.iter().any(|(c, _)| c == *v)) {
+                client.set_option(&option.id, value);
+            }
+        }
+    }
+
+    /// Asks the agent to change a setting of the thread's session. Once it accepts, the choice is
+    /// remembered for the agent's next threads.
+    fn choose_option(&mut self, id: &str, value: &str) {
+        if let Some(client) = &self.thread.client {
+            client.set_option(id, value);
+        }
+    }
+
     /// Lists an agent's sessions in a new thread, to resume one: those of the agent the thread on
     /// screen is running, or of the chosen one if it has not started.
     fn resume_thread(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1947,6 +1977,7 @@ impl Reader {
             busy: false,
             queue: vec![],
             ready: false,
+            options: Vec::new(),
             loading: false,
             picking: false,
             sessions: None,
@@ -2308,13 +2339,28 @@ impl Reader {
                     self.thread.sessions = Some(sessions);
                 }
             },
-            Event::Ready { agent } => {
+            Event::Options(options) => {
+                self.thread.options = options;
+            }
+            Event::OptionSet { id, value } => {
+                if let Some(key) = self.thread.agent.clone() {
+                    self.choices.entry(key.clone()).or_default().insert(id.clone(), value.clone());
+                    cx.background_spawn(async move { config::save_choice(&key, &id, &value) }).detach();
+                }
+            }
+            Event::Refused(text) => {
+                self.thread.status = text;
+            }
+            Event::Ready { agent, fresh } => {
                 self.thread.ready = true;
                 self.thread.loading = false;
                 self.thread.picking = false;
                 log::info!("agent: {agent} ready");
                 self.thread.status = "ready".into();
                 self.thread.session = self.thread.client.as_ref().and_then(|client| client.session());
+                if fresh {
+                    self.apply_choices();
+                }
                 self.request_save(cx);
                 if let Some(prompt) = self.thread.pending.take()
                     && !self.send_to_agent(&prompt)
@@ -3635,7 +3681,38 @@ impl Reader {
                 }))
                 .into_any_element()
         } else {
-            div().pl_2().text_sm().text_color(muted).child(self.agent_label().unwrap_or("Agent").to_string()).into_any_element()
+            let this = cx.entity();
+            let (busy, id) = (self.thread.busy, self.thread.id);
+            // The model first, then the agent's other settings in the order it gave them.
+            let mut options: Vec<&ConfigOption> = self.thread.options.iter().collect();
+            options.sort_by_key(|option| option.category != "model");
+            div()
+                .flex()
+                .items_center()
+                .gap_1()
+                .child(div().pl_2().text_sm().text_color(muted).child(self.agent_label().unwrap_or("Agent").to_string()))
+                .children(options.into_iter().map(|option| {
+                    let key = SharedString::from(format!("option-{id}-{}", option.id));
+                    let (this, setting) = (this.clone(), option.clone());
+                    let button = Button::new(key.clone()).label(option.current_name().to_string()).ghost().small().dropdown_caret(true);
+                    if busy {
+                        // Agents differ on changing settings mid-turn, so it waits for the turn to end.
+                        return button.tooltip(format!("{}: available when the agent is idle", option.name)).into_any_element();
+                    }
+                    dropdown(key, button.tooltip(option.name.clone()), move || {
+                        setting
+                            .choices
+                            .iter()
+                            .map(|(value, name)| {
+                                let (this, setting_id, value) = (this.clone(), setting.id.clone(), value.clone());
+                                let label = if *value == setting.current { format!("✓ {name}") } else { name.clone() };
+                                MenuItem::new(label, move |_, cx| this.update(cx, |reader, _| reader.choose_option(&setting_id, &value)))
+                            })
+                            .collect()
+                    })
+                    .into_any_element()
+                }))
+                .into_any_element()
         };
         div()
             .size_full()
