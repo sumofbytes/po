@@ -69,6 +69,9 @@ jobs:
           name="po-${GITHUB_REF_NAME}-${{ matrix.target }}"
           mkdir -p "dist/$name"
           cp "target/${{ matrix.target }}/release/po" LICENSE LICENSE-APACHE README.md "dist/$name/"
+          if [ "$RUNNER_OS" = macOS ]; then
+            scripts/bundle-macos.sh "target/${{ matrix.target }}/release/po" "$GITHUB_REF_NAME" "dist/$name"
+          fi
           tar -czf "$name.tar.gz" -C dist "$name"
       - uses: actions/upload-artifact@v6
         with:

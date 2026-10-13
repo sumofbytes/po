@@ -71,9 +71,9 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("alt-shift-left", SelectToPreviousWordStart, Some(CONTEXT)),
         #[cfg(target_os = "linux")]
         KeyBinding::new("alt-shift-right", SelectToNextWordEnd, Some(CONTEXT)),
-        KeyBinding::new("ctrl-a", SelectAll, Some(CONTEXT)),
-        KeyBinding::new("ctrl-c", Copy, Some(CONTEXT)),
-        KeyBinding::new("ctrl-f", Search, Some(CONTEXT)),
+        KeyBinding::new("secondary-a", SelectAll, Some(CONTEXT)),
+        KeyBinding::new("secondary-c", Copy, Some(CONTEXT)),
+        KeyBinding::new("secondary-f", Search, Some(CONTEXT)),
     ]);
     search::init(cx);
 }

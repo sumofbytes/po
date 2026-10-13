@@ -223,7 +223,12 @@ impl RenderOnce for Button {
 
 /// A tooltip styled like the kit's: a small popover with the text.
 pub fn tooltip(text: SharedString, cx: &mut App) -> AnyView {
-    cx.new(|_| Tooltip(text)).into()
+    cx.new(|_| Tooltip(platform_keys(text))).into()
+}
+
+/// Shortcuts are written as Ctrl+Shift+X; on macOS the "secondary" modifier is Command, so show it so.
+fn platform_keys(text: SharedString) -> SharedString {
+    if cfg!(target_os = "macos") { text.replace("Ctrl+", "⌘").replace("Shift+", "⇧").into() } else { text }
 }
 
 struct Tooltip(SharedString);

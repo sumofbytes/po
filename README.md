@@ -101,6 +101,8 @@ One layout, in three columns:
 - **Right:** the viewer, for a file or a diff. Open it from the explorer, the
   Ctrl+P finder, or **Open** on a tool call.
 
+Shortcuts are written with Ctrl; on macOS the same keys use Cmd (Cmd+P, Cmd+W to close the window).
+
 The window's own controls sit in the pane headers, at the edges: the sidebar
 toggle (Ctrl+B) at the left of the leftmost pane, and the viewer toggle
 (Ctrl+Shift+B) at the right of the rightmost one, with **⇄** beside it (Ctrl+Shift+S)

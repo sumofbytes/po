@@ -35,12 +35,12 @@ use futures::StreamExt;
 use serde_json::Value;
 
 use gpui::{
-    AnyElement, App, Bounds, Context, Entity, FontWeight, IntoElement, ListAlignment, ListState, ParentElement,
+    AnyElement, App, Pixels, TitlebarOptions, WindowControlArea, point, Bounds, Context, Entity, FontWeight, IntoElement, ListAlignment, ListState, ParentElement,
     Render, SharedString, StyleRefinement, Styled, Subscription, Task, Window, WindowBounds, WindowOptions, div, list,
     prelude::*, px, rems, size, KeyBinding,
 };
 
-gpui::actions!(po, [ToggleLeft, ToggleRight, ShowSource, ShowChanges, ShowChat, SwapPanes, ShowHistory, ToggleSplit, ToggleRendered, NewThread, OpenProject, ShowFinder, CloseFinder, FinderUp, FinderDown]);
+gpui::actions!(po, [ToggleLeft, ToggleRight, ShowSource, ShowChanges, ShowChat, SwapPanes, ShowHistory, ToggleSplit, ToggleRendered, NewThread, OpenProject, ShowFinder, CloseWindow, CloseFinder, FinderUp, FinderDown]);
 
 const SKIP: [&str; 5] = ["target", "node_modules", "dist", "build", "__pycache__"];
 const MAX_FILES: usize = 5000;
@@ -4051,6 +4051,11 @@ impl Render for Reader {
             .on_action(cx.listener(|reader, _: &NewThread, window, cx| {
                 reader.new_blank_thread(window, cx);
             }))
+            // macOS draws no titlebar of its own (see `main`): this strip clears the traffic lights
+            // and, like the titlebar it replaces, drags the window.
+            .when(cfg!(target_os = "macos"), |this| {
+                this.child(div().h(TITLEBAR_HEIGHT).flex_none().window_control_area(WindowControlArea::Drag))
+            })
             .child(
                 div().flex_1().min_h_0().child(
                     sidebars(&self.sidebars)
@@ -4124,6 +4129,9 @@ impl Render for Shell {
             .child(self.child.clone())
     }
 }
+
+/// Height of the strip standing in for macOS's titlebar, which holds the traffic lights.
+const TITLEBAR_HEIGHT: Pixels = px(32.0);
 
 fn main() {
     // `po update` is a terminal command, not a window: it runs to completion and
@@ -4199,26 +4207,48 @@ fn main() {
         viewer::init(cx);
         ui::init(cx);
         cx.bind_keys([
-            KeyBinding::new("ctrl-b", ToggleLeft, None),
-            KeyBinding::new("ctrl-shift-b", ToggleRight, None),
-            KeyBinding::new("ctrl-1", ShowSource, None),
-            KeyBinding::new("ctrl-2", ShowChanges, None),
-            KeyBinding::new("ctrl-3", ShowChat, None),
-            KeyBinding::new("ctrl-shift-s", SwapPanes, None),
-            KeyBinding::new("ctrl-shift-h", ShowHistory, None),
-            KeyBinding::new("ctrl-\\", ToggleSplit, None),
-            KeyBinding::new("ctrl-shift-m", ToggleRendered, None),
-            KeyBinding::new("ctrl-n", NewThread, None),
-            KeyBinding::new("ctrl-o", OpenProject, None),
-            KeyBinding::new("ctrl-p", ShowFinder, None),
+            KeyBinding::new("secondary-b", ToggleLeft, None),
+            KeyBinding::new("secondary-shift-b", ToggleRight, None),
+            KeyBinding::new("secondary-1", ShowSource, None),
+            KeyBinding::new("secondary-2", ShowChanges, None),
+            KeyBinding::new("secondary-3", ShowChat, None),
+            KeyBinding::new("secondary-shift-s", SwapPanes, None),
+            KeyBinding::new("secondary-shift-h", ShowHistory, None),
+            KeyBinding::new("secondary-\\", ToggleSplit, None),
+            KeyBinding::new("secondary-shift-m", ToggleRendered, None),
+            KeyBinding::new("secondary-n", NewThread, None),
+            KeyBinding::new("secondary-o", OpenProject, None),
+            KeyBinding::new("secondary-p", ShowFinder, None),
+            KeyBinding::new("secondary-w", CloseWindow, None),
             KeyBinding::new("escape", CloseFinder, Some("Finder")),
             // The Input binds up/down itself and swallows them when single-line, so these name it.
             KeyBinding::new("up", FinderUp, Some("Finder > Input")),
             KeyBinding::new("down", FinderDown, Some("Finder > Input")),
         ]);
+        cx.on_action(|_: &CloseWindow, cx| {
+            if let Some(window) = cx.active_window() {
+                window.update(cx, |_, window, _| window.remove_window()).ok();
+            }
+        });
+        // macOS keeps an app running after its last window closes; this one has nothing left to show.
+        cx.on_window_closed(|cx, _| {
+            if cx.windows().is_empty() {
+                cx.quit();
+            }
+        })
+        .detach();
         let bounds = Bounds::centered(None, size(px(1360.0), px(840.0)), cx);
         cx.open_window(
-            WindowOptions { window_bounds: Some(WindowBounds::Windowed(bounds)), ..Default::default() },
+            WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(bounds)),
+                // On macOS, hide the titlebar but keep the traffic lights, centred in our own strip.
+                titlebar: cfg!(target_os = "macos").then(|| TitlebarOptions {
+                    title: Some("po".into()),
+                    appears_transparent: true,
+                    traffic_light_position: Some(point(px(12.0), (TITLEBAR_HEIGHT - px(14.0)) / 2.0)),
+                }),
+                ..Default::default()
+            },
             |window, cx| {
                 // Applied here rather than before the window opens: the first text lookup waits
                 // for the system fonts, and until the window exists the GPU setup can run alongside.
