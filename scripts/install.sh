@@ -8,12 +8,14 @@
 # Env:
 #   PO_VERSION       version to install ("latest" or e.g. "0.1.0" / "v0.1.0")
 #   PO_INSTALL_DIR   install directory (default: $HOME/.local/bin)
+#   PO_BASE_URL      base for /releases lookups (default: https://github.com)
 
 set -eu
 
 REPO="${PO_REPO:-sumofbytes/po}"
 INSTALL_DIR="${PO_INSTALL_DIR:-$HOME/.local/bin}"
 VERSION="${1:-${PO_VERSION:-latest}}"
+BASE_URL="${PO_BASE_URL:-https://github.com}"
 
 err() {
     echo "po-install: $1" >&2
@@ -48,7 +50,7 @@ if [ "$VERSION" = "latest" ]; then
     tag_file="$(mktemp)"
     trap 'rm -f "$tag_file"' EXIT
     if ! fetch -o /dev/null -w '%{url_effective}' \
-            "https://github.com/$REPO/releases/latest" >"$tag_file"; then
+            "$BASE_URL/releases/latest" >"$tag_file"; then
         rm -f "$tag_file"
         err "cannot determine latest release (none published yet?)"
     fi
@@ -61,7 +63,7 @@ v[0-9]*) ;;
 *) err "invalid version '$VERSION' (expected e.g. 0.1.0 or v0.1.0; no release published yet?)" ;;
 esac
 
-BASE="https://github.com/$REPO/releases/download/$VERSION"
+BASE="$BASE_URL/releases/download/$VERSION"
 NAME="po-$VERSION-$TARGET"
 ASSET="$NAME.tar.gz"
 TMP="$(mktemp -d)"
