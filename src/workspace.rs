@@ -32,6 +32,9 @@ pub struct Workspace {
     pub viewer_open: bool,
     /// The viewer was in the middle and the conversation on the right, rather than the reverse.
     pub swapped: bool,
+    /// The conversation pane was open while it sat on the right, rather than collapsed. Only
+    /// matters while it is there; in the middle it is always shown.
+    pub agent_open: bool,
     /// The agent last chosen for a new thread.
     pub agent: Option<String>,
     /// The height, in pixels, the agents view gives its projects above the explorer, if dragged.
@@ -83,7 +86,7 @@ impl Workspace {
                 })
             })
             .collect();
-        json!({ "version": 1, "viewer_open": self.viewer_open, "swapped": self.swapped, "agent": self.agent, "split": self.split, "explorer_collapsed": self.explorer_collapsed, "left_width": self.left_width, "right_width": self.right_width, "projects": projects })
+        json!({ "version": 1, "viewer_open": self.viewer_open, "swapped": self.swapped, "agent_open": self.agent_open, "agent": self.agent, "split": self.split, "explorer_collapsed": self.explorer_collapsed, "left_width": self.left_width, "right_width": self.right_width, "projects": projects })
     }
 
     fn from_json(value: &Value) -> Option<Self> {
@@ -120,6 +123,7 @@ impl Workspace {
         Some(Self { projects, // Files saved before the views were merged only said which layout the window was in.
             viewer_open: value["viewer_open"].as_bool().unwrap_or(value["layout"].as_str() != Some("agents")),
             swapped: value["swapped"].as_bool().unwrap_or(false),
+            agent_open: value["agent_open"].as_bool().unwrap_or(true),
             agent: text(&value["agent"]),
             // A saved height that isn't a sensible number is dropped rather than trusted.
             explorer_collapsed: value["explorer_collapsed"].as_bool().unwrap_or(false),
@@ -158,6 +162,7 @@ mod tests {
         let saved = Workspace {
             viewer_open: false,
             swapped: true,
+            agent_open: false,
             agent: Some("dex".into()),
             split: Some(212.5),
             explorer_collapsed: true,
@@ -186,6 +191,7 @@ mod tests {
         let back = Workspace::from_json(&saved.to_json()).expect("parses");
         assert!(!back.viewer_open);
         assert!(back.swapped);
+        assert!(!back.agent_open);
         assert_eq!(back.agent.as_deref(), Some("dex"));
         assert_eq!(back.split, Some(212.5));
         assert!(back.explorer_collapsed);

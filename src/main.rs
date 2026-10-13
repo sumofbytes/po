@@ -793,6 +793,9 @@ struct Reader {
     /// The viewer is in the middle and the conversation on the right, instead of the reverse.
     /// Only matters while the viewer is open.
     swapped: bool,
+    /// The conversation pane is shown while it sits on the right, rather than collapsed. Only
+    /// matters while it is there (`side_open` and `swapped`); in the middle it is always shown.
+    agent_open: bool,
     /// The agent picker in the input box.
     agent_menu: Entity<MenuState>,
     /// The agent new threads start with: the one last chosen.
@@ -926,6 +929,7 @@ impl Reader {
             left_split,
             side_open: true,
             swapped: false,
+            agent_open: true,
             agent_menu: cx.new(MenuState::new),
             chosen_agent: command.clone(),
             split: false,
@@ -1543,6 +1547,8 @@ impl Reader {
     fn open_viewer_wide(&mut self, cx: &mut Context<Self>) {
         if !self.side_open {
             self.side_open = true;
+            // It may have been opened from the middle, where the conversation always shows.
+            self.agent_open = true;
             self.sidebars.update(cx, |sidebars, _| sidebars.set_right_share(0.55));
             self.request_save(cx);
         }
@@ -1562,6 +1568,8 @@ impl Reader {
     fn reveal_side(&mut self, cx: &mut Context<Self>) {
         if !self.side_open {
             self.side_open = true;
+            // It may have been opened from the middle, where the conversation always shows.
+            self.agent_open = true;
             self.request_save(cx);
             cx.notify();
         }
@@ -1589,15 +1597,24 @@ impl Reader {
         cx.notify();
     }
 
-    /// Puts the viewer in the middle and the conversation on the right, or back.
+    /// Puts the viewer in the middle and the conversation on the right, or back. The
+    /// conversation always shows after a swap: it lands in the middle, where it can't be
+    /// collapsed, and keeps its place when it goes back to the right.
     fn swap_panes(&mut self, cx: &mut Context<Self>) {
         self.swapped = !self.swapped;
+        self.agent_open = true;
         self.request_save(cx);
         cx.notify();
     }
 
     fn toggle_right(&mut self, cx: &mut Context<Self>) {
-        if self.side_open {
+        // The right toggle works on the pane that sits on the right: the conversation while the
+        // viewer is open and swapped, the viewer otherwise.
+        if self.side_open && self.swapped {
+            self.agent_open = !self.agent_open;
+            self.request_save(cx);
+            cx.notify();
+        } else if self.side_open {
             self.show_chat(cx);
         } else {
             self.open_viewer_wide(cx);
@@ -1985,6 +2002,7 @@ impl Reader {
         let mut seen = HashSet::new();
         self.side_open = saved.viewer_open;
         self.swapped = saved.swapped;
+        self.agent_open = saved.agent_open;
         self.sidebars.update(cx, |sidebars, _| sidebars.set_widths(saved.left_width.map(px), saved.right_width.map(px)));
         self.chosen_agent = saved.agent.clone().or(self.chosen_agent.take());
         if let Some(height) = saved.split {
@@ -2085,7 +2103,7 @@ impl Reader {
                 }
             })
             .collect();
-        workspace::Workspace { projects, viewer_open: self.side_open, swapped: self.swapped, agent: self.chosen_agent.clone(), split: self.left_split.read(cx).top().map(f32::from), explorer_collapsed: self.left_split.read(cx).collapsed(), left_width: Some(self.sidebars.read(cx).widths().0.into()), right_width: self.sidebars.read(cx).widths().1.map(f32::from) }
+        workspace::Workspace { projects, viewer_open: self.side_open, agent_open: self.agent_open, swapped: self.swapped, agent: self.chosen_agent.clone(), split: self.left_split.read(cx).top().map(f32::from), explorer_collapsed: self.left_split.read(cx).collapsed(), left_width: Some(self.sidebars.read(cx).widths().0.into()), right_width: self.sidebars.read(cx).widths().1.map(f32::from) }
     }
 
     /// Saves the workspace once the current change has settled, so that a thread that is
@@ -3801,7 +3819,7 @@ impl Render for Reader {
         }
         let colors = cx.global::<Palette>();
         let (background, foreground) = (colors.background, colors.foreground);
-        let (left_open, side_open) = (self.left_open, self.side_open);
+        let (left_open, side_open, swapped, agent_open) = (self.left_open, self.side_open, self.swapped, self.agent_open);
         // The window's controls live in the headers of the panes at its edges: the sidebar toggle
         // at the left of the leftmost pane, the viewer toggle (and the swap, while the viewer is
         // open) at the right of the rightmost one.
@@ -3819,19 +3837,28 @@ impl Render for Reader {
             .small()
             .tooltip("Swap the viewer and the conversation (Ctrl+Shift+S)")
             .on_click(move |_, _, cx| swap.update(cx, |reader, cx| reader.swap_panes(cx)));
+        // The right toggle works on the pane that sits on the right: the conversation while the
+        // viewer is open and swapped, the viewer otherwise. Its icon says whether that pane shows.
+        let (toggles_agent, right_open) = if side_open && swapped { (true, agent_open) } else { (false, side_open) };
         let viewer_toggle = Button::new("toggle-right")
-            .icon(if side_open { IconName::PanelRightClose } else { IconName::PanelRightOpen })
+            .icon(if right_open { IconName::PanelRightClose } else { IconName::PanelRightOpen })
             .ghost()
             .small()
-            .tooltip("Toggle the viewer (Ctrl+Shift+B)")
+            .tooltip(if toggles_agent { "Toggle the conversation (Ctrl+Shift+B)" } else { "Toggle the viewer (Ctrl+Shift+B)" })
             .on_click(move |_, _, cx| right.update(cx, |reader, cx| reader.toggle_right(cx)));
         let trailing = div().flex().items_center().gap_1().children(side_open.then_some(swap_button)).child(viewer_toggle).into_any_element();
         // With the viewer open they can trade places; with it closed the conversation is the middle
         // either way, and has both controls.
         let (middle, side) = if !side_open {
             (self.agent_panel(Some(sidebar_toggle), Some(trailing), cx).into_any_element(), self.pane(None, None, cx))
-        } else if self.swapped {
-            (self.pane(Some(sidebar_toggle), None, cx), self.agent_panel(None, Some(trailing), cx).into_any_element())
+        } else if swapped {
+            // The conversation sits on the right; with it collapsed the viewer keeps the middle
+            // and carries both controls.
+            if agent_open {
+                (self.pane(Some(sidebar_toggle), None, cx), self.agent_panel(None, Some(trailing), cx).into_any_element())
+            } else {
+                (self.pane(Some(sidebar_toggle), Some(trailing), cx), self.pane(None, None, cx))
+            }
         } else {
             (self.agent_panel(Some(sidebar_toggle), None, cx).into_any_element(), self.pane(None, Some(trailing), cx))
         };
@@ -3861,7 +3888,7 @@ impl Render for Reader {
                     sidebars(&self.sidebars)
                         .left(left_open, px(220.0)..px(520.0), self.left_sidebar(cx))
                         .center(middle)
-                        .right(side_open, px(320.0)..px(900.0), side),
+                        .right(right_open, px(320.0)..px(900.0), side),
                 ),
             )
             .when(self.finder_open, |this| this.child(self.finder(cx)))
