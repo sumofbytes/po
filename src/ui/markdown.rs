@@ -19,8 +19,8 @@ gpui::actions!(markdown, [Copy, SelectAll]);
 
 pub fn init(cx: &mut App) {
     cx.bind_keys([
-        gpui::KeyBinding::new("ctrl-c", Copy, Some("Markdown")),
-        gpui::KeyBinding::new("ctrl-a", SelectAll, Some("Markdown")),
+        gpui::KeyBinding::new("secondary-c", Copy, Some("Markdown")),
+        gpui::KeyBinding::new("secondary-a", SelectAll, Some("Markdown")),
     ]);
 }
 

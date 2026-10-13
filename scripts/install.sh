@@ -91,8 +91,17 @@ tar -xzf "$TMP/$ASSET" -C "$TMP"
 [ -f "$TMP/$NAME/po" ] || err "archive did not contain a po binary"
 
 mkdir -p "$INSTALL_DIR"
-mv "$TMP/$NAME/po" "$INSTALL_DIR/po"
-chmod 755 "$INSTALL_DIR/po"
+if [ -d "$TMP/$NAME/po.app" ]; then
+    # macOS: the app bundle carries the Dock icon; `po` points into it so launching from a
+    # shell shows it too.
+    mkdir -p "$HOME/Applications"
+    rm -rf "$HOME/Applications/po.app"
+    mv "$TMP/$NAME/po.app" "$HOME/Applications/po.app"
+    ln -sf "$HOME/Applications/po.app/Contents/MacOS/po" "$INSTALL_DIR/po"
+else
+    mv "$TMP/$NAME/po" "$INSTALL_DIR/po"
+    chmod 755 "$INSTALL_DIR/po"
+fi
 
 case ":$PATH:" in
 *":$INSTALL_DIR:"*) ;;

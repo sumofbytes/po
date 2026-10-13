@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="#09090b"/>
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="none" stroke="#27272a" stroke-width="8"/>
+  <text x="512" y="650" font-family="DejaVu Sans, Helvetica, Arial, sans-serif" font-size="400" font-weight="700" text-anchor="middle" fill="#fafafa">po</text>
+</svg>
