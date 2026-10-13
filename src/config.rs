@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
@@ -88,4 +89,26 @@ pub fn agents(config: &Value) -> Vec<Agent> {
         }
     }
     agents
+}
+
+/// The settings chosen for each agent (by agent id, then option id), reapplied to its new threads.
+pub type Choices = BTreeMap<String, BTreeMap<String, String>>;
+
+fn choices_path() -> PathBuf {
+    data_dir().join("choices.json")
+}
+
+pub fn load_choices() -> Choices {
+    read_json(&choices_path()).and_then(|value| serde_json::from_value(value).ok()).unwrap_or_default()
+}
+
+pub fn save_choices(choices: &Choices) {
+    let path = choices_path();
+    let saved = path
+        .parent()
+        .map_or(Ok(()), std::fs::create_dir_all)
+        .and_then(|()| std::fs::write(&path, serde_json::to_string_pretty(choices).unwrap_or_default()));
+    if let Err(error) = saved {
+        log::error!("{}: {error}", path.display());
+    }
 }

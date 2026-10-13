@@ -29,7 +29,60 @@ pub struct SessionInfo {
     pub updated: String,
 }
 
+/// A choice of a session setting, like its model: one of the agent's `select` config options.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ConfigOption {
+    pub id: String,
+    pub name: String,
+    /// `model`, `mode`, `thought_level`, or empty; a hint for ordering and labels only.
+    pub category: String,
+    pub current: String,
+    /// Each choice's value and name.
+    pub choices: Vec<(String, String)>,
+}
+
+impl ConfigOption {
+    /// The name of the current choice.
+    pub fn current_name(&self) -> &str {
+        self.choices.iter().find(|(value, _)| *value == self.current).map_or(self.current.as_str(), |(_, name)| name.as_str())
+    }
+}
+
+/// The `select` options in an agent's `configOptions`, in the agent's order. Choices may be
+/// flat or grouped; groups are flattened.
+fn parse_options(list: &Value) -> Vec<ConfigOption> {
+    fn choices(list: &Value, into: &mut Vec<(String, String)>) {
+        for entry in list.as_array().into_iter().flatten() {
+            if let Some(value) = entry["value"].as_str() {
+                into.push((value.to_string(), entry["name"].as_str().unwrap_or(value).to_string()));
+            } else {
+                choices(&entry["options"], into);
+            }
+        }
+    }
+    list.as_array()
+        .into_iter()
+        .flatten()
+        .filter(|entry| entry["type"].as_str().is_none_or(|kind| kind == "select"))
+        .filter_map(|entry| {
+            let id = entry["id"].as_str().or(entry["configId"].as_str())?.to_string();
+            let current = entry["currentValue"].as_str()?.to_string();
+            let mut all = Vec::new();
+            choices(&entry["options"], &mut all);
+            (!all.is_empty()).then(|| ConfigOption {
+                name: entry["name"].as_str().unwrap_or(&id).to_string(),
+                category: entry["category"].as_str().unwrap_or_default().to_string(),
+                id,
+                current,
+                choices: all,
+            })
+        })
+        .collect()
+}
+
 pub enum Event {
+    /// The session's settings, when it opens and whenever they change.
+    Options(Vec<ConfigOption>),
     /// A session is open: a new one, or a loaded one once its history has been replayed.
     Ready { agent: String },
     /// The agent's resumable sessions for this project, newest first.
@@ -54,6 +107,7 @@ enum Pending {
     /// A page of `session/list`, counting from 0.
     List(u8),
     Load,
+    SetOption,
 }
 
 /// `session/list` pages followed before giving up on the rest.
@@ -106,6 +160,14 @@ impl Shared {
         self.request("session/list", params, Pending::List(page));
     }
 
+    /// Announces the settings a `session/new` or `session/load` result carries, if any.
+    fn emit_options(&self, result: &Value) {
+        let options = parse_options(&result["configOptions"]);
+        if !options.is_empty() {
+            self.emit(Event::Options(options));
+        }
+    }
+
     fn emit(&self, event: Event) {
         let _ = self.events.unbounded_send(event);
     }
@@ -117,7 +179,12 @@ impl Shared {
             (Some(method), Some(id)) => self.on_request(&method, id, &message["params"]),
             (Some(method), None) => {
                 if method == "session/update" {
-                    self.emit(Event::Update(message["params"]["update"].clone()));
+                    let update = &message["params"]["update"];
+                    if update["sessionUpdate"] == "config_option_update" {
+                        self.emit(Event::Options(parse_options(&update["configOptions"])));
+                    } else {
+                        self.emit(Event::Update(update.clone()));
+                    }
                 }
             }
             (None, Some(id)) => self.on_response(id, &message),
@@ -130,6 +197,10 @@ impl Shared {
             return;
         };
         if let Some(error) = message.get("error") {
+            if matches!(kind, Pending::SetOption) {
+                log::warn!("acp: setting refused: {error}");
+                return;
+            }
             // -32000 is ACP's `authRequired`.
             if error["code"].as_i64() == Some(-32000) {
                 let agent = self.agent.lock().expect("agent lock").clone();
@@ -186,12 +257,15 @@ impl Shared {
                     }
                 }
             }
+            Pending::SetOption => self.emit(Event::Options(parse_options(&result["configOptions"]))),
             Pending::Load => {
+                self.emit_options(result);
                 let agent = self.agent.lock().expect("agent lock").clone();
                 self.emit(Event::Ready { agent });
             }
             Pending::Session => {
                 *self.session.lock().expect("session lock") = result["sessionId"].as_str().map(String::from);
+                self.emit_options(result);
                 let agent = self.agent.lock().expect("agent lock").clone();
                 self.emit(Event::Ready { agent });
             }
@@ -315,6 +389,19 @@ impl Client {
         true
     }
 
+    /// Changes a session setting; the agent answers with all the settings, as [`Event::Options`].
+    pub fn set_option(&self, id: &str, value: &str) -> bool {
+        let Some(session) = self.shared.session.lock().expect("session lock").clone() else {
+            return false;
+        };
+        self.shared.request(
+            "session/set_config_option",
+            json!({ "sessionId": session, "configId": id, "value": value }),
+            Pending::SetOption,
+        );
+        true
+    }
+
     /// Resumes a listed session; the agent replays its history as updates, then answers.
     pub fn load(&self, id: &str) -> bool {
         *self.shared.session.lock().expect("session lock") = Some(id.to_string());
@@ -347,5 +434,26 @@ impl Client {
 impl Drop for Client {
     fn drop(&mut self) {
         let _ = self.child.lock().expect("child lock").kill();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_flat_and_grouped_select_options() {
+        let list = json!([
+            { "id": "model", "name": "Model", "category": "model", "type": "select", "currentValue": "b",
+              "options": [{ "value": "a", "name": "A" }, { "value": "b", "name": "B" }] },
+            { "configId": "effort", "name": "Effort", "type": "select", "currentValue": "x",
+              "options": [{ "group": "g", "name": "G", "options": [{ "value": "x", "name": "X" }] }] },
+            { "id": "flag", "name": "Flag", "type": "boolean", "currentValue": true }
+        ]);
+        let options = parse_options(&list);
+        assert_eq!(options.len(), 2);
+        assert_eq!(options[0].current_name(), "B");
+        assert_eq!(options[1].id, "effort");
+        assert_eq!(options[1].choices, vec![("x".to_string(), "X".to_string())]);
     }
 }
