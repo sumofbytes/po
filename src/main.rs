@@ -530,6 +530,29 @@ struct Thread {
 }
 
 impl Thread {
+    /// What Select All copies, in reading order: each text with whether it is plain (drawn by
+    /// `markdown::plain`) rather than markdown. Includes replies scrolled out of view.
+    fn selectable_sources(&self) -> Vec<(&str, bool)> {
+        let mut sources = Vec::new();
+        for msg in &self.messages {
+            match msg {
+                Msg::User(text) => sources.push((text.as_str(), true)),
+                Msg::Agent(blocks) => {
+                    for block in blocks {
+                        match block {
+                            Block::Text(text) | Block::Thought(text) => sources.push((text.as_str(), false)),
+                            Block::Tool(tool) if tool.open => {
+                                sources.extend([&tool.arguments, &tool.result].into_iter().filter(|t| !t.is_empty()).map(|t| (t.as_str(), true)));
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+        sources
+    }
+
     fn fail(&mut self, text: String) {
         self.busy = false;
         self.messages.push(Msg::Agent(vec![Block::Text(format!("**Error:** {text}"))]));
@@ -3654,13 +3677,7 @@ impl Reader {
                     .on_action(cx.listener(|reader, _: &ui::markdown::Copy, _, cx| {
                         // Select All takes the replies scrolled out of view too, which aren't laid out.
                         let text = if reader.thread.selection.read(cx).is_all() {
-                            ui::markdown::all_text(reader.thread.messages.iter().flat_map(|msg| match msg {
-                                Msg::Agent(blocks) => blocks.as_slice(),
-                                Msg::User(_) => &[],
-                            }).filter_map(|block| match block {
-                                Block::Text(text) | Block::Thought(text) => Some(text.as_str()),
-                                _ => None,
-                            }))
+                            ui::markdown::all_text_of(reader.thread.selectable_sources())
                         } else {
                             reader.thread.selection.read(cx).selected_text()
                         };
@@ -3747,9 +3764,10 @@ fn render_msg(
     window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
-    let colors = cx.global::<Palette>();
     let blocks = match msg {
         Msg::User(text) => {
+            let colors = cx.global::<Palette>();
+            let (bg, text_el) = (colors.secondary, ui::markdown::plain(("user", ix), text, selection, window, cx));
             return div()
                 .flex()
                 .justify_end()
@@ -3759,14 +3777,15 @@ fn render_msg(
                         .px_3()
                         .py_2()
                         .rounded_lg()
-                        .bg(colors.secondary)
+                        .bg(bg)
                         .text_sm()
-                        .child(text.clone()),
+                        .child(text_el),
                 )
                 .into_any_element();
         }
         Msg::Agent(blocks) => blocks,
     };
+    let colors = cx.global::<Palette>();
     let mut column = div().flex().flex_col().gap_2().min_w_0();
     // Text blocks sit where the composer's text does; boxes (tool cards) span the composer's width.
     let text_inset = text_inset(window);
@@ -3782,7 +3801,7 @@ fn render_msg(
                 div().opacity(0.7).child(ui::markdown::italic(("thought", id), text, selection, window, cx)).into_any_element(),
                 false,
             ),
-            Block::Tool(tool) => (tool_card(ix, n, tool, this, text_inset, cx).into_any_element(), true),
+            Block::Tool(tool) => (tool_card(ix, n, tool, this, text_inset, selection, window, cx).into_any_element(), true),
             Block::Permission(ask) => (permission(ix, n, ask, this).into_any_element(), false),
             Block::Plan(entries) => (plan(entries, cx).into_any_element(), false),
         };
@@ -3838,9 +3857,20 @@ fn plan(entries: &[(String, Step)], cx: &App) -> impl IntoElement {
     }))
 }
 
-fn tool_card(ix: usize, n: usize, tool: &ToolBlock, this: &Entity<Reader>, text_inset: gpui::Pixels, cx: &App) -> impl IntoElement {
+#[allow(clippy::too_many_arguments)]
+fn tool_card(
+    ix: usize,
+    n: usize,
+    tool: &ToolBlock,
+    this: &Entity<Reader>,
+    text_inset: gpui::Pixels,
+    selection: &Entity<ui::markdown::Selection>,
+    window: &mut Window,
+    cx: &mut App,
+) -> impl IntoElement {
     let colors = cx.global::<Palette>();
     let (mark, tint) = step_mark(tool.status, colors);
+    let (muted, border, background) = (colors.muted_foreground, colors.border, colors.background);
     let toggle = this.clone();
     let reveal = this.clone();
     let path = tool.path.clone();
@@ -3853,8 +3883,8 @@ fn tool_card(ix: usize, n: usize, tool: &ToolBlock, this: &Entity<Reader>, text_
         .px(text_inset - px(BOX_BORDER))
         .rounded_md()
         .border(px(BOX_BORDER))
-        .border_color(colors.border)
-        .bg(colors.background)
+        .border_color(border)
+        .bg(background)
         .child(
             div()
                 .flex()
@@ -3884,16 +3914,29 @@ fn tool_card(ix: usize, n: usize, tool: &ToolBlock, this: &Entity<Reader>, text_
                 })),
         );
     if tool.open {
-        for text in [&tool.arguments, &tool.result] {
+        for (which, text) in [&tool.arguments, &tool.result].into_iter().enumerate() {
             if !text.is_empty() {
+                let mono = cx.global::<Palette>().mono_font_family.clone();
+                let family = mono.clone();
+                let body = ui::markdown::plain_styled(
+                    ("tool-text", (ix * 10_000 + n) * 2 + which),
+                    text,
+                    selection,
+                    |style| {
+                        style.font_family = family;
+                        style.color = muted;
+                    },
+                    window,
+                    cx,
+                );
                 card = card.child(
                     div()
                         .max_h(rems(16.))
                         .overflow_hidden()
-                        .font_family(cx.global::<Palette>().mono_font_family.clone())
+                        .font_family(mono)
                         .text_xs()
-                        .text_color(colors.muted_foreground)
-                        .child(text.clone()),
+                        .text_color(muted)
+                        .child(body),
                 );
             }
         }

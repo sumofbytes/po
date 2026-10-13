@@ -232,10 +232,19 @@ fn leaves<'a>(blocks: &'a [Block], out: &mut Vec<&'a str>) {
 /// The text Select All copies from `sources`, the replies in order, including those scrolled
 /// out of view and so not laid out: every run's text, one run a line.
 pub fn all_text<'a>(sources: impl IntoIterator<Item = &'a str>) -> String {
-    let parsed: Vec<Vec<Block>> = sources.into_iter().map(parse).collect();
+    all_text_of(sources.into_iter().map(|source| (source, false)))
+}
+
+/// Like [`all_text`], for sources that may be plain text (drawn by [`plain`]) rather than markdown.
+pub fn all_text_of<'a>(sources: impl IntoIterator<Item = (&'a str, bool)>) -> String {
+    let sources: Vec<(&str, Option<Vec<Block>>)> =
+        sources.into_iter().map(|(source, plain)| (source, (!plain).then(|| parse(source)))).collect();
     let mut parts = Vec::new();
-    for blocks in &parsed {
-        leaves(blocks, &mut parts);
+    for (source, blocks) in &sources {
+        match blocks {
+            Some(blocks) => leaves(blocks, &mut parts),
+            None => parts.push(source),
+        }
     }
     parts.join("\n").trim().to_string()
 }
@@ -400,6 +409,35 @@ pub fn markdown(id: impl Into<ElementId>, source: &str, selection: &Entity<Selec
 /// Like [`markdown`], with the text in italics, as for the agent's thoughts.
 pub fn italic(id: impl Into<ElementId>, source: &str, selection: &Entity<Selection>, window: &mut Window, cx: &mut App) -> AnyElement {
     render(id.into(), source, selection, true, window, cx)
+}
+
+/// Shows `text` as it is, with no markdown, but selectable like a reply. `id` must be unique
+/// among replies shown together. Unlike markdown, line breaks are kept.
+pub fn plain(id: impl Into<ElementId>, text: &str, selection: &Entity<Selection>, window: &mut Window, cx: &mut App) -> AnyElement {
+    plain_styled(id, text, selection, |_| {}, window, cx)
+}
+
+/// Like [`plain`], with `restyle` adjusting the text style the runs carry, since a style set on
+/// a parent element doesn't reach them.
+pub fn plain_styled(
+    id: impl Into<ElementId>,
+    text: &str,
+    selection: &Entity<Selection>,
+    restyle: impl FnOnce(&mut gpui::TextStyle),
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
+    let mut style = window.text_style();
+    restyle(&mut style);
+    let mut cx2 = Render {
+        id: format!("{:?}", id.into()),
+        leaf: 0,
+        selection: selection.clone(),
+        style,
+        colors: Rc::new(CodeColorMap::new()),
+    };
+    let inline = Inline { text: text.to_string(), marks: Vec::new(), links: Vec::new() };
+    cx2.text(&inline, window, cx)
 }
 
 fn render(id: ElementId, source: &str, selection: &Entity<Selection>, italic: bool, window: &mut Window, cx: &mut App) -> AnyElement {
@@ -810,5 +848,11 @@ mod tests {
     fn double_click_takes_a_word() {
         assert_eq!(word_at("hello big_world!", 8), 6..15);
         assert_eq!(word_at("a  b", 1), 1..3);
+    }
+
+    #[test]
+    fn all_text_of_keeps_plain_sources_verbatim() {
+        let text = super::all_text_of([("a *b*", true), ("c *d*", false)]);
+        assert_eq!(text, "a *b*\nc d");
     }
 }
