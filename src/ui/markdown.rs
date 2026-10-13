@@ -232,10 +232,19 @@ fn leaves<'a>(blocks: &'a [Block], out: &mut Vec<&'a str>) {
 /// The text Select All copies from `sources`, the replies in order, including those scrolled
 /// out of view and so not laid out: every run's text, one run a line.
 pub fn all_text<'a>(sources: impl IntoIterator<Item = &'a str>) -> String {
-    let parsed: Vec<Vec<Block>> = sources.into_iter().map(parse).collect();
+    all_text_of(sources.into_iter().map(|source| (source, false)))
+}
+
+/// Like [`all_text`], for sources that may be plain text (drawn by [`plain`]) rather than markdown.
+pub fn all_text_of<'a>(sources: impl IntoIterator<Item = (&'a str, bool)>) -> String {
+    let sources: Vec<(&str, Option<Vec<Block>>)> =
+        sources.into_iter().map(|(source, plain)| (source, (!plain).then(|| parse(source)))).collect();
     let mut parts = Vec::new();
-    for blocks in &parsed {
-        leaves(blocks, &mut parts);
+    for (source, blocks) in &sources {
+        match blocks {
+            Some(blocks) => leaves(blocks, &mut parts),
+            None => parts.push(source),
+        }
     }
     parts.join("\n").trim().to_string()
 }
@@ -400,6 +409,30 @@ pub fn markdown(id: impl Into<ElementId>, source: &str, selection: &Entity<Selec
 /// Like [`markdown`], with the text in italics, as for the agent's thoughts.
 pub fn italic(id: impl Into<ElementId>, source: &str, selection: &Entity<Selection>, window: &mut Window, cx: &mut App) -> AnyElement {
     render(id.into(), source, selection, true, window, cx)
+}
+
+/// Shows `text` as it is, with no markdown, but selectable like a reply. `id` must be unique
+/// among replies shown together. `restyle` adjusts the text style the runs carry, since a
+/// style set on a parent element doesn't reach them.
+pub fn plain(
+    id: impl Into<ElementId>,
+    text: &str,
+    selection: &Entity<Selection>,
+    restyle: impl FnOnce(&mut gpui::TextStyle),
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
+    let mut style = window.text_style();
+    restyle(&mut style);
+    let mut cx2 = Render {
+        id: format!("{:?}", id.into()),
+        leaf: 0,
+        selection: selection.clone(),
+        style,
+        colors: Rc::new(CodeColorMap::new()),
+    };
+    let inline = Inline { text: text.to_string(), marks: Vec::new(), links: Vec::new() };
+    cx2.text(&inline, window, cx)
 }
 
 fn render(id: ElementId, source: &str, selection: &Entity<Selection>, italic: bool, window: &mut Window, cx: &mut App) -> AnyElement {
