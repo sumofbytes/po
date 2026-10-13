@@ -1,5 +1,5 @@
 #!/bin/sh
-# po installer (Linux x86_64 / macOS Apple Silicon).
+# po installer (Linux x86_64/aarch64, macOS Apple Silicon/Intel).
 #
 #   curl -fsSL https://raw.githubusercontent.com/sumofbytes/po/HEAD/scripts/install.sh | sh
 #   curl -fsSL ... | sh -s -- 0.1.0                    # pin a version
@@ -36,6 +36,8 @@ os="$(uname -s)"
 arch="$(uname -m)"
 case "$os-$arch" in
 Linux-x86_64 | Linux-amd64) TARGET="x86_64-unknown-linux-gnu" ;;
+Linux-aarch64 | Linux-arm64) TARGET="aarch64-unknown-linux-gnu" ;;
+Darwin-x86_64) TARGET="x86_64-apple-darwin" ;;
 Darwin-arm64 | Darwin-aarch64) TARGET="aarch64-apple-darwin" ;;
 *) err "no prebuilt binary for $os $arch. Build from source: cargo install --git https://github.com/$REPO" ;;
 esac

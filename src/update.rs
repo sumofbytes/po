@@ -46,6 +46,9 @@ pub fn update() -> Result<String, String> {
         .canonicalize()
         .map_err(|e| format!("cannot locate the running binary: {e}"))?;
     check_install_source(&exe)?;
+    if cfg!(windows) {
+        let _ = fs::remove_file(exe.with_extension("exe.old"));
+    }
     let target = release_target()?;
 
     // PO_VERSION (same env as install.sh) pins a version: it installs that
@@ -104,7 +107,13 @@ pub fn update() -> Result<String, String> {
     })
 }
 
-/// Download `po-{tag}-{target}.tar.gz` + `SHA256SUMS`, verify the archive's
+/// Release archive extension: Windows ships a zip, everything else a tarball.
+const ARCHIVE_EXT: &str = if cfg!(windows) { "zip" } else { "tar.gz" };
+
+/// Name of the binary inside the archive.
+const BINARY: &str = if cfg!(windows) { "po.exe" } else { "po" };
+
+/// Download `po-{tag}-{target}.{tar.gz,zip}` + `SHA256SUMS`, verify the archive's
 /// sha256, extract with the system tar and replace the running binary.
 fn download_verify_and_install(
     exe: &Path,
@@ -114,7 +123,7 @@ fn download_verify_and_install(
 ) -> Result<String, String> {
     let base = format!("{}/releases/download/{tag}", base_url());
     let name = format!("po-{tag}-{target}");
-    let asset = format!("{name}.tar.gz");
+    let asset = format!("{name}.{ARCHIVE_EXT}");
     let archive = dir.join(&asset);
 
     // A generous cap for the whole exchange (connect + a multi-MB GUI
@@ -131,7 +140,7 @@ fn download_verify_and_install(
     let expected = checksum_for(&sums, &asset)
         .ok_or_else(|| format!("no SHA256SUMS entry for {asset}"))?;
     let actual = sha256_of(&archive).ok_or_else(|| {
-        "neither sha256sum nor shasum is available to verify the download".to_string()
+        "no sha256 tool (sha256sum, shasum or certutil) is available to verify the download".to_string()
     })?;
     if !actual.eq_ignore_ascii_case(&expected) {
         return Err(format!(
@@ -143,8 +152,9 @@ fn download_verify_and_install(
     // flate2 + tar crates just for this. The release archives hold the binary
     // under `po-<tag>-<target>/po`, like install.sh unpacks them.
     progress("installing ...");
+    // Windows 10+ ships bsdtar, which also unpacks the zip.
     let status = Command::new("tar")
-        .arg("-xzf")
+        .arg(if cfg!(windows) { "-xf" } else { "-xzf" })
         .arg(&archive)
         .arg("-C")
         .arg(dir)
@@ -153,7 +163,7 @@ fn download_verify_and_install(
     if !status.success() {
         return Err("tar extraction failed".to_string());
     }
-    let new_bin = dir.join(&name).join("po");
+    let new_bin = dir.join(&name).join(BINARY);
     if !new_bin.is_file() {
         return Err(format!("archive did not contain a po binary ({asset})"));
     }
@@ -219,23 +229,33 @@ fn install(new_bin: &Path, exe: &Path) -> Result<String, String> {
         fs::set_permissions(&staged_path, perms)
             .map_err(|e| format!("cannot chmod {}: {e}", staged_path.display()))?;
     }
-    fs::rename(&staged_path, exe)
-        .map_err(|e| format!("cannot replace {}: {e}", exe.display()))?;
+    replace_exe(&staged_path, exe)?;
     staged.armed = false;
     Ok(exe.display().to_string())
+}
+
+/// Swap the staged binary over the running one. Unix renames over the live
+/// image; Windows refuses that, but lets the running exe be renamed aside
+/// (it's deleted on the next update, or by the user).
+fn replace_exe(staged: &Path, exe: &Path) -> Result<(), String> {
+    let fail = |e: io::Error| format!("cannot replace {}: {e}", exe.display());
+    if !cfg!(windows) {
+        return fs::rename(staged, exe).map_err(fail);
+    }
+    let old = exe.with_extension("exe.old");
+    let _ = fs::remove_file(&old);
+    fs::rename(exe, &old).map_err(fail)?;
+    if let Err(e) = fs::rename(staged, exe) {
+        let _ = fs::rename(&old, exe);
+        return Err(fail(e));
+    }
+    Ok(())
 }
 
 /// Refuse to touch binaries we do not manage: replacing a dev build from a
 /// release would silently lie about its version, and replacing a
 /// cargo-installed binary would leave `~/.cargo/.crates.toml` stale.
 fn check_install_source(exe: &Path) -> Result<(), String> {
-    if cfg!(target_os = "windows") {
-        return Err(
-            "self-update is not supported on Windows — download a release from \
-             https://github.com/sumofbytes/po/releases"
-                .to_string(),
-        );
-    }
     if is_cargo_build_path(exe) {
         return Err(
             "this is a dev build (running from target/) — update via git pull + cargo build"
@@ -244,7 +264,7 @@ fn check_install_source(exe: &Path) -> Result<(), String> {
     }
     let cargo_home = env::var_os("CARGO_HOME")
         .map(PathBuf::from)
-        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".cargo")));
+        .or_else(|| crate::config::home().map(|home| home.join(".cargo")));
     // Canonicalize like `exe` so a symlinked HOME/CARGO_HOME still matches.
     let cargo_home = cargo_home.map(|home| home.canonicalize().unwrap_or(home));
     if let Some(cargo_home) = cargo_home
@@ -279,8 +299,14 @@ fn crates_toml_tracks(text: &str) -> bool {
 fn release_target() -> Result<&'static str, String> {
     if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
         Ok("x86_64-unknown-linux-gnu")
+    } else if cfg!(all(target_os = "linux", target_arch = "aarch64")) {
+        Ok("aarch64-unknown-linux-gnu")
     } else if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
         Ok("aarch64-apple-darwin")
+    } else if cfg!(all(target_os = "macos", target_arch = "x86_64")) {
+        Ok("x86_64-apple-darwin")
+    } else if cfg!(all(target_os = "windows", target_arch = "x86_64")) {
+        Ok("x86_64-pc-windows-msvc")
     } else {
         Err(
             "self-update is not available for this platform — build from source or download a \
@@ -326,6 +352,17 @@ fn checksum_for(sums: &str, asset: &str) -> Option<String> {
 /// Digest a file the way install.sh does: `sha256sum` where it exists (Linux),
 /// else `shasum -a 256` (macOS). None when neither tool runs successfully.
 fn sha256_of(path: &Path) -> Option<String> {
+    if cfg!(windows) {
+        // `certutil -hashfile` prints the hash on its own line (older versions space-separate bytes).
+        let output = Command::new("certutil").arg("-hashfile").arg(path).arg("SHA256").output().ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        return String::from_utf8_lossy(&output.stdout).lines().find_map(|line| {
+            let hash: String = line.split_whitespace().collect();
+            (hash.len() == 64 && hash.chars().all(|c| c.is_ascii_hexdigit())).then(|| hash.to_ascii_lowercase())
+        });
+    }
     for mut command in [
         Command::new("sha256sum"),
         {

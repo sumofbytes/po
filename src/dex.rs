@@ -351,6 +351,38 @@ impl Mapper {
     }
 }
 
+/// The daemon dies with po even when po is killed: a job object that kills its members when the
+/// last handle to it closes, which is when po exits. The Windows counterpart of `PR_SET_PDEATHSIG`.
+#[cfg(windows)]
+fn kill_with_po(child: &std::process::Child) {
+    use std::os::windows::io::AsRawHandle;
+    use std::sync::OnceLock;
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation, SetInformationJobObject,
+    };
+    // The handle is never closed: it lives as long as po does.
+    static JOB: OnceLock<usize> = OnceLock::new();
+    let job = *JOB.get_or_init(|| unsafe {
+        let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+        if !job.is_null() {
+            let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            SetInformationJobObject(
+                job,
+                JobObjectExtendedLimitInformation,
+                (&raw const info).cast(),
+                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            );
+        }
+        job as usize
+    });
+    if job != 0 {
+        // SAFETY: both handles are valid; a failure just leaves the daemon unmanaged.
+        unsafe { AssignProcessToJobObject(job as _, child.as_raw_handle() as _) };
+    }
+}
+
 /// A daemon po started. Threads share one daemon per URL, so it belongs to the process rather
 /// than to the client that happened to start it, and goes away with the last client using it.
 struct Owned {
@@ -441,6 +473,8 @@ impl Client {
                         .stderr(Stdio::inherit())
                         .spawn()
                         .with_context(|| format!("could not start `{command}`"))?;
+                    #[cfg(windows)]
+                    kill_with_po(&child);
                     let (release, hold) = std::sync::mpsc::channel::<()>();
                     let adopted = registry(|r| {
                         // Every client using this daemon was dropped while it started.

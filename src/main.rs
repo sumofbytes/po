@@ -4079,11 +4079,16 @@ impl Render for Reader {
 /// Relaunch ourselves in its own process group with output going to a log file,
 /// so the shell gets its prompt back (like `code .`).
 fn detach(root: &Path, command: &Option<String>, pr: &Option<pr::Pr>) -> std::io::Result<()> {
-    use std::os::unix::process::CommandExt;
     use std::process::{Command, Stdio};
     let log_dir = std::env::var_os("XDG_CACHE_HOME")
         .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")))
+        .or_else(|| {
+            if cfg!(windows) {
+                std::env::var_os("LOCALAPPDATA").map(PathBuf::from)
+            } else {
+                config::home().map(|home| home.join(".cache"))
+            }
+        })
         .unwrap_or_else(std::env::temp_dir)
         .join("po");
     std::fs::create_dir_all(&log_dir)?;
@@ -4108,13 +4113,15 @@ fn detach(root: &Path, command: &Option<String>, pr: &Option<pr::Pr>) -> std::io
             child.arg("--pr-source").arg(source);
         }
     }
-    child
-        .arg(root)
-        .stdin(Stdio::null())
-        .stdout(log.try_clone()?)
-        .stderr(log)
-        .process_group(0)
-        .spawn()?;
+    child.arg(root).stdin(Stdio::null()).stdout(log.try_clone()?).stderr(log);
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut child, 0);
+    #[cfg(windows)]
+    {
+        // DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+        std::os::windows::process::CommandExt::creation_flags(&mut child, 0x0000_0008 | 0x0000_0200);
+    }
+    child.spawn()?;
     Ok(())
 }
 

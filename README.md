@@ -7,7 +7,7 @@ and review the agent's plans and edit diffs side by side.
 
 ## Install
 
-Prebuilt binaries are published for Linux x86_64 and macOS Apple Silicon:
+Prebuilt binaries are published for Linux (x86_64, aarch64) and macOS (Apple Silicon, Intel), and Windows x86_64:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/sumofbytes/po/HEAD/scripts/install.sh | sh
@@ -17,7 +17,15 @@ curl -fsSL https://raw.githubusercontent.com/sumofbytes/po/HEAD/scripts/install.
 - Custom directory: `PO_INSTALL_DIR=/usr/local/bin curl -fsSL .../install.sh | sh`
   (default is `~/.local/bin`)
 
-Or download a tarball from the [releases page](https://github.com/sumofbytes/po/releases).
+On Windows (PowerShell):
+
+```powershell
+irm https://raw.githubusercontent.com/sumofbytes/po/HEAD/scripts/install.ps1 | iex
+```
+
+`PO_VERSION` and `PO_INSTALL_DIR` work the same way (default is `%LOCALAPPDATA%\Programs\po`).
+
+Or download a tarball (a `.zip` on Windows) from the [releases page](https://github.com/sumofbytes/po/releases).
 On Linux the runtime needs Wayland or X11, Vulkan, and fontconfig libraries.
 Other platforms: build from source below.
 

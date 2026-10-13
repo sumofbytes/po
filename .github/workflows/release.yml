@@ -40,8 +40,14 @@ jobs:
           # Oldest runner image, so the glibc requirement stays low.
           - os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
+          - os: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
           - os: macos-latest
             target: aarch64-apple-darwin
+          - os: macos-latest
+            target: x86_64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
@@ -63,11 +69,21 @@ jobs:
       # po is a GUI and has no --version, so just check the binary exists and
       # is the right kind of executable.
       - name: Smoke test
-        run: file "target/${{ matrix.target }}/release/po"
+        shell: bash
+        run: |
+          bin="target/${{ matrix.target }}/release/po"
+          [ -f "$bin.exe" ] && bin="$bin.exe"
+          file "$bin"
       - name: Package
+        shell: bash
         run: |
           name="po-${GITHUB_REF_NAME}-${{ matrix.target }}"
           mkdir -p "dist/$name"
+          if [ "$RUNNER_OS" = Windows ]; then
+            cp "target/${{ matrix.target }}/release/po.exe" LICENSE LICENSE-APACHE README.md "dist/$name/"
+            powershell -NoProfile -Command "Compress-Archive -Path 'dist/$name' -DestinationPath '$name.zip' -Force"
+            exit 0
+          fi
           cp "target/${{ matrix.target }}/release/po" LICENSE LICENSE-APACHE README.md "dist/$name/"
           if [ "$RUNNER_OS" = macOS ]; then
             scripts/bundle-macos.sh "target/${{ matrix.target }}/release/po" "$GITHUB_REF_NAME" "dist/$name"
@@ -76,7 +92,9 @@ jobs:
       - uses: actions/upload-artifact@v6
         with:
           name: po-${{ matrix.target }}
-          path: po-*.tar.gz
+          path: |
+            po-*.tar.gz
+            po-*.zip
           if-no-files-found: error
 
   release:
