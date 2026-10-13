@@ -123,11 +123,10 @@ fn walk(root: &Path, out: &mut Vec<String>) {
         if out.len() >= MAX_FILES {
             return;
         }
-        if entry.file_type().is_some_and(|t| t.is_file()) {
-            if let Ok(rel) = entry.path().strip_prefix(root) {
+        if entry.file_type().is_some_and(|t| t.is_file())
+            && let Ok(rel) = entry.path().strip_prefix(root) {
                 out.push(rel.to_string_lossy().replace('\\', "/"));
             }
-        }
     }
 }
 
@@ -966,8 +965,8 @@ impl Reader {
 
     /// A project over `root`, showing `files` in its explorer until the next walk.
     fn build_project(root: PathBuf, pr: Option<pr::Pr>, files: Vec<String>, window: &mut Window, cx: &mut Context<Self>) -> Project {
-        let tree = cx.new(|cx| TreeState::new(cx));
-        let changes_tree = cx.new(|cx| TreeState::new(cx));
+        let tree = cx.new(TreeState::new);
+        let changes_tree = cx.new(TreeState::new);
         // Only the project on screen has its trees touched, so these act on `reader.project`;
         // the check keeps a stray event from another project's tree off it.
         let subscriptions = vec![
@@ -1708,12 +1707,11 @@ impl Reader {
                         }
                         let rediff = reader.project.picked.as_ref().is_some_and(|path| touched.contains(path));
                         reader.apply_changes(changes, false, rediff, cx);
-                        if let (Some(path), Some(seen)) = (reader.project.current.clone(), seen) {
-                            if reader.project.stamp != Some(seen) {
+                        if let (Some(path), Some(seen)) = (reader.project.current.clone(), seen)
+                            && reader.project.stamp != Some(seen) {
                                 log::info!("reloading {path}");
                                 reader.open(&path, window, cx);
                             }
-                        }
                     })
                 });
                 if !matches!(alive, Ok(Ok(()))) {
@@ -2519,7 +2517,7 @@ impl Reader {
 
     fn open(&mut self, path: &str, window: &mut Window, cx: &mut Context<Self>) {
         let full = self.project.root.join(path);
-        let too_big = std::fs::metadata(&full).map_or(false, |m| m.len() > 4 * 1024 * 1024);
+        let too_big = std::fs::metadata(&full).is_ok_and(|m| m.len() > 4 * 1024 * 1024);
         // A file too big to show isn't read at all.
         let read = if too_big { Ok(None) } else { std::fs::read_to_string(&full).map(Some) };
         match read {
@@ -2625,7 +2623,7 @@ impl Reader {
         if self.thread.queue.is_empty() {
             return;
         }
-        let items: Vec<Queued> = self.thread.queue.drain(..).collect();
+        let items: Vec<Queued> = std::mem::take(&mut self.thread.queue);
         let mut text = Vec::new();
         for item in items {
             if let (Some(kind), Some(client)) = (item.kind, &self.thread.client) {
@@ -2681,12 +2679,11 @@ impl Reader {
         for msg in &mut self.thread.messages {
             let Msg::Agent(blocks) = msg else { continue };
             for block in blocks {
-                if let Block::Permission(ask) = block {
-                    if ask.answered.is_none() {
+                if let Block::Permission(ask) = block
+                    && ask.answered.is_none() {
                         client.answer(ask.request.clone(), None);
                         ask.answered = Some("Cancelled".into());
                     }
-                }
             }
         }
         self.thread.relist(0);

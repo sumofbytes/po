@@ -30,9 +30,12 @@ pub fn init(cx: &mut App) {
     ]);
 }
 
+/// What clicking an item does.
+type Click = Rc<dyn Fn(&mut Window, &mut App)>;
+
 pub struct MenuItem {
     label: SharedString,
-    on_click: Option<Rc<dyn Fn(&mut Window, &mut App)>>,
+    on_click: Option<Click>,
     disabled: bool,
 }
 

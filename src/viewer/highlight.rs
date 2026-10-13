@@ -55,7 +55,7 @@ fn grammar(name: &str) -> Option<Arc<Grammar>> {
         for i in 0..injection_patterns {
             query.disable_pattern(i);
         }
-        let injections = (!config.injections.is_empty()).then(|| Query::new(&language, &config.injections).ok()).flatten();
+        let injections = (!config.injections.is_empty()).then(|| Query::new(&language, config.injections).ok()).flatten();
         Some(Arc::new(Grammar {
             name: config.name.to_string(),
             language,

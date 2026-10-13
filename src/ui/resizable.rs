@@ -191,11 +191,11 @@ impl RenderOnce for Sidebars {
                                 moving.update(cx, |state, cx| {
                                     match state.dragging {
                                         Some(Side::Left) => {
-                                            let width = right_shown.then_some(state.right).unwrap_or_default();
+                                            let width = if right_shown { state.right } else { Default::default() };
                                             state.left = dragged_width(Side::Left, event.position.x, state.bounds, width, &left_range);
                                         }
                                         Some(Side::Right) => {
-                                            let width = left_shown.then_some(state.left).unwrap_or_default();
+                                            let width = if left_shown { state.left } else { Default::default() };
                                             state.right = dragged_width(Side::Right, event.position.x, state.bounds, width, &right_range);
                                             state.right_chosen = true;
                                         }
