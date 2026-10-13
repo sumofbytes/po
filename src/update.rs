@@ -244,7 +244,7 @@ fn check_install_source(exe: &Path) -> Result<(), String> {
     }
     let cargo_home = env::var_os("CARGO_HOME")
         .map(PathBuf::from)
-        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".cargo")));
+        .or_else(|| crate::config::home().map(|home| home.join(".cargo")));
     // Canonicalize like `exe` so a symlinked HOME/CARGO_HOME still matches.
     let cargo_home = cargo_home.map(|home| home.canonicalize().unwrap_or(home));
     if let Some(cargo_home) = cargo_home

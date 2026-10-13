@@ -15,20 +15,35 @@ pub struct Agent {
     pub daemon: Option<String>,
 }
 
-/// `$XDG_CONFIG_HOME/po`, or `~/.config/po`.
+/// The user's home directory: `$HOME`, or `%USERPROFILE%` on Windows.
+pub fn home() -> Option<PathBuf> {
+    std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map(PathBuf::from)
+}
+
+/// `$XDG_CONFIG_HOME/po`, or `~/.config/po` (`%APPDATA%\po` on Windows).
 pub fn dir() -> Option<PathBuf> {
-    let base = std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))?;
+    let base = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).or_else(|| {
+        if cfg!(windows) {
+            std::env::var_os("APPDATA").map(PathBuf::from)
+        } else {
+            home().map(|home| home.join(".config"))
+        }
+    })?;
     Some(base.join("po"))
 }
 
-/// `$XDG_DATA_HOME/po`, or `~/.local/share/po`: where po keeps what it makes, like worktrees.
+/// `$XDG_DATA_HOME/po`, or `~/.local/share/po` (`%LOCALAPPDATA%\po` on Windows): where po keeps what it makes, like worktrees.
 pub fn data_dir() -> PathBuf {
     std::env::var_os("XDG_DATA_HOME")
         .map(PathBuf::from)
         .filter(|path| path.is_absolute())
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share")))
+        .or_else(|| {
+            if cfg!(windows) {
+                std::env::var_os("LOCALAPPDATA").map(PathBuf::from)
+            } else {
+                home().map(|home| home.join(".local/share"))
+            }
+        })
         .unwrap_or_else(std::env::temp_dir)
         .join("po")
 }
