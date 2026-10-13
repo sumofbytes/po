@@ -240,6 +240,26 @@ pub fn all_text<'a>(sources: impl IntoIterator<Item = &'a str>) -> String {
     parts.join("\n").trim().to_string()
 }
 
+/// `source` cut into pieces at its top-level blocks, so a long document can be laid out a
+/// piece at a time. Link reference definitions go with every piece, since a link can use one
+/// from anywhere in the file.
+pub fn chunks(source: &str) -> Vec<String> {
+    let Ok(Node::Root(root)) = ::markdown::to_mdast(source, &::markdown::ParseOptions::gfm()) else {
+        return vec![source.to_string()];
+    };
+    let span = |node: &Node| node.position().and_then(|p| source.get(p.start.offset..p.end.offset));
+    let definitions: String =
+        root.children.iter().filter(|node| matches!(node, Node::Definition(_))).filter_map(span).map(|d| format!("{d}\n")).collect();
+    let chunks: Vec<String> = root
+        .children
+        .iter()
+        .filter(|node| !matches!(node, Node::Definition(_)))
+        .filter_map(span)
+        .map(|text| if definitions.is_empty() { text.to_string() } else { format!("{text}\n\n{definitions}") })
+        .collect();
+    if chunks.is_empty() { vec![source.to_string()] } else { chunks }
+}
+
 #[derive(Clone)]
 enum Picked {
     Range(SharedString, Range<usize>),
@@ -437,9 +457,11 @@ impl Render {
     fn block(&mut self, block: &Block, last: bool, in_list: bool, depth: usize, window: &mut Window, cx: &mut App) -> AnyElement {
         let gap_last = last || in_list;
         let palette = cx.global::<Palette>();
-        let (border, muted) = (palette.border, palette.muted_foreground);
+        let theme = palette.markdown;
+        let (border, muted) = (theme.quote_border, theme.quote);
         let (code_bg, mono, mono_size, radius) =
-            (palette.muted, palette.mono_font_family.clone(), palette.mono_font_size, palette.radius);
+            (theme.code_background, palette.mono_font_family.clone(), palette.mono_font_size, palette.radius);
+        let heading_muted = palette.muted_foreground;
         match block {
             Block::Paragraph(inline) => gapped(self.text(inline, window, cx), gap_last),
             Block::Heading(level, inline) => {
@@ -461,9 +483,7 @@ impl Render {
                     .child(self.styled(
                         |s| {
                             s.font_weight = weight;
-                            if *level == 6 {
-                                s.color = muted;
-                            }
+                            s.color = if *level == 6 { heading_muted } else { theme.heading };
                         },
                         |this| this.text(inline, window, cx),
                     ))
@@ -522,7 +542,7 @@ impl Render {
                     last,
                 )
             }
-            Block::Rule => gapped(div().bg(border).h(px(2.)).into_any_element(), gap_last),
+            Block::Rule => gapped(div().bg(theme.rule).h(px(2.)).into_any_element(), gap_last),
             Block::Table { align, rows } => self.table(align, rows, gap_last, window, cx),
         }
     }
@@ -530,7 +550,10 @@ impl Render {
     #[allow(clippy::too_many_arguments)]
     fn item(&mut self, item: &Item, ix: usize, ordered: bool, start: Option<u32>, depth: usize, window: &mut Window, cx: &mut App) -> AnyElement {
         let mut rows: Vec<AnyElement> = Vec::new();
-        let foreground = cx.global::<Palette>().foreground;
+        let (foreground, marker) = {
+            let palette = cx.global::<Palette>();
+            (palette.foreground, palette.markdown.marker)
+        };
         let line_height = window.line_height();
         for (child_ix, child) in item.children.iter().enumerate() {
             let content = self.block(child, true, true, depth + 1, window, cx);
@@ -557,7 +580,7 @@ impl Render {
                                     .when(checked, |this| this.bg(foreground)),
                             )
                             .into_any_element(),
-                        None => div().child(prefix(ix, start, ordered, depth)).into_any_element(),
+                        None => div().text_color(marker).child(prefix(ix, start, ordered, depth)).into_any_element(),
                     };
                     rows.push(
                         div()
@@ -648,15 +671,18 @@ impl Render {
             let mut style = HighlightStyle::default();
             if mark.bold {
                 style.font_weight = Some(FontWeight::BOLD);
+                style.color = palette.markdown.strong;
             }
             if mark.italic {
                 style.font_style = Some(FontStyle::Italic);
+                style.color = palette.markdown.emphasis.or(style.color);
             }
             if mark.strike {
                 style.strikethrough = Some(StrikethroughStyle { thickness: px(1.), ..Default::default() });
             }
             if mark.code {
-                style.background_color = Some(palette.accent);
+                style.background_color = Some(palette.markdown.inline_code_background);
+                style.color = Some(palette.markdown.code);
             }
             styles.push((range.clone(), style, mark.code));
         }
@@ -736,7 +762,16 @@ fn prefix(ix: usize, start: Option<u32>, ordered: bool, depth: usize) -> String 
 
 #[cfg(test)]
 mod tests {
-    use super::{Block, parse, prefix, word_at};
+    use super::{Block, chunks, parse, prefix, word_at};
+
+    #[test]
+    fn chunks_split_at_blocks_and_keep_definitions() {
+        let pieces = chunks("# Title\n\nSee [it][a].\n\n- x\n- y\n\n[a]: http://x.y\n");
+        assert_eq!(pieces.len(), 3);
+        assert!(pieces[0].starts_with("# Title"));
+        assert!(pieces.iter().all(|piece| piece.contains("[a]: http://x.y")));
+        assert_eq!(chunks("").len(), 1);
+    }
 
     #[test]
     fn soft_breaks_reflow_and_marks_land_on_text() {

@@ -372,6 +372,26 @@ fn mono_font(wanted: Option<&str>, cx: &App) -> SharedString {
         .into()
 }
 
+/// The colors markdown is drawn with, for the agent's replies and for `.md` files alike. Each
+/// comes from the theme's `markdown` object (`heading`, `code`, `code_background`,
+/// `inline_code_background`, `quote`, `quote_border`, `rule`, `marker`, `strong`, `emphasis`)
+/// if it names one, else from the syntax colors the theme already has, else a neutral one.
+#[derive(Clone, Copy)]
+pub struct MarkdownColors {
+    pub heading: Hsla,
+    /// Inline code's text.
+    pub code: Hsla,
+    pub code_background: Hsla,
+    pub inline_code_background: Hsla,
+    pub quote: Hsla,
+    pub quote_border: Hsla,
+    pub rule: Hsla,
+    /// List bullets and numbers.
+    pub marker: Hsla,
+    pub strong: Option<Hsla>,
+    pub emphasis: Option<Hsla>,
+}
+
 /// The colors and fonts po's own components draw with, taken from the applied theme. Kept
 /// apart from the kit's theme so those components don't depend on it.
 pub struct Palette {
@@ -391,9 +411,9 @@ pub struct Palette {
     pub popover_ring: Hsla,
     pub accent: Hsla,
     pub accent_foreground: Hsla,
-    pub muted: Hsla,
     pub muted_foreground: Hsla,
     pub link: Hsla,
+    pub markdown: MarkdownColors,
     pub table_head: Hsla,
     pub table_head_foreground: Hsla,
     pub input_background: Hsla,
@@ -460,6 +480,24 @@ impl Palette {
             })
             .unwrap_or_default();
         let primary = base.primary;
+        let syntax_color = |name: &str| -> Option<Hsla> {
+            let styles: &HashMap<String, HighlightStyle> = &syntax;
+            styles.get(name).or_else(|| styles.get(name.split('.').next()?))?.color
+        };
+        let md = &theme["markdown"];
+        let md_get = |key: &str, fallback: Hsla| md.get(key).and_then(parse_color).unwrap_or(fallback);
+        let markdown = MarkdownColors {
+            heading: md_get("heading", syntax_color("title").unwrap_or(base.foreground)),
+            code: md_get("code", syntax_color("string").unwrap_or(base.foreground)),
+            code_background: md_get("code_background", base.muted),
+            inline_code_background: md_get("inline_code_background", accent),
+            quote: md_get("quote", base.muted_foreground),
+            quote_border: md_get("quote_border", syntax_color("punctuation").unwrap_or(base.border)),
+            rule: md_get("rule", base.border),
+            marker: md_get("marker", syntax_color("punctuation").unwrap_or(base.muted_foreground)),
+            strong: md.get("strong").and_then(parse_color).or_else(|| syntax_color("emphasis.strong")),
+            emphasis: md.get("emphasis").and_then(parse_color).or_else(|| syntax_color("emphasis")),
+        };
 
         Self {
             buttons: Buttons::new(&base),
@@ -477,9 +515,9 @@ impl Palette {
             popover_ring: base.foreground.alpha(0.1),
             accent,
             accent_foreground: base.accent_foreground,
-            muted: base.muted,
             muted_foreground: base.muted_foreground,
             link: get("link", primary),
+            markdown,
             table_head: get("table.head.background", list_head),
             table_head_foreground: get("table.head.foreground", base.muted_foreground),
             input_background: base.input_background,

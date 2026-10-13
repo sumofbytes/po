@@ -189,6 +189,14 @@ of the bundled files, rename it, and set `"theme"` to its name. An unknown
 theme falls back to `main`. The `font` block overrides the theme's UI and
 monospace fonts and sizes.
 
+Markdown, in the agent's replies and in `.md` files (which open rendered; the
+**Source** button or Ctrl+Shift+M switches to the text), is coloured from the
+theme: headings from the `title` syntax colour, inline code from `string`,
+bullets from `punctuation`, links from `colors.link`. An optional top-level
+`"markdown"` object overrides any of these with `#rrggbb` colours: `heading`,
+`code`, `code_background`, `inline_code_background`, `quote`, `quote_border`,
+`rule`, `marker`, `strong`, `emphasis`.
+
 ## License
 
 Dual-licensed under [MIT](LICENSE) or [Apache-2.0](LICENSE-APACHE), at your
