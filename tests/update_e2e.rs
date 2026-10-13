@@ -35,7 +35,10 @@ struct Release {
 }
 
 fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("po-update-e2e-{}-{name}", std::process::id()));
+    // Unique per call: tests run in parallel and may build the same release tag.
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("po-update-e2e-{}-{n}-{name}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
     dir
@@ -186,5 +189,34 @@ fn pinned_version_installs_even_when_not_newer() {
     assert!(out.status.success(), "stderr: {}", text(&out.stderr));
     let replaced = run(&mut Command::new(&exe));
     assert_eq!(text(&replaced.stdout).trim(), NEW_BINARY_OUTPUT);
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn refuses_to_update_a_dev_build() {
+    let dir = scratch("devbuild");
+    let bin_dir = dir.join("target").join("debug");
+    fs::create_dir_all(&bin_dir).unwrap();
+    let (exe, out) = run_update(&bin_dir, "http://127.0.0.1:1", &[]);
+    assert!(!out.status.success());
+    assert!(text(&out.stderr).contains("dev build"), "stderr: {}", text(&out.stderr));
+    assert_eq!(fs::read(&exe).unwrap(), fs::read(env!("CARGO_BIN_EXE_po")).unwrap());
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn refuses_to_update_a_cargo_installed_binary() {
+    let dir = scratch("cargo");
+    let cargo_home = dir.join("cargo-home");
+    fs::create_dir_all(cargo_home.join("bin")).unwrap();
+    fs::write(cargo_home.join(".crates.toml"), "[[package]]\nname = \"po\"\n").unwrap();
+    let (exe, out) = run_update(
+        &cargo_home.join("bin"),
+        "http://127.0.0.1:1",
+        &[("CARGO_HOME", cargo_home.to_str().unwrap())],
+    );
+    assert!(!out.status.success());
+    assert!(text(&out.stderr).contains("installed via cargo"), "stderr: {}", text(&out.stderr));
+    assert_eq!(fs::read(&exe).unwrap(), fs::read(env!("CARGO_BIN_EXE_po")).unwrap());
     let _ = fs::remove_dir_all(&dir);
 }

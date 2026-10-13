@@ -3958,7 +3958,11 @@ impl Render for Shell {
 fn main() {
     // `po update` is a terminal command, not a window: it runs to completion and
     // exits before any GUI is set up (like `dex update`).
-    if std::env::args().nth(1).as_deref() == Some("update") {
+    let cli: Vec<String> = std::env::args().skip(1).collect();
+    if cli.len() == 1 && cli[0] == "update" {
+        if std::path::Path::new("update").exists() {
+            eprintln!("po-update: running self-update (use `po ./update` to open the local path 'update')");
+        }
         match update::update() {
             Ok(message) => println!("{message}"),
             Err(message) => {

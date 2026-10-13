@@ -72,8 +72,8 @@ pub fn update() -> Result<String, String> {
                 .map_err(|e| format!("cannot check the latest release: {e}"))?;
             let tag = resp
                 .get_uri()
-                // The tag is the last path segment of the URL the redirect landed on.
-                .to_string()
+                .path()
+                .trim_end_matches('/')
                 .rsplit('/')
                 .next()
                 .unwrap_or_default()
@@ -84,17 +84,24 @@ pub fn update() -> Result<String, String> {
         }
     };
 
-    let current = parse_version(VERSION).expect("po release version is semver");
+    let current = parse_version(VERSION).ok_or_else(|| {
+        format!("this build's version '{VERSION}' is not a plain vX.Y.Z release")
+    })?;
     if pinned.is_none() && latest <= current {
         return Ok(format!("po {VERSION} is up to date (latest release {tag})"));
     }
 
     // Download, verify, extract, install. The temp dir is removed on every
-    // path; the staged copy in the install dir is removed on rename failure.
+    // path; the staged copy in the install dir is removed on any install failure.
     let dir = temp_download_dir()?;
     let outcome = download_verify_and_install(&exe, &tag, target, &dir);
     let _ = fs::remove_dir_all(&dir);
-    outcome.map(|installed| format!("po {VERSION} -> {tag} — updated at {installed}"))
+    outcome.map(|installed| {
+        format!(
+            "po {VERSION} -> {tag} — updated at {installed}\n\
+             restart any running po windows to pick up the new version"
+        )
+    })
 }
 
 /// Download `po-{tag}-{target}.tar.gz` + `SHA256SUMS`, verify the archive's
@@ -126,7 +133,7 @@ fn download_verify_and_install(
     let actual = sha256_of(&archive).ok_or_else(|| {
         "neither sha256sum nor shasum is available to verify the download".to_string()
     })?;
-    if actual != expected {
+    if !actual.eq_ignore_ascii_case(&expected) {
         return Err(format!(
             "checksum mismatch for {asset} (got {actual}, want {expected})"
         ));
@@ -172,15 +179,31 @@ fn fetch_file(client: &ureq::Agent, url: &str, to: &Path) -> Result<(), String> 
     Ok(())
 }
 
+/// Removes the staged file on drop unless install succeeded, so no error path
+/// (failed copy, chmod or rename) leaves a partial binary next to the exe.
+struct Staged<'a> {
+    path: &'a Path,
+    armed: bool,
+}
+
+impl Drop for Staged<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = fs::remove_file(self.path);
+        }
+    }
+}
+
 /// Move the verified binary into place: copy to a uniquely named staged file
 /// next to the exe, chmod 755, rename over the running binary.
 fn install(new_bin: &Path, exe: &Path) -> Result<String, String> {
     let dir = exe
         .parent()
         .ok_or_else(|| "binary has no parent directory".to_string())?;
-    let staged = dir.join(format!(".po.new-{}", std::process::id()));
-    let _ = fs::remove_file(&staged);
-    fs::copy(new_bin, &staged).map_err(|e| {
+    let staged_path = dir.join(format!(".po.new-{}", std::process::id()));
+    let _ = fs::remove_file(&staged_path);
+    let mut staged = Staged { path: &staged_path, armed: true };
+    fs::copy(new_bin, &staged_path).map_err(|e| {
         format!(
             "cannot stage the new binary in {} (is the install directory writable?): {e}",
             dir.display()
@@ -189,17 +212,16 @@ fn install(new_bin: &Path, exe: &Path) -> Result<String, String> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let mut perms = fs::metadata(&staged)
-            .map_err(|e| format!("cannot stat {}: {e}", staged.display()))?
+        let mut perms = fs::metadata(&staged_path)
+            .map_err(|e| format!("cannot stat {}: {e}", staged_path.display()))?
             .permissions();
         perms.set_mode(0o755);
-        fs::set_permissions(&staged, perms)
-            .map_err(|e| format!("cannot chmod {}: {e}", staged.display()))?;
+        fs::set_permissions(&staged_path, perms)
+            .map_err(|e| format!("cannot chmod {}: {e}", staged_path.display()))?;
     }
-    fs::rename(&staged, exe).map_err(|e| {
-        let _ = fs::remove_file(&staged);
-        format!("cannot replace {}: {e}", exe.display())
-    })?;
+    fs::rename(&staged_path, exe)
+        .map_err(|e| format!("cannot replace {}: {e}", exe.display()))?;
+    staged.armed = false;
     Ok(exe.display().to_string())
 }
 
@@ -214,7 +236,7 @@ fn check_install_source(exe: &Path) -> Result<(), String> {
                 .to_string(),
         );
     }
-    if exe.components().any(|c| c.as_os_str() == "target") {
+    if is_cargo_build_path(exe) {
         return Err(
             "this is a dev build (running from target/) — update via git pull + cargo build"
                 .to_string(),
@@ -223,6 +245,8 @@ fn check_install_source(exe: &Path) -> Result<(), String> {
     let cargo_home = env::var_os("CARGO_HOME")
         .map(PathBuf::from)
         .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".cargo")));
+    // Canonicalize like `exe` so a symlinked HOME/CARGO_HOME still matches.
+    let cargo_home = cargo_home.map(|home| home.canonicalize().unwrap_or(home));
     if let Some(cargo_home) = cargo_home
         && exe.starts_with(cargo_home.join("bin"))
         && let Ok(text) = fs::read_to_string(cargo_home.join(".crates.toml"))
@@ -231,6 +255,16 @@ fn check_install_source(exe: &Path) -> Result<(), String> {
         return Err("installed via cargo — update with `cargo install`".to_string());
     }
     Ok(())
+}
+
+/// Is this path inside a cargo build dir (`.../target/debug|release/...`)? A
+/// bare `target` directory name elsewhere (`/opt/target/po`) does not count.
+fn is_cargo_build_path(exe: &Path) -> bool {
+    let parts: Vec<_> = exe.components().map(|c| c.as_os_str()).collect();
+    parts
+        .iter()
+        .position(|p| *p == "target")
+        .is_some_and(|i| parts[i + 1..].iter().any(|p| *p == "debug" || *p == "release"))
 }
 
 /// Does `~/.cargo/.crates.toml` (v1 or v2 format) track a package named po?
@@ -283,8 +317,9 @@ fn checksum_for(sums: &str, asset: &str) -> Option<String> {
     sums.lines().find_map(|line| {
         let mut fields = line.split_whitespace();
         let hash = fields.next()?;
-        let name = fields.next()?;
-        (name == asset).then(|| hash.to_string())
+        // `sha256sum -b` writes `<hash> *<name>`.
+        let name = fields.next()?.trim_start_matches('*');
+        (name == asset).then(|| hash.to_ascii_lowercase())
     })
 }
 
@@ -304,18 +339,38 @@ fn sha256_of(path: &Path) -> Option<String> {
             continue;
         }
         if let Some(hash) = String::from_utf8_lossy(&output.stdout).split_whitespace().next() {
-            return Some(hash.to_string());
+            return Some(hash.to_ascii_lowercase());
         }
     }
     None
 }
 
-/// Fresh unique temp dir for this run: a shared name would let two concurrent
-/// `po update` processes extract into each other's files.
+/// Fresh private temp dir for this run. It is created with `create_dir` (which
+/// fails if the path exists, even as a symlink) and mode 0700, so another local
+/// user cannot pre-create it and swap the extracted binary before install.
 fn temp_download_dir() -> Result<PathBuf, String> {
-    let dir = env::temp_dir().join(format!("po-update-{}", std::process::id()));
-    fs::create_dir_all(&dir).map_err(|e| format!("cannot create temp dir {}: {e}", dir.display()))?;
-    Ok(dir)
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.subsec_nanos());
+    for attempt in 0..16u32 {
+        let dir = env::temp_dir().join(format!(
+            "po-update-{}-{:08x}",
+            std::process::id(),
+            nanos.wrapping_add(attempt)
+        ));
+        let mut builder = fs::DirBuilder::new();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            builder.mode(0o700);
+        }
+        match builder.create(&dir) {
+            Ok(()) => return Ok(dir),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(format!("cannot create temp dir {}: {e}", dir.display())),
+        }
+    }
+    Err("cannot create a unique temp dir".to_string())
 }
 
 #[cfg(test)]
@@ -347,21 +402,42 @@ mod tests {
     }
 
     #[test]
-    fn this_build_has_a_supported_release_target() {
-        // Running the tests from target/-built test binaries: the release
-        // targets are exactly the ones release.yml builds.
-        release_target().expect("this build's platform must be supported");
+    fn checksum_parsing_handles_binary_mode_and_uppercase() {
+        let sums = "ABC123 *po-v1.0.0-t.tar.gz\n";
+        assert_eq!(checksum_for(sums, "po-v1.0.0-t.tar.gz").as_deref(), Some("abc123"));
     }
 
     #[test]
-    fn archive_inner_paths_match_release_yml() {
-        let tag = "v0.2.1";
-        let target = "x86_64-unknown-linux-gnu";
-        assert_eq!(
-            format!("po-{tag}-{target}.tar.gz"),
-            "po-v0.2.1-x86_64-unknown-linux-gnu.tar.gz"
-        );
-        assert_eq!(format!("po-{tag}-{target}/po"), "po-v0.2.1-x86_64-unknown-linux-gnu/po");
+    fn release_targets_are_the_ones_release_yml_builds() {
+        let yml = include_str!("../.github/workflows/release.yml");
+        if let Ok(target) = release_target() {
+            assert!(yml.contains(&format!("target: {target}")), "{target} not in release.yml");
+        }
+        // The archive layout `download_verify_and_install` unpacks.
+        assert!(yml.contains(r#"name="po-${GITHUB_REF_NAME}-${{ matrix.target }}""#));
+        assert!(yml.contains(r#"tar -czf "$name.tar.gz" -C dist "$name""#));
+    }
+
+    #[test]
+    fn cargo_build_paths_are_detected_narrowly() {
+        assert!(is_cargo_build_path(Path::new("/src/po/target/debug/po")));
+        assert!(is_cargo_build_path(Path::new("/src/po/target/x86_64-unknown-linux-gnu/release/po")));
+        assert!(!is_cargo_build_path(Path::new("/opt/target/po")));
+        assert!(!is_cargo_build_path(Path::new("/home/u/target/bin/po")));
+    }
+
+    #[test]
+    fn temp_dirs_are_unique_and_private() {
+        let a = temp_download_dir().unwrap();
+        let b = temp_download_dir().unwrap();
+        assert_ne!(a, b);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(fs::metadata(&a).unwrap().permissions().mode() & 0o777, 0o700);
+        }
+        let _ = fs::remove_dir_all(a);
+        let _ = fs::remove_dir_all(b);
     }
 
     #[test]
