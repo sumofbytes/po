@@ -13,7 +13,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use serde_json::{Value, json};
 
@@ -122,6 +122,12 @@ impl Shared {
         let mut response = self.post(&self.quick, &self.url("/api/sessions"), &json!({ "cwd": self.cwd.to_string_lossy() }))?;
         let created: Value = response.body_mut().read_json()?;
         let id = created["session_id"].as_str().context("the daemon returned no session id")?;
+        // The daemon falls back to its own directory when it can't use ours, and a daemon from
+        // before it honored `cwd` does so always. Running tools in the wrong repo is worse than
+        // failing; an empty `cwd` is an older daemon that doesn't say, so nothing to check.
+        if let Some(actual) = created["cwd"].as_str().filter(|c| !c.is_empty() && Path::new(c) != self.cwd) {
+            bail!("the dex daemon runs this session in {actual}, not {}", self.cwd.display());
+        }
         *self.session.lock().expect("session lock") = Some(id.to_string());
         self.emit(Event::Ready { agent: "dex".into() });
         Ok(())
