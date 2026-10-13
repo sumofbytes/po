@@ -412,9 +412,14 @@ pub fn italic(id: impl Into<ElementId>, source: &str, selection: &Entity<Selecti
 }
 
 /// Shows `text` as it is, with no markdown, but selectable like a reply. `id` must be unique
-/// among replies shown together. `restyle` adjusts the text style the runs carry, since a
-/// style set on a parent element doesn't reach them.
-pub fn plain(
+/// among replies shown together. Unlike markdown, line breaks are kept.
+pub fn plain(id: impl Into<ElementId>, text: &str, selection: &Entity<Selection>, window: &mut Window, cx: &mut App) -> AnyElement {
+    plain_styled(id, text, selection, |_| {}, window, cx)
+}
+
+/// Like [`plain`], with `restyle` adjusting the text style the runs carry, since a style set on
+/// a parent element doesn't reach them.
+pub fn plain_styled(
     id: impl Into<ElementId>,
     text: &str,
     selection: &Entity<Selection>,
@@ -843,5 +848,11 @@ mod tests {
     fn double_click_takes_a_word() {
         assert_eq!(word_at("hello big_world!", 8), 6..15);
         assert_eq!(word_at("a  b", 1), 1..3);
+    }
+
+    #[test]
+    fn all_text_of_keeps_plain_sources_verbatim() {
+        let text = super::all_text_of([("a *b*", true), ("c *d*", false)]);
+        assert_eq!(text, "a *b*\nc d");
     }
 }

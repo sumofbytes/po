@@ -530,6 +530,29 @@ struct Thread {
 }
 
 impl Thread {
+    /// What Select All copies, in reading order: each text with whether it is plain (drawn by
+    /// `markdown::plain`) rather than markdown. Includes replies scrolled out of view.
+    fn selectable_sources(&self) -> Vec<(&str, bool)> {
+        let mut sources = Vec::new();
+        for msg in &self.messages {
+            match msg {
+                Msg::User(text) => sources.push((text.as_str(), true)),
+                Msg::Agent(blocks) => {
+                    for block in blocks {
+                        match block {
+                            Block::Text(text) | Block::Thought(text) => sources.push((text.as_str(), false)),
+                            Block::Tool(tool) if tool.open => {
+                                sources.extend([&tool.arguments, &tool.result].into_iter().filter(|t| !t.is_empty()).map(|t| (t.as_str(), true)));
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+        sources
+    }
+
     fn fail(&mut self, text: String) {
         self.busy = false;
         self.messages.push(Msg::Agent(vec![Block::Text(format!("**Error:** {text}"))]));
@@ -3654,24 +3677,7 @@ impl Reader {
                     .on_action(cx.listener(|reader, _: &ui::markdown::Copy, _, cx| {
                         // Select All takes the replies scrolled out of view too, which aren't laid out.
                         let text = if reader.thread.selection.read(cx).is_all() {
-                            let mut sources: Vec<(&str, bool)> = Vec::new();
-                            for msg in &reader.thread.messages {
-                                match msg {
-                                    Msg::User(text) => sources.push((text, true)),
-                                    Msg::Agent(blocks) => {
-                                        for block in blocks {
-                                            match block {
-                                                Block::Text(text) | Block::Thought(text) => sources.push((text, false)),
-                                                Block::Tool(tool) if tool.open => {
-                                                    sources.extend([&tool.arguments, &tool.result].into_iter().filter(|t| !t.is_empty()).map(|t| (t.as_str(), true)));
-                                                }
-                                                _ => {}
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            ui::markdown::all_text_of(sources)
+                            ui::markdown::all_text_of(reader.thread.selectable_sources())
                         } else {
                             reader.thread.selection.read(cx).selected_text()
                         };
@@ -3761,7 +3767,7 @@ fn render_msg(
     let blocks = match msg {
         Msg::User(text) => {
             let colors = cx.global::<Palette>();
-            let (bg, text_el) = (colors.secondary, ui::markdown::plain(("user", ix), text, selection, |_| {}, window, cx));
+            let (bg, text_el) = (colors.secondary, ui::markdown::plain(("user", ix), text, selection, window, cx));
             return div()
                 .flex()
                 .justify_end()
@@ -3851,6 +3857,7 @@ fn plan(entries: &[(String, Step)], cx: &App) -> impl IntoElement {
     }))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn tool_card(
     ix: usize,
     n: usize,
@@ -3910,12 +3917,13 @@ fn tool_card(
         for (which, text) in [&tool.arguments, &tool.result].into_iter().enumerate() {
             if !text.is_empty() {
                 let mono = cx.global::<Palette>().mono_font_family.clone();
-                let body = ui::markdown::plain(
+                let family = mono.clone();
+                let body = ui::markdown::plain_styled(
                     ("tool-text", (ix * 10_000 + n) * 2 + which),
                     text,
                     selection,
                     |style| {
-                        style.font_family = mono;
+                        style.font_family = family;
                         style.color = muted;
                     },
                     window,
@@ -3925,7 +3933,7 @@ fn tool_card(
                     div()
                         .max_h(rems(16.))
                         .overflow_hidden()
-                        .font_family(cx.global::<Palette>().mono_font_family.clone())
+                        .font_family(mono)
                         .text_xs()
                         .text_color(muted)
                         .child(body),
