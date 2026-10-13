@@ -53,9 +53,13 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("pagedown", MovePageDown, Some(CONTEXT)),
         KeyBinding::new("home", MoveHome, Some(CONTEXT)),
         KeyBinding::new("end", MoveEnd, Some(CONTEXT)),
+        #[cfg(not(target_os = "macos"))]
         KeyBinding::new("ctrl-home", MoveToStart, Some(CONTEXT)),
+        #[cfg(not(target_os = "macos"))]
         KeyBinding::new("ctrl-end", MoveToEnd, Some(CONTEXT)),
+        #[cfg(not(target_os = "macos"))]
         KeyBinding::new("ctrl-left", MoveToPreviousWord, Some(CONTEXT)),
+        #[cfg(not(target_os = "macos"))]
         KeyBinding::new("ctrl-right", MoveToNextWord, Some(CONTEXT)),
         KeyBinding::new("shift-left", SelectLeft, Some(CONTEXT)),
         KeyBinding::new("shift-right", SelectRight, Some(CONTEXT)),
@@ -63,14 +67,42 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("shift-down", SelectDown, Some(CONTEXT)),
         KeyBinding::new("shift-home", SelectToStartOfLine, Some(CONTEXT)),
         KeyBinding::new("shift-end", SelectToEndOfLine, Some(CONTEXT)),
+        #[cfg(not(target_os = "macos"))]
         KeyBinding::new("ctrl-shift-home", SelectToStart, Some(CONTEXT)),
+        #[cfg(not(target_os = "macos"))]
         KeyBinding::new("ctrl-shift-end", SelectToEnd, Some(CONTEXT)),
+        #[cfg(not(target_os = "macos"))]
         KeyBinding::new("ctrl-shift-left", SelectToPreviousWordStart, Some(CONTEXT)),
+        #[cfg(not(target_os = "macos"))]
         KeyBinding::new("ctrl-shift-right", SelectToNextWordEnd, Some(CONTEXT)),
         #[cfg(target_os = "linux")]
         KeyBinding::new("alt-shift-left", SelectToPreviousWordStart, Some(CONTEXT)),
         #[cfg(target_os = "linux")]
         KeyBinding::new("alt-shift-right", SelectToNextWordEnd, Some(CONTEXT)),
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("alt-left", MoveToPreviousWord, Some(CONTEXT)),
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("alt-right", MoveToNextWord, Some(CONTEXT)),
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("cmd-left", MoveHome, Some(CONTEXT)),
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("cmd-right", MoveEnd, Some(CONTEXT)),
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("cmd-up", MoveToStart, Some(CONTEXT)),
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("cmd-down", MoveToEnd, Some(CONTEXT)),
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("alt-shift-left", SelectToPreviousWordStart, Some(CONTEXT)),
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("alt-shift-right", SelectToNextWordEnd, Some(CONTEXT)),
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("cmd-shift-left", SelectToStartOfLine, Some(CONTEXT)),
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("cmd-shift-right", SelectToEndOfLine, Some(CONTEXT)),
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("cmd-shift-up", SelectToStart, Some(CONTEXT)),
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("cmd-shift-down", SelectToEnd, Some(CONTEXT)),
         KeyBinding::new("secondary-a", SelectAll, Some(CONTEXT)),
         KeyBinding::new("secondary-c", Copy, Some(CONTEXT)),
         KeyBinding::new("secondary-f", Search, Some(CONTEXT)),
