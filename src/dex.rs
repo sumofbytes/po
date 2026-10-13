@@ -129,7 +129,7 @@ impl Shared {
             bail!("the dex daemon runs this session in {actual}, not {}", self.cwd.display());
         }
         *self.session.lock().expect("session lock") = Some(id.to_string());
-        self.emit(Event::Ready { agent: "dex".into() });
+        self.emit(Event::Ready { agent: "dex".into(), fresh: true });
         Ok(())
     }
 
@@ -192,7 +192,7 @@ impl Shared {
             }
             since = next;
         }
-        self.emit(Event::Ready { agent: "dex".into() });
+        self.emit(Event::Ready { agent: "dex".into(), fresh: true });
         Ok(())
     }
 

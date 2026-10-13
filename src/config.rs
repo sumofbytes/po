@@ -102,12 +102,18 @@ pub fn load_choices() -> Choices {
     read_json(&choices_path()).and_then(|value| serde_json::from_value(value).ok()).unwrap_or_default()
 }
 
-pub fn save_choices(choices: &Choices) {
+/// Remembers one choice. The file is read again first, so other windows' choices are kept, and
+/// replaced whole, so a crash can't leave it half written.
+pub fn save_choice(agent: &str, id: &str, value: &str) {
     let path = choices_path();
+    let mut choices = load_choices();
+    choices.entry(agent.to_string()).or_default().insert(id.to_string(), value.to_string());
+    let temp = path.with_extension("json.tmp");
     let saved = path
         .parent()
         .map_or(Ok(()), std::fs::create_dir_all)
-        .and_then(|()| std::fs::write(&path, serde_json::to_string_pretty(choices).unwrap_or_default()));
+        .and_then(|()| std::fs::write(&temp, serde_json::to_string_pretty(&choices).unwrap_or_default()))
+        .and_then(|()| std::fs::rename(&temp, &path));
     if let Err(error) = saved {
         log::error!("{}: {error}", path.display());
     }

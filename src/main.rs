@@ -1887,12 +1887,11 @@ impl Reader {
         }
     }
 
-    /// Changes a setting of the thread's session, and remembers it for the agent's next threads.
+    /// Asks the agent to change a setting of the thread's session. Once it accepts, the choice is
+    /// remembered for the agent's next threads.
     fn choose_option(&mut self, id: &str, value: &str) {
-        let (Some(key), Some(client)) = (&self.thread.agent, &self.thread.client) else { return };
-        if client.set_option(id, value) {
-            self.choices.entry(key.clone()).or_default().insert(id.to_string(), value.to_string());
-            config::save_choices(&self.choices);
+        if let Some(client) = &self.thread.client {
+            client.set_option(id, value);
         }
     }
 
@@ -2343,14 +2342,25 @@ impl Reader {
             Event::Options(options) => {
                 self.thread.options = options;
             }
-            Event::Ready { agent } => {
+            Event::OptionSet { id, value } => {
+                if let Some(key) = self.thread.agent.clone() {
+                    self.choices.entry(key.clone()).or_default().insert(id.clone(), value.clone());
+                    cx.background_spawn(async move { config::save_choice(&key, &id, &value) }).detach();
+                }
+            }
+            Event::Refused(text) => {
+                self.thread.status = text;
+            }
+            Event::Ready { agent, fresh } => {
                 self.thread.ready = true;
                 self.thread.loading = false;
                 self.thread.picking = false;
                 log::info!("agent: {agent} ready");
                 self.thread.status = "ready".into();
                 self.thread.session = self.thread.client.as_ref().and_then(|client| client.session());
-                self.apply_choices();
+                if fresh {
+                    self.apply_choices();
+                }
                 self.request_save(cx);
                 if let Some(prompt) = self.thread.pending.take()
                     && !self.send_to_agent(&prompt)

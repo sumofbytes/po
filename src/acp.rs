@@ -83,8 +83,13 @@ fn parse_options(list: &Value) -> Vec<ConfigOption> {
 pub enum Event {
     /// The session's settings, when it opens and whenever they change.
     Options(Vec<ConfigOption>),
-    /// A session is open: a new one, or a loaded one once its history has been replayed.
-    Ready { agent: String },
+    /// The agent accepted a change to a session setting.
+    OptionSet { id: String, value: String },
+    /// The agent refused a change to a session setting.
+    Refused(String),
+    /// A session is open: a new one, or a loaded one once its history has been replayed. `fresh`
+    /// is false for a resumed one, whose settings the agent restored.
+    Ready { agent: String, fresh: bool },
     /// The agent's resumable sessions for this project, newest first.
     Sessions(Vec<SessionInfo>),
     /// A `session/update` payload.
@@ -99,7 +104,7 @@ pub enum Event {
     Exited(String),
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum Pending {
     Init,
     Session,
@@ -107,7 +112,7 @@ enum Pending {
     /// A page of `session/list`, counting from 0.
     List(u8),
     Load,
-    SetOption,
+    SetOption { id: String, value: String },
 }
 
 /// `session/list` pages followed before giving up on the rest.
@@ -162,7 +167,12 @@ impl Shared {
 
     /// Announces the settings a `session/new` or `session/load` result carries, if any.
     fn emit_options(&self, result: &Value) {
-        let options = parse_options(&result["configOptions"]);
+        self.emit_listed(&result["configOptions"]);
+    }
+
+    /// Announces a list of settings, unless it is missing or empty, which would hide them all.
+    fn emit_listed(&self, list: &Value) {
+        let options = parse_options(list);
         if !options.is_empty() {
             self.emit(Event::Options(options));
         }
@@ -181,7 +191,7 @@ impl Shared {
                 if method == "session/update" {
                     let update = &message["params"]["update"];
                     if update["sessionUpdate"] == "config_option_update" {
-                        self.emit(Event::Options(parse_options(&update["configOptions"])));
+                        self.emit_listed(&update["configOptions"]);
                     } else {
                         self.emit(Event::Update(update.clone()));
                     }
@@ -197,8 +207,10 @@ impl Shared {
             return;
         };
         if let Some(error) = message.get("error") {
-            if matches!(kind, Pending::SetOption) {
+            if matches!(kind, Pending::SetOption { .. }) {
                 log::warn!("acp: setting refused: {error}");
+                let text = error["message"].as_str().unwrap_or("the agent refused");
+                self.emit(Event::Refused(format!("setting not changed: {text}")));
                 return;
             }
             // -32000 is ACP's `authRequired`.
@@ -257,17 +269,20 @@ impl Shared {
                     }
                 }
             }
-            Pending::SetOption => self.emit(Event::Options(parse_options(&result["configOptions"]))),
+            Pending::SetOption { id, value } => {
+                self.emit_options(result);
+                self.emit(Event::OptionSet { id, value });
+            }
             Pending::Load => {
                 self.emit_options(result);
                 let agent = self.agent.lock().expect("agent lock").clone();
-                self.emit(Event::Ready { agent });
+                self.emit(Event::Ready { agent, fresh: false });
             }
             Pending::Session => {
                 *self.session.lock().expect("session lock") = result["sessionId"].as_str().map(String::from);
                 self.emit_options(result);
                 let agent = self.agent.lock().expect("agent lock").clone();
-                self.emit(Event::Ready { agent });
+                self.emit(Event::Ready { agent, fresh: true });
             }
             Pending::Prompt => {
                 self.emit(Event::Stopped(result["stopReason"].as_str().unwrap_or("end_turn").to_string()));
@@ -397,7 +412,7 @@ impl Client {
         self.shared.request(
             "session/set_config_option",
             json!({ "sessionId": session, "configId": id, "value": value }),
-            Pending::SetOption,
+            Pending::SetOption { id: id.to_string(), value: value.to_string() },
         );
         true
     }
