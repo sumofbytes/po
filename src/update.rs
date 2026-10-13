@@ -29,7 +29,7 @@ fn base_url() -> String {
         .ok()
         .map(|b| b.trim().trim_end_matches('/').to_string())
         .filter(|b| !b.is_empty())
-        .unwrap_or_else(|| "https://github.com".to_string())
+        .unwrap_or_else(|| "https://github.com/sumofbytes/po".to_string())
 }
 
 /// Progress line for a long network/IO phase, so a multi-MB download never
