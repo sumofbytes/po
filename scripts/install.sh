@@ -8,14 +8,14 @@
 # Env:
 #   PO_VERSION       version to install ("latest" or e.g. "0.1.0" / "v0.1.0")
 #   PO_INSTALL_DIR   install directory (default: $HOME/.local/bin)
-#   PO_BASE_URL      base for /releases lookups (default: https://github.com)
+#   PO_BASE_URL      base for /releases lookups (default: https://github.com/<repo>)
 
 set -eu
 
 REPO="${PO_REPO:-sumofbytes/po}"
 INSTALL_DIR="${PO_INSTALL_DIR:-$HOME/.local/bin}"
 VERSION="${1:-${PO_VERSION:-latest}}"
-BASE_URL="${PO_BASE_URL:-https://github.com}"
+BASE_URL="${PO_BASE_URL:-https://github.com/$REPO}"
 
 err() {
     echo "po-install: $1" >&2
