@@ -7,7 +7,7 @@ and review the agent's plans and edit diffs side by side.
 
 ## Install
 
-Prebuilt binaries are published for Linux (x86_64, aarch64) and macOS (Apple Silicon, Intel):
+Prebuilt binaries are published for Linux (x86_64, aarch64) and macOS (Apple Silicon, Intel), and Windows x86_64 (a `.zip` on the releases page; no installer or `po update` yet):
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/sumofbytes/po/HEAD/scripts/install.sh | sh
