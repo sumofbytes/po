@@ -72,9 +72,10 @@ is optional. `config.json` looks like
 ### Coding agents
 
 Any program that speaks ACP over stdio works. `po` ships with entries for
-`opencode acp`, `dex acp`, `exsa-acp` and `claude-agent-acp`
-([`agents.json`](agents.json)); install the one you want and it must be on your
-`PATH`. Add your own under `agents` in `config.json`: `id` and `command` are
+the popular ones: Claude Code, Codex, Gemini CLI, OpenCode, Cursor, GitHub
+Copilot and Goose ([`agents.json`](agents.json)); install the one you want and
+it must be on your `PATH`. Add your own under `agents` in `config.json`, which
+is merged over the bundled list: `id` and `command` are
 required, `name` defaults to the `id`. An entry whose `id` matches a bundled
 one replaces it, so you can change flags or the binary path. `command` is split
 on whitespace into program and arguments (no shell quoting). Choose the agent
@@ -83,8 +84,10 @@ in the app, or pass `--agent` / `PO_AGENT`.
 #### Steering and follow-ups (dex daemon)
 
 ACP has no way to add to a turn that is already running, so with an ACP agent a
-message typed while it works is queued and sent when the turn ends. The `dex
-(daemon)` entry talks to a [`dex serve` daemon over HTTP
+message typed while it works is queued and sent when the turn ends. An entry with a
+`daemon` URL, such as
+`{ "id": "dex-daemon", "name": "dex (daemon)", "command": "dex serve 127.0.0.1:8420", "daemon": "http://127.0.0.1:8420" }`
+in your `config.json`, talks to a [`dex serve` daemon over HTTP
 and SSE instead, which can take messages mid-turn:
 
 - **Enter** steers: the agent reads the message before its next model call.
