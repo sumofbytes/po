@@ -3478,7 +3478,7 @@ impl Reader {
                     let Some(msg) = reader.thread.messages.get(ix) else { return div().into_any_element() };
                     let last = ix + 1 == reader.thread.messages.len();
                     // Boxes share the composer box's edges (the column's own padding); the text
-                    // inside them is inset to the composer's text edge (see `TEXT_INSET`).
+                    // inside them is inset to the composer's text edge (see `text_inset`).
                     div()
                         .pt_3()
                         .when(last, |this| this.pb_3())
@@ -3708,9 +3708,9 @@ impl Reader {
                         .flex()
                         .flex_col()
                         .gap_1()
-                        .p_2()
+                        .p(rems(COMPOSER_PAD_REM))
                         .rounded_lg()
-                        .border_1()
+                        .border(px(BOX_BORDER))
                         .border_color(colors.border)
                         .bg(colors.sidebar)
                         .when(!queued.is_empty(), |this| {
@@ -3727,10 +3727,15 @@ impl Reader {
     }
 }
 
-/// From a box's edge to its text in the composer: the input's own padding (0.75rem) plus the
-/// composer box's border and padding (1px + 0.5rem). The transcript insets its text by the same.
+/// The composer's box: its border, its padding, and the padding of the input inside it. The
+/// transcript derives its edges from these, so the two cannot drift apart.
+const BOX_BORDER: f32 = 1.;
+const COMPOSER_PAD_REM: f32 = 0.5;
+const INPUT_PAD_REM: f32 = 0.75;
+
+/// From a box's edge to its text in the composer; the transcript insets its text by the same.
 fn text_inset(window: &Window) -> gpui::Pixels {
-    rems(1.25).to_pixels(window.rem_size()) + px(1.)
+    rems(COMPOSER_PAD_REM + INPUT_PAD_REM).to_pixels(window.rem_size()) + px(BOX_BORDER)
 }
 
 fn render_msg(
@@ -3764,23 +3769,23 @@ fn render_msg(
     let mut column = div().flex().flex_col().gap_2().min_w_0();
     // Text blocks sit where the composer's text does; boxes (tool cards) span the composer's width.
     let text_inset = text_inset(window);
-    let inset = |el: AnyElement| div().px(text_inset).child(el).into_any_element();
     if blocks.is_empty() {
-        column = column.child(inset(div().text_sm().text_color(colors.muted_foreground).child("Thinking…").into_any_element()));
+        let thinking = div().text_sm().text_color(colors.muted_foreground).child("Thinking…");
+        column = column.child(div().px(text_inset).child(thinking));
     }
     for (n, block) in blocks.iter().enumerate() {
         let id = ix * 10_000 + n;
-        column = match block {
-            Block::Text(text) => {
-                column.child(inset(ui::markdown::markdown(("answer", id), text, selection, window, cx).into_any_element()))
-            }
-            Block::Thought(text) => column.child(inset(
+        let (el, boxed) = match block {
+            Block::Text(text) => (ui::markdown::markdown(("answer", id), text, selection, window, cx).into_any_element(), false),
+            Block::Thought(text) => (
                 div().opacity(0.7).child(ui::markdown::italic(("thought", id), text, selection, window, cx)).into_any_element(),
-            )),
-            Block::Tool(tool) => column.child(tool_card(ix, n, tool, this, text_inset, cx)),
-            Block::Permission(ask) => column.child(inset(permission(ix, n, ask, this).into_any_element())),
-            Block::Plan(entries) => column.child(inset(plan(entries, cx).into_any_element())),
+                false,
+            ),
+            Block::Tool(tool) => (tool_card(ix, n, tool, this, text_inset, cx).into_any_element(), true),
+            Block::Permission(ask) => (permission(ix, n, ask, this).into_any_element(), false),
+            Block::Plan(entries) => (plan(entries, cx).into_any_element(), false),
         };
+        column = column.child(if boxed { el } else { div().px(text_inset).child(el).into_any_element() });
     }
     column.into_any_element()
 }
@@ -3844,9 +3849,9 @@ fn tool_card(ix: usize, n: usize, tool: &ToolBlock, this: &Entity<Reader>, text_
         .gap_1()
         .py_2()
         // The border plus this padding put the card's text on the composer's text edge.
-        .px(text_inset - px(1.))
+        .px(text_inset - px(BOX_BORDER))
         .rounded_md()
-        .border_1()
+        .border(px(BOX_BORDER))
         .border_color(colors.border)
         .bg(colors.background)
         .child(
