@@ -1,51 +1,25 @@
-use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::config::{self, read_json};
+use crate::schemes;
 
 use std::collections::HashMap;
 
 use gpui::{App, FontStyle, FontWeight, Global, HighlightStyle, Hsla, Pixels, Rgba, SharedString, font, hsla, px};
 use serde_json::Value;
 
-const DEFAULT_THEME: &str = "main";
+const DEFAULT_THEME: &str = "Rose Pine";
 const FONT_SIZE: f64 = 14.0;
 const MONO_FONT_SIZE: f64 = 13.0;
-
-/// Themes shipped in the binary, by name; seeded into `<config>/themes/` on
-/// startup and kept as a fallback.
-const BUNDLED: [(&str, &str); 3] = [
-    ("main", include_str!("../themes/main.json")),
-    ("moon", include_str!("../themes/moon.json")),
-    ("dawn", include_str!("../themes/dawn.json")),
-];
 
 /// Where themes are picked from: `<config>/themes/`.
 fn themes_dir(config_dir: &Path) -> PathBuf {
     config_dir.join("themes")
 }
 
-/// Copy bundled themes missing from `<config>/themes/` there, so they can be
-/// edited without rebuilding; existing files are left alone.
-fn seed_themes(config_dir: &Path) {
-    let dir = themes_dir(config_dir);
-    if let Err(error) = fs::create_dir_all(&dir) {
-        return log::warn!("theme: seeding {}: {error}", dir.display());
-    }
-    for (name, source) in BUNDLED {
-        let path = dir.join(format!("{name}.json"));
-        if path.exists() {
-            continue;
-        }
-        if let Err(error) = fs::write(&path, source) {
-            log::warn!("theme: seeding {name}: {error}");
-        }
-    }
-}
-
 /// The theme `name` asks for: a JSON file in `<config>/themes/`, else in the
-/// config folder itself — `.json` optional, absolute paths work — else a
-/// bundled one.
+/// config folder itself — `.json` optional, absolute paths work — else one of
+/// the bundled colour schemes.
 fn load_theme(name: &str, config_dir: Option<&Path>) -> Option<Value> {
     let try_file = |path: &Path| -> Option<Value> {
         read_json(path).or_else(|| {
@@ -64,8 +38,7 @@ fn load_theme(name: &str, config_dir: Option<&Path>) -> Option<Value> {
     } else if let Some(theme) = try_file(Path::new(name)) {
         return Some(theme);
     }
-    let key = name.strip_suffix(".json").unwrap_or(name);
-    BUNDLED.iter().find(|(bundled, _)| *bundled == key).and_then(|(_, source)| serde_json::from_str(source).ok())
+    schemes::load(name.strip_suffix(".json").unwrap_or(name))
 }
 
 /// Applies the user's config (`theme`, `font.*`) over the bundled defaults.
@@ -77,15 +50,12 @@ pub fn apply(cx: &mut App) {
         .unwrap_or_else(|| DEFAULT_THEME.into());
     let dir = config::dir();
     let dir = dir.as_deref();
-    if let Some(dir) = dir {
-        seed_themes(dir);
-    }
     let mut theme = load_theme(&name, dir)
         .or_else(|| {
             log::warn!("theme {name:?} not found, using {DEFAULT_THEME}");
             load_theme(DEFAULT_THEME, dir)
         })
-        .expect("bundled theme");
+        .expect("default scheme");
     let font = &config["font"];
     let fields = [
         ("font.family", font["family"].clone()),
@@ -559,6 +529,7 @@ impl Palette {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     /// A temp folder cleaned up when the test ends.
     struct Scratch(PathBuf);
@@ -596,30 +567,24 @@ mod tests {
     }
 
     #[test]
-    fn themes_folder_overrides_bundled() {
+    fn themes_folder_overrides_schemes() {
         let scratch = Scratch::new("override");
-        scratch.write("themes/main.json", r#"{"mode":"light"}"#);
-        assert_eq!(load_theme("main", Some(scratch.0.as_path())).unwrap()["mode"], "light");
+        scratch.write("themes/Dracula.json", r#"{"mode":"light"}"#);
+        assert_eq!(load_theme("Dracula", Some(scratch.0.as_path())).unwrap()["mode"], "light");
+        assert_eq!(load_theme("Dracula", None).unwrap()["mode"], "dark");
     }
 
     #[test]
-    fn seeds_missing_themes_into_the_config_folder() {
-        let scratch = Scratch::new("seed");
-        seed_themes(&scratch.0);
-        for (name, source) in BUNDLED {
-            let path = scratch.0.join("themes").join(format!("{name}.json"));
-            assert_eq!(fs::read_to_string(&path).unwrap(), *source);
-        }
-        // Already-present files are left alone.
-        scratch.write("themes/main.json", r#"{"mode":"light"}"#);
-        seed_themes(&scratch.0);
-        assert_eq!(fs::read_to_string(scratch.0.join("themes/main.json")).unwrap(), r#"{"mode":"light"}"#);
-    }
-
-    #[test]
-    fn falls_back_to_bundled() {
-        assert_eq!(load_theme("moon", None).unwrap()["mode"], "dark");
-        assert_eq!(load_theme("moon.json", None).unwrap()["mode"], "dark");
+    fn picks_schemes_by_name() {
+        let theme = load_theme("Catppuccin Mocha", None).unwrap();
+        assert_eq!(theme["colors"]["background"], "#1e1e2e");
+        assert_eq!(load_theme("catppuccin mocha.json", None).unwrap()["colors"], theme["colors"]);
+        assert_eq!(load_theme("Catppuccin Latte", None).unwrap()["mode"], "light");
         assert!(load_theme("no-such-theme", None).is_none());
+    }
+
+    #[test]
+    fn default_theme_exists() {
+        assert!(load_theme(DEFAULT_THEME, None).is_some());
     }
 }

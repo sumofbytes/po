@@ -63,7 +63,7 @@ is optional. `config.json` looks like
 
 ```json
 {
-  "theme": "main",
+  "theme": "Rose Pine",
   "font": { "family": "Adwaita Sans", "size": 14, "mono_family": "Noto Sans Mono", "mono_size": 13 },
   "agents": [{ "id": "mine", "name": "My agent", "command": "my-agent --acp" }]
 }
@@ -190,14 +190,19 @@ turn that off.
 
 ### Themes
 
-Set `"theme"` to a theme name. On first start `po` copies the bundled themes
-(`main`, `moon`, `dawn`, from [`themes/`](themes)) into `<config>/themes/`;
-existing files are never overwritten, so edit them freely. A name is looked up
-as `<config>/themes/<name>.json`, then `<config>/<name>.json`, then the bundled
-theme; an absolute path to a JSON file also works. To make your own, copy one
-of the bundled files, rename it, and set `"theme"` to its name. An unknown
-theme falls back to `main`. The `font` block overrides the theme's UI and
-monospace fonts and sizes.
+Set `"theme"` to a colour scheme name. Over 450 are built in (Catppuccin,
+Dracula, Gruvbox, Rose Pine, Tokyo Night and so on); the names are the lines
+starting `@@` in [`themes/schemes.txt`](themes/schemes.txt), and case doesn't
+matter. The default is `Rose Pine`; an unknown name falls back to it. `po`
+derives its UI colours from each scheme's palette. The set is the
+[iTerm2-Color-Schemes](https://github.com/mbadolato/iTerm2-Color-Schemes)
+collection (MIT).
+
+To make your own, write a theme as JSON (see any scheme converted in
+`src/schemes.rs` for the keys) and save it as `<config>/themes/<name>.json`, or
+set `"theme"` to the absolute path of the file; a file there wins over a scheme
+of the same name. The `font` block overrides the theme's UI and monospace fonts
+and sizes.
 
 Markdown, in the agent's replies and in `.md` files (which open rendered; the
 **Source** button or Ctrl+Shift+M switches to the text), is coloured from the

@@ -6,6 +6,7 @@ mod config;
 mod dex;
 mod diff;
 mod pr;
+mod schemes;
 mod theme;
 mod trace;
 mod ui;
