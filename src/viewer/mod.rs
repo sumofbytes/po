@@ -355,7 +355,7 @@ impl CodeViewState {
 
     /// The fold hiding `line`, if any.
     fn fold_hiding(&self, line: usize) -> Option<(usize, usize)> {
-        self.folded.iter().copied().filter(|&(start, end)| start < line && line < end).next()
+        self.folded.iter().copied().find(|&(start, end)| start < line && line < end)
     }
 
     /// An offset on a hidden line moves back to the end of its fold's first line.

@@ -124,7 +124,7 @@ impl Render for SearchBar {
         let on = |f: fn(&mut CodeViewState, &mut Context<CodeViewState>)| {
             let view = view.clone();
             move |_: &gpui::ClickEvent, _: &mut Window, cx: &mut gpui::App| {
-                view.update(cx, |view, cx| f(view, cx)).ok();
+                view.update(cx, f).ok();
             }
         };
         div()

@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use gpui::{
     App, Bounds, Context, CursorStyle, Element, ElementId, Entity, GlobalElementId, Hitbox, HitboxBehavior,
     InspectorElementId, IntoElement, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
-    ScrollHandle, ScrollWheelEvent, Style, Task, Window, fill, point, px, relative, size,
+    ScrollHandle, ScrollWheelEvent, Style, Task, Window, Edges, fill, point, px, relative, size,
 };
 
 use crate::theme::Palette;
@@ -183,11 +183,12 @@ impl Element for Scrollbar {
         window: &mut Window,
         cx: &mut App,
     ) -> (LayoutId, ()) {
-        let mut style = Style::default();
-        style.position = gpui::Position::Absolute;
-        style.inset.top = px(0.).into();
-        style.inset.right = px(0.).into();
-        style.size = size(relative(1.).into(), relative(1.).into());
+        let style = Style {
+            position: gpui::Position::Absolute,
+            inset: Edges { top: px(0.).into(), right: px(0.).into(), ..Edges::default() },
+            size: size(relative(1.).into(), relative(1.).into()),
+            ..Style::default()
+        };
         (window.request_layout(style, [], cx), ())
     }
 
