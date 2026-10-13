@@ -182,6 +182,10 @@ pub struct Selection {
     /// The runs laid out in the last frame, in reading order.
     runs: Vec<(SharedString, Run)>,
     index: HashMap<SharedString, usize>,
+    /// The frame before, which is what the text being built now is highlighted from: this
+    /// frame's runs are only registered once its text is laid out.
+    before: Vec<(SharedString, Run)>,
+    before_index: HashMap<SharedString, usize>,
     /// Parsed replies, by their id.
     parsed: HashMap<ElementId, Parsed>,
 }
@@ -288,8 +292,8 @@ fn word_kind(c: char) -> u8 {
 impl Selection {
     /// Forgets the runs of the last frame; call before drawing replies.
     pub fn begin_frame(&mut self) {
-        self.runs.clear();
-        self.index.clear();
+        self.before = std::mem::take(&mut self.runs);
+        self.before_index = std::mem::take(&mut self.index);
     }
 
     fn register(&mut self, key: SharedString, run: Run) {
@@ -355,13 +359,17 @@ impl Selection {
 
     /// The part of a run that's selected, from where the drag points were last frame.
     fn range_for(&self, key: &SharedString) -> Option<Range<usize>> {
+        self.range_in(key, &self.before, &self.before_index)
+    }
+
+    fn range_in(&self, key: &SharedString, runs: &[(SharedString, Run)], index: &HashMap<SharedString, usize>) -> Option<Range<usize>> {
         match &self.picked {
-            Some(Picked::All) => return self.index.get(key).map(|&ix| 0..self.runs[ix].1.text.len()),
+            Some(Picked::All) => return index.get(key).map(|&ix| 0..runs[ix].1.text.len()),
             Some(Picked::Range(k, range)) => return (k == key).then(|| range.clone()),
             None => {}
         }
         let (a, b) = (self.anchor?, self.head?);
-        let run = &self.runs[*self.index.get(key)?].1;
+        let run = &runs[*index.get(key)?].1;
         let bounds = run.layout.bounds();
         let line = run.layout.line_height();
         // The earlier point in reading order: higher up, or further left on the same line.
@@ -383,7 +391,7 @@ impl Selection {
         let parts: Vec<&str> = self
             .runs
             .iter()
-            .filter_map(|(key, run)| self.range_for(key).map(|r| &run.text[r]))
+            .filter_map(|(key, run)| self.range_in(key, &self.runs, &self.index).map(|r| &run.text[r]))
             .collect();
         parts.join("\n").trim().to_string()
     }
