@@ -484,6 +484,10 @@ impl Palette {
             let styles: &HashMap<String, HighlightStyle> = &syntax;
             styles.get(name).or_else(|| styles.get(name.split('.').next()?))?.color
         };
+        let exact_syntax_color = |name: &str| -> Option<Hsla> {
+            let styles: &HashMap<String, HighlightStyle> = &syntax;
+            styles.get(name)?.color
+        };
         let md = &theme["markdown"];
         let md_get = |key: &str, fallback: Hsla| md.get(key).and_then(parse_color).unwrap_or(fallback);
         let markdown = MarkdownColors {
@@ -495,7 +499,7 @@ impl Palette {
             quote_border: md_get("quote_border", syntax_color("punctuation").unwrap_or(base.border)),
             rule: md_get("rule", base.border),
             marker: md_get("marker", syntax_color("punctuation").unwrap_or(base.muted_foreground)),
-            strong: md.get("strong").and_then(parse_color).or_else(|| syntax_color("emphasis.strong")),
+            strong: md.get("strong").and_then(parse_color).or_else(|| exact_syntax_color("emphasis.strong")),
             emphasis: md.get("emphasis").and_then(parse_color).or_else(|| syntax_color("emphasis")),
         };
 

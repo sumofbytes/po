@@ -2543,8 +2543,17 @@ impl Reader {
         }
         let chunks = Rc::new(ui::markdown::chunks(text));
         match self.project.doc.take().filter(|_| self.project.current.as_deref() == Some(path)) {
+            Some(doc) if *doc.chunks == *chunks => Some(doc),
             Some(doc) => {
+                // Splicing resets the scroll to the top, so put it back, and drop a selection
+                // that may now point at different text.
+                let mut top = doc.list.logical_scroll_top();
                 doc.list.splice(0..doc.list.item_count(), chunks.len());
+                if top.item_ix >= chunks.len() {
+                    top = gpui::ListOffset { item_ix: chunks.len().saturating_sub(1), offset_in_item: px(0.) };
+                }
+                doc.list.scroll_to(top);
+                doc.selection.update(cx, |s, _| s.clear());
                 Some(Doc { chunks, ..doc })
             }
             None => Some(Doc {
@@ -3316,7 +3325,7 @@ impl Reader {
         let doc = self.project.doc.as_ref().filter(|_| self.rendered);
         let body: AnyElement = match (&self.project.code, &self.project.notice) {
             (_, Some(notice)) => centered(notice.clone(), cx),
-            (_, None) if doc.is_some() => self.markdown_view(doc.expect("checked"), cx),
+            (_, None) if let Some(doc) = doc => self.markdown_view(doc, cx),
             // Cached: the viewer redraws when it changes, not with every agent update or caret blink elsewhere.
             (Some(code), None) => code.clone().cached(StyleRefinement::default().size_full()).into_any_element(),
             (None, None) => centered("Pick a file in the explorer".into(), cx),
@@ -3357,11 +3366,7 @@ impl Reader {
     /// A markdown file rendered, scrolling a piece at a time like the thread.
     fn markdown_view(&self, doc: &Doc, cx: &mut Context<Self>) -> AnyElement {
         doc.selection.update(cx, |s, _| s.begin_frame());
-        let (chunks, selection) = (doc.chunks.clone(), doc.selection.clone());
-        let all_chunks = doc.chunks.clone();
-        let (focus, copy_selection) = (doc.focus.clone(), doc.selection.clone());
-        let (down, moved, up, up_out) = (doc.selection.clone(), doc.selection.clone(), doc.selection.clone(), doc.selection.clone());
-        let (down_focus, select_all) = (doc.focus.clone(), doc.selection.clone());
+        let (chunks, selection, focus) = (doc.chunks.clone(), doc.selection.clone(), doc.focus.clone());
         let background = cx.global::<Palette>().background;
         div()
             .id("markdown-file")
@@ -3369,43 +3374,61 @@ impl Reader {
             .track_focus(&focus)
             .size_full()
             .bg(background)
-            .on_action(cx.listener(move |_, _: &ui::markdown::Copy, _, cx| {
-                // Select All takes the pieces scrolled out of view too, which aren't laid out.
-                let text = if copy_selection.read(cx).is_all() {
-                    ui::markdown::all_text(all_chunks.iter().map(String::as_str))
-                } else {
-                    copy_selection.read(cx).selected_text()
-                };
-                if text.is_empty() {
-                    return cx.propagate();
+            .on_action(cx.listener({
+                let (chunks, selection) = (chunks.clone(), selection.clone());
+                move |_, _: &ui::markdown::Copy, _, cx| {
+                    // Select All takes the pieces scrolled out of view too, which aren't laid out.
+                    let text = if selection.read(cx).is_all() {
+                        ui::markdown::all_text(chunks.iter().map(String::as_str))
+                    } else {
+                        selection.read(cx).selected_text()
+                    };
+                    if text.is_empty() {
+                        return cx.propagate();
+                    }
+                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
                 }
-                cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
             }))
-            .on_action(cx.listener(move |_, _: &ui::markdown::SelectAll, _, cx| {
-                select_all.update(cx, |s, _| s.select_all());
-                cx.notify();
-            }))
-            .on_mouse_down(gpui::MouseButton::Left, cx.listener(move |_, event: &gpui::MouseDownEvent, window, cx| {
-                down_focus.focus(window, cx);
-                down.update(cx, |s, _| s.mouse_down(event.position, event.click_count));
-                cx.notify();
-            }))
-            .on_mouse_move(cx.listener(move |_, event: &gpui::MouseMoveEvent, _, cx| {
-                if event.pressed_button == Some(gpui::MouseButton::Left) && moved.read(cx).selecting {
-                    moved.update(cx, |s, _| s.drag(event.position));
+            .on_action(cx.listener({
+                let selection = selection.clone();
+                move |_, _: &ui::markdown::SelectAll, _, cx| {
+                    selection.update(cx, |s, _| s.select_all());
                     cx.notify();
                 }
             }))
-            .on_mouse_up(gpui::MouseButton::Left, cx.listener(move |_, event: &gpui::MouseUpEvent, _, cx| {
-                if let Some(url) = up.update(cx, |s, _| s.mouse_up(event.position)) {
-                    cx.open_url(&url);
+            .on_mouse_down(gpui::MouseButton::Left, cx.listener({
+                let (selection, focus) = (selection.clone(), focus.clone());
+                move |_, event: &gpui::MouseDownEvent, window, cx| {
+                    focus.focus(window, cx);
+                    selection.update(cx, |s, _| s.mouse_down(event.position, event.click_count));
+                    cx.notify();
                 }
-                cx.notify();
             }))
-            .on_mouse_up_out(gpui::MouseButton::Left, cx.listener(move |_, event: &gpui::MouseUpEvent, _, cx| {
-                up_out.update(cx, |s, _| {
-                    s.mouse_up(event.position);
-                });
+            .on_mouse_move(cx.listener({
+                let selection = selection.clone();
+                move |_, event: &gpui::MouseMoveEvent, _, cx| {
+                    if event.pressed_button == Some(gpui::MouseButton::Left) && selection.read(cx).selecting {
+                        selection.update(cx, |s, _| s.drag(event.position));
+                        cx.notify();
+                    }
+                }
+            }))
+            .on_mouse_up(gpui::MouseButton::Left, cx.listener({
+                let selection = selection.clone();
+                move |_, event: &gpui::MouseUpEvent, _, cx| {
+                    if let Some(url) = selection.update(cx, |s, _| s.mouse_up(event.position)) {
+                        cx.open_url(&url);
+                    }
+                    cx.notify();
+                }
+            }))
+            .on_mouse_up_out(gpui::MouseButton::Left, cx.listener({
+                let selection = selection.clone();
+                move |_, event: &gpui::MouseUpEvent, _, cx| {
+                    selection.update(cx, |s, _| {
+                        s.mouse_up(event.position);
+                    });
+                }
             }))
             .child(
                 list(
