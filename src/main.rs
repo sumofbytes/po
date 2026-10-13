@@ -3477,10 +3477,9 @@ impl Reader {
                 cx.processor(move |reader: &mut Self, ix: usize, window, cx| {
                     let Some(msg) = reader.thread.messages.get(ix) else { return div().into_any_element() };
                     let last = ix + 1 == reader.thread.messages.len();
-                    // The text is inset as far as the composer's is (its box padding plus the
-                    // input's own), so the two share a left edge.
+                    // Boxes share the composer box's edges (the column's own padding); the text
+                    // inside them is inset to the composer's text edge (see `text_inset`).
                     div()
-                        .px_5()
                         .pt_3()
                         .when(last, |this| this.pb_3())
                         .child(render_msg(ix, msg, &this, &selection, window, cx))
@@ -3709,9 +3708,9 @@ impl Reader {
                         .flex()
                         .flex_col()
                         .gap_1()
-                        .p_2()
+                        .p(rems(COMPOSER_PAD_REM))
                         .rounded_lg()
-                        .border_1()
+                        .border(px(BOX_BORDER))
                         .border_color(colors.border)
                         .bg(colors.sidebar)
                         .when(!queued.is_empty(), |this| {
@@ -3728,6 +3727,17 @@ impl Reader {
     }
 }
 
+/// The composer's box: its border, its padding, and the padding of the input inside it. The
+/// transcript derives its edges from these, so the two cannot drift apart.
+const BOX_BORDER: f32 = 1.;
+const COMPOSER_PAD_REM: f32 = 0.5;
+const INPUT_PAD_REM: f32 = 0.75;
+
+/// From a box's edge to its text in the composer; the transcript insets its text by the same.
+fn text_inset(window: &Window) -> gpui::Pixels {
+    rems(COMPOSER_PAD_REM + INPUT_PAD_REM).to_pixels(window.rem_size()) + px(BOX_BORDER)
+}
+
 fn render_msg(
     ix: usize,
     msg: &Msg,
@@ -3742,9 +3752,6 @@ fn render_msg(
             return div()
                 .flex()
                 .justify_end()
-                // A bubble is a box like the composer, so its edge lines up with that box's edge, not
-                // with the text column the agent's words follow.
-                .mr(px(-17.5))
                 .child(
                     div()
                         .max_w(gpui::relative(0.9))
@@ -3760,26 +3767,25 @@ fn render_msg(
         Msg::Agent(blocks) => blocks,
     };
     let mut column = div().flex().flex_col().gap_2().min_w_0();
+    // Text blocks sit where the composer's text does; boxes (tool cards) span the composer's width.
+    let text_inset = text_inset(window);
     if blocks.is_empty() {
-        column = column.child(div().text_sm().text_color(colors.muted_foreground).child("Thinking…"));
+        let thinking = div().text_sm().text_color(colors.muted_foreground).child("Thinking…");
+        column = column.child(div().px(text_inset).child(thinking));
     }
     for (n, block) in blocks.iter().enumerate() {
         let id = ix * 10_000 + n;
-        column = match block {
-            Block::Text(text) => {
-                column.child(ui::markdown::markdown(("answer", id), text, selection, window, cx))
-            }
-            Block::Thought(text) => column.child(div().opacity(0.7).child(ui::markdown::italic(
-                ("thought", id),
-                text,
-                selection,
-                window,
-                cx,
-            ))),
-            Block::Tool(tool) => column.child(tool_card(ix, n, tool, this, cx)),
-            Block::Permission(ask) => column.child(permission(ix, n, ask, this)),
-            Block::Plan(entries) => column.child(plan(entries, cx)),
+        let (el, boxed) = match block {
+            Block::Text(text) => (ui::markdown::markdown(("answer", id), text, selection, window, cx).into_any_element(), false),
+            Block::Thought(text) => (
+                div().opacity(0.7).child(ui::markdown::italic(("thought", id), text, selection, window, cx)).into_any_element(),
+                false,
+            ),
+            Block::Tool(tool) => (tool_card(ix, n, tool, this, text_inset, cx).into_any_element(), true),
+            Block::Permission(ask) => (permission(ix, n, ask, this).into_any_element(), false),
+            Block::Plan(entries) => (plan(entries, cx).into_any_element(), false),
         };
+        column = column.child(if boxed { el } else { div().px(text_inset).child(el).into_any_element() });
     }
     column.into_any_element()
 }
@@ -3831,7 +3837,7 @@ fn plan(entries: &[(String, Step)], cx: &App) -> impl IntoElement {
     }))
 }
 
-fn tool_card(ix: usize, n: usize, tool: &ToolBlock, this: &Entity<Reader>, cx: &App) -> impl IntoElement {
+fn tool_card(ix: usize, n: usize, tool: &ToolBlock, this: &Entity<Reader>, text_inset: gpui::Pixels, cx: &App) -> impl IntoElement {
     let colors = cx.global::<Palette>();
     let (mark, tint) = step_mark(tool.status, colors);
     let toggle = this.clone();
@@ -3841,9 +3847,11 @@ fn tool_card(ix: usize, n: usize, tool: &ToolBlock, this: &Entity<Reader>, cx: &
         .flex()
         .flex_col()
         .gap_1()
-        .p_2()
+        .py_2()
+        // The border plus this padding put the card's text on the composer's text edge.
+        .px(text_inset - px(BOX_BORDER))
         .rounded_md()
-        .border_1()
+        .border(px(BOX_BORDER))
         .border_color(colors.border)
         .bg(colors.background)
         .child(
