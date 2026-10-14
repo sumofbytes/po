@@ -3975,8 +3975,8 @@ fn render_msg(
                 false,
             ),
             Block::Tool(tool) => (tool_card(ix, n, tool, this, text_inset, selection, window, cx).into_any_element(), true),
-            Block::Permission(ask) => (permission(ix, n, ask, this).into_any_element(), false),
-            Block::Plan(entries) => (plan(entries, cx).into_any_element(), false),
+            Block::Permission(ask) => (permission(ix, n, ask, this, text_inset, cx).into_any_element(), true),
+            Block::Plan(entries) => (plan(entries, text_inset, cx).into_any_element(), true),
         };
         column = column.child(if boxed { el } else { div().px(text_inset).child(el).into_any_element() });
     }
@@ -4022,12 +4022,27 @@ fn step_mark(status: Step, colors: &Palette) -> (&'static str, gpui::Hsla) {
     }
 }
 
-fn plan(entries: &[(String, Step)], cx: &App) -> impl IntoElement {
+fn plan(entries: &[(String, Step)], text_inset: gpui::Pixels, cx: &App) -> impl IntoElement {
     let colors = cx.global::<Palette>();
-    div().flex().flex_col().gap_1().text_sm().children(entries.iter().map(|(text, status)| {
-        let (mark, tint) = step_mark(*status, colors);
-        div().flex().gap_2().child(div().flex_none().text_color(tint).child(mark)).child(div().flex_1().min_w_0().child(text.clone()))
-    }))
+    div()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .py_2()
+        .px(text_inset - px(BOX_BORDER))
+        .rounded_md()
+        .border(px(BOX_BORDER))
+        .border_color(colors.border)
+        .text_sm()
+        .children(entries.iter().map(|(text, status)| {
+            let (mark, tint) = step_mark(*status, colors);
+            let done = *status == Step::Done;
+            div()
+                .flex()
+                .gap_2()
+                .child(div().flex_none().text_color(tint).child(mark))
+                .child(div().flex_1().min_w_0().text_color(if done { colors.muted_foreground } else { colors.foreground }).child(text.clone()))
+        }))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4117,13 +4132,18 @@ fn tool_card(
     card
 }
 
-fn permission(ix: usize, n: usize, ask: &Ask, this: &Entity<Reader>) -> impl IntoElement {
+fn permission(ix: usize, n: usize, ask: &Ask, this: &Entity<Reader>, text_inset: gpui::Pixels, cx: &App) -> impl IntoElement {
+    let colors = cx.global::<Palette>();
+    let (muted, warning) = (colors.muted_foreground, colors.warning);
+    // Only the first way of saying yes is the primary action; "Always allow" and the rest stay plain.
+    let mut primary_given = false;
     let row = div().flex().flex_wrap().gap_2();
     let row = match &ask.answered {
-        Some(name) => row.child(format!("→ {name}")),
+        Some(name) => row.child(div().text_color(muted).child(format!("→ {name}"))),
         None => row.children(ask.options.iter().enumerate().map(|(o, option)| {
             let this = this.clone();
-            let allow = option.name.to_lowercase().contains("allow");
+            let allow = !primary_given && option.name.to_lowercase().contains("allow");
+            primary_given |= allow;
             let button = Button::new(("permit", ix * 1_000_000 + n * 100 + o))
                 .label(option.name.clone())
                 .small()
@@ -4131,7 +4151,20 @@ fn permission(ix: usize, n: usize, ask: &Ask, this: &Entity<Reader>) -> impl Int
             if allow { button.primary() } else { button }
         })),
     };
-    div().flex().flex_col().gap_2().text_sm().child(format!("Permission: {}", ask.title)).child(row)
+    let waiting = ask.answered.is_none();
+    div()
+        .flex()
+        .flex_col()
+        .gap_2()
+        .py_2()
+        .px(text_inset - px(BOX_BORDER))
+        .rounded_md()
+        .border(px(BOX_BORDER))
+        // A question still waiting for you is outlined in the warning tone; an answered one settles.
+        .border_color(if waiting { warning.opacity(0.6) } else { colors.border })
+        .text_sm()
+        .child(div().flex().gap_2().child(div().flex_none().text_color(muted).child("Permission")).child(div().flex_1().min_w_0().child(ask.title.clone())))
+        .child(row)
 }
 
 fn status_text(text: String, cx: &App) -> impl IntoElement {
