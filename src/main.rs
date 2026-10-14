@@ -3978,7 +3978,7 @@ fn render_msg(
             ),
             Block::Tool(tool) => (tool_card(ix, n, tool, this, text_inset, selection, window, cx).into_any_element(), true),
             Block::Permission(ask) => (permission(ix, n, ask, this, text_inset, cx).into_any_element(), true),
-            Block::Plan(entries) => (plan(entries, text_inset, cx).into_any_element(), true),
+            Block::Plan(entries) => (plan(entries, cx).into_any_element(), false),
         };
         let el = if boxed { el } else { div().px(text_inset).child(el).into_any_element() };
         column = column.child(div().when(n > 0, |this| if run { this.mt_0p5() } else { this.mt_4() }).child(el));
@@ -4025,13 +4025,12 @@ fn step_mark(status: Step, colors: &Palette) -> (&'static str, gpui::Hsla) {
     }
 }
 
-fn plan(entries: &[(String, Step)], text_inset: gpui::Pixels, cx: &App) -> impl IntoElement {
+fn plan(entries: &[(String, Step)], cx: &App) -> impl IntoElement {
     let colors = cx.global::<Palette>();
     div()
         .flex()
         .flex_col()
         .gap_1p5()
-        .px(text_inset)
         .text_sm()
         .children(entries.iter().map(|(text, status)| {
             let (mark, tint) = step_mark(*status, colors);
@@ -4136,23 +4135,31 @@ fn tool_card(
     card
 }
 
+/// The one option in a permission request rendered as the filled button: the first way of saying
+/// yes, however the agent orders the rest. Options that describe themselves in `kind` (ACP) are
+/// picked by it; agents that send no kinds at all get their first "allow" in the name honoured.
+fn primary_option(options: &[PermissionOption]) -> Option<usize> {
+    if options.iter().any(|o| !o.kind.is_empty()) {
+        options.iter().position(|o| o.kind == "allow_once")
+    } else {
+        options.iter().position(|o| o.name.to_lowercase().contains("allow"))
+    }
+}
+
 fn permission(ix: usize, n: usize, ask: &Ask, this: &Entity<Reader>, text_inset: gpui::Pixels, cx: &App) -> impl IntoElement {
     let colors = cx.global::<Palette>();
     let (muted, warning) = (colors.muted_foreground, colors.warning);
-    // Only the first way of saying yes is the primary action; "Always allow" and the rest stay plain.
-    let mut primary_given = false;
+    let primary = primary_option(&ask.options);
     let row = div().flex().flex_wrap().gap_2();
     let row = match &ask.answered {
         Some(name) => row.child(div().text_color(muted).child(format!("→ {name}"))),
         None => row.children(ask.options.iter().enumerate().map(|(o, option)| {
             let this = this.clone();
-            let allow = !primary_given && option.name.to_lowercase().contains("allow");
-            primary_given |= allow;
             let button = Button::new(("permit", ix * 1_000_000 + n * 100 + o))
                 .label(option.name.clone())
                 .small()
                 .on_click(move |_, _, cx| this.update(cx, |reader, cx| reader.answer(ix, n, o, cx)));
-            if allow { button.primary() } else { button }
+            if primary == Some(o) { button.primary() } else { button }
         })),
     };
     let waiting = ask.answered.is_none();
@@ -4535,7 +4542,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{language, match_files, syntax};
+    use super::{PermissionOption, language, match_files, primary_option, syntax};
 
     #[test]
     fn file_matches_rank_names_before_paths() {
@@ -4565,5 +4572,36 @@ mod tests {
         assert_eq!(syntax("mix.exs"), "elixir");
         assert!(super::viewer::highlights("defmodule A do\nend\n", "ex"));
         assert!(super::viewer::highlights("defmodule A do\nend\n", &syntax("mix.exs")));
+    }
+
+    fn option(name: &str, kind: &str) -> PermissionOption {
+        PermissionOption { id: name.to_lowercase(), name: name.into(), kind: kind.into() }
+    }
+
+    // “Always allow” listed first is not the first way of saying yes: the once-option is.
+    #[test]
+    fn allow_always_first_is_not_primary() {
+        let options = vec![option("Always allow", "allow_always"), option("Allow once", "allow_once"), option("Deny", "reject_once")];
+        assert_eq!(primary_option(&options), Some(1));
+    }
+
+    #[test]
+    fn first_of_several_allow_once_wins() {
+        let options = vec![option("Allow once", "allow_once"), option("Allow once (this project)", "allow_once"), option("Deny", "reject_once")];
+        assert_eq!(primary_option(&options), Some(0));
+    }
+
+    // No option says yes once, so nothing is primary and all buttons stay plain.
+    #[test]
+    fn kinds_without_allow_once_leave_nothing_primary() {
+        let options = vec![option("Always allow", "allow_always"), option("Deny once", "reject_once"), option("Always deny", "reject_always")];
+        assert_eq!(primary_option(&options), None);
+    }
+
+    // Agents from before `kind` was in the protocol describe options in names only.
+    #[test]
+    fn names_only_fall_back_to_the_first_allow() {
+        let options = vec![option("Allow once", ""), option("Allow for session", ""), option("Deny", "")];
+        assert_eq!(primary_option(&options), Some(0));
     }
 }
