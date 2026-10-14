@@ -3223,8 +3223,8 @@ impl Reader {
                     .gap_2()
                     .px_1p5()
                     .h(rems(1.875))
-                    // A little air between the project and its threads.
-                    .mb_1()
+                    // A hair of air between the project and its threads.
+                    .mb_0p5()
                     .rounded_md()
                     .cursor_pointer()
                     .hover(move |row| row.bg(over))
