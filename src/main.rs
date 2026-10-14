@@ -41,7 +41,7 @@ use gpui::{
     prelude::*, px, rems, size, KeyBinding,
 };
 
-gpui::actions!(po, [ToggleLeft, ToggleRight, ShowSource, ShowChanges, ShowChat, SwapPanes, ShowHistory, ToggleSplit, ToggleRendered, NewThread, OpenProject, ShowFinder, CloseWindow, CloseFinder, FinderUp, FinderDown]);
+gpui::actions!(po, [ToggleTools, ToggleThoughts, ToggleLeft, ToggleRight, ShowSource, ShowChanges, ShowChat, SwapPanes, ShowHistory, ToggleSplit, ToggleRendered, NewThread, OpenProject, ShowFinder, CloseWindow, CloseFinder, FinderUp, FinderDown]);
 
 const SKIP: [&str; 5] = ["target", "node_modules", "dist", "build", "__pycache__"];
 const MAX_FILES: usize = 5000;
@@ -292,7 +292,8 @@ struct Ask {
 #[derive(Clone)]
 enum Block {
     Text(String),
-    Thought(String),
+    /// The agent's reasoning, and whether it is shown; it starts folded.
+    Thought(String, bool),
     Tool(ToolBlock),
     Permission(Ask),
     /// The agent's to-do list; each update replaces the whole list.
@@ -550,7 +551,7 @@ impl Thread {
                 Msg::Agent(blocks) => {
                     for block in blocks {
                         match block {
-                            Block::Text(text) | Block::Thought(text) => sources.push((text.as_str(), false)),
+                            Block::Text(text) | Block::Thought(text, true) => sources.push((text.as_str(), false)),
                             Block::Tool(tool) if tool.open => {
                                 sources.extend([&tool.arguments, &tool.result].into_iter().filter(|t| !t.is_empty()).map(|t| (t.as_str(), true)));
                             }
@@ -619,8 +620,8 @@ impl Thread {
                 }
             }
             Some("agent_thought_chunk") => match self.blocks().last_mut() {
-                Some(Block::Thought(body)) => body.push_str(text),
-                _ => self.blocks().push(Block::Thought(text.to_string())),
+                Some(Block::Thought(body, _)) => body.push_str(text),
+                _ => self.blocks().push(Block::Thought(text.to_string(), false)),
             },
             Some("plan") => {
                 let entries = update["entries"]
@@ -2992,6 +2993,46 @@ impl Reader {
         cx.notify();
     }
 
+    fn toggle_thought(&mut self, msg: usize, block: usize, cx: &mut Context<Self>) {
+        let Some(Msg::Agent(blocks)) = self.thread.messages.get_mut(msg) else { return };
+        let Some(Block::Thought(_, open)) = blocks.get_mut(block) else { return };
+        *open = !*open;
+        self.thread.relist(msg);
+        cx.notify();
+    }
+
+    /// Opens every tool call's details, or closes them all when none is left to open.
+    fn toggle_tools(&mut self, cx: &mut Context<Self>) {
+        let blocks = || self.thread.messages.iter().filter_map(|m| if let Msg::Agent(b) = m { Some(b) } else { None }).flatten();
+        let open = blocks().any(|b| matches!(b, Block::Tool(tool) if !tool.open));
+        for msg in &mut self.thread.messages {
+            let Msg::Agent(blocks) = msg else { continue };
+            for block in blocks {
+                if let Block::Tool(tool) = block {
+                    tool.open = open;
+                }
+            }
+        }
+        self.thread.relist(0);
+        cx.notify();
+    }
+
+    /// Opens every thought, or folds them all when none is left to open.
+    fn toggle_thoughts(&mut self, cx: &mut Context<Self>) {
+        let blocks = || self.thread.messages.iter().filter_map(|m| if let Msg::Agent(b) = m { Some(b) } else { None }).flatten();
+        let open = blocks().any(|b| matches!(b, Block::Thought(_, false)));
+        for msg in &mut self.thread.messages {
+            let Msg::Agent(blocks) = msg else { continue };
+            for block in blocks {
+                if let Block::Thought(_, shown) = block {
+                    *shown = open;
+                }
+            }
+        }
+        self.thread.relist(0);
+        cx.notify();
+    }
+
     /// The strip under the explorer header in Changes mode: an input to open a PR for
     /// review, or the open PR's summary with a way out.
     fn pr_strip(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -3407,7 +3448,7 @@ impl Reader {
                     .child(div().text_xs().text_color(muted).child(project_count.to_string())),
                 Button::new("agents-add")
                     .icon(IconName::Plus)
-                    .tooltip("Add a project: open a folder (Ctrl+O)")
+                    .tooltip("Add a project: open a folder (Ctrl+Shift+O)")
                     .ghost()
                     .small()
                     .on_click(move |_, window, cx| add.update(cx, |reader, cx| reader.pick_project(window, cx))),
@@ -4061,10 +4102,7 @@ fn render_msg(
         let run = n > 0 && matches!((&blocks[n - 1], block), (Block::Tool(_), Block::Tool(_)));
         let (el, boxed) = match block {
             Block::Text(text) => (ui::markdown::markdown(("answer", id), text, selection, window, cx).into_any_element(), false),
-            Block::Thought(text) => (
-                div().opacity(0.7).child(ui::markdown::italic(("thought", id), text, selection, window, cx)).into_any_element(),
-                false,
-            ),
+            Block::Thought(text, open) => (thought(ix, n, text, *open, this, selection, window, cx), false),
             Block::Tool(tool) => (tool_card(ix, n, tool, this, text_inset, selection, window, cx).into_any_element(), true),
             Block::Permission(ask) => (permission(ix, n, ask, this, text_inset, cx).into_any_element(), true),
             Block::Plan(entries) => (plan(entries, cx).into_any_element(), false),
@@ -4073,6 +4111,29 @@ fn render_msg(
         column = column.child(div().when(n > 0, |this| if run { this.mt_0p5() } else { this.mt_4() }).child(el));
     }
     column.into_any_element()
+}
+
+/// A thought: a quiet "Thinking" row that opens to the agent's reasoning.
+fn thought(ix: usize, n: usize, text: &str, open: bool, this: &Entity<Reader>, selection: &Entity<ui::markdown::Selection>, window: &mut Window, cx: &mut App) -> AnyElement {
+    let muted = cx.global::<Palette>().muted_foreground;
+    let toggle = this.clone();
+    let header = div()
+        .id(("thought", ix * 10_000 + n))
+        .flex()
+        .items_center()
+        .gap_1()
+        .cursor_pointer()
+        .text_sm()
+        .text_color(muted)
+        .on_click(move |_, _, cx| toggle.update(cx, |reader, cx| reader.toggle_thought(ix, n, cx)))
+        .child(Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight }).size(IconSize::XSmall))
+        .child("Thinking");
+    let column = div().flex().flex_col().gap_1().child(header);
+    if open {
+        column.child(div().opacity(0.7).child(ui::markdown::italic(("thought", ix * 10_000 + n), text, selection, window, cx))).into_any_element()
+    } else {
+        column.into_any_element()
+    }
 }
 
 /// The sessions an agent offers to resume, newest first.
@@ -4396,6 +4457,8 @@ impl Render for Reader {
             .relative()
             .track_focus(&self.focus)
             .on_action(cx.listener(|reader, _: &ShowFinder, window, cx| reader.show_finder(window, cx)))
+            .on_action(cx.listener(|reader, _: &ToggleTools, _, cx| reader.toggle_tools(cx)))
+            .on_action(cx.listener(|reader, _: &ToggleThoughts, _, cx| reader.toggle_thoughts(cx)))
             .on_action(cx.listener(|reader, _: &ToggleLeft, _, cx| reader.toggle_left(cx)))
             .on_action(cx.listener(|reader, _: &ToggleRight, _, cx| reader.toggle_right(cx)))
             .on_action(cx.listener(|reader, _: &ShowSource, _, cx| reader.show_viewer(Mode::Source, cx)))
@@ -4572,6 +4635,8 @@ fn main() {
         viewer::init(cx);
         ui::init(cx);
         cx.bind_keys([
+            KeyBinding::new("ctrl-o", ToggleTools, None),
+            KeyBinding::new("ctrl-t", ToggleThoughts, None),
             KeyBinding::new("secondary-b", ToggleLeft, None),
             KeyBinding::new("secondary-shift-b", ToggleRight, None),
             KeyBinding::new("secondary-1", ShowSource, None),
@@ -4582,7 +4647,7 @@ fn main() {
             KeyBinding::new("secondary-\\", ToggleSplit, None),
             KeyBinding::new("secondary-shift-m", ToggleRendered, None),
             KeyBinding::new("secondary-n", NewThread, None),
-            KeyBinding::new("secondary-o", OpenProject, None),
+            KeyBinding::new("secondary-shift-o", OpenProject, None),
             KeyBinding::new("secondary-p", ShowFinder, None),
             KeyBinding::new("secondary-w", CloseWindow, None),
             KeyBinding::new("escape", CloseFinder, Some("Finder")),
