@@ -3197,7 +3197,7 @@ impl Reader {
         let many = project_count > 1;
         let add = cx.entity();
         // Groups are spaced apart by more than anything inside one, so the eye reads them as units.
-        let mut tree = div().id("agents-tree").size_full().overflow_y_scroll().flex().flex_col().gap_2().p_1();
+        let mut tree = div().id("agents-tree").size_full().overflow_y_scroll().flex().flex_col().gap_3().p_2();
         for view in &views {
             let pid = view.id;
             let (select, close, start) = (cx.entity(), cx.entity(), cx.entity());
@@ -3208,8 +3208,8 @@ impl Reader {
             let mut group = div()
                 .flex()
                 .flex_col()
-                .gap_px()
-                .p_1()
+                .gap_0p5()
+                .p_1p5()
                 .rounded_lg()
                 .when(current, |card| card.bg(hover));
             // Inside the selected card the row under the pointer needs a different shade to show.
@@ -3222,9 +3222,9 @@ impl Reader {
                     .items_center()
                     .gap_2()
                     .px_1p5()
-                    .h(rems(1.625))
+                    .h(rems(1.875))
                     // A little air between the project and its threads.
-                    .mb_1()
+                    .mb_1p5()
                     .rounded_md()
                     .cursor_pointer()
                     .hover(move |row| row.bg(over))
@@ -3281,7 +3281,7 @@ impl Reader {
                         .items_center()
                         .gap_2()
                         .px_1p5()
-                        .h(rems(1.625))
+                        .h(rems(1.875))
                         .rounded_md()
                         .cursor_pointer()
                         .when((pid, tid) == (active_project, active_thread), |row| row.bg(selected))
@@ -3670,8 +3670,8 @@ impl Reader {
                     // Boxes share the composer box's edges (the column's own padding); the text
                     // inside them is inset to the composer's text edge (see `text_inset`).
                     div()
-                        .pt_3()
-                        .when(last, |this| this.pb_3())
+                        .pt_5()
+                        .when(last, |this| this.pb_5())
                         .child(render_msg(ix, msg, &this, &selection, window, cx))
                         .into_any_element()
                 }),
@@ -3892,22 +3892,22 @@ impl Reader {
                     .child(div().size_full().flex().justify_center().px_3().child(div().h_full().w_full().max_w(px(860.0)).child(thread))),
             )
             .child(
-                div().flex_none().p_3().flex().justify_center().child(
+                div().flex_none().px_3().pt_2().pb_4().flex().justify_center().child(
                     div()
                         .w_full()
                         .max_w(px(860.0))
                         .flex()
                         .flex_col()
-                        .gap_1()
+                        .gap_2()
                         .p(rems(COMPOSER_PAD_REM))
-                        .rounded_lg()
+                        .rounded_xl()
                         .border(px(BOX_BORDER))
                         .border_color(colors.border)
                         .bg(colors.sidebar)
                         .when(!queued.is_empty(), |this| {
                             this.child(div().flex().flex_col().gap_1().pb_1().border_b_1().border_color(border).children(queued))
                         })
-                        .child(Input::new(&self.thread.draft).large())
+                        .child(div().py_1().child(Input::new(&self.thread.draft).large()))
                         .child(
                             // The input's text sits 0.75rem in; the chips' own padding (0.5rem) plus this
                             // inset puts their text, and the label after the thread has started, on its edge.
@@ -3947,11 +3947,11 @@ fn render_msg(
                 .child(
                     div()
                         .max_w(gpui::relative(0.9))
-                        .px_3()
-                        .py_2()
-                        .rounded_lg()
+                        .px_4()
+                        .py_3()
+                        .rounded_xl()
                         .bg(bg)
-                        .text_sm()
+                        .text_base()
                         .child(text_el),
                 )
                 .into_any_element();
@@ -3959,7 +3959,7 @@ fn render_msg(
         Msg::Agent(blocks) => blocks,
     };
     let colors = cx.global::<Palette>();
-    let mut column = div().flex().flex_col().gap_2().min_w_0();
+    let mut column = div().flex().flex_col().gap_3().min_w_0();
     // Text blocks sit where the composer's text does; boxes (tool cards) span the composer's width.
     let text_inset = text_inset(window);
     if blocks.is_empty() {
@@ -4027,8 +4027,8 @@ fn plan(entries: &[(String, Step)], text_inset: gpui::Pixels, cx: &App) -> impl 
     div()
         .flex()
         .flex_col()
-        .gap_1()
-        .py_2()
+        .gap_1p5()
+        .py_2p5()
         .px(text_inset - px(BOX_BORDER))
         .rounded_md()
         .border(px(BOX_BORDER))
@@ -4065,8 +4065,8 @@ fn tool_card(
     let mut card = div()
         .flex()
         .flex_col()
-        .gap_1()
-        .py_2()
+        .gap_1p5()
+        .py_2p5()
         // The border plus this padding put the card's text on the composer's text edge.
         .px(text_inset - px(BOX_BORDER))
         .rounded_md()
@@ -4156,7 +4156,7 @@ fn permission(ix: usize, n: usize, ask: &Ask, this: &Entity<Reader>, text_inset:
         .flex()
         .flex_col()
         .gap_2()
-        .py_2()
+        .py_2p5()
         .px(text_inset - px(BOX_BORDER))
         .rounded_md()
         .border(px(BOX_BORDER))
@@ -4205,7 +4205,7 @@ fn pane_header(title: &str, right: impl IntoElement, lead: Option<AnyElement>, t
 fn header_row(left: impl IntoElement, right: impl IntoElement, cx: &App) -> impl IntoElement {
     let colors = cx.global::<Palette>();
     div()
-        .h_10()
+        .h_11()
         .flex_none()
         .flex()
         .items_center()
