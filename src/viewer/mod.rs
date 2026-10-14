@@ -141,11 +141,37 @@ impl CodeColors {
     /// Syntax colors for the code, for code shown outside the viewer, such as Markdown code
     /// blocks.
     pub fn styles(&self, cx: &App) -> Vec<(std::ops::Range<usize>, gpui::HighlightStyle)> {
+        self.styles_in(0..usize::MAX, &self.palette(cx))
+    }
+
+    /// The theme's style for each capture name, for [`Self::styles_in`].
+    pub fn palette(&self, cx: &App) -> Vec<Option<gpui::HighlightStyle>> {
         let palette = cx.global::<crate::theme::Palette>();
-        let styles: Vec<_> = self.names.iter().map(|name| palette.syntax(name)).collect();
-        self.runs
+        self.names.iter().map(|name| palette.syntax(name)).collect()
+    }
+
+    /// How many capture names the code uses, so tests can build a palette without a theme.
+    #[cfg(test)]
+    pub fn palette_len(&self) -> usize {
+        self.names.len()
+    }
+
+    /// Syntax colors for `range` of the code, such as one of its lines, measured from the
+    /// range's start; `palette` comes from [`Self::palette`].
+    pub fn styles_in(
+        &self,
+        range: std::ops::Range<usize>,
+        palette: &[Option<gpui::HighlightStyle>],
+    ) -> Vec<(std::ops::Range<usize>, gpui::HighlightStyle)> {
+        let first = self.runs.partition_point(|(run, _)| run.end <= range.start);
+        self.runs[first..]
             .iter()
-            .filter_map(|(range, id)| Some((range.clone(), (*styles.get(*id as usize - 1)?)?)))
+            .take_while(|(run, _)| run.start < range.end)
+            .filter_map(|(run, id)| {
+                let style = (*palette.get(*id as usize - 1)?)?;
+                let (start, end) = (run.start.max(range.start), run.end.min(range.end));
+                Some((start - range.start..end - range.start, style))
+            })
             .collect()
     }
 }

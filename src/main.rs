@@ -37,7 +37,7 @@ use serde_json::Value;
 
 use gpui::{
     AnyElement, App, Pixels, TitlebarOptions, WindowControlArea, point, Bounds, Context, Entity, FontWeight, IntoElement, ListAlignment, ListState, ParentElement,
-    Render, SharedString, StyleRefinement, Styled, Subscription, Task, Window, WindowBounds, WindowOptions, div, list,
+    Render, SharedString, StyleRefinement, Styled, StyledText, Subscription, Task, Window, WindowBounds, WindowOptions, div, list,
     prelude::*, px, rems, size, KeyBinding,
 };
 
@@ -453,6 +453,8 @@ struct Project {
     /// The picked file's diff, its side-by-side pairs and how many lines it adds and removes.
     rows: Rc<Vec<Row>>,
     pairs: Rc<Vec<Pair>>,
+    /// Syntax colors for the picked file's old and new versions.
+    colors: Rc<diff::Colors>,
     counts: (usize, usize),
     /// The diff's rows as laid out, inline or split; only those in view are drawn.
     diff_list: ListState,
@@ -1126,6 +1128,7 @@ impl Reader {
             picked: None,
             rows: Rc::new(vec![]),
             pairs: Rc::new(vec![]),
+            colors: Rc::default(),
             counts: (0, 0),
             diff_list: ListState::new(0, ListAlignment::Top, px(400.)),
             current: None,
@@ -1179,7 +1182,7 @@ impl Reader {
                 None => {
                     self.project.picked = None;
                     self.project.diffing = None;
-                    self.set_rows(vec![]);
+                    self.set_rows(vec![], diff::Colors::default());
                 }
             },
         }
@@ -1236,8 +1239,8 @@ impl Reader {
         cx.notify();
     }
 
-    /// Shows the diff `rows`, and works out their side-by-side pairs and counts once.
-    fn set_rows(&mut self, rows: Vec<Row>) {
+    /// Shows the diff `rows` colored by `colors`, and works out their side-by-side pairs and counts once.
+    fn set_rows(&mut self, rows: Vec<Row>, colors: diff::Colors) {
         self.project.counts = rows.iter().fold((0, 0), |(a, r), row| match row.kind {
             Kind::Added => (a + 1, r),
             Kind::Removed => (a, r + 1),
@@ -1245,6 +1248,7 @@ impl Reader {
         });
         self.project.pairs = Rc::new(diff::split(&rows));
         self.project.rows = Rc::new(rows);
+        self.project.colors = Rc::new(colors);
         self.relist_diff();
     }
 
@@ -1258,7 +1262,7 @@ impl Reader {
         if self.project.picked.as_deref() != Some(path) {
             self.project.picked = Some(path.to_string());
             // The last file's diff isn't shown under this one's name while this one loads.
-            self.set_rows(vec![]);
+            self.set_rows(vec![], diff::Colors::default());
             let id = SharedString::from(path.to_string());
             self.project.changes_tree.update(cx, |tree, cx| {
                 if let Some(ix) = tree.index_of(&id) {
@@ -1268,10 +1272,19 @@ impl Reader {
         }
         let (root, base, path) = (self.project.root.clone(), self.project.base.clone(), path.to_string());
         self.project.diffing = Some(cx.spawn(async move |this, cx| {
-            let rows = cx.background_executor().spawn(async move { diff::file_diff(&root, &base, &change) }).await;
+            let language = syntax(&path);
+            let (rows, colors) = cx
+                .background_executor()
+                .spawn(async move {
+                    let rows = diff::file_diff(&root, &base, &change);
+                    // Only files with changed lines are worth parsing.
+                    let colors = if rows.is_empty() { diff::Colors::default() } else { diff::colors(&root, &base, &change, &language) };
+                    (rows, colors)
+                })
+                .await;
             this.update(cx, |reader, cx| {
                 if reader.project.picked.as_deref() == Some(&path) {
-                    reader.set_rows(rows);
+                    reader.set_rows(rows, colors);
                     reader.project.diffing = None;
                     cx.notify();
                 }
@@ -3435,7 +3448,8 @@ impl Reader {
                 .child(pane_header("Changes", status_text(String::new(), cx), lead, trail, cx))
                 .child(div().flex_1().min_h_0().child(centered("Pick a changed file".into(), cx)));
         };
-        let (rows, pairs) = (self.project.rows.clone(), self.project.pairs.clone());
+        let (rows, pairs, syntax) = (self.project.rows.clone(), self.project.pairs.clone(), self.project.colors.clone());
+        let palettes = syntax.palettes(cx);
         let (added, removed) = self.project.counts;
         // Themes may lack a green (Rosé Pine's success is teal), so added lines get their own.
         let (success, danger, muted, border) =
@@ -3448,6 +3462,9 @@ impl Reader {
         } else if rows.is_empty() {
             centered("No textual changes".into(), cx)
         } else {
+            let code = |text: &str, styles: Vec<(std::ops::Range<usize>, gpui::HighlightStyle)>| {
+                StyledText::new(SharedString::from(text.to_string())).with_highlights(styles)
+            };
             list(self.project.diff_list.clone(), move |ix, _, _| {
                 let line = div().flex().w_full().min_h(rems(1.5)).items_start().font_family(font.clone()).text_sm();
                 if split {
@@ -3464,8 +3481,9 @@ impl Reader {
                             Some(tint) => half.bg(tint),
                             None => half,
                         };
+                        let styles = syntax.line(first, cell.number, &cell.text, &palettes);
                         half.child(div().w(rems(3.)).flex_none().text_right().text_color(muted).child(cell.number.to_string()))
-                            .child(div().flex_1().min_w_0().child(cell.text.clone()))
+                            .child(div().flex_1().min_w_0().child(code(&cell.text, styles)))
                     };
                     return match &pairs[ix] {
                         Pair::Hunk(text) => line.px_2().bg(muted.opacity(0.12)).text_color(muted).child(text.clone()),
@@ -3491,10 +3509,16 @@ impl Reader {
                 if row.kind == Kind::Hunk {
                     return line.px_2().text_color(muted).child(row.text.clone()).into_any_element();
                 }
+                // Removed lines read as the old version had them, the rest as the new one does.
+                let styles = match (row.kind, row.old, row.new) {
+                    (Kind::Removed, Some(n), _) => syntax.line(true, n, &row.text, &palettes),
+                    (_, _, Some(n)) => syntax.line(false, n, &row.text, &palettes),
+                    _ => vec![],
+                };
                 line.child(number(row.old))
                     .child(number(row.new))
                     .child(div().w(rems(0.75)).flex_none().text_color(muted).child(sign))
-                    .child(div().flex_1().min_w_0().child(row.text.clone()))
+                    .child(div().flex_1().min_w_0().child(code(&row.text, styles)))
                     .into_any_element()
             })
             .size_full()
