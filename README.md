@@ -95,6 +95,9 @@ and SSE instead, which can take messages mid-turn:
 - Queued messages are listed above the input until the agent takes them; the
   **×** takes one back into the input to edit.
 
+The model and mode menus under the input list the daemon's models and the modes
+it allows; po sends the choice with each message.
+
 An entry with a `daemon` URL uses this path, and its `command` starts the
 daemon if nothing answers at the URL (po stops a daemon it started). Plain
 `http` only; set `DEX_DAEMON_TOKEN` if the daemon needs a bearer token.

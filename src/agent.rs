@@ -67,11 +67,11 @@ impl Client {
         }
     }
 
-    /// Changes a session setting, like its model. Only ACP agents have them.
+    /// Changes a session setting, like its model.
     pub fn set_option(&self, id: &str, value: &str) -> bool {
         match self {
             Self::Acp(client) => client.set_option(id, value),
-            Self::Dex(_) => false,
+            Self::Dex(client) => client.set_option(id, value),
         }
     }
 
