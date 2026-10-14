@@ -85,8 +85,8 @@ pub enum Event {
     Options(Vec<ConfigOption>),
     /// The agent accepted a change to a session setting.
     OptionSet { id: String, value: String },
-    /// The agent refused a change to a session setting.
-    Refused(String),
+    /// The agent refused a change to session setting `id`.
+    Refused { id: String, text: String },
     /// A session is open: a new one, or a loaded one once its history has been replayed. `fresh`
     /// is false for a resumed one, whose settings the agent restored.
     Ready { agent: String, fresh: bool },
@@ -207,10 +207,10 @@ impl Shared {
             return;
         };
         if let Some(error) = message.get("error") {
-            if matches!(kind, Pending::SetOption { .. }) {
+            if let Pending::SetOption { id, .. } = kind {
                 log::warn!("acp: setting refused: {error}");
                 let text = error["message"].as_str().unwrap_or("the agent refused");
-                self.emit(Event::Refused(format!("setting not changed: {text}")));
+                self.emit(Event::Refused { id, text: format!("setting not changed: {text}") });
                 return;
             }
             // -32000 is ACP's `authRequired`.
