@@ -1,7 +1,14 @@
+use std::ops::Range;
 use std::path::Path;
 use std::process::Command;
 
+use gpui::HighlightStyle;
+
+use crate::viewer::CodeColors;
+
 const MAX_ROWS: usize = 5000;
+/// Versions of a file bigger than this are diffed without syntax colors.
+const MAX_COLORED: usize = 2 * 1024 * 1024;
 
 /// A file that differs from `HEAD`: `M`odified, `A`dded, `D`eleted, `R`enamed or `U`ntracked.
 #[derive(Clone, PartialEq)]
@@ -92,6 +99,79 @@ pub fn file_diff(root: &Path, base: &str, change: &Change) -> Vec<Row> {
     text.map(|text| parse(&text)).unwrap_or_default()
 }
 
+/// Syntax colors for both versions of a changed file. Each version is parsed whole, so a
+/// line is colored as it reads in the file rather than as a fragment cut out of it.
+#[derive(Default)]
+pub struct Colors {
+    old: Option<Version>,
+    new: Option<Version>,
+}
+
+struct Version {
+    colors: CodeColors,
+    text: String,
+    /// Where each line starts in `text`.
+    starts: Vec<usize>,
+}
+
+impl Version {
+    fn new(text: String, language: &str) -> Option<Self> {
+        if text.len() > MAX_COLORED {
+            return None;
+        }
+        let colors = CodeColors::new(&text, language)?;
+        let starts = std::iter::once(0).chain(text.match_indices('\n').map(|(ix, _)| ix + 1)).collect();
+        Some(Self { colors, text, starts })
+    }
+
+    /// Where line `number` (from 1) is in the text, if it still reads `line`: the file may
+    /// have moved on since the diff was taken.
+    fn line(&self, number: u32, line: &str) -> Option<Range<usize>> {
+        let start = *self.starts.get((number as usize).checked_sub(1)?)?;
+        let end = self.starts.get(number as usize).map_or(self.text.len(), |next| next - 1);
+        let end = if self.text[..end].ends_with('\r') { end - 1 } else { end };
+        (self.text[start..end] == *line).then_some(start..end)
+    }
+}
+
+/// The theme's styles for each version's captures, looked up once per frame.
+pub type Palettes = [Vec<Option<HighlightStyle>>; 2];
+
+impl Colors {
+    pub fn palettes(&self, cx: &gpui::App) -> Palettes {
+        let palette = |version: &Option<Version>| version.as_ref().map(|v| v.colors.palette(cx)).unwrap_or_default();
+        [palette(&self.old), palette(&self.new)]
+    }
+
+    /// Syntax colors for `text`, line `number` of the old version or the new one.
+    pub fn line(&self, old: bool, number: u32, text: &str, palettes: &Palettes) -> Vec<(Range<usize>, HighlightStyle)> {
+        let (version, palette) = if old { (&self.old, &palettes[0]) } else { (&self.new, &palettes[1]) };
+        let Some(version) = version else { return vec![] };
+        version.line(number, text).map(|range| version.colors.styles_in(range, palette)).unwrap_or_default()
+    }
+}
+
+/// Parses the old and new versions of `change` as `language` (a name or file extension).
+pub fn colors(root: &Path, base: &str, change: &Change, language: &str) -> Colors {
+    let old = if matches!(change.status, 'A' | 'U') {
+        None
+    } else {
+        Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(["show", &format!("{base}:{}", change.path)])
+            .output()
+            .ok()
+            .filter(|out| out.status.success())
+            .and_then(|out| String::from_utf8(out.stdout).ok())
+    };
+    let new = if change.status == 'D' { None } else { std::fs::read_to_string(root.join(&change.path)).ok() };
+    Colors {
+        old: old.and_then(|text| Version::new(text, language)),
+        new: new.and_then(|text| Version::new(text, language)),
+    }
+}
+
 fn parse(text: &str) -> Vec<Row> {
     let mut rows = Vec::new();
     let (mut old, mut new) = (0, 0);
@@ -178,4 +258,24 @@ pub fn split(rows: &[Row]) -> Vec<Pair> {
     }
     flush(&mut out, &mut removed, &mut added);
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lines_are_colored_in_the_context_of_their_whole_version() {
+        // The string opens a line earlier, so on its own the second line wouldn't read as one.
+        let text = "let s = \"a\nb\";\r\nlet t = 1;\n".to_string();
+        let version = Version::new(text, "rs").unwrap();
+        assert_eq!(version.line(2, "b\";"), Some(11..14));
+        assert_eq!(version.line(2, "changed since"), None);
+        assert_eq!(version.line(9, "b\";"), None);
+        let names = version.colors.palette_len();
+        let colors = Colors { old: None, new: Some(version) };
+        let palettes = [vec![], vec![Some(HighlightStyle::default()); names]];
+        assert_eq!(colors.line(false, 2, "b\";", &palettes).first().map(|(range, _)| range.clone()), Some(0..2));
+        assert!(colors.line(true, 2, "b\";", &palettes).is_empty());
+    }
 }
