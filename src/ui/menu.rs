@@ -228,7 +228,8 @@ pub fn menu(state: &Entity<MenuState>, items: Vec<MenuItem>, keep: Option<Bounds
                 outside.update(cx, |s, cx| s.close(window, cx));
             }
         })
-        .child(div().flex().flex_col().p_1().gap_y_0p5().min_w(rems(8.)).max_w(px(500.)).children(rows));
+        // A long list, like a daemon's models, scrolls rather than running off the window.
+        .child(div().id("popup-menu-items").flex().flex_col().p_1().gap_y_0p5().min_w(rems(8.)).max_w(px(500.)).max_h(px(420.)).overflow_y_scroll().children(rows));
     Some(deferred(anchored().position(position).snap_to_window_with_margin(px(8.)).child(panel)).into_any_element())
 }
 
