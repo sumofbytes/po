@@ -3208,7 +3208,7 @@ impl Reader {
             let mut group = div()
                 .flex()
                 .flex_col()
-                .gap_0p5()
+                .gap_px()
                 .p_1p5()
                 .rounded_lg()
                 .when(current, |card| card.bg(hover));
@@ -3224,7 +3224,7 @@ impl Reader {
                     .px_1p5()
                     .h(rems(1.875))
                     // A little air between the project and its threads.
-                    .mb_1p5()
+                    .mb_1()
                     .rounded_md()
                     .cursor_pointer()
                     .hover(move |row| row.bg(over))
@@ -3670,8 +3670,8 @@ impl Reader {
                     // Boxes share the composer box's edges (the column's own padding); the text
                     // inside them is inset to the composer's text edge (see `text_inset`).
                     div()
-                        .pt_5()
-                        .when(last, |this| this.pb_5())
+                        .pt_6()
+                        .when(last, |this| this.pb_6())
                         .child(render_msg(ix, msg, &this, &selection, window, cx))
                         .into_any_element()
                 }),
@@ -3959,7 +3959,7 @@ fn render_msg(
         Msg::Agent(blocks) => blocks,
     };
     let colors = cx.global::<Palette>();
-    let mut column = div().flex().flex_col().gap_3().min_w_0();
+    let mut column = div().flex().flex_col().gap_4().min_w_0();
     // Text blocks sit where the composer's text does; boxes (tool cards) span the composer's width.
     let text_inset = text_inset(window);
     if blocks.is_empty() {
@@ -4027,8 +4027,8 @@ fn plan(entries: &[(String, Step)], text_inset: gpui::Pixels, cx: &App) -> impl 
     div()
         .flex()
         .flex_col()
-        .gap_1p5()
-        .py_2p5()
+        .gap_2()
+        .py_3()
         .px(text_inset - px(BOX_BORDER))
         .rounded_md()
         .border(px(BOX_BORDER))
@@ -4066,7 +4066,7 @@ fn tool_card(
         .flex()
         .flex_col()
         .gap_1p5()
-        .py_2p5()
+        .py_3()
         // The border plus this padding put the card's text on the composer's text edge.
         .px(text_inset - px(BOX_BORDER))
         .rounded_md()
@@ -4156,7 +4156,7 @@ fn permission(ix: usize, n: usize, ask: &Ask, this: &Entity<Reader>, text_inset:
         .flex()
         .flex_col()
         .gap_2()
-        .py_2p5()
+        .py_3()
         .px(text_inset - px(BOX_BORDER))
         .rounded_md()
         .border(px(BOX_BORDER))
