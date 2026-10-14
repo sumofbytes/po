@@ -3264,7 +3264,7 @@ impl Reader {
         let many = project_count > 1;
         let add = cx.entity();
         // Groups are spaced apart by more than anything inside one, so the eye reads them as units.
-        let mut tree = div().id("agents-tree").size_full().overflow_y_scroll().flex().flex_col().gap_2().p_1();
+        let mut tree = div().id("agents-tree").size_full().overflow_y_scroll().flex().flex_col().gap_3().p_2();
         for view in &views {
             let pid = view.id;
             let (select, close, start) = (cx.entity(), cx.entity(), cx.entity());
@@ -3276,7 +3276,7 @@ impl Reader {
                 .flex()
                 .flex_col()
                 .gap_px()
-                .p_1()
+                .p_1p5()
                 .rounded_lg()
                 .when(current, |card| card.bg(hover));
             // Inside the selected card the row under the pointer needs a different shade to show.
@@ -3289,9 +3289,9 @@ impl Reader {
                     .items_center()
                     .gap_2()
                     .px_1p5()
-                    .h(rems(1.625))
-                    // A little air between the project and its threads.
-                    .mb_1()
+                    .h(rems(1.875))
+                    // A hair of air between the project and its threads.
+                    .mb_0p5()
                     .rounded_md()
                     .cursor_pointer()
                     .hover(move |row| row.bg(over))
@@ -3348,7 +3348,7 @@ impl Reader {
                         .items_center()
                         .gap_2()
                         .px_1p5()
-                        .h(rems(1.625))
+                        .h(rems(1.875))
                         .rounded_md()
                         .cursor_pointer()
                         .when((pid, tid) == (active_project, active_thread), |row| row.bg(selected))
@@ -3735,8 +3735,8 @@ impl Reader {
                     // Boxes share the composer box's edges (the column's own padding); the text
                     // inside them is inset to the composer's text edge (see `text_inset`).
                     div()
-                        .pt_3()
-                        .when(last, |this| this.pb_3())
+                        .pt_6()
+                        .when(last, |this| this.pb_6())
                         .child(render_msg(ix, msg, &this, &selection, window, cx))
                         .into_any_element()
                 }),
@@ -3957,22 +3957,22 @@ impl Reader {
                     .child(div().size_full().flex().justify_center().px_3().child(div().h_full().w_full().max_w(px(860.0)).child(thread))),
             )
             .child(
-                div().flex_none().p_3().flex().justify_center().child(
+                div().flex_none().px_3().pt_2().pb_4().flex().justify_center().child(
                     div()
                         .w_full()
                         .max_w(px(860.0))
                         .flex()
                         .flex_col()
-                        .gap_1()
+                        .gap_2()
                         .p(rems(COMPOSER_PAD_REM))
-                        .rounded_lg()
+                        .rounded_xl()
                         .border(px(BOX_BORDER))
                         .border_color(colors.border)
                         .bg(colors.sidebar)
                         .when(!queued.is_empty(), |this| {
                             this.child(div().flex().flex_col().gap_1().pb_1().border_b_1().border_color(border).children(queued))
                         })
-                        .child(Input::new(&self.thread.draft).large())
+                        .child(div().py_1().child(Input::new(&self.thread.draft).large()))
                         .child(
                             // The input's text sits 0.75rem in; the chips' own padding (0.5rem) plus this
                             // inset puts their text, and the label after the thread has started, on its edge.
@@ -4012,11 +4012,11 @@ fn render_msg(
                 .child(
                     div()
                         .max_w(gpui::relative(0.9))
-                        .px_3()
-                        .py_2()
-                        .rounded_lg()
+                        .px_4()
+                        .py_3()
+                        .rounded_xl()
                         .bg(bg)
-                        .text_sm()
+                        .text_base()
                         .child(text_el),
                 )
                 .into_any_element();
@@ -4024,7 +4024,7 @@ fn render_msg(
         Msg::Agent(blocks) => blocks,
     };
     let colors = cx.global::<Palette>();
-    let mut column = div().flex().flex_col().gap_2().min_w_0();
+    let mut column = div().flex().flex_col().min_w_0();
     // Text blocks sit where the composer's text does; boxes (tool cards) span the composer's width.
     let text_inset = text_inset(window);
     if blocks.is_empty() {
@@ -4033,6 +4033,8 @@ fn render_msg(
     }
     for (n, block) in blocks.iter().enumerate() {
         let id = ix * 10_000 + n;
+        // Runs of tool calls read as one list; anything else is set a step apart.
+        let run = n > 0 && matches!((&blocks[n - 1], block), (Block::Tool(_), Block::Tool(_)));
         let (el, boxed) = match block {
             Block::Text(text) => (ui::markdown::markdown(("answer", id), text, selection, window, cx).into_any_element(), false),
             Block::Thought(text) => (
@@ -4040,10 +4042,11 @@ fn render_msg(
                 false,
             ),
             Block::Tool(tool) => (tool_card(ix, n, tool, this, text_inset, selection, window, cx).into_any_element(), true),
-            Block::Permission(ask) => (permission(ix, n, ask, this).into_any_element(), false),
+            Block::Permission(ask) => (permission(ix, n, ask, this, text_inset, cx).into_any_element(), true),
             Block::Plan(entries) => (plan(entries, cx).into_any_element(), false),
         };
-        column = column.child(if boxed { el } else { div().px(text_inset).child(el).into_any_element() });
+        let el = if boxed { el } else { div().px(text_inset).child(el).into_any_element() };
+        column = column.child(div().when(n > 0, |this| if run { this.mt_0p5() } else { this.mt_4() }).child(el));
     }
     column.into_any_element()
 }
@@ -4089,10 +4092,20 @@ fn step_mark(status: Step, colors: &Palette) -> (&'static str, gpui::Hsla) {
 
 fn plan(entries: &[(String, Step)], cx: &App) -> impl IntoElement {
     let colors = cx.global::<Palette>();
-    div().flex().flex_col().gap_1().text_sm().children(entries.iter().map(|(text, status)| {
-        let (mark, tint) = step_mark(*status, colors);
-        div().flex().gap_2().child(div().flex_none().text_color(tint).child(mark)).child(div().flex_1().min_w_0().child(text.clone()))
-    }))
+    div()
+        .flex()
+        .flex_col()
+        .gap_1p5()
+        .text_sm()
+        .children(entries.iter().map(|(text, status)| {
+            let (mark, tint) = step_mark(*status, colors);
+            let done = *status == Step::Done;
+            div()
+                .flex()
+                .gap_2()
+                .child(div().flex_none().text_color(tint).child(mark))
+                .child(div().flex_1().min_w_0().text_color(if done { colors.muted_foreground } else { colors.foreground }).child(text.clone()))
+        }))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4108,21 +4121,22 @@ fn tool_card(
 ) -> impl IntoElement {
     let colors = cx.global::<Palette>();
     let (mark, tint) = step_mark(tool.status, colors);
-    let (muted, border, background) = (colors.muted_foreground, colors.border, colors.background);
+    let (muted, hover, panel) = (colors.muted_foreground, colors.list_hover, colors.markdown.code_background);
+    let settled = tool.status == Step::Done;
     let toggle = this.clone();
     let reveal = this.clone();
     let path = tool.path.clone();
+    // A tool call is a quiet row, not a box: it lights up under the pointer, and its text sits on
+    // the composer's text edge like the answer's.
     let mut card = div()
+        .id(("tool-row", ix * 10_000 + n))
         .flex()
         .flex_col()
-        .gap_1()
-        .py_2()
-        // The border plus this padding put the card's text on the composer's text edge.
-        .px(text_inset - px(BOX_BORDER))
+        .gap_2()
+        .py_1p5()
+        .px(text_inset)
         .rounded_md()
-        .border(px(BOX_BORDER))
-        .border_color(border)
-        .bg(background)
+        .hover(move |row| row.bg(hover))
         .child(
             div()
                 .flex()
@@ -4140,7 +4154,7 @@ fn tool_card(
                         .text_sm()
                         .on_click(move |_, _, cx| toggle.update(cx, |reader, cx| reader.toggle_tool(ix, n, cx)))
                         .child(div().text_color(tint).child(mark))
-                        .child(div().flex_1().min_w_0().truncate().child(tool.title.clone())),
+                        .child(div().flex_1().min_w_0().truncate().text_color(if settled { muted } else { colors.foreground }).child(tool.title.clone())),
                 )
                 .children(path.map(|path| {
                     Button::new(("tool-open", ix * 10_000 + n))
@@ -4171,6 +4185,10 @@ fn tool_card(
                     div()
                         .max_h(rems(16.))
                         .overflow_hidden()
+                        .rounded_md()
+                        .bg(panel)
+                        .px_3()
+                        .py_2()
                         .font_family(mono)
                         .text_xs()
                         .text_color(muted)
@@ -4182,21 +4200,47 @@ fn tool_card(
     card
 }
 
-fn permission(ix: usize, n: usize, ask: &Ask, this: &Entity<Reader>) -> impl IntoElement {
+/// The one option in a permission request rendered as the filled button: the first way of saying
+/// yes, however the agent orders the rest. Options that describe themselves in `kind` (ACP) are
+/// picked by it; agents that send no kinds at all get their first "allow" in the name honoured.
+fn primary_option(options: &[PermissionOption]) -> Option<usize> {
+    if options.iter().any(|o| !o.kind.is_empty()) {
+        options.iter().position(|o| o.kind == "allow_once")
+    } else {
+        options.iter().position(|o| o.name.to_lowercase().contains("allow"))
+    }
+}
+
+fn permission(ix: usize, n: usize, ask: &Ask, this: &Entity<Reader>, text_inset: gpui::Pixels, cx: &App) -> impl IntoElement {
+    let colors = cx.global::<Palette>();
+    let (muted, warning) = (colors.muted_foreground, colors.warning);
+    let primary = primary_option(&ask.options);
     let row = div().flex().flex_wrap().gap_2();
     let row = match &ask.answered {
-        Some(name) => row.child(format!("→ {name}")),
+        Some(name) => row.child(div().text_color(muted).child(format!("→ {name}"))),
         None => row.children(ask.options.iter().enumerate().map(|(o, option)| {
             let this = this.clone();
-            let allow = option.name.to_lowercase().contains("allow");
             let button = Button::new(("permit", ix * 1_000_000 + n * 100 + o))
                 .label(option.name.clone())
                 .small()
                 .on_click(move |_, _, cx| this.update(cx, |reader, cx| reader.answer(ix, n, o, cx)));
-            if allow { button.primary() } else { button }
+            if primary == Some(o) { button.primary() } else { button }
         })),
     };
-    div().flex().flex_col().gap_2().text_sm().child(format!("Permission: {}", ask.title)).child(row)
+    let waiting = ask.answered.is_none();
+    div()
+        .flex()
+        .flex_col()
+        .gap_2()
+        .py_3()
+        .px(text_inset - px(BOX_BORDER))
+        .rounded_md()
+        .border(px(BOX_BORDER))
+        // A question still waiting for you is outlined in the warning tone; an answered one settles.
+        .border_color(if waiting { warning.opacity(0.6) } else { colors.border })
+        .text_sm()
+        .child(div().flex().gap_2().child(div().flex_none().text_color(muted).child("Permission")).child(div().flex_1().min_w_0().child(ask.title.clone())))
+        .child(row)
 }
 
 fn status_text(text: String, cx: &App) -> impl IntoElement {
@@ -4237,7 +4281,7 @@ fn pane_header(title: &str, right: impl IntoElement, lead: Option<AnyElement>, t
 fn header_row(left: impl IntoElement, right: impl IntoElement, cx: &App) -> impl IntoElement {
     let colors = cx.global::<Palette>();
     div()
-        .h_10()
+        .h_11()
         .flex_none()
         .flex()
         .items_center()
@@ -4563,7 +4607,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{language, match_files, syntax};
+    use super::{PermissionOption, language, match_files, primary_option, syntax};
 
     #[test]
     fn file_matches_rank_names_before_paths() {
@@ -4593,5 +4637,36 @@ mod tests {
         assert_eq!(syntax("mix.exs"), "elixir");
         assert!(super::viewer::highlights("defmodule A do\nend\n", "ex"));
         assert!(super::viewer::highlights("defmodule A do\nend\n", &syntax("mix.exs")));
+    }
+
+    fn option(name: &str, kind: &str) -> PermissionOption {
+        PermissionOption { id: name.to_lowercase(), name: name.into(), kind: kind.into() }
+    }
+
+    // “Always allow” listed first is not the first way of saying yes: the once-option is.
+    #[test]
+    fn allow_always_first_is_not_primary() {
+        let options = vec![option("Always allow", "allow_always"), option("Allow once", "allow_once"), option("Deny", "reject_once")];
+        assert_eq!(primary_option(&options), Some(1));
+    }
+
+    #[test]
+    fn first_of_several_allow_once_wins() {
+        let options = vec![option("Allow once", "allow_once"), option("Allow once (this project)", "allow_once"), option("Deny", "reject_once")];
+        assert_eq!(primary_option(&options), Some(0));
+    }
+
+    // No option says yes once, so nothing is primary and all buttons stay plain.
+    #[test]
+    fn kinds_without_allow_once_leave_nothing_primary() {
+        let options = vec![option("Always allow", "allow_always"), option("Deny once", "reject_once"), option("Always deny", "reject_always")];
+        assert_eq!(primary_option(&options), None);
+    }
+
+    // Agents from before `kind` was in the protocol describe options in names only.
+    #[test]
+    fn names_only_fall_back_to_the_first_allow() {
+        let options = vec![option("Allow once", ""), option("Allow for session", ""), option("Deny", "")];
+        assert_eq!(primary_option(&options), Some(0));
     }
 }

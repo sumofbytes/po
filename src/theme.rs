@@ -9,8 +9,8 @@ use gpui::{App, FontStyle, FontWeight, Global, HighlightStyle, Hsla, Pixels, Rgb
 use serde_json::Value;
 
 const DEFAULT_THEME: &str = "Rose Pine";
-const FONT_SIZE: f64 = 14.0;
-const MONO_FONT_SIZE: f64 = 13.0;
+const FONT_SIZE: f64 = 15.0;
+const MONO_FONT_SIZE: f64 = 14.0;
 
 /// Where themes are picked from: `<config>/themes/`.
 fn themes_dir(config_dir: &Path) -> PathBuf {

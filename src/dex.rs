@@ -304,9 +304,9 @@ impl Mapper {
                     request: json!({ "approval": data["request_id"] }),
                     title: format!("{who}{name}: {}", data["input"].as_str().unwrap_or_default().chars().take(200).collect::<String>()),
                     options: vec![
-                        PermissionOption { id: "allow_once".into(), name: "Allow once".into() },
-                        PermissionOption { id: "allow_session".into(), name: "Allow for session".into() },
-                        PermissionOption { id: "deny".into(), name: "Deny".into() },
+                        PermissionOption { id: "allow_once".into(), name: "Allow once".into(), kind: "allow_once".into() },
+                        PermissionOption { id: "allow_session".into(), name: "Allow for session".into(), kind: "allow_always".into() },
+                        PermissionOption { id: "deny".into(), name: "Deny".into(), kind: "reject_once".into() },
                     ],
                 }]
             }
@@ -328,6 +328,7 @@ impl Mapper {
                             .map(|(n, option)| PermissionOption {
                                 id: n.to_string(),
                                 name: option["label"].as_str().unwrap_or_default().to_string(),
+                                kind: option["kind"].as_str().unwrap_or_default().to_string(),
                             })
                             .collect(),
                     })

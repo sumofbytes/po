@@ -16,8 +16,8 @@ use super::wrap::{self, WrapMap};
 use super::{CodeViewState, Geometry};
 use crate::theme::Palette;
 
-pub(super) const PADDING: Edges<Pixels> = Edges { top: px(8.), right: px(10.), bottom: px(8.), left: px(6.) };
-const LINE_HEIGHT: f32 = 1.5;
+pub(super) const PADDING: Edges<Pixels> = Edges { top: px(12.), right: px(16.), bottom: px(12.), left: px(10.) };
+const LINE_HEIGHT: f32 = 1.65;
 /// Space kept right of the text so wrapped rows don't touch the edge.
 const RIGHT_MARGIN: Pixels = px(10.);
 const NUMBER_MARGIN: Pixels = px(6.);

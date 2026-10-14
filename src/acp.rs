@@ -18,6 +18,7 @@ use serde_json::{Value, json};
 pub struct PermissionOption {
     pub id: String,
     pub name: String,
+    pub kind: String,
 }
 
 /// A session an agent can resume.
@@ -301,6 +302,7 @@ impl Shared {
                                 Some(PermissionOption {
                                     id: o["optionId"].as_str()?.to_string(),
                                     name: o["name"].as_str()?.to_string(),
+                                    kind: o["kind"].as_str().unwrap_or_default().to_string(),
                                 })
                             })
                             .collect()
