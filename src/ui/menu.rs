@@ -7,11 +7,12 @@ use std::rc::Rc;
 use gpui::{
     AnyElement, App, AppContext as _, Bounds, BoxShadow, Context, ElementId, Entity, FocusHandle,
     InteractiveElement as _, IntoElement, KeyBinding, MouseButton, ParentElement as _, Pixels, Point, RenderOnce,
-    Rems, SharedString, StatefulInteractiveElement as _, Styled as _, Window, anchored, canvas, deferred, div, hsla, point,
-    prelude::FluentBuilder as _, px, rems,
+    Rems, ScrollHandle, SharedString, StatefulInteractiveElement as _, Styled as _, Window, anchored, canvas, deferred, div,
+    hsla, point, prelude::FluentBuilder as _, px, rems,
 };
 
 use super::button::Button;
+use super::scrollbar::{Scrollbar, ScrollbarState};
 use crate::theme::Palette;
 
 gpui::actions!(popup_menu, [SelectUp, SelectDown, Confirm, Cancel]);
@@ -20,6 +21,10 @@ const CONTEXT: &str = "PopupMenu";
 const ITEM_HEIGHT: Rems = rems(1.875);
 /// The gap between a button and its menu.
 const OFFSET: Pixels = px(4.);
+/// How close a menu comes to the window's edges.
+const MARGIN: Pixels = px(8.);
+/// The tallest a menu grows before its items scroll.
+const MAX_HEIGHT: Pixels = px(480.);
 
 pub fn init(cx: &mut App) {
     cx.bind_keys([
@@ -71,11 +76,25 @@ pub struct MenuState {
     restore: Option<FocusHandle>,
     /// Where the button that opens it is, for [`MenuState::toggle`].
     trigger: Bounds<Pixels>,
+    /// How tall it may be, to fit the window; longer lists scroll.
+    max_height: Pixels,
+    scroll: ScrollHandle,
+    scrollbar: Entity<ScrollbarState>,
 }
 
 impl MenuState {
     pub fn new(cx: &mut Context<Self>) -> Self {
-        Self { open: false, position: Point::default(), highlighted: None, focus: cx.focus_handle(), restore: None, trigger: Bounds::default() }
+        Self {
+            open: false,
+            position: Point::default(),
+            highlighted: None,
+            focus: cx.focus_handle(),
+            restore: None,
+            trigger: Bounds::default(),
+            max_height: MAX_HEIGHT,
+            scroll: ScrollHandle::new(),
+            scrollbar: cx.new(|_| ScrollbarState::default()),
+        }
     }
 
     pub fn is_open(&self) -> bool {
@@ -87,6 +106,8 @@ impl MenuState {
         self.open = true;
         self.position = position;
         self.highlighted = None;
+        self.max_height = (window.viewport_size().height - MARGIN * 2.).clamp(ITEM_HEIGHT.to_pixels(window.rem_size()), MAX_HEIGHT);
+        self.scroll.set_offset(Point::default());
         self.restore = window.focused(cx);
         self.focus.focus(window, cx);
         cx.notify();
@@ -114,6 +135,8 @@ impl MenuState {
     fn step(&mut self, step: isize, items: &[MenuItem]) {
         if let Some(ix) = next_choosable(items, self.highlighted, step) {
             self.highlighted = Some(ix);
+            // Keep it in view when the list scrolls; rows are the scrolled div's children by index.
+            self.scroll.scroll_to_item(ix);
         }
     }
 }
@@ -154,6 +177,7 @@ pub fn menu(state: &Entity<MenuState>, items: Vec<MenuItem>, keep: Option<Bounds
         return None;
     }
     let (position, highlighted, focus) = (s.position, s.highlighted, s.focus.clone());
+    let (max_height, scroll, scrollbar) = (s.max_height, s.scroll.clone(), s.scrollbar.clone());
     let palette = cx.global::<Palette>();
     let radius = palette.radius.min(px(8.));
     let (accent, accent_fg, fg, muted, border) =
@@ -200,6 +224,7 @@ pub fn menu(state: &Entity<MenuState>, items: Vec<MenuItem>, keep: Option<Bounds
     let (up_items, down_items, chosen) = (items.clone(), items.clone(), items.clone());
     let panel = div()
         .id("popup-menu")
+        .relative()
         .key_context(CONTEXT)
         .track_focus(&focus)
         .occlude()
@@ -228,8 +253,22 @@ pub fn menu(state: &Entity<MenuState>, items: Vec<MenuItem>, keep: Option<Bounds
                 outside.update(cx, |s, cx| s.close(window, cx));
             }
         })
-        .child(div().flex().flex_col().p_1().gap_y_0p5().min_w(rems(8.)).max_w(px(500.)).children(rows));
-    Some(deferred(anchored().position(position).snap_to_window_with_margin(px(8.)).child(panel)).into_any_element())
+        .child(
+            div()
+                .id("popup-menu-items")
+                .flex()
+                .flex_col()
+                .p_1()
+                .gap_y_0p5()
+                .min_w(rems(8.))
+                .max_w(px(500.))
+                .max_h(max_height)
+                .overflow_y_scroll()
+                .track_scroll(&scroll)
+                .children(rows),
+        )
+        .child(Scrollbar::new(&scrollbar, scroll));
+    Some(deferred(anchored().position(position).snap_to_window_with_margin(MARGIN).child(panel)).into_any_element())
 }
 
 /// `button`, opening a menu of what `items` returns each time it opens.
