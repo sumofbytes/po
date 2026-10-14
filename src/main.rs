@@ -3959,7 +3959,7 @@ fn render_msg(
         Msg::Agent(blocks) => blocks,
     };
     let colors = cx.global::<Palette>();
-    let mut column = div().flex().flex_col().gap_4().min_w_0();
+    let mut column = div().flex().flex_col().min_w_0();
     // Text blocks sit where the composer's text does; boxes (tool cards) span the composer's width.
     let text_inset = text_inset(window);
     if blocks.is_empty() {
@@ -3968,6 +3968,8 @@ fn render_msg(
     }
     for (n, block) in blocks.iter().enumerate() {
         let id = ix * 10_000 + n;
+        // Runs of tool calls read as one list; anything else is set a step apart.
+        let run = n > 0 && matches!((&blocks[n - 1], block), (Block::Tool(_), Block::Tool(_)));
         let (el, boxed) = match block {
             Block::Text(text) => (ui::markdown::markdown(("answer", id), text, selection, window, cx).into_any_element(), false),
             Block::Thought(text) => (
@@ -3978,7 +3980,8 @@ fn render_msg(
             Block::Permission(ask) => (permission(ix, n, ask, this, text_inset, cx).into_any_element(), true),
             Block::Plan(entries) => (plan(entries, text_inset, cx).into_any_element(), true),
         };
-        column = column.child(if boxed { el } else { div().px(text_inset).child(el).into_any_element() });
+        let el = if boxed { el } else { div().px(text_inset).child(el).into_any_element() };
+        column = column.child(div().when(n > 0, |this| if run { this.mt_0p5() } else { this.mt_4() }).child(el));
     }
     column.into_any_element()
 }
@@ -4027,12 +4030,8 @@ fn plan(entries: &[(String, Step)], text_inset: gpui::Pixels, cx: &App) -> impl 
     div()
         .flex()
         .flex_col()
-        .gap_2()
-        .py_3()
-        .px(text_inset - px(BOX_BORDER))
-        .rounded_md()
-        .border(px(BOX_BORDER))
-        .border_color(colors.border)
+        .gap_1p5()
+        .px(text_inset)
         .text_sm()
         .children(entries.iter().map(|(text, status)| {
             let (mark, tint) = step_mark(*status, colors);
@@ -4058,21 +4057,22 @@ fn tool_card(
 ) -> impl IntoElement {
     let colors = cx.global::<Palette>();
     let (mark, tint) = step_mark(tool.status, colors);
-    let (muted, border, background) = (colors.muted_foreground, colors.border, colors.background);
+    let (muted, hover, panel) = (colors.muted_foreground, colors.list_hover, colors.markdown.code_background);
+    let settled = tool.status == Step::Done;
     let toggle = this.clone();
     let reveal = this.clone();
     let path = tool.path.clone();
+    // A tool call is a quiet row, not a box: it lights up under the pointer, and its text sits on
+    // the composer's text edge like the answer's.
     let mut card = div()
+        .id(("tool-row", ix * 10_000 + n))
         .flex()
         .flex_col()
-        .gap_1p5()
-        .py_3()
-        // The border plus this padding put the card's text on the composer's text edge.
-        .px(text_inset - px(BOX_BORDER))
+        .gap_2()
+        .py_1p5()
+        .px(text_inset)
         .rounded_md()
-        .border(px(BOX_BORDER))
-        .border_color(border)
-        .bg(background)
+        .hover(move |row| row.bg(hover))
         .child(
             div()
                 .flex()
@@ -4090,7 +4090,7 @@ fn tool_card(
                         .text_sm()
                         .on_click(move |_, _, cx| toggle.update(cx, |reader, cx| reader.toggle_tool(ix, n, cx)))
                         .child(div().text_color(tint).child(mark))
-                        .child(div().flex_1().min_w_0().truncate().child(tool.title.clone())),
+                        .child(div().flex_1().min_w_0().truncate().text_color(if settled { muted } else { colors.foreground }).child(tool.title.clone())),
                 )
                 .children(path.map(|path| {
                     Button::new(("tool-open", ix * 10_000 + n))
@@ -4121,6 +4121,10 @@ fn tool_card(
                     div()
                         .max_h(rems(16.))
                         .overflow_hidden()
+                        .rounded_md()
+                        .bg(panel)
+                        .px_3()
+                        .py_2()
                         .font_family(mono)
                         .text_xs()
                         .text_color(muted)
