@@ -133,12 +133,17 @@ Three shortcuts set how the layout is used:
 - **Chat** (Ctrl+3): the viewer closed, so the conversation has the middle to
   itself.
 
+In a conversation, thinking starts folded behind a **Thinking** row; click it to
+read it. Two shortcuts act on the whole thread: Ctrl+O opens every tool
+call's details (or folds them all when they are already open), and Ctrl+T
+does the same for thinking.
+
 Widths, the split, whether the explorer is folded, whether the viewer is open and
 which way round they are come back with your workspace.
 
 ### Projects and threads
 
-Several projects can be open at once. **Add project…** (Ctrl+O, or the **+** in the Projects header)
+Several projects can be open at once. **Add project…** (Ctrl+Shift+O, or the **+** in the Projects header)
 opens a folder; each project keeps its own files, changes, open file and agent
 threads. Opening a PR adds it as a project too, and closing it removes the
 checkout.
