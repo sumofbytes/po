@@ -39,6 +39,8 @@ pub struct Workspace {
     pub agent: Option<String>,
     /// The height, in pixels, the agents view gives its projects above the explorer, if dragged.
     pub split: Option<f32>,
+    /// The height, in pixels, of the live agents list above the projects, if dragged.
+    pub live_split: Option<f32>,
     /// The explorer on the agents view was folded down to its header.
     pub explorer_collapsed: bool,
     /// How wide the left side was, and the right side if it had been dragged to a width.
@@ -86,7 +88,7 @@ impl Workspace {
                 })
             })
             .collect();
-        json!({ "version": 1, "viewer_open": self.viewer_open, "swapped": self.swapped, "agent_open": self.agent_open, "agent": self.agent, "split": self.split, "explorer_collapsed": self.explorer_collapsed, "left_width": self.left_width, "right_width": self.right_width, "projects": projects })
+        json!({ "version": 1, "viewer_open": self.viewer_open, "swapped": self.swapped, "agent_open": self.agent_open, "agent": self.agent, "split": self.split, "live_split": self.live_split, "explorer_collapsed": self.explorer_collapsed, "left_width": self.left_width, "right_width": self.right_width, "projects": projects })
     }
 
     fn from_json(value: &Value) -> Option<Self> {
@@ -129,6 +131,7 @@ impl Workspace {
             explorer_collapsed: value["explorer_collapsed"].as_bool().unwrap_or(false),
             left_width: width(&value["left_width"]),
             right_width: width(&value["right_width"]),
+            live_split: value["live_split"].as_f64().map(|height| height as f32).filter(|height| height.is_finite() && *height > 0.),
             split: value["split"].as_f64().map(|height| height as f32).filter(|height| height.is_finite() && *height > 0.),
         })
     }
@@ -165,6 +168,7 @@ mod tests {
             agent_open: false,
             agent: Some("dex".into()),
             split: Some(212.5),
+            live_split: Some(140.0),
             explorer_collapsed: true,
             left_width: Some(300.0),
             right_width: Some(640.0),
@@ -194,6 +198,7 @@ mod tests {
         assert!(!back.agent_open);
         assert_eq!(back.agent.as_deref(), Some("dex"));
         assert_eq!(back.split, Some(212.5));
+        assert_eq!(back.live_split, Some(140.0));
         assert!(back.explorer_collapsed);
         assert_eq!((back.left_width, back.right_width), (Some(300.0), Some(640.0)));
         assert_eq!(back.projects.len(), 2);
