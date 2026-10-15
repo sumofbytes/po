@@ -708,8 +708,7 @@ impl Activity {
             Activity::Idle => ("○", colors.muted_foreground),
             Activity::Running => ("●", colors.primary),
             Activity::Asking => ("!", colors.warning),
-            // Themes may lack a green (Rosé Pine's success is teal), so this has its own.
-            Activity::Unread => ("●", gpui::hsla(0.37, 0.5, 0.5, 1.0)),
+            Activity::Unread => ("●", colors.added),
         }
     }
 }
@@ -3207,9 +3206,8 @@ impl Reader {
         };
         let state = if mode == Mode::Diff { &self.project.changes_tree } else { &self.project.tree };
         let marks = if mode == Mode::Diff { self.project.marks.clone() } else { Rc::default() };
-        // Themes may lack a green (Rosé Pine's success is teal), so added files get their own.
         let (muted, danger) = (colors.muted_foreground, colors.danger);
-        let kinds = [colors.primary, colors.warning, colors.info, gpui::hsla(0.37, 0.5, 0.5, 1.0)];
+        let kinds = [colors.primary, colors.warning, colors.info, colors.added];
         let body: AnyElement = if mode == Mode::Diff && self.project.changes.is_empty() {
             centered("No changes".into(), cx)
         } else {
@@ -3235,9 +3233,9 @@ impl Reader {
                         FileKind::Doc => muted,
                         FileKind::Web => kinds[2],
                         FileKind::Image => kinds[3],
-                        FileKind::Other => muted.opacity(0.6),
+                        FileKind::Other => muted.opacity(theme::tokens::MUTED),
                     };
-                    div().size(rems(0.5)).flex_none().rounded(px(2.0)).bg(tint).into_any_element()
+                    div().size(rems(0.5)).flex_none().rounded(theme::tokens::RADIUS_MARK).bg(tint).into_any_element()
                 };
                 let mark = marks.get(path.as_ref()).map(|status| {
                     let color = match status {
@@ -3354,10 +3352,10 @@ impl Reader {
                 .flex_col()
                 .gap_px()
                 .p_1p5()
-                .rounded_lg()
+                .rounded(colors.radius_lg)
                 .when(current, |card| card.bg(hover));
             // Inside the selected card the row under the pointer needs a different shade to show.
-            let over = if current { selected.opacity(0.6) } else { hover };
+            let over = if current { selected.opacity(theme::tokens::MUTED) } else { hover };
             group = group.child(
                 div()
                     .id(("agent-project", pid as usize))
@@ -3366,10 +3364,10 @@ impl Reader {
                     .items_center()
                     .gap_2()
                     .px_1p5()
-                    .h(rems(1.875))
+                    .h(theme::tokens::ROW_HEIGHT)
                     // A hair of air between the project and its threads.
                     .mb_0p5()
-                    .rounded_md()
+                    .rounded(colors.radius)
                     .cursor_pointer()
                     .hover(move |row| row.bg(over))
                     .on_click(move |_, window, cx| select.update(cx, |reader, cx| reader.show_project(pid, window, cx)))
@@ -3386,7 +3384,7 @@ impl Reader {
                             .flex_1()
                             .min_w_0()
                             .truncate()
-                            .text_size(rems(0.9375))
+                            .text_sm()
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(project_tone(primary, current))
                             .child(view.project.name()),
@@ -3425,13 +3423,13 @@ impl Reader {
                         .items_center()
                         .gap_2()
                         .px_1p5()
-                        .h(rems(1.875))
-                        .rounded_md()
+                        .h(theme::tokens::ROW_HEIGHT)
+                        .rounded(colors.radius)
                         .cursor_pointer()
                         .when((pid, tid) == (active_project, active_thread), |row| row.bg(selected))
                         .hover(move |row| row.bg(over))
                         .on_click(move |_, window, cx| select.update(cx, |reader, cx| reader.open_thread(pid, tid, window, cx)))
-                        .child(div().w(rems(1.)).flex_none().flex().justify_center().text_size(rems(0.875)).text_color(tint).child(glyph))
+                        .child(div().w(rems(1.)).flex_none().flex().justify_center().text_sm().text_color(tint).child(glyph))
                         .child(
                             // Threads sit a step below their project: smaller and regular, bright only
                             // for the one on screen.
@@ -3439,7 +3437,7 @@ impl Reader {
                                 .flex_1()
                                 .min_w_0()
                                 .truncate()
-                                .text_size(rems(0.875))
+                                .text_sm()
                                 .text_color(if (pid, tid) == (active_project, active_thread) { foreground } else { muted })
                                 .child(thread.title()),
                         )
@@ -3515,9 +3513,8 @@ impl Reader {
         let (rows, pairs, syntax) = (self.project.rows.clone(), self.project.pairs.clone(), self.project.colors.clone());
         let palettes = syntax.palettes(cx);
         let (added, removed) = self.project.counts;
-        // Themes may lack a green (Rosé Pine's success is teal), so added lines get their own.
         let (success, danger, muted, border) =
-            (gpui::hsla(0.37, 0.5, 0.5, 1.0), colors.danger, colors.muted_foreground, colors.border);
+            (colors.added, colors.danger, colors.muted_foreground, colors.border);
         let font = cx.global::<Palette>().mono_font_family.clone();
         let split = self.split;
         // Only the rows in view are built, so a long diff costs no more than a short one.
@@ -3535,10 +3532,10 @@ impl Reader {
                     let cell = |cell: &Option<diff::Cell>, first: bool| {
                         let half = div().flex_1().min_w_0().self_stretch().flex().items_start().gap_2();
                         let half = if first { half.border_r_1().border_color(border) } else { half };
-                        let Some(cell) = cell else { return half.bg(muted.opacity(0.06)) };
+                        let Some(cell) = cell else { return half.bg(muted.opacity(theme::tokens::TINT_FAINT)) };
                         let tint = match cell.kind {
-                            Kind::Added => Some(success.opacity(0.16)),
-                            Kind::Removed => Some(danger.opacity(0.16)),
+                            Kind::Added => Some(success.opacity(theme::tokens::TINT)),
+                            Kind::Removed => Some(danger.opacity(theme::tokens::TINT)),
                             _ => None,
                         };
                         let half = match tint {
@@ -3550,7 +3547,7 @@ impl Reader {
                             .child(div().flex_1().min_w_0().child(code(&cell.text, styles)))
                     };
                     return match &pairs[ix] {
-                        Pair::Hunk(text) => line.px_2().bg(muted.opacity(0.12)).text_color(muted).child(text.clone()),
+                        Pair::Hunk(text) => line.px_2().bg(muted.opacity(theme::tokens::TINT_SUBTLE)).text_color(muted).child(text.clone()),
                         Pair::Line(old, new) => line.child(cell(old, true)).child(cell(new, false)),
                     }
                     .into_any_element();
@@ -3560,9 +3557,9 @@ impl Reader {
                     div().w(rems(3.)).flex_none().text_right().text_color(muted).child(n.map_or(String::new(), |n| n.to_string()))
                 };
                 let (tint, sign) = match row.kind {
-                    Kind::Added => (Some(success.opacity(0.16)), "+"),
-                    Kind::Removed => (Some(danger.opacity(0.16)), "-"),
-                    Kind::Hunk => (Some(muted.opacity(0.12)), ""),
+                    Kind::Added => (Some(success.opacity(theme::tokens::TINT)), "+"),
+                    Kind::Removed => (Some(danger.opacity(theme::tokens::TINT)), "-"),
+                    Kind::Hunk => (Some(muted.opacity(theme::tokens::TINT_SUBTLE)), ""),
                     Kind::Context => (None, " "),
                 };
                 let line = line.gap_2();
@@ -3844,7 +3841,7 @@ impl Reader {
             Button::new("stop")
                 .icon(IconName::Square)
                 .ghost()
-                .rounded(gpui::px(999.0))
+                .pill()
                 .small()
                 .tooltip("Stop")
                 .on_click(move |_, window, cx| stop.update(cx, |reader, cx| reader.stop(window, cx)))
@@ -3853,7 +3850,7 @@ impl Reader {
             let button = Button::new("send")
                 .icon(IconName::ArrowUp)
                 .ghost()
-                .rounded(gpui::px(999.0))
+                .pill()
                 .small()
                 .tooltip(tooltip)
                 .on_click(move |_, window, cx| send.update(cx, |reader, cx| reader.send(false, window, cx)));
@@ -4053,7 +4050,7 @@ impl Reader {
                         .flex_col()
                         .gap_2()
                         .p(rems(COMPOSER_PAD_REM))
-                        .rounded_xl()
+                        .rounded(colors.radius_xl)
                         .border(px(BOX_BORDER))
                         .border_color(colors.border)
                         .bg(colors.sidebar)
@@ -4093,7 +4090,8 @@ fn render_msg(
     let blocks = match msg {
         Msg::User(text) => {
             let colors = cx.global::<Palette>();
-            let (bg, text_el) = (colors.secondary, ui::markdown::plain(("user", ix), text, selection, window, cx));
+            let (bg, radius) = (colors.secondary, colors.radius_xl);
+            let text_el = ui::markdown::plain(("user", ix), text, selection, window, cx);
             return div()
                 .flex()
                 .justify_end()
@@ -4102,7 +4100,7 @@ fn render_msg(
                         .max_w(gpui::relative(0.9))
                         .px_4()
                         .py_3()
-                        .rounded_xl()
+                        .rounded(radius)
                         .bg(bg)
                         .text_base()
                         .child(text_el),
@@ -4173,7 +4171,7 @@ fn thought(ix: usize, n: usize, text: &str, open: bool, this: &Entity<Reader>, s
         .child("Thinking");
     let column = div().flex().flex_col().gap_1().child(header);
     if open {
-        column.child(div().opacity(0.7).child(ui::markdown::italic(("thought", ix * 10_000 + n), text, selection, window, cx))).into_any_element()
+        column.child(div().opacity(theme::tokens::DIM).child(ui::markdown::italic(("thought", ix * 10_000 + n), text, selection, window, cx))).into_any_element()
     } else {
         column.into_any_element()
     }
@@ -4199,7 +4197,7 @@ fn session_picker(sessions: &[SessionInfo], this: &Entity<Reader>, cx: &App) -> 
                 .flex()
                 .flex_col()
                 .p_2()
-                .rounded_md()
+                .rounded(colors.radius)
                 .cursor_pointer()
                 .hover(|style| style.bg(colors.list_hover))
                 .on_click(move |_, window, cx| this.update(cx, |reader, cx| reader.resume_session(&id, window, cx)))
@@ -4250,6 +4248,7 @@ fn tool_card(
     let colors = cx.global::<Palette>();
     let (mark, tint) = step_mark(tool.status, colors);
     let (muted, hover, panel) = (colors.muted_foreground, colors.list_hover, colors.markdown.code_background);
+    let radius = colors.radius;
     let settled = tool.status == Step::Done;
     let toggle = this.clone();
     let reveal = this.clone();
@@ -4263,7 +4262,7 @@ fn tool_card(
         .gap_2()
         .py_1p5()
         .px(text_inset)
-        .rounded_md()
+        .rounded(radius)
         .hover(move |row| row.bg(hover))
         .child(
             div()
@@ -4313,7 +4312,7 @@ fn tool_card(
                     div()
                         .max_h(rems(16.))
                         .overflow_hidden()
-                        .rounded_md()
+                        .rounded(radius)
                         .bg(panel)
                         .px_3()
                         .py_2()
@@ -4362,10 +4361,10 @@ fn permission(ix: usize, n: usize, ask: &Ask, this: &Entity<Reader>, text_inset:
         .gap_2()
         .py_3()
         .px(text_inset - px(BOX_BORDER))
-        .rounded_md()
+        .rounded(colors.radius)
         .border(px(BOX_BORDER))
         // A question still waiting for you is outlined in the warning tone; an answered one settles.
-        .border_color(if waiting { warning.opacity(0.6) } else { colors.border })
+        .border_color(if waiting { warning.opacity(theme::tokens::MUTED) } else { colors.border })
         .text_sm()
         .child(div().flex().gap_2().child(div().flex_none().text_color(muted).child("Permission")).child(div().flex_1().min_w_0().child(ask.title.clone())))
         .child(row)
@@ -4378,7 +4377,7 @@ fn status_text(text: String, cx: &App) -> impl IntoElement {
 /// The colour of a project's name and folder: the theme's primary, in full for the project on
 /// screen and softer for the rest, so projects read apart from the threads under them.
 fn project_tone(primary: gpui::Hsla, current: bool) -> gpui::Hsla {
-    if current { primary } else { primary.opacity(0.78) }
+    if current { primary } else { primary.opacity(theme::tokens::INACTIVE) }
 }
 
 /// The name that ties a row to the controls that appear only while it is hovered.

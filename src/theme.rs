@@ -11,6 +11,32 @@ use serde_json::Value;
 
 const DEFAULT_THEME: &str = "Rose Pine";
 
+/// Design tokens that don't vary by theme. Draw with these, not literals, so the UI stays uniform.
+pub mod tokens {
+    use gpui::{Pixels, Rems, px, rems};
+
+    /// Height of a list row (sidebar projects and threads).
+    pub const ROW_HEIGHT: Rems = rems(1.875);
+    /// Radius that turns a square element into a circle or pill.
+    pub const RADIUS_FULL: Pixels = px(999.);
+    /// Radius of tiny marks, like the dot beside a file.
+    pub const RADIUS_MARK: Pixels = px(2.);
+    /// Alpha of a status tint behind a row (an added or removed diff line).
+    pub const TINT: f32 = 0.16;
+    /// Alpha of the faintest tint (the empty side of a split diff).
+    pub const TINT_FAINT: f32 = 0.06;
+    /// Alpha of a neutral tint (a diff hunk header).
+    pub const TINT_SUBTLE: f32 = 0.12;
+    /// Alpha of a muted or de-emphasised foreground.
+    pub const MUTED: f32 = 0.6;
+    /// Alpha of an indent guide line over the border colour.
+    pub const GUIDE: f32 = 0.85;
+    /// Alpha of dimmed content, like a model's reasoning.
+    pub const DIM: f32 = 0.7;
+    /// Alpha of a label that isn't the current one.
+    pub const INACTIVE: f32 = 0.78;
+}
+
 /// Where themes are picked from: `<config>/themes/`.
 fn themes_dir(config_dir: &Path) -> PathBuf {
     config_dir.join("themes")
@@ -411,6 +437,12 @@ pub struct Palette {
     pub editor_line_number: Hsla,
     /// The corner radius of small parts, like scrollbar thumbs.
     pub radius: Pixels,
+    /// Larger parts, like cards and sidebar groups: a third more than `radius`.
+    pub radius_lg: Pixels,
+    /// The largest: chat bubbles and the composer, twice `radius`.
+    pub radius_xl: Pixels,
+    /// Green for added and unread. Themes may lack one (Rosé Pine's success is teal), so it is fixed.
+    pub added: Hsla,
     pub font_family: SharedString,
     pub font_size: Pixels,
     pub mono_font_family: SharedString,
@@ -429,6 +461,7 @@ impl Palette {
         let get = |key: &str, fallback: Hsla| colors.get(key).and_then(parse_color).unwrap_or(fallback);
         let clamp_alpha = |c: Hsla, max: f32| c.alpha(c.a.min(max));
 
+        let radius = px(theme["radius"].as_f64().unwrap_or(6.) as f32);
         let accent = base.accent;
         let list_head = get("list.head.background", get("list.background", base.background));
         let scrollbar_thumb = get("scrollbar.thumb.background", accent);
@@ -515,7 +548,10 @@ impl Palette {
             editor_foreground: editor("editor.foreground").unwrap_or(base.foreground),
             editor_active_line: editor("editor.active_line.background"),
             editor_line_number: editor("editor.line_number").unwrap_or(base.muted_foreground),
-            radius: px(theme["radius"].as_f64().unwrap_or(6.) as f32),
+            radius,
+            radius_lg: radius * (4. / 3.),
+            radius_xl: radius * 2.,
+            added: hsla(0.37, 0.5, 0.5, 1.0),
             font_family: fonts.ui,
             font_size: px(fonts.ui_size),
             mono_font_family: fonts.mono,

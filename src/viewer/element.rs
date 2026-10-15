@@ -113,7 +113,7 @@ impl Colors {
             number: palette.editor_line_number,
             // The kit draws the current line's number in the text color, not `active_line_number`.
             active_number: palette.editor_foreground,
-            guide: palette.border.opacity(0.85),
+            guide: palette.border.opacity(crate::theme::tokens::GUIDE),
             caret: palette.caret,
             selection: palette.selection,
         }
