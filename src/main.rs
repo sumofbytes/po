@@ -5,6 +5,7 @@ mod alert;
 mod config;
 mod dex;
 mod diff;
+mod fonts;
 mod pr;
 mod schemes;
 mod theme;
@@ -20,7 +21,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::{Duration, Instant, SystemTime};
 
-use acp::{Event, PermissionOption, SessionInfo};
+use acp::{ConfigOption, Event, PermissionOption, SessionInfo};
 use agent::Client;
 use dex::Queue;
 use diff::{Change, Kind, Pair, Row};
@@ -37,11 +38,11 @@ use serde_json::Value;
 
 use gpui::{
     AnyElement, App, Pixels, TitlebarOptions, WindowControlArea, point, Bounds, Context, Entity, FontWeight, IntoElement, ListAlignment, ListState, ParentElement,
-    Render, SharedString, StyleRefinement, Styled, Subscription, Task, Window, WindowBounds, WindowOptions, div, list,
+    Render, SharedString, StyleRefinement, Styled, StyledText, Subscription, Task, Window, WindowBounds, WindowOptions, div, list,
     prelude::*, px, rems, size, KeyBinding,
 };
 
-gpui::actions!(po, [ToggleLeft, ToggleRight, ShowSource, ShowChanges, ShowChat, SwapPanes, ShowHistory, ToggleSplit, ToggleRendered, NewThread, OpenProject, ShowFinder, CloseWindow, CloseFinder, FinderUp, FinderDown]);
+gpui::actions!(po, [ToggleTools, ToggleThoughts, ToggleLeft, ToggleRight, ShowSource, ShowChanges, ShowChat, SwapPanes, ShowHistory, ToggleSplit, ToggleRendered, NewThread, OpenProject, ShowFinder, CloseWindow, CloseFinder, FinderUp, FinderDown]);
 
 const SKIP: [&str; 5] = ["target", "node_modules", "dist", "build", "__pycache__"];
 const MAX_FILES: usize = 5000;
@@ -292,7 +293,8 @@ struct Ask {
 #[derive(Clone)]
 enum Block {
     Text(String),
-    Thought(String),
+    /// The agent's reasoning, and whether it is shown; it starts folded.
+    Thought(String, bool),
     Tool(ToolBlock),
     Permission(Ask),
     /// The agent's to-do list; each update replaces the whole list.
@@ -453,6 +455,8 @@ struct Project {
     /// The picked file's diff, its side-by-side pairs and how many lines it adds and removes.
     rows: Rc<Vec<Row>>,
     pairs: Rc<Vec<Pair>>,
+    /// Syntax colors for the picked file's old and new versions.
+    colors: Rc<diff::Colors>,
     counts: (usize, usize),
     /// The diff's rows as laid out, inline or split; only those in view are drawn.
     diff_list: ListState,
@@ -505,11 +509,22 @@ struct Thread {
     pending: Option<String>,
     /// Start the thread in a git worktree of its own. Only asked before it has started.
     isolate: bool,
+    /// Nothing has been sent in it and no session was picked for it. Its agent runs only to
+    /// offer the session's settings, so its session is never kept or resumed.
+    blank: bool,
+    /// The settings being carried over from earlier threads, while the agent takes them one at
+    /// a time: a model can change what the other settings offer. A first message waits for them.
+    applying: Option<Applying>,
+    /// Settings the agent was asked to carry over and gave up on answering; a late answer is
+    /// not a choice of the user's.
+    unanswered: HashSet<String>,
     messages: Vec<Msg>,
     busy: bool,
     /// Messages typed during a turn, shown above the input until they are taken.
     queue: Vec<Queued>,
     ready: bool,
+    /// The agent's settings for the session, like its model, once it has said what they are.
+    options: Vec<ConfigOption>,
     /// A resumed session's history is being replayed.
     loading: bool,
     /// Choosing a session to resume: the agent's list once it arrives.
@@ -540,7 +555,7 @@ impl Thread {
                 Msg::Agent(blocks) => {
                     for block in blocks {
                         match block {
-                            Block::Text(text) | Block::Thought(text) => sources.push((text.as_str(), false)),
+                            Block::Text(text) | Block::Thought(text, true) => sources.push((text.as_str(), false)),
                             Block::Tool(tool) if tool.open => {
                                 sources.extend([&tool.arguments, &tool.result].into_iter().filter(|t| !t.is_empty()).map(|t| (t.as_str(), true)));
                             }
@@ -609,8 +624,8 @@ impl Thread {
                 }
             }
             Some("agent_thought_chunk") => match self.blocks().last_mut() {
-                Some(Block::Thought(body)) => body.push_str(text),
-                _ => self.blocks().push(Block::Thought(text.to_string())),
+                Some(Block::Thought(body, _)) => body.push_str(text),
+                _ => self.blocks().push(Block::Thought(text.to_string(), false)),
             },
             Some("plan") => {
                 let entries = update["entries"]
@@ -738,6 +753,24 @@ impl Thread {
         self.client.is_none() && self.agent.is_some() && self.session.is_some()
     }
 
+    /// Session settings in the order they are shown and carried over: the model first, as it
+    /// can change what the others offer, then the others in the agent's order.
+    fn ordered(mut options: Vec<&ConfigOption>) -> Vec<&ConfigOption> {
+        options.sort_by_key(|option| option.category != "model");
+        options
+    }
+
+    /// It was started with a first message, but its agent stopped before opening a session.
+    fn unstarted(&self) -> bool {
+        !self.blank && self.client.is_none() && self.session.is_none() && !self.picking
+    }
+
+    /// Whether to keep it once another thread is on screen: a blank thread, or a session listing
+    /// nothing was picked from, has nothing to come back to.
+    fn worth_keeping(&self) -> bool {
+        !self.blank && !self.is_listing()
+    }
+
     /// It is showing an agent's sessions to pick one from, and nothing has been picked.
     fn is_listing(&self) -> bool {
         self.agent.is_some() && self.picking && !self.loading && self.messages.is_empty() && self.session.is_none()
@@ -750,14 +783,37 @@ impl Thread {
 
     /// Stops the agent, keeping what has been said so it can be shown and resumed.
     fn sleep(&mut self) {
+        self.drop_agent();
+        self.status = if self.blank { String::new() } else { "asleep".into() };
+    }
+
+    /// Stops the agent and forgets what it was doing. A blank thread's session was never used,
+    /// so it goes too, and the thread starts a new one when it is shown.
+    fn drop_agent(&mut self) {
         self.client = None;
         self.ready = false;
+        self.options.clear();
+        self.applying = None;
+        self.unanswered.clear();
         self.loading = false;
         self.picking = false;
+        if self.blank {
+            self.session = None;
+        }
         // The events of the stopped agent are no longer this thread's.
         self.generation += 1;
-        self.status = "asleep".into();
     }
+}
+
+/// How far a new session has got in taking the settings last chosen for its agent.
+#[derive(Default)]
+struct Applying {
+    /// The settings dealt with: carried over, already as chosen, or chosen in this thread since.
+    settled: HashSet<String>,
+    /// The setting the agent was asked to carry over and hasn't answered for yet.
+    asked: Option<String>,
+    /// Counts the questions put to the agent, so a timer can tell whether its own is still the one waiting.
+    asks: u64,
 }
 
 /// A project and its threads, wherever they are kept.
@@ -837,6 +893,8 @@ struct Reader {
     agent_open: bool,
     /// The agent picker in the input box.
     agent_menu: Entity<MenuState>,
+    /// What was chosen for each agent's settings, such as its model.
+    choices: config::Choices,
     /// The agent new threads start with: the one last chosen.
     chosen_agent: Option<String>,
     /// Whether diffs show old and new side by side instead of inline.
@@ -921,11 +979,15 @@ impl Reader {
             touched: Instant::now(),
             pending: None,
             isolate: false,
+            blank: true,
+            applying: None,
+            unanswered: HashSet::new(),
             _enter: enter,
             messages: vec![],
             busy: false,
             queue: vec![],
             ready: false,
+            options: Vec::new(),
             loading: false,
             picking: false,
             sessions: None,
@@ -972,6 +1034,7 @@ impl Reader {
             swapped: false,
             agent_open: true,
             agent_menu: cx.new(MenuState::new),
+            choices: config::load_choices(),
             chosen_agent: command.clone(),
             split: false,
             rendered: true,
@@ -985,12 +1048,11 @@ impl Reader {
         trace::mark("tree");
         let resumed = workspace::Workspace::load(&reader.home).is_some_and(|saved| reader.restore(saved, window, cx));
         trace::mark("restore");
-        if resumed {
-            reader.wake_thread(window, cx);
-        } else if let Some(command) = command {
-            reader.connect(&command, false, window, cx);
-            trace::mark("connect");
+        match command.filter(|_| !resumed) {
+            Some(command) => reader.connect(&command, false, window, cx),
+            None => reader.wake_thread(window, cx),
         }
+        trace::mark("connect");
         reader.watch(watch, window, cx);
         trace::mark("watch");
         // Agents nobody is talking to are stopped now and then; their threads wake on demand.
@@ -1075,6 +1137,7 @@ impl Reader {
             picked: None,
             rows: Rc::new(vec![]),
             pairs: Rc::new(vec![]),
+            colors: Rc::default(),
             counts: (0, 0),
             diff_list: ListState::new(0, ListAlignment::Top, px(400.)),
             current: None,
@@ -1128,7 +1191,7 @@ impl Reader {
                 None => {
                     self.project.picked = None;
                     self.project.diffing = None;
-                    self.set_rows(vec![]);
+                    self.set_rows(vec![], diff::Colors::default());
                 }
             },
         }
@@ -1185,8 +1248,8 @@ impl Reader {
         cx.notify();
     }
 
-    /// Shows the diff `rows`, and works out their side-by-side pairs and counts once.
-    fn set_rows(&mut self, rows: Vec<Row>) {
+    /// Shows the diff `rows` colored by `colors`, and works out their side-by-side pairs and counts once.
+    fn set_rows(&mut self, rows: Vec<Row>, colors: diff::Colors) {
         self.project.counts = rows.iter().fold((0, 0), |(a, r), row| match row.kind {
             Kind::Added => (a + 1, r),
             Kind::Removed => (a, r + 1),
@@ -1194,6 +1257,7 @@ impl Reader {
         });
         self.project.pairs = Rc::new(diff::split(&rows));
         self.project.rows = Rc::new(rows);
+        self.project.colors = Rc::new(colors);
         self.relist_diff();
     }
 
@@ -1207,7 +1271,7 @@ impl Reader {
         if self.project.picked.as_deref() != Some(path) {
             self.project.picked = Some(path.to_string());
             // The last file's diff isn't shown under this one's name while this one loads.
-            self.set_rows(vec![]);
+            self.set_rows(vec![], diff::Colors::default());
             let id = SharedString::from(path.to_string());
             self.project.changes_tree.update(cx, |tree, cx| {
                 if let Some(ix) = tree.index_of(&id) {
@@ -1217,10 +1281,19 @@ impl Reader {
         }
         let (root, base, path) = (self.project.root.clone(), self.project.base.clone(), path.to_string());
         self.project.diffing = Some(cx.spawn(async move |this, cx| {
-            let rows = cx.background_executor().spawn(async move { diff::file_diff(&root, &base, &change) }).await;
+            let language = syntax(&path);
+            let (rows, colors) = cx
+                .background_executor()
+                .spawn(async move {
+                    let rows = diff::file_diff(&root, &base, &change);
+                    // Only files with changed lines are worth parsing.
+                    let colors = if rows.is_empty() { diff::Colors::default() } else { diff::colors(&root, &base, &change, &language) };
+                    (rows, colors)
+                })
+                .await;
             this.update(cx, |reader, cx| {
                 if reader.project.picked.as_deref() == Some(&path) {
-                    reader.set_rows(rows);
+                    reader.set_rows(rows, colors);
                     reader.project.diffing = None;
                     cx.notify();
                 }
@@ -1290,8 +1363,12 @@ impl Reader {
     }
 
     /// Stops what only the project on screen needs (its watcher, `git` runs and the finder), so
-    /// that nothing keeps updating it once another is shown. Its threads are not touched.
+    /// that nothing keeps updating it once another is shown. Its threads keep going, except a
+    /// blank one, whose agent starts again when it is back on screen.
     fn suspend_project(&mut self) {
+        if self.thread.blank && self.thread.client.is_some() {
+            self.thread.sleep();
+        }
         let project = &mut self.project;
         project.watching = None;
         project.listing = None;
@@ -1339,6 +1416,7 @@ impl Reader {
         self.swap_slot(at);
         if let Some(parked) = thread.and_then(|id| self.parked.iter().position(|t| t.id == id)) {
             std::mem::swap(&mut self.thread, &mut self.parked[parked]);
+            self.parked.retain(Thread::worth_keeping);
         }
         self.resume_project(window, cx);
         self.wake_thread(window, cx);
@@ -1375,8 +1453,9 @@ impl Reader {
         let at = self.slots.len() - 1;
         self.swap_slot(at);
         self.resume_project(window, cx);
-        if let Some(agent) = agent {
-            self.connect(&agent, false, window, cx);
+        match agent {
+            Some(agent) => self.connect(&agent, false, window, cx),
+            None => self.wake_thread(window, cx),
         }
         self.request_save(cx);
     }
@@ -1436,7 +1515,7 @@ impl Reader {
             self.begin_turn(&prompt);
             self.thread.pending = Some(prompt);
             // The thread it was typed in stays only if something has happened to it since.
-            let blank = self.views().iter().any(|v| v.id == pid && v.threads.iter().any(|t| t.id == tid && t.agent.is_none()));
+            let blank = self.views().iter().any(|v| v.id == pid && v.threads.iter().any(|t| t.id == tid && t.blank));
             if blank {
                 self.close_any_thread(pid, tid, window, cx);
             }
@@ -1780,8 +1859,12 @@ impl Reader {
         self.thread.busy = false;
         self.thread.queue.clear();
         self.thread.ready = false;
+        self.thread.options.clear();
+        self.thread.applying = None;
         self.thread.loading = false;
         self.thread.picking = resume;
+        // Listing sessions to resume is not a blank thread, even before one is picked.
+        self.thread.blank &= !resume;
         self.thread.sessions = None;
         let agent = self.agents.iter().find(|agent| agent.id == key).cloned().unwrap_or_else(|| config::Agent {
             id: key.to_string(),
@@ -1799,16 +1882,22 @@ impl Reader {
                     let watchdog = this.clone();
                     cx.spawn(async move |cx| {
                         cx.background_executor().timer(Duration::from_secs(20)).await;
-                        watchdog
-                            .update(cx, |reader, cx| {
-                                reader.with_thread(id, |reader, _| {
-                                    let thread = &mut reader.thread;
-                                    if thread.generation == generation && !thread.ready && thread.client.is_some() {
-                                        thread.status = "not responding".into();
-                                        thread.fail("The agent did not answer the handshake. Check that its command speaks ACP.".into());
-                                    }
-                                });
-                                cx.notify();
+                        handle
+                            .update(cx, |_, window, cx| {
+                                watchdog.update(cx, |reader, cx| {
+                                    reader.with_thread(id, |reader, _| {
+                                        let thread = &reader.thread;
+                                        if thread.generation == generation && !thread.ready && thread.client.is_some() {
+                                            // What was typed goes back to the draft rather than wait for an agent that is gone.
+                                            reader.return_pending();
+                                            reader.restore_queue(window, cx);
+                                            reader.thread.status = "not responding".into();
+                                            reader.thread.fail("The agent did not answer the handshake. Check that its command speaks ACP.".into());
+                                            reader.unstart();
+                                        }
+                                    });
+                                    cx.notify();
+                                })
                             })
                             .ok();
                     })
@@ -1845,13 +1934,14 @@ impl Reader {
         cx.notify();
     }
 
-    /// Opens a thread that has no agent yet, ready for a message. The thread on screen keeps
-    /// running in the background; if it is itself still blank it is used instead. The agent
-    /// starts when the first message is sent.
+    /// Opens a blank thread, ready for a message, with its agent starting so that its settings
+    /// can be chosen first. The thread on screen keeps running in the background; if it is
+    /// itself still blank it is used instead.
     fn new_blank_thread(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.thread.agent.is_some() {
+        if !self.thread.blank {
             self.add_thread(window, cx);
         }
+        self.start_blank(window, cx);
         self.focus_draft(window, cx);
         cx.notify();
     }
@@ -1865,6 +1955,110 @@ impl Reader {
         self.chosen_agent.as_ref().and_then(|key| self.agents.iter().find(|agent| agent.id == *key)).or(self.agents.first())
     }
 
+    /// Sets a new session's settings to what was last chosen for its agent, in the order of
+    /// [`Thread::ordered`]. A first message waits until they are taken.
+    fn apply_choices(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.thread.applying = Some(Applying::default());
+        self.apply_next(window, cx);
+    }
+
+    /// Asks the agent for the next setting to carry over that it doesn't already have, judged
+    /// by what it offers now, so that one it only offers after a change is carried over too.
+    /// Once none are left, the first message goes.
+    fn apply_next(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let thread = &mut self.thread;
+        let (Some(applying), Some(key), Some(client)) = (thread.applying.as_mut(), &thread.agent, &thread.client) else {
+            thread.applying = None;
+            return self.send_pending(window, cx);
+        };
+        let chosen = self.choices.get(key);
+        let options: Vec<&ConfigOption> = thread.options.iter().filter(|option| !applying.settled.contains(&option.id)).collect();
+        for option in Thread::ordered(options) {
+            applying.settled.insert(option.id.clone());
+            let Some(value) = chosen.and_then(|chosen| chosen.get(&option.id)) else { continue };
+            if *value != option.current && option.choices.iter().any(|(choice, _)| choice == value) && client.set_option(&option.id, value) {
+                applying.asked = Some(option.id.clone());
+                applying.asks += 1;
+                // An agent that never answers would hold the first message back for good.
+                let (id, generation, asked, ask, handle) =
+                    (thread.id, thread.generation, option.id.clone(), applying.asks, window.window_handle());
+                cx.spawn(async move |this, cx| {
+                    cx.background_executor().timer(Duration::from_secs(20)).await;
+                    handle
+                        .update(cx, |_, window, cx| {
+                            this.update(cx, |reader, cx| {
+                                reader.with_thread(id, |reader, _| {
+                                    let thread = &mut reader.thread;
+                                    let waiting = thread.generation == generation
+                                        && thread.applying.as_ref().is_some_and(|applying| applying.asks == ask && applying.asked.is_some());
+                                    if waiting {
+                                        log::warn!("agent: no answer to the setting {asked}");
+                                        thread.unanswered.insert(asked);
+                                        reader.apply_next(window, cx);
+                                    }
+                                });
+                            })
+                            .ok();
+                        })
+                        .ok();
+                })
+                .detach();
+                return;
+            }
+        }
+        thread.applying = None;
+        self.send_pending(window, cx);
+    }
+
+    /// Sends the first message, once the agent is ready and has the settings it starts with.
+    fn send_pending(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.thread.ready || self.thread.applying.is_some() {
+            return;
+        }
+        if let Some(prompt) = self.thread.pending.take()
+            && !self.send_to_agent(&prompt)
+        {
+            self.thread.pending = Some(prompt);
+            self.return_pending();
+            self.thread.fail("The agent has no session yet.".into());
+            self.restore_queue(window, cx);
+        }
+    }
+
+    /// The agent answered a change of setting `id`. If it was the one being carried over, the
+    /// next follows; true then, as the choice it carried over is already remembered.
+    fn took_setting(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let carried = self.thread.applying.as_ref().is_some_and(|applying| applying.asked.as_deref() == Some(id));
+        if carried {
+            self.apply_next(window, cx);
+        }
+        // One given up on was asked for too, so it isn't the user's choice either.
+        carried || self.thread.unanswered.remove(id)
+    }
+
+    /// Chooses the agent new threads start with. A blank thread on screen switches to it.
+    fn pick_agent(&mut self, key: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.chosen_agent = Some(key.clone());
+        if self.thread.blank && self.thread.agent.as_ref() != Some(&key) {
+            log::info!("agent: blank thread switches to {key}");
+            self.connect(&key, false, window, cx);
+        }
+        cx.notify();
+    }
+
+    /// Asks the agent to change a setting of the thread's session. Once it accepts, the choice is
+    /// remembered for the agent's next threads.
+    fn choose_option(&mut self, id: &str, value: &str) {
+        let thread = &mut self.thread;
+        if let Some(client) = &thread.client
+            && client.set_option(id, value)
+            && let Some(applying) = &mut thread.applying
+        {
+            // What is chosen here isn't then undone by carrying over an earlier choice.
+            applying.settled.insert(id.to_string());
+        }
+    }
+
     /// Lists an agent's sessions in a new thread, to resume one: those of the agent the thread on
     /// screen is running, or of the chosen one if it has not started.
     fn resume_thread(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1874,11 +2068,11 @@ impl Reader {
         self.connect(&key, true, window, cx);
     }
 
-    /// Starts the blank thread on screen: the chosen agent runs `prompt` as its first message,
-    /// which is shown at once and sent when the agent is ready. In a worktree of its own if
-    /// that was asked for.
-    fn start_thread(&mut self, prompt: String, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(key) = self.chosen().map(|agent| agent.id.clone()) else {
+    /// Starts the blank thread on screen with `prompt`, the draft, as its first message: in
+    /// the session its agent already has open, or in a worktree of its own if that was asked
+    /// for. `later` is as for [`Self::send`].
+    fn start_thread(&mut self, prompt: String, later: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(key) = self.thread.agent.clone().or_else(|| self.chosen().map(|agent| agent.id.clone())) else {
             self.thread.fail("No agents are configured.".into());
             cx.notify();
             return;
@@ -1894,13 +2088,18 @@ impl Reader {
             self.new_worktree_thread(&key, Some((prompt, blank)), window, cx);
             return;
         }
-        self.thread.draft.update(cx, |input, cx| input.set_value("", window, cx));
         log::info!("agent: new thread with {key}");
-        self.connect(&key, false, window, cx);
-        self.begin_turn(&prompt);
-        self.thread.pending = Some(prompt);
+        // An agent that failed or was stopped starts again, without the error it left.
+        if self.thread.client.is_none() {
+            self.connect(&key, false, window, cx);
+        }
+        // One that couldn't be started has said why, and the next message tries again.
+        if self.thread.client.is_none() {
+            return;
+        }
+        self.thread.blank = false;
+        self.send(later, window, cx);
         self.request_save(cx);
-        cx.notify();
     }
 
     /// Puts a first message back in the draft after the agent failed before it could be sent.
@@ -1942,11 +2141,15 @@ impl Reader {
             touched: Instant::now(),
             pending: None,
             isolate: false,
+            blank: true,
+            applying: None,
+            unanswered: HashSet::new(),
             _enter: Self::send_on_enter(&draft, window, cx),
             messages: vec![],
             busy: false,
             queue: vec![],
             ready: false,
+            options: Vec::new(),
             loading: false,
             picking: false,
             sessions: None,
@@ -1966,7 +2169,7 @@ impl Reader {
         let fresh = self.blank_thread(window, cx);
         let old = std::mem::replace(&mut self.thread, fresh);
         // A blank thread, or a session listing nothing was picked from, isn't kept.
-        if old.agent.is_some() && !old.is_listing() {
+        if old.worth_keeping() {
             self.parked.push(old);
         }
     }
@@ -2000,8 +2203,7 @@ impl Reader {
     fn show_thread(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(at) = self.parked.iter().position(|thread| thread.id == id) {
             std::mem::swap(&mut self.thread, &mut self.parked[at]);
-            // A session listing that was left without picking anything isn't kept.
-            self.parked.retain(|thread| !thread.is_listing());
+            self.parked.retain(Thread::worth_keeping);
             self.thread.unread = false;
             self.wake_thread(window, cx);
             self.request_save(cx);
@@ -2010,7 +2212,15 @@ impl Reader {
     }
 
     /// Starts the agent of the thread on screen again if it was stopped, resuming its session.
+    /// A blank thread's agent starts afresh, unless it failed: that shows why until a message
+    /// or a new thread asks for it again.
     fn wake_thread(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.thread.blank {
+            if self.thread.messages.is_empty() {
+                self.start_blank(window, cx);
+            }
+            return;
+        }
         if !self.thread.asleep() {
             return;
         }
@@ -2019,6 +2229,17 @@ impl Reader {
         self.connect(&key, true, window, cx);
         self.thread.restore = Some(session);
         self.thread.status = "waking…".into();
+    }
+
+    /// Starts the agent of the blank thread on screen if it has none running: its own agent, or
+    /// else the chosen one.
+    fn start_blank(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.thread.blank
+            && self.thread.client.is_none()
+            && let Some(key) = self.thread.agent.clone().or_else(|| self.chosen().map(|agent| agent.id.clone()))
+        {
+            self.connect(&key, false, window, cx);
+        }
     }
 
     /// The threads not on screen, in every project.
@@ -2032,6 +2253,7 @@ impl Reader {
         thread.agent = Some(saved.agent);
         thread.session = Some(saved.session);
         thread.saved_title = Some(saved.title).filter(|title| !title.is_empty());
+        thread.blank = false;
         thread.status = "asleep".into();
         thread
     }
@@ -2129,7 +2351,7 @@ impl Reader {
             .into_iter()
             .filter(|view| view.project.pr.is_none())
             .map(|view| {
-                let mut threads: Vec<&Thread> = view.threads.into_iter().filter(|t| t.agent.is_some() && t.session.is_some()).collect();
+                let mut threads: Vec<&Thread> = view.threads.into_iter().filter(|t| !t.blank && t.agent.is_some() && t.session.is_some()).collect();
                 threads.sort_by_key(|t| t.id);
                 workspace::ProjectState {
                     root: view.project.root.clone(),
@@ -2184,7 +2406,8 @@ impl Reader {
         live += self.background_threads().filter(|t| t.client.is_some()).count();
         let Some(excess) = live.checked_sub(self.max_live).filter(|n| *n > 0) else { return };
         let mut idle: Vec<&mut Thread> = self.background_threads().filter(|t| t.restful()).collect();
-        idle.sort_by_key(|t| t.touched);
+        // Blank threads lose nothing by stopping, so they go first.
+        idle.sort_by_key(|t| (!t.blank, t.touched));
         for thread in idle.into_iter().take(excess) {
             log::info!("agent: stopping thread {} to stay under the limit", thread.id);
             thread.sleep();
@@ -2308,7 +2531,22 @@ impl Reader {
                     self.thread.sessions = Some(sessions);
                 }
             },
-            Event::Ready { agent } => {
+            Event::Options(options) => {
+                self.thread.options = options;
+            }
+            Event::OptionSet { id, value } => {
+                if !self.took_setting(&id, window, cx)
+                    && let Some(key) = self.thread.agent.clone()
+                {
+                    self.choices.entry(key.clone()).or_default().insert(id.clone(), value.clone());
+                    cx.background_spawn(async move { config::save_choice(&key, &id, &value) }).detach();
+                }
+            }
+            Event::Refused { id, text } => {
+                self.thread.status = text;
+                self.took_setting(&id, window, cx);
+            }
+            Event::Ready { agent, fresh } => {
                 self.thread.ready = true;
                 self.thread.loading = false;
                 self.thread.picking = false;
@@ -2316,13 +2554,10 @@ impl Reader {
                 self.thread.status = "ready".into();
                 self.thread.session = self.thread.client.as_ref().and_then(|client| client.session());
                 self.request_save(cx);
-                if let Some(prompt) = self.thread.pending.take()
-                    && !self.send_to_agent(&prompt)
-                {
-                    self.thread.pending = Some(prompt);
-                    self.return_pending();
-                    self.thread.fail("The agent has no session yet.".into());
-                    self.restore_queue(window, cx);
+                if fresh {
+                    self.apply_choices(window, cx);
+                } else {
+                    self.send_pending(window, cx);
                 }
             }
             Event::Update(update) => {
@@ -2369,6 +2604,8 @@ impl Reader {
                 self.return_pending();
                 self.thread.fail(error);
                 self.restore_queue(window, cx);
+                self.thread.applying = None;
+                self.unstart();
             }
             Event::Exited(status) => {
                 log::warn!("agent exited: {status}");
@@ -2379,6 +2616,8 @@ impl Reader {
                     self.thread.fail(format!("the agent exited ({status})"));
                     self.restore_queue(window, cx);
                 }
+                self.thread.applying = None;
+                self.unstart();
             }
         }
         self.thread.relist(changed);
@@ -2387,6 +2626,16 @@ impl Reader {
     }
 
 
+
+    /// After its agent failed or exited: a blank thread, or one whose first message never got
+    /// a session, starts its agent again when it is next asked for. That includes one whose
+    /// agent is still held but never became ready, as it would never answer.
+    fn unstart(&mut self) {
+        let thread = &mut self.thread;
+        if thread.blank || thread.unstarted() || thread.session.is_none() && !thread.ready && !thread.picking && !thread.loading {
+            thread.drop_agent();
+        }
+    }
 
     /// Shows the file a tool call touches; a finished call reloads it to show the change.
     fn follow(&mut self, path: &str, finished: bool, window: &mut Window, cx: &mut Context<Self>) {
@@ -2635,12 +2884,15 @@ impl Reader {
         if prompt.is_empty() {
             return;
         }
-        if self.thread.agent.is_none() {
-            return self.start_thread(prompt, window, cx);
+        if self.thread.blank || self.thread.unstarted() {
+            return self.start_thread(prompt, later, window, cx);
         }
-        let starting = self.thread.client.is_some() && !self.thread.ready && !self.thread.loading && !self.thread.picking && self.thread.restore.is_none();
+        let thread = &self.thread;
+        let starting = thread.client.is_some()
+            && (thread.applying.is_some() || !thread.ready && !thread.loading && !thread.picking && thread.restore.is_none());
         if starting && !self.thread.busy {
-            // The agent is still starting: the message waits for it, shown as sent.
+            // The agent is still starting, or taking its settings: the message waits for it,
+            // shown as sent.
             self.thread.draft.update(cx, |input, cx| input.set_value("", window, cx));
             self.begin_turn(&prompt);
             self.thread.pending = Some(prompt);
@@ -2744,6 +2996,7 @@ impl Reader {
 
     /// Shows `prompt` as the start of a turn the agent is working on.
     fn begin_turn(&mut self, prompt: &str) {
+        self.thread.blank = false;
         self.thread.busy = true;
         self.thread.touched = Instant::now();
         self.thread.messages.push(Msg::User(prompt.to_string()));
@@ -2777,6 +3030,30 @@ impl Reader {
         tool.open = !tool.open;
         self.thread.relist(msg);
         cx.notify();
+    }
+
+    fn toggle_thought(&mut self, msg: usize, block: usize, cx: &mut Context<Self>) {
+        let Some(Msg::Agent(blocks)) = self.thread.messages.get_mut(msg) else { return };
+        let Some(Block::Thought(_, open)) = blocks.get_mut(block) else { return };
+        *open = !*open;
+        self.thread.relist(msg);
+        cx.notify();
+    }
+
+    /// Opens every tool call's details, or closes them all when none is left to open.
+    fn toggle_tools(&mut self, cx: &mut Context<Self>) {
+        if let Some(from) = toggle_all(&mut self.thread.messages, |b| if let Block::Tool(tool) = b { Some(&mut tool.open) } else { None }) {
+            self.thread.relist(from);
+            cx.notify();
+        }
+    }
+
+    /// Opens every thought, or folds them all when none is left to open.
+    fn toggle_thoughts(&mut self, cx: &mut Context<Self>) {
+        if let Some(from) = toggle_all(&mut self.thread.messages, |b| if let Block::Thought(_, shown) = b { Some(shown) } else { None }) {
+            self.thread.relist(from);
+            cx.notify();
+        }
     }
 
     /// The strip under the explorer header in Changes mode: an input to open a PR for
@@ -3064,7 +3341,7 @@ impl Reader {
         let many = project_count > 1;
         let add = cx.entity();
         // Groups are spaced apart by more than anything inside one, so the eye reads them as units.
-        let mut tree = div().id("agents-tree").size_full().overflow_y_scroll().flex().flex_col().gap_2().p_1();
+        let mut tree = div().id("agents-tree").size_full().overflow_y_scroll().flex().flex_col().gap_3().p_2();
         for view in &views {
             let pid = view.id;
             let (select, close, start) = (cx.entity(), cx.entity(), cx.entity());
@@ -3076,7 +3353,7 @@ impl Reader {
                 .flex()
                 .flex_col()
                 .gap_px()
-                .p_1()
+                .p_1p5()
                 .rounded_lg()
                 .when(current, |card| card.bg(hover));
             // Inside the selected card the row under the pointer needs a different shade to show.
@@ -3089,9 +3366,9 @@ impl Reader {
                     .items_center()
                     .gap_2()
                     .px_1p5()
-                    .h(rems(1.625))
-                    // A little air between the project and its threads.
-                    .mb_1()
+                    .h(rems(1.875))
+                    // A hair of air between the project and its threads.
+                    .mb_0p5()
                     .rounded_md()
                     .cursor_pointer()
                     .hover(move |row| row.bg(over))
@@ -3136,7 +3413,7 @@ impl Reader {
                         ))
                     }),
             );
-            for thread in view.threads.iter().filter(|t| t.agent.is_some() || t.id == view.shown) {
+            for thread in view.threads.iter().filter(|t| !t.blank || t.id == view.shown) {
                 let tid = thread.id;
                 let (glyph, tint) = thread.activity().mark(colors);
                 let (select, close) = (cx.entity(), cx.entity());
@@ -3148,7 +3425,7 @@ impl Reader {
                         .items_center()
                         .gap_2()
                         .px_1p5()
-                        .h(rems(1.625))
+                        .h(rems(1.875))
                         .rounded_md()
                         .cursor_pointer()
                         .when((pid, tid) == (active_project, active_thread), |row| row.bg(selected))
@@ -3194,7 +3471,7 @@ impl Reader {
                     .child(div().text_xs().text_color(muted).child(project_count.to_string())),
                 Button::new("agents-add")
                     .icon(IconName::Plus)
-                    .tooltip("Add a project: open a folder (Ctrl+O)")
+                    .tooltip("Add a project: open a folder (Ctrl+Shift+O)")
                     .ghost()
                     .small()
                     .on_click(move |_, window, cx| add.update(cx, |reader, cx| reader.pick_project(window, cx))),
@@ -3235,7 +3512,8 @@ impl Reader {
                 .child(pane_header("Changes", status_text(String::new(), cx), lead, trail, cx))
                 .child(div().flex_1().min_h_0().child(centered("Pick a changed file".into(), cx)));
         };
-        let (rows, pairs) = (self.project.rows.clone(), self.project.pairs.clone());
+        let (rows, pairs, syntax) = (self.project.rows.clone(), self.project.pairs.clone(), self.project.colors.clone());
+        let palettes = syntax.palettes(cx);
         let (added, removed) = self.project.counts;
         // Themes may lack a green (Rosé Pine's success is teal), so added lines get their own.
         let (success, danger, muted, border) =
@@ -3248,6 +3526,9 @@ impl Reader {
         } else if rows.is_empty() {
             centered("No textual changes".into(), cx)
         } else {
+            let code = |text: &str, styles: Vec<(std::ops::Range<usize>, gpui::HighlightStyle)>| {
+                StyledText::new(SharedString::from(text.to_string())).with_highlights(styles)
+            };
             list(self.project.diff_list.clone(), move |ix, _, _| {
                 let line = div().flex().w_full().min_h(rems(1.5)).items_start().font_family(font.clone()).text_sm();
                 if split {
@@ -3264,8 +3545,9 @@ impl Reader {
                             Some(tint) => half.bg(tint),
                             None => half,
                         };
+                        let styles = syntax.line(first, cell.number, &cell.text, &palettes);
                         half.child(div().w(rems(3.)).flex_none().text_right().text_color(muted).child(cell.number.to_string()))
-                            .child(div().flex_1().min_w_0().child(cell.text.clone()))
+                            .child(div().flex_1().min_w_0().child(code(&cell.text, styles)))
                     };
                     return match &pairs[ix] {
                         Pair::Hunk(text) => line.px_2().bg(muted.opacity(0.12)).text_color(muted).child(text.clone()),
@@ -3291,10 +3573,16 @@ impl Reader {
                 if row.kind == Kind::Hunk {
                     return line.px_2().text_color(muted).child(row.text.clone()).into_any_element();
                 }
+                // Removed lines read as the old version had them, the rest as the new one does.
+                let styles = match (row.kind, row.old, row.new) {
+                    (Kind::Removed, Some(n), _) => syntax.line(true, n, &row.text, &palettes),
+                    (_, _, Some(n)) => syntax.line(false, n, &row.text, &palettes),
+                    _ => vec![],
+                };
                 line.child(number(row.old))
                     .child(number(row.new))
                     .child(div().w(rems(0.75)).flex_none().text_color(muted).child(sign))
-                    .child(div().flex_1().min_w_0().child(row.text.clone()))
+                    .child(div().flex_1().min_w_0().child(code(&row.text, styles)))
                     .into_any_element()
             })
             .size_full()
@@ -3482,13 +3770,44 @@ impl Reader {
             .into_any_element()
     }
 
+    /// A menu for each of the thread's session settings: the model first, then the agent's
+    /// others in the order it gave them.
+    fn setting_menus(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let this = cx.entity();
+        let (busy, id) = (self.thread.busy, self.thread.id);
+        Thread::ordered(self.thread.options.iter().collect())
+            .into_iter()
+            .map(|option| {
+                let key = SharedString::from(format!("option-{id}-{}", option.id));
+                let (this, setting) = (this.clone(), option.clone());
+                let button = Button::new(key.clone()).label(option.current_name().to_string()).ghost().small().dropdown_caret(true);
+                if busy {
+                    // Agents differ on changing settings mid-turn, so it waits for the turn to end.
+                    return button.tooltip(format!("{}: available when the agent is idle", option.name)).into_any_element();
+                }
+                dropdown(key, button.tooltip(option.name.clone()), move || {
+                    setting
+                        .choices
+                        .iter()
+                        .map(|(value, name)| {
+                            let (this, setting_id, value) = (this.clone(), setting.id.clone(), value.clone());
+                            let label = if *value == setting.current { format!("✓ {name}") } else { name.clone() };
+                            MenuItem::new(label, move |_, cx| this.update(cx, |reader, _| reader.choose_option(&setting_id, &value)))
+                        })
+                        .collect()
+                })
+                .into_any_element()
+            })
+            .collect()
+    }
+
     fn agent_panel(&self, lead: Option<AnyElement>, trail: Option<AnyElement>, cx: &mut Context<Self>) -> impl IntoElement {
         let this = cx.entity();
         self.thread.selection.update(cx, |s, _| s.begin_frame());
         // Only the messages in view are built and laid out, however long the thread gets.
         let selection = self.thread.selection.clone();
-        let thread: AnyElement = if self.thread.agent.is_none() {
-            centered("Pick an agent below, then send a message to start a thread".into(), cx)
+        let thread: AnyElement = if self.thread.blank && self.thread.messages.is_empty() {
+            centered("Pick an agent and its settings below, then send a message to start a thread".into(), cx)
         } else if self.thread.picking && self.thread.messages.is_empty() {
             match &self.thread.sessions {
                 Some(sessions) if !self.thread.loading && !sessions.is_empty() => session_picker(sessions, &this, cx),
@@ -3504,8 +3823,8 @@ impl Reader {
                     // Boxes share the composer box's edges (the column's own padding); the text
                     // inside them is inset to the composer's text edge (see `text_inset`).
                     div()
-                        .pt_3()
-                        .when(last, |this| this.pb_3())
+                        .pt_6()
+                        .when(last, |this| this.pb_6())
                         .child(render_msg(ix, msg, &this, &selection, window, cx))
                         .into_any_element()
                 }),
@@ -3513,6 +3832,8 @@ impl Reader {
             .size_full()
             .into_any_element()
         };
+        // The session's settings, which can be changed before the thread starts and after.
+        let settings = self.setting_menus(cx);
         let colors = cx.global::<Palette>();
         let (send, stop, history, fresh) = (cx.entity(), cx.entity(), cx.entity(), cx.entity());
         let agents = self.agents.clone();
@@ -3590,9 +3911,10 @@ impl Reader {
                     .into_any_element()
             })
             .collect();
-        // Before the thread starts, what it starts with is chosen here; after, it is only named.
-        let chips: AnyElement = if self.thread.agent.is_none() {
-            let name = self.chosen().map_or_else(|| "No agent".to_string(), |agent| agent.name.clone());
+        // Before the thread starts, its agent is chosen here; after, it is only named.
+        let chips: AnyElement = if self.thread.blank {
+            let name = self.agent_label().map(str::to_string).or_else(|| self.chosen().map(|agent| agent.name.clone()));
+            let name = name.unwrap_or_else(|| "No agent".to_string());
             let isolated = self.thread.isolate;
             div()
                 .flex()
@@ -3607,11 +3929,8 @@ impl Reader {
                                 .iter()
                                 .map(|agent| {
                                     let (pick, key) = (pick.clone(), agent.id.clone());
-                                    MenuItem::new(agent.name.clone(), move |_, cx| {
-                                        pick.update(cx, |reader, cx| {
-                                            reader.chosen_agent = Some(key.clone());
-                                            cx.notify();
-                                        })
+                                    MenuItem::new(agent.name.clone(), move |window, cx| {
+                                        pick.update(cx, |reader, cx| reader.pick_agent(key.clone(), window, cx))
                                     })
                                 })
                                 .collect()
@@ -3619,6 +3938,7 @@ impl Reader {
                     )
                     .menu(self.agent_menu.clone()),
                 )
+                .children(settings)
                 .children(in_repo.then(|| {
                     Button::new("worktree-chip")
                         .label("⎇ Worktree")
@@ -3635,7 +3955,13 @@ impl Reader {
                 }))
                 .into_any_element()
         } else {
-            div().pl_2().text_sm().text_color(muted).child(self.agent_label().unwrap_or("Agent").to_string()).into_any_element()
+            div()
+                .flex()
+                .items_center()
+                .gap_1()
+                .child(div().pl_2().text_sm().text_color(muted).child(self.agent_label().unwrap_or("Agent").to_string()))
+                .children(settings)
+                .into_any_element()
         };
         div()
             .size_full()
@@ -3719,22 +4045,22 @@ impl Reader {
                     .child(div().size_full().flex().justify_center().px_3().child(div().h_full().w_full().max_w(px(860.0)).child(thread))),
             )
             .child(
-                div().flex_none().p_3().flex().justify_center().child(
+                div().flex_none().px_3().pt_2().pb_4().flex().justify_center().child(
                     div()
                         .w_full()
                         .max_w(px(860.0))
                         .flex()
                         .flex_col()
-                        .gap_1()
+                        .gap_2()
                         .p(rems(COMPOSER_PAD_REM))
-                        .rounded_lg()
+                        .rounded_xl()
                         .border(px(BOX_BORDER))
                         .border_color(colors.border)
                         .bg(colors.sidebar)
                         .when(!queued.is_empty(), |this| {
                             this.child(div().flex().flex_col().gap_1().pb_1().border_b_1().border_color(border).children(queued))
                         })
-                        .child(Input::new(&self.thread.draft).large())
+                        .child(div().py_1().child(Input::new(&self.thread.draft).large()))
                         .child(
                             // The input's text sits 0.75rem in; the chips' own padding (0.5rem) plus this
                             // inset puts their text, and the label after the thread has started, on its edge.
@@ -3774,11 +4100,11 @@ fn render_msg(
                 .child(
                     div()
                         .max_w(gpui::relative(0.9))
-                        .px_3()
-                        .py_2()
-                        .rounded_lg()
+                        .px_4()
+                        .py_3()
+                        .rounded_xl()
                         .bg(bg)
-                        .text_sm()
+                        .text_base()
                         .child(text_el),
                 )
                 .into_any_element();
@@ -3786,7 +4112,7 @@ fn render_msg(
         Msg::Agent(blocks) => blocks,
     };
     let colors = cx.global::<Palette>();
-    let mut column = div().flex().flex_col().gap_2().min_w_0();
+    let mut column = div().flex().flex_col().min_w_0();
     // Text blocks sit where the composer's text does; boxes (tool cards) span the composer's width.
     let text_inset = text_inset(window);
     if blocks.is_empty() {
@@ -3795,19 +4121,62 @@ fn render_msg(
     }
     for (n, block) in blocks.iter().enumerate() {
         let id = ix * 10_000 + n;
+        // Runs of tool calls read as one list; anything else is set a step apart.
+        let run = n > 0 && matches!((&blocks[n - 1], block), (Block::Tool(_), Block::Tool(_)));
         let (el, boxed) = match block {
             Block::Text(text) => (ui::markdown::markdown(("answer", id), text, selection, window, cx).into_any_element(), false),
-            Block::Thought(text) => (
-                div().opacity(0.7).child(ui::markdown::italic(("thought", id), text, selection, window, cx)).into_any_element(),
-                false,
-            ),
+            Block::Thought(text, open) => (thought(ix, n, text, *open, this, selection, window, cx), false),
             Block::Tool(tool) => (tool_card(ix, n, tool, this, text_inset, selection, window, cx).into_any_element(), true),
-            Block::Permission(ask) => (permission(ix, n, ask, this).into_any_element(), false),
+            Block::Permission(ask) => (permission(ix, n, ask, this, text_inset, cx).into_any_element(), true),
             Block::Plan(entries) => (plan(entries, cx).into_any_element(), false),
         };
-        column = column.child(if boxed { el } else { div().px(text_inset).child(el).into_any_element() });
+        let el = if boxed { el } else { div().px(text_inset).child(el).into_any_element() };
+        column = column.child(div().when(n > 0, |this| if run { this.mt_0p5() } else { this.mt_4() }).child(el));
     }
     column.into_any_element()
+}
+
+/// Opens every block `flag` picks out, or closes them all when none is left to open. Returns
+/// the first message that changed, if any.
+fn toggle_all(messages: &mut [Msg], flag: fn(&mut Block) -> Option<&mut bool>) -> Option<usize> {
+    let open = messages.iter_mut().any(|m| match m {
+        Msg::Agent(blocks) => blocks.iter_mut().any(|b| flag(b).is_some_and(|f| !*f)),
+        Msg::User(_) => false,
+    });
+    let mut first = None;
+    for (ix, msg) in messages.iter_mut().enumerate() {
+        let Msg::Agent(blocks) = msg else { continue };
+        for shown in blocks.iter_mut().filter_map(flag) {
+            if *shown != open {
+                *shown = open;
+                first.get_or_insert(ix);
+            }
+        }
+    }
+    first
+}
+
+/// A thought: a quiet "Thinking" row that opens to the agent's reasoning.
+fn thought(ix: usize, n: usize, text: &str, open: bool, this: &Entity<Reader>, selection: &Entity<ui::markdown::Selection>, window: &mut Window, cx: &mut App) -> AnyElement {
+    let muted = cx.global::<Palette>().muted_foreground;
+    let toggle = this.clone();
+    let header = div()
+        .id(("thought", ix * 10_000 + n))
+        .flex()
+        .items_center()
+        .gap_1()
+        .cursor_pointer()
+        .text_sm()
+        .text_color(muted)
+        .on_click(move |_, _, cx| toggle.update(cx, |reader, cx| reader.toggle_thought(ix, n, cx)))
+        .child(Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight }).size(IconSize::XSmall))
+        .child("Thinking");
+    let column = div().flex().flex_col().gap_1().child(header);
+    if open {
+        column.child(div().opacity(0.7).child(ui::markdown::italic(("thought", ix * 10_000 + n), text, selection, window, cx))).into_any_element()
+    } else {
+        column.into_any_element()
+    }
 }
 
 /// The sessions an agent offers to resume, newest first.
@@ -3851,10 +4220,20 @@ fn step_mark(status: Step, colors: &Palette) -> (&'static str, gpui::Hsla) {
 
 fn plan(entries: &[(String, Step)], cx: &App) -> impl IntoElement {
     let colors = cx.global::<Palette>();
-    div().flex().flex_col().gap_1().text_sm().children(entries.iter().map(|(text, status)| {
-        let (mark, tint) = step_mark(*status, colors);
-        div().flex().gap_2().child(div().flex_none().text_color(tint).child(mark)).child(div().flex_1().min_w_0().child(text.clone()))
-    }))
+    div()
+        .flex()
+        .flex_col()
+        .gap_1p5()
+        .text_sm()
+        .children(entries.iter().map(|(text, status)| {
+            let (mark, tint) = step_mark(*status, colors);
+            let done = *status == Step::Done;
+            div()
+                .flex()
+                .gap_2()
+                .child(div().flex_none().text_color(tint).child(mark))
+                .child(div().flex_1().min_w_0().text_color(if done { colors.muted_foreground } else { colors.foreground }).child(text.clone()))
+        }))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3870,21 +4249,22 @@ fn tool_card(
 ) -> impl IntoElement {
     let colors = cx.global::<Palette>();
     let (mark, tint) = step_mark(tool.status, colors);
-    let (muted, border, background) = (colors.muted_foreground, colors.border, colors.background);
+    let (muted, hover, panel) = (colors.muted_foreground, colors.list_hover, colors.markdown.code_background);
+    let settled = tool.status == Step::Done;
     let toggle = this.clone();
     let reveal = this.clone();
     let path = tool.path.clone();
+    // A tool call is a quiet row, not a box: it lights up under the pointer, and its text sits on
+    // the composer's text edge like the answer's.
     let mut card = div()
+        .id(("tool-row", ix * 10_000 + n))
         .flex()
         .flex_col()
-        .gap_1()
-        .py_2()
-        // The border plus this padding put the card's text on the composer's text edge.
-        .px(text_inset - px(BOX_BORDER))
+        .gap_2()
+        .py_1p5()
+        .px(text_inset)
         .rounded_md()
-        .border(px(BOX_BORDER))
-        .border_color(border)
-        .bg(background)
+        .hover(move |row| row.bg(hover))
         .child(
             div()
                 .flex()
@@ -3902,7 +4282,7 @@ fn tool_card(
                         .text_sm()
                         .on_click(move |_, _, cx| toggle.update(cx, |reader, cx| reader.toggle_tool(ix, n, cx)))
                         .child(div().text_color(tint).child(mark))
-                        .child(div().flex_1().min_w_0().truncate().child(tool.title.clone())),
+                        .child(div().flex_1().min_w_0().truncate().text_color(if settled { muted } else { colors.foreground }).child(tool.title.clone())),
                 )
                 .children(path.map(|path| {
                     Button::new(("tool-open", ix * 10_000 + n))
@@ -3933,6 +4313,10 @@ fn tool_card(
                     div()
                         .max_h(rems(16.))
                         .overflow_hidden()
+                        .rounded_md()
+                        .bg(panel)
+                        .px_3()
+                        .py_2()
                         .font_family(mono)
                         .text_xs()
                         .text_color(muted)
@@ -3944,21 +4328,47 @@ fn tool_card(
     card
 }
 
-fn permission(ix: usize, n: usize, ask: &Ask, this: &Entity<Reader>) -> impl IntoElement {
+/// The one option in a permission request rendered as the filled button: the first way of saying
+/// yes, however the agent orders the rest. Options that describe themselves in `kind` (ACP) are
+/// picked by it; agents that send no kinds at all get their first "allow" in the name honoured.
+fn primary_option(options: &[PermissionOption]) -> Option<usize> {
+    if options.iter().any(|o| !o.kind.is_empty()) {
+        options.iter().position(|o| o.kind == "allow_once")
+    } else {
+        options.iter().position(|o| o.name.to_lowercase().contains("allow"))
+    }
+}
+
+fn permission(ix: usize, n: usize, ask: &Ask, this: &Entity<Reader>, text_inset: gpui::Pixels, cx: &App) -> impl IntoElement {
+    let colors = cx.global::<Palette>();
+    let (muted, warning) = (colors.muted_foreground, colors.warning);
+    let primary = primary_option(&ask.options);
     let row = div().flex().flex_wrap().gap_2();
     let row = match &ask.answered {
-        Some(name) => row.child(format!("→ {name}")),
+        Some(name) => row.child(div().text_color(muted).child(format!("→ {name}"))),
         None => row.children(ask.options.iter().enumerate().map(|(o, option)| {
             let this = this.clone();
-            let allow = option.name.to_lowercase().contains("allow");
             let button = Button::new(("permit", ix * 1_000_000 + n * 100 + o))
                 .label(option.name.clone())
                 .small()
                 .on_click(move |_, _, cx| this.update(cx, |reader, cx| reader.answer(ix, n, o, cx)));
-            if allow { button.primary() } else { button }
+            if primary == Some(o) { button.primary() } else { button }
         })),
     };
-    div().flex().flex_col().gap_2().text_sm().child(format!("Permission: {}", ask.title)).child(row)
+    let waiting = ask.answered.is_none();
+    div()
+        .flex()
+        .flex_col()
+        .gap_2()
+        .py_3()
+        .px(text_inset - px(BOX_BORDER))
+        .rounded_md()
+        .border(px(BOX_BORDER))
+        // A question still waiting for you is outlined in the warning tone; an answered one settles.
+        .border_color(if waiting { warning.opacity(0.6) } else { colors.border })
+        .text_sm()
+        .child(div().flex().gap_2().child(div().flex_none().text_color(muted).child("Permission")).child(div().flex_1().min_w_0().child(ask.title.clone())))
+        .child(row)
 }
 
 fn status_text(text: String, cx: &App) -> impl IntoElement {
@@ -3999,7 +4409,7 @@ fn pane_header(title: &str, right: impl IntoElement, lead: Option<AnyElement>, t
 fn header_row(left: impl IntoElement, right: impl IntoElement, cx: &App) -> impl IntoElement {
     let colors = cx.global::<Palette>();
     div()
-        .h_10()
+        .h_11()
         .flex_none()
         .flex()
         .items_center()
@@ -4090,6 +4500,8 @@ impl Render for Reader {
             .relative()
             .track_focus(&self.focus)
             .on_action(cx.listener(|reader, _: &ShowFinder, window, cx| reader.show_finder(window, cx)))
+            .on_action(cx.listener(|reader, _: &ToggleTools, _, cx| reader.toggle_tools(cx)))
+            .on_action(cx.listener(|reader, _: &ToggleThoughts, _, cx| reader.toggle_thoughts(cx)))
             .on_action(cx.listener(|reader, _: &ToggleLeft, _, cx| reader.toggle_left(cx)))
             .on_action(cx.listener(|reader, _: &ToggleRight, _, cx| reader.toggle_right(cx)))
             .on_action(cx.listener(|reader, _: &ShowSource, _, cx| reader.show_viewer(Mode::Source, cx)))
@@ -4266,6 +4678,8 @@ fn main() {
         viewer::init(cx);
         ui::init(cx);
         cx.bind_keys([
+            KeyBinding::new("ctrl-o", ToggleTools, None),
+            KeyBinding::new("ctrl-t", ToggleThoughts, None),
             KeyBinding::new("secondary-b", ToggleLeft, None),
             KeyBinding::new("secondary-shift-b", ToggleRight, None),
             KeyBinding::new("secondary-1", ShowSource, None),
@@ -4276,7 +4690,7 @@ fn main() {
             KeyBinding::new("secondary-\\", ToggleSplit, None),
             KeyBinding::new("secondary-shift-m", ToggleRendered, None),
             KeyBinding::new("secondary-n", NewThread, None),
-            KeyBinding::new("secondary-o", OpenProject, None),
+            KeyBinding::new("secondary-shift-o", OpenProject, None),
             KeyBinding::new("secondary-p", ShowFinder, None),
             KeyBinding::new("secondary-w", CloseWindow, None),
             KeyBinding::new("escape", CloseFinder, Some("Finder")),
@@ -4314,6 +4728,7 @@ fn main() {
                 trace::mark("window created");
                 theme::apply(cx);
                 trace::mark("theme applied");
+                theme::watch(cx);
                 let reader = cx.new(|cx| Reader::new(root, pr, command, prefetch, window, cx));
                 cx.new(|_| Shell { child: reader })
             },
@@ -4325,7 +4740,26 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{language, match_files, syntax};
+    fn thought_flag(b: &mut Block) -> Option<&mut bool> {
+        if let Block::Thought(_, shown) = b { Some(shown) } else { None }
+    }
+
+    #[test]
+    fn toggling_opens_all_then_folds_all() {
+        let mut messages = vec![
+            Msg::User("hi".into()),
+            Msg::Agent(vec![Block::Thought("a".into(), true), Block::Text("t".into())]),
+            Msg::Agent(vec![Block::Thought("b".into(), false)]),
+        ];
+        assert_eq!(toggle_all(&mut messages, thought_flag), Some(2));
+        assert!(matches!(&messages[1], Msg::Agent(b) if matches!(b[0], Block::Thought(_, true))));
+        assert!(matches!(&messages[2], Msg::Agent(b) if matches!(b[0], Block::Thought(_, true))));
+        assert_eq!(toggle_all(&mut messages, thought_flag), Some(1));
+        assert!(matches!(&messages[1], Msg::Agent(b) if matches!(b[0], Block::Thought(_, false))));
+        assert_eq!(toggle_all(&mut vec![Msg::User("x".into())], thought_flag), None);
+    }
+
+    use super::{Block, Msg, PermissionOption, language, toggle_all, match_files, primary_option, syntax};
 
     #[test]
     fn file_matches_rank_names_before_paths() {
@@ -4355,5 +4789,36 @@ mod tests {
         assert_eq!(syntax("mix.exs"), "elixir");
         assert!(super::viewer::highlights("defmodule A do\nend\n", "ex"));
         assert!(super::viewer::highlights("defmodule A do\nend\n", &syntax("mix.exs")));
+    }
+
+    fn option(name: &str, kind: &str) -> PermissionOption {
+        PermissionOption { id: name.to_lowercase(), name: name.into(), kind: kind.into() }
+    }
+
+    // “Always allow” listed first is not the first way of saying yes: the once-option is.
+    #[test]
+    fn allow_always_first_is_not_primary() {
+        let options = vec![option("Always allow", "allow_always"), option("Allow once", "allow_once"), option("Deny", "reject_once")];
+        assert_eq!(primary_option(&options), Some(1));
+    }
+
+    #[test]
+    fn first_of_several_allow_once_wins() {
+        let options = vec![option("Allow once", "allow_once"), option("Allow once (this project)", "allow_once"), option("Deny", "reject_once")];
+        assert_eq!(primary_option(&options), Some(0));
+    }
+
+    // No option says yes once, so nothing is primary and all buttons stay plain.
+    #[test]
+    fn kinds_without_allow_once_leave_nothing_primary() {
+        let options = vec![option("Always allow", "allow_always"), option("Deny once", "reject_once"), option("Always deny", "reject_always")];
+        assert_eq!(primary_option(&options), None);
+    }
+
+    // Agents from before `kind` was in the protocol describe options in names only.
+    #[test]
+    fn names_only_fall_back_to_the_first_allow() {
+        let options = vec![option("Allow once", ""), option("Allow for session", ""), option("Deny", "")];
+        assert_eq!(primary_option(&options), Some(0));
     }
 }

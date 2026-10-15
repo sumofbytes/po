@@ -1,6 +1,6 @@
 [package]
 name = "po"
-version = "0.3.0"
+version = "0.5.0"
 edition = "2024"
 description = "A native desktop GUI for ACP coding agents: chat, file browser, code viewer and diffs."
 license = "MIT OR Apache-2.0"
@@ -8,8 +8,8 @@ readme = "README.md"
 repository = "https://github.com/sumofbytes/po"
 
 [dependencies]
-gpui = { package = "gpui-pre", version = "=0.3.8", default-features = false, features = ["stacker"] }
-gpui_platform = { package = "gpui-pre-platform", version = "=0.3.8", features = ["font-kit", "wayland", "x11"] }
+gpui = { package = "gpui-pre", version = "=0.3.9", default-features = false, features = ["stacker"] }
+gpui_platform = { package = "gpui-pre-platform", version = "=0.3.9", features = ["font-kit", "wayland", "x11"] }
 env_logger = "0.11"
 log = "0.4"
 libc = "0.2"
@@ -63,7 +63,7 @@ tree-sitter-zig = "1.1.2"
 ureq = { version = "3", default-features = false, features = ["json", "rustls"] }
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }
 
 [profile.dev]
 debug = "line-tables-only"

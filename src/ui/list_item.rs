@@ -70,7 +70,7 @@ impl RenderOnce for ListItem {
             .flex()
             .relative()
             .gap_x_1()
-            .py_1()
+            .py_1p5()
             .px_3()
             .text_base()
             .text_color(palette.foreground)

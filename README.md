@@ -95,6 +95,9 @@ and SSE instead, which can take messages mid-turn:
 - Queued messages are listed above the input until the agent takes them; the
   **×** takes one back into the input to edit.
 
+The model and mode menus under the input list the daemon's models and the modes
+it allows; po sends the choice with each message.
+
 An entry with a `daemon` URL uses this path, and its `command` starts the
 daemon if nothing answers at the URL (po stops a daemon it started). Plain
 `http` only; set `DEX_DAEMON_TOKEN` if the daemon needs a bearer token.
@@ -130,12 +133,17 @@ Three shortcuts set how the layout is used:
 - **Chat** (Ctrl+3): the viewer closed, so the conversation has the middle to
   itself.
 
+In a conversation, thinking starts folded behind a **Thinking** row; click it to
+read it. Two shortcuts act on the whole thread: Ctrl+O opens every tool
+call's details (or folds them all when they are already open), and Ctrl+T
+does the same for thinking.
+
 Widths, the split, whether the explorer is folded, whether the viewer is open and
 which way round they are come back with your workspace.
 
 ### Projects and threads
 
-Several projects can be open at once. **Add project…** (Ctrl+O, or the **+** in the Projects header)
+Several projects can be open at once. **Add project…** (Ctrl+Shift+O, or the **+** in the Projects header)
 opens a folder; each project keeps its own files, changes, open file and agent
 threads. Opening a PR adds it as a project too, and closing it removes the
 checkout.
@@ -205,7 +213,12 @@ To make your own, write a theme as JSON (see any scheme converted in
 `src/schemes.rs` for the keys) and save it as `<config>/themes/<name>.json`, or
 set `"theme"` to the absolute path of the file; a file there wins over a scheme
 of the same name. The `font` block overrides the theme's UI and monospace fonts
-and sizes.
+and sizes. `family` and `mono_family` take a name or a list tried in order
+(`["JetBrains Mono", "Fira Code"]`); one that isn't installed is logged and
+skipped. Without one, the monospace font is the system's `monospace` (fontconfig
+on Linux), then a well-known one for the platform, then the bundled Fira Mono.
+`size` also scales the UI's spacing, since layout is measured in units of it.
+Edits to `config.json` and to theme files apply without a restart.
 
 Markdown, in the agent's replies and in `.md` files (which open rendered; the
 **Source** button or Ctrl+Shift+M switches to the text), is coloured from the

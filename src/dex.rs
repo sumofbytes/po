@@ -17,13 +17,17 @@ use anyhow::{Context, Result, anyhow, bail};
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use serde_json::{Value, json};
 
-use crate::acp::{Event, PermissionOption, SessionInfo};
+use crate::acp::{ConfigOption, Event, PermissionOption, SessionInfo};
 
 /// How long a freshly started daemon gets to answer `/health`.
 const STARTUP: Duration = Duration::from_secs(15);
 
 /// Sessions offered for resuming.
 const MAX_SESSIONS: usize = 100;
+
+/// The daemon's modes, from the most careful, with the permission each needs. It refuses a
+/// mode more permissive than its own, and with none named runs at its own.
+const MODES: [(&str, &str, &str); 3] = [("plan", "Plan", "read-only"), ("manual", "Manual", "ask"), ("auto", "Auto", "trusted")];
 
 /// Where a steering or follow-up message ended up.
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -58,6 +62,9 @@ struct Shared {
     session: Mutex<Option<String>>,
     events: UnboundedSender<Event>,
     batches: Mutex<HashMap<String, Batch>>,
+    /// The session's settings. The daemon takes them with each message rather than keeping
+    /// them, so they are kept here; each option's id is the field of the chat request it fills.
+    options: Mutex<Vec<ConfigOption>>,
 }
 
 impl Shared {
@@ -129,8 +136,26 @@ impl Shared {
             bail!("the dex daemon runs this session in {actual}, not {}", self.cwd.display());
         }
         *self.session.lock().expect("session lock") = Some(id.to_string());
-        self.emit(Event::Ready { agent: "dex".into() });
+        self.load_options();
+        self.emit(Event::Ready { agent: "dex".into(), fresh: true });
         Ok(())
+    }
+
+    /// Offers the daemon's models, and the modes it allows, as the session's settings. A daemon
+    /// that can't say leaves the session without them rather than failing it.
+    fn load_options(&self) {
+        let info = self.get(&self.url("/api/config")).and_then(|mut response| Ok(response.body_mut().read_json::<Value>()?));
+        let options = match info {
+            Ok(info) => options_from(&info),
+            Err(error) => {
+                log::warn!("dex: no session settings: {error:#}");
+                return;
+            }
+        };
+        *self.options.lock().expect("options lock") = options.clone();
+        if !options.is_empty() {
+            self.emit(Event::Options(options));
+        }
     }
 
     /// Reads one turn's SSE stream to its end, then forgets any questions it left unanswered.
@@ -142,7 +167,11 @@ impl Shared {
 
     fn stream_turn(&self, prompt: &str) -> Result<()> {
         let url = self.session_url("chat")?;
-        let response = match self.post(&self.stream, &url, &json!({ "prompt": prompt })) {
+        let mut body = json!({ "prompt": prompt });
+        for option in self.options.lock().expect("options lock").iter() {
+            body[&option.id] = json!(option.current);
+        }
+        let response = match self.post(&self.stream, &url, &body) {
             Ok(response) => response,
             Err(error) if is_status(&error, 409) => return Err(anyhow!("The agent is still working on the last message.")),
             Err(error) => return Err(error),
@@ -192,7 +221,8 @@ impl Shared {
             }
             since = next;
         }
-        self.emit(Event::Ready { agent: "dex".into() });
+        self.load_options();
+        self.emit(Event::Ready { agent: "dex".into(), fresh: true });
         Ok(())
     }
 
@@ -217,6 +247,37 @@ impl Shared {
             }
         }
     }
+}
+
+/// The settings `GET /api/config` offers: the model, when there is more than one to pick, and
+/// the mode, when the daemon allows more than one.
+fn options_from(info: &Value) -> Vec<ConfigOption> {
+    let mut options = Vec::new();
+    let current = info["model"].as_str().unwrap_or_default();
+    let mut models: Vec<&str> = info["available_models"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+    if !current.is_empty() && !models.contains(&current) {
+        models.insert(0, current);
+    }
+    if !current.is_empty() && models.len() > 1 {
+        options.push(ConfigOption {
+            id: "model".into(),
+            name: "Model".into(),
+            category: "model".into(),
+            current: current.into(),
+            choices: models.into_iter().map(|model| (model.to_string(), model.to_string())).collect(),
+        });
+    }
+    let permission = info["permission"].as_str().unwrap_or_default().to_ascii_lowercase().replace('_', "-");
+    if let Some(ceiling) = MODES.iter().position(|(_, _, needs)| *needs == permission).filter(|&at| at > 0) {
+        options.push(ConfigOption {
+            id: "mode".into(),
+            name: "Mode".into(),
+            category: "mode".into(),
+            current: MODES[ceiling].0.into(),
+            choices: MODES[..=ceiling].iter().map(|(value, name, _)| (value.to_string(), name.to_string())).collect(),
+        });
+    }
+    options
 }
 
 /// Whether a bearer token may be sent to `url`: https, or a loopback address.
@@ -304,9 +365,9 @@ impl Mapper {
                     request: json!({ "approval": data["request_id"] }),
                     title: format!("{who}{name}: {}", data["input"].as_str().unwrap_or_default().chars().take(200).collect::<String>()),
                     options: vec![
-                        PermissionOption { id: "allow_once".into(), name: "Allow once".into() },
-                        PermissionOption { id: "allow_session".into(), name: "Allow for session".into() },
-                        PermissionOption { id: "deny".into(), name: "Deny".into() },
+                        PermissionOption { id: "allow_once".into(), name: "Allow once".into(), kind: "allow_once".into() },
+                        PermissionOption { id: "allow_session".into(), name: "Allow for session".into(), kind: "allow_always".into() },
+                        PermissionOption { id: "deny".into(), name: "Deny".into(), kind: "reject_once".into() },
                     ],
                 }]
             }
@@ -328,6 +389,7 @@ impl Mapper {
                             .map(|(n, option)| PermissionOption {
                                 id: n.to_string(),
                                 name: option["label"].as_str().unwrap_or_default().to_string(),
+                                kind: option["kind"].as_str().unwrap_or_default().to_string(),
                             })
                             .collect(),
                     })
@@ -441,6 +503,7 @@ impl Client {
             session: Mutex::new(None),
             events,
             batches: Mutex::new(HashMap::new()),
+            options: Mutex::new(Vec::new()),
         });
         let url = shared.base.clone();
         registry(|r| *r.users.entry(url.clone()).or_default() += 1);
@@ -592,6 +655,25 @@ impl Client {
         });
     }
 
+    /// Changes a session setting. It goes with the next message, as the daemon takes settings
+    /// with each one, so it is taken at once.
+    pub fn set_option(&self, id: &str, value: &str) -> bool {
+        if self.session().is_none() {
+            return false;
+        }
+        let options = {
+            let mut options = self.shared.options.lock().expect("options lock");
+            let Some(option) = options.iter_mut().find(|o| o.id == id && o.choices.iter().any(|(choice, _)| choice == value)) else {
+                return false;
+            };
+            option.current = value.to_string();
+            options.clone()
+        };
+        self.shared.emit(Event::Options(options));
+        self.shared.emit(Event::OptionSet { id: id.to_string(), value: value.to_string() });
+        true
+    }
+
     /// Adds `content` to the running turn. If the daemon has no turn to add it to, the
     /// reader hears `Event::Rejected` and can send it as a prompt instead.
     pub fn enqueue(&self, content: &str, queue: Queue) {
@@ -651,6 +733,16 @@ impl Drop for Client {
 mod tests {
     use super::*;
 
+    /// The next event other than the session's settings, which a real daemon sends before `Ready`.
+    fn next_past_options(events: &mut UnboundedReceiver<Event>) -> Option<Event> {
+        loop {
+            match next(events)? {
+                Event::Options(_) => continue,
+                event => return Some(event),
+            }
+        }
+    }
+
     fn next(events: &mut UnboundedReceiver<Event>) -> Option<Event> {
         let deadline = Instant::now() + Duration::from_secs(20);
         while Instant::now() < deadline {
@@ -675,6 +767,7 @@ mod tests {
             session: Mutex::new(None),
             events,
             batches: Mutex::new(HashMap::new()),
+            options: Mutex::new(Vec::new()),
         }
     }
 
@@ -721,21 +814,75 @@ mod tests {
 
     /// Serves one canned SSE response to the first request that arrives.
     fn serve_once(body: String) -> String {
+        serve_and_capture(body).0
+    }
+
+    /// Like [`serve_once`], also handing over the request's JSON body.
+    fn serve_and_capture(body: String) -> (String, std::sync::mpsc::Receiver<Value>) {
         use std::io::{Read, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
+        let (sent, received) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
             let mut seen = Vec::new();
             let mut chunk = [0u8; 1024];
-            while !seen.windows(4).any(|w| w == b"\r\n\r\n") {
+            let end = loop {
+                if let Some(at) = seen.windows(4).position(|w| w == b"\r\n\r\n") {
+                    break at + 4;
+                }
+                let n = stream.read(&mut chunk).unwrap();
+                seen.extend_from_slice(&chunk[..n]);
+            };
+            let head = String::from_utf8_lossy(&seen[..end]).to_ascii_lowercase();
+            let length = head.lines().find_map(|line| line.strip_prefix("content-length:")).and_then(|n| n.trim().parse().ok()).unwrap_or(0);
+            while seen.len() < end + length {
                 let n = stream.read(&mut chunk).unwrap();
                 seen.extend_from_slice(&chunk[..n]);
             }
+            let _ = sent.send(serde_json::from_slice(&seen[end..end + length]).unwrap_or(Value::Null));
             let head = format!("HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n{body}");
             stream.write_all(head.as_bytes()).unwrap();
         });
-        url
+        (url, received)
+    }
+
+    #[test]
+    fn offers_the_models_and_the_modes_the_daemon_allows() {
+        let info = json!({ "model": "opus", "available_models": ["sonnet", "haiku"], "permission": "ask" });
+        let options = options_from(&info);
+        assert_eq!(options.len(), 2);
+        assert_eq!((options[0].id.as_str(), options[0].current.as_str()), ("model", "opus"));
+        // The daemon's own model is offered even when its list leaves it out.
+        let models: Vec<&str> = options[0].choices.iter().map(|(value, _)| value.as_str()).collect();
+        assert_eq!(models, ["opus", "sonnet", "haiku"]);
+        // An `ask` daemon refuses `auto`, so it isn't offered.
+        assert_eq!((options[1].id.as_str(), options[1].current.as_str()), ("mode", "manual"));
+        let modes: Vec<&str> = options[1].choices.iter().map(|(value, _)| value.as_str()).collect();
+        assert_eq!(modes, ["plan", "manual"]);
+        // One model and a read-only daemon leave nothing to choose.
+        assert!(options_from(&json!({ "model": "opus", "available_models": [], "permission": "read-only" })).is_empty());
+        assert!(options_from(&json!({})).is_empty());
+    }
+
+    #[test]
+    fn a_setting_is_taken_at_once_and_goes_with_the_next_turn() {
+        let done = json!({ "seq": 0, "type": "turn_complete", "data": { "response": "ok" } });
+        let (base, request) = serve_and_capture(format!("data: {done}\n\n"));
+        let (events, mut receiver) = unbounded();
+        let shared = Arc::new(Shared { base, events, ..idle() });
+        *shared.options.lock().unwrap() = options_from(&json!({ "model": "opus", "available_models": ["sonnet"], "permission": "trusted" }));
+        let client = Client { shared: shared.clone(), url: String::new() };
+        assert!(!client.set_option("model", "sonnet"), "set before there is a session");
+        *shared.session.lock().unwrap() = Some("s1".into());
+        assert!(!client.set_option("model", "gpt"), "set to a model the daemon doesn't offer");
+        assert!(client.set_option("model", "sonnet"));
+        assert!(client.set_option("mode", "plan"));
+        assert!(matches!(receiver.try_recv(), Ok(Event::Options(options)) if options[0].current == "sonnet"));
+        assert!(matches!(receiver.try_recv(), Ok(Event::OptionSet { id, value }) if id == "model" && value == "sonnet"));
+        shared.run_turn("hi").unwrap();
+        let body = request.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(body, json!({ "prompt": "hi", "model": "sonnet", "mode": "plan" }));
     }
 
     #[test]
@@ -782,7 +929,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("po-dex-test-{port}"));
         std::fs::create_dir_all(&dir).unwrap();
         let (client, mut events) = Client::spawn(&format!("http://127.0.0.1:{port}"), &format!("dex serve 127.0.0.1:{port}"), &dir, false).unwrap();
-        assert!(matches!(next(&mut events), Some(Event::Ready { .. })), "no session");
+        assert!(matches!(next_past_options(&mut events), Some(Event::Ready { .. })), "no session");
         // With no turn running there is nothing to steer.
         client.enqueue("hello", Queue::Steer);
         assert!(matches!(next(&mut events), Some(Event::Rejected { queue: Queue::Steer, .. })));
@@ -805,8 +952,8 @@ mod tests {
         let (url, command) = (format!("http://127.0.0.1:{port}"), format!("dex serve 127.0.0.1:{port}"));
         let (first, mut first_events) = Client::spawn(&url, &command, &dir, false).unwrap();
         let (second, mut second_events) = Client::spawn(&url, &command, &dir, false).unwrap();
-        assert!(matches!(next(&mut first_events), Some(Event::Ready { .. })));
-        assert!(matches!(next(&mut second_events), Some(Event::Ready { .. })));
+        assert!(matches!(next_past_options(&mut first_events), Some(Event::Ready { .. })));
+        assert!(matches!(next_past_options(&mut second_events), Some(Event::Ready { .. })));
         let alive = || ureq::get(&format!("{url}/health")).call().is_ok();
         drop(first);
         assert!(alive(), "dropping the client that started the daemon killed it");

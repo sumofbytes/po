@@ -67,6 +67,14 @@ impl Client {
         }
     }
 
+    /// Changes a session setting, like its model.
+    pub fn set_option(&self, id: &str, value: &str) -> bool {
+        match self {
+            Self::Acp(client) => client.set_option(id, value),
+            Self::Dex(client) => client.set_option(id, value),
+        }
+    }
+
     /// Whether messages can be added to a running turn, rather than only sent after it.
     pub fn queues(&self) -> bool {
         matches!(self, Self::Dex(_))

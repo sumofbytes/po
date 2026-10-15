@@ -179,9 +179,12 @@ pub struct Selection {
     /// A run and range picked by a double or triple click, or everything.
     picked: Option<Picked>,
     pub selecting: bool,
-    /// The runs laid out in the last frame, in reading order.
-    runs: Vec<(SharedString, Run)>,
-    index: HashMap<SharedString, usize>,
+    /// The runs laid out in the last frame, which clicks and copying read.
+    current: Frame,
+    /// The frame before, which a drag is highlighted from while this frame is built: this
+    /// frame's runs are only registered once its text is laid out, so the highlight trails
+    /// the text by a frame whenever it moves.
+    before: Frame,
     /// Parsed replies, by their id.
     parsed: HashMap<ElementId, Parsed>,
 }
@@ -269,10 +272,32 @@ pub fn chunks(source: &str) -> Vec<String> {
     if chunks.is_empty() { vec![source.to_string()] } else { chunks }
 }
 
+/// The runs laid out in one frame, in reading order.
+#[derive(Default)]
+struct Frame {
+    runs: Vec<(SharedString, Run)>,
+    index: HashMap<SharedString, usize>,
+}
+
+impl Frame {
+    fn get(&self, key: &SharedString) -> Option<&Run> {
+        self.index.get(key).map(|&ix| &self.runs[ix].1)
+    }
+}
+
 #[derive(Clone)]
 enum Picked {
-    Range(SharedString, Range<usize>),
+    /// Parts of runs, from a click or a finished drag, kept with their text so scrolling or
+    /// new text doesn't change what's selected.
+    Spans(Vec<Span>),
     All,
+}
+
+#[derive(Clone)]
+struct Span {
+    key: SharedString,
+    text: SharedString,
+    range: Range<usize>,
 }
 
 fn word_kind(c: char) -> u8 {
@@ -286,19 +311,18 @@ fn word_kind(c: char) -> u8 {
 }
 
 impl Selection {
-    /// Forgets the runs of the last frame; call before drawing replies.
+    /// Starts a new frame, keeping the last one to highlight from; call before drawing replies.
     pub fn begin_frame(&mut self) {
-        self.runs.clear();
-        self.index.clear();
+        self.before = std::mem::take(&mut self.current);
     }
 
     fn register(&mut self, key: SharedString, run: Run) {
-        self.index.insert(key.clone(), self.runs.len());
-        self.runs.push((key, run));
+        self.current.index.insert(key.clone(), self.current.runs.len());
+        self.current.runs.push((key, run));
     }
 
     fn run_at(&self, position: Point<Pixels>) -> Option<&(SharedString, Run)> {
-        self.runs.iter().find(|(_, run)| run.layout.bounds().contains(&position))
+        self.current.runs.iter().find(|(_, run)| run.layout.bounds().contains(&position))
     }
 
     pub fn mouse_down(&mut self, position: Point<Pixels>, clicks: usize) {
@@ -311,7 +335,7 @@ impl Selection {
                     Ok(ix) | Err(ix) => ix,
                 };
                 let range = if clicks == 2 { word_at(&run.text, ix) } else { 0..run.text.len() };
-                self.picked = Some(Picked::Range(key.clone(), range));
+                self.picked = Some(Picked::Spans(vec![Span { key: key.clone(), text: run.text.clone(), range }]));
             }
             return;
         }
@@ -326,14 +350,20 @@ impl Selection {
         }
     }
 
-    /// Ends a drag; a click that didn't drag returns the link it landed on.
+    /// Ends a drag, pinning what it covered to the text; a click that didn't drag returns the
+    /// link it landed on.
     pub fn mouse_up(&mut self, position: Point<Pixels>) -> Option<String> {
         self.selecting = false;
-        if self.anchor != self.head {
-            return None;
+        let dragged = self.anchor != self.head;
+        if dragged {
+            let spans = self.dragged_spans();
+            self.picked = (!spans.is_empty()).then_some(Picked::Spans(spans));
         }
         self.anchor = None;
         self.head = None;
+        if dragged {
+            return None;
+        }
         let (_, run) = self.run_at(position)?;
         let ix = run.layout.index_for_position(position).ok()?;
         run.links.iter().find(|(r, _)| r.contains(&ix)).map(|(_, url)| url.clone())
@@ -353,15 +383,24 @@ impl Selection {
         self.picked = None;
     }
 
-    /// The part of a run that's selected, from where the drag points were last frame.
-    fn range_for(&self, key: &SharedString) -> Option<Range<usize>> {
+    /// The part of the run `text` that's highlighted. A pinned span only counts while the run still
+    /// holds the text it was taken from: just the selected part is compared, so a run that has
+    /// grown since keeps its highlight.
+    fn highlight(&self, key: &SharedString, text: &str) -> Option<Range<usize>> {
         match &self.picked {
-            Some(Picked::All) => return self.index.get(key).map(|&ix| 0..self.runs[ix].1.text.len()),
-            Some(Picked::Range(k, range)) => return (k == key).then(|| range.clone()),
-            None => {}
+            Some(Picked::All) => Some(0..text.len()),
+            Some(Picked::Spans(spans)) => spans
+                .iter()
+                .find(|s| &s.key == key && text.get(s.range.clone()).is_some_and(|now| s.text.get(s.range.clone()) == Some(now)))
+                .map(|s| s.range.clone()),
+            None => self.dragged(key, &self.before),
         }
+    }
+
+    /// The part of a run between the drag points, laid out as it was in `frame`.
+    fn dragged(&self, key: &SharedString, frame: &Frame) -> Option<Range<usize>> {
         let (a, b) = (self.anchor?, self.head?);
-        let run = &self.runs[*self.index.get(key)?].1;
+        let run = frame.get(key)?;
         let bounds = run.layout.bounds();
         let line = run.layout.line_height();
         // The earlier point in reading order: higher up, or further left on the same line.
@@ -378,13 +417,25 @@ impl Selection {
         (start < end).then_some(start..end)
     }
 
-    /// The selected text of every run, one run a line.
-    pub fn selected_text(&self) -> String {
-        let parts: Vec<&str> = self
+    /// What the drag covers in the last frame's runs.
+    fn dragged_spans(&self) -> Vec<Span> {
+        self.current
             .runs
             .iter()
-            .filter_map(|(key, run)| self.range_for(key).map(|r| &run.text[r]))
-            .collect();
+            .filter_map(|(key, run)| self.dragged(key, &self.current).map(|range| Span { key: key.clone(), text: run.text.clone(), range }))
+            .collect()
+    }
+
+    /// The selected text of every run, one run a line.
+    pub fn selected_text(&self) -> String {
+        let spans = match &self.picked {
+            Some(Picked::Spans(spans)) => spans.clone(),
+            Some(Picked::All) => {
+                self.current.runs.iter().map(|(key, run)| Span { key: key.clone(), text: run.text.clone(), range: 0..run.text.len() }).collect()
+            }
+            None => self.dragged_spans(),
+        };
+        let parts: Vec<&str> = spans.iter().filter_map(|s| s.text.get(s.range.clone())).collect();
         parts.join("\n").trim().to_string()
     }
 }
@@ -699,7 +750,7 @@ impl Render {
         self.leaf += 1;
         let palette = cx.global::<Palette>();
         let text: SharedString = inline.text.clone().into();
-        let selected = self.selection.read(cx).range_for(&key);
+        let selected = self.selection.read(cx).highlight(&key, &text);
         let base = self.style.clone();
         let mono = palette.mono_font_family.clone();
 
@@ -800,7 +851,7 @@ fn prefix(ix: usize, start: Option<u32>, ordered: bool, depth: usize) -> String 
 
 #[cfg(test)]
 mod tests {
-    use super::{Block, chunks, parse, prefix, word_at};
+    use super::{Block, Picked, Selection, Span, chunks, parse, prefix, word_at};
 
     #[test]
     fn chunks_split_at_blocks_and_keep_definitions() {
@@ -848,6 +899,26 @@ mod tests {
     fn double_click_takes_a_word() {
         assert_eq!(word_at("hello big_world!", 8), 6..15);
         assert_eq!(word_at("a  b", 1), 1..3);
+    }
+
+    #[test]
+    fn select_all_highlights_text_never_laid_out() {
+        let mut selection = Selection::default();
+        selection.select_all();
+        assert_eq!(selection.highlight(&"reply/3".into(), "twelve bytes"), Some(0..12));
+    }
+
+    #[test]
+    fn picked_spans_keep_their_text() {
+        let span = |key: &str, text: &str, range| Span { key: key.into(), text: text.to_string().into(), range };
+        let selection = Selection {
+            picked: Some(Picked::Spans(vec![span("a/0", "hello world", 6..11), span("a/1", "next line", 0..4)])),
+            ..Default::default()
+        };
+        assert_eq!(selection.selected_text(), "world\nnext");
+        assert_eq!(selection.highlight(&"a/1".into(), "next line"), Some(0..4));
+        assert_eq!(selection.highlight(&"a/1".into(), "changed"), None);
+        assert_eq!(selection.highlight(&"a/2".into(), "next line"), None);
     }
 
     #[test]
