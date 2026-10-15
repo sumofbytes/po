@@ -208,7 +208,12 @@ To make your own, write a theme as JSON (see any scheme converted in
 `src/schemes.rs` for the keys) and save it as `<config>/themes/<name>.json`, or
 set `"theme"` to the absolute path of the file; a file there wins over a scheme
 of the same name. The `font` block overrides the theme's UI and monospace fonts
-and sizes.
+and sizes. `family` and `mono_family` take a name or a list tried in order
+(`["JetBrains Mono", "Fira Code"]`); one that isn't installed is logged and
+skipped. Without one, the monospace font is the system's `monospace` (fontconfig
+on Linux), then a well-known one for the platform, then the bundled Fira Mono.
+`size` also scales the UI's spacing, since layout is measured in units of it.
+Edits to `config.json` and to theme files apply without a restart.
 
 Markdown, in the agent's replies and in `.md` files (which open rendered; the
 **Source** button or Ctrl+Shift+M switches to the text), is coloured from the

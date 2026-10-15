@@ -3,6 +3,7 @@ mod acp;
 mod agent;
 mod alert;
 mod config;
+mod fonts;
 mod dex;
 mod diff;
 mod pr;
@@ -4620,6 +4621,7 @@ fn main() {
                 trace::mark("window created");
                 theme::apply(cx);
                 trace::mark("theme applied");
+                theme::watch(cx);
                 let reader = cx.new(|cx| Reader::new(root, pr, command, prefetch, window, cx));
                 cx.new(|_| Shell { child: reader })
             },
