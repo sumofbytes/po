@@ -515,6 +515,9 @@ struct Thread {
     /// The settings being carried over from earlier threads, while the agent takes them one at
     /// a time: a model can change what the other settings offer. A first message waits for them.
     applying: Option<Applying>,
+    /// Settings the agent was asked to carry over and gave up on answering; a late answer is
+    /// not a choice of the user's.
+    unanswered: HashSet<String>,
     messages: Vec<Msg>,
     busy: bool,
     /// Messages typed during a turn, shown above the input until they are taken.
@@ -791,6 +794,7 @@ impl Thread {
         self.ready = false;
         self.options.clear();
         self.applying = None;
+        self.unanswered.clear();
         self.loading = false;
         self.picking = false;
         if self.blank {
@@ -808,6 +812,8 @@ struct Applying {
     settled: HashSet<String>,
     /// The setting the agent was asked to carry over and hasn't answered for yet.
     asked: Option<String>,
+    /// Counts the questions put to the agent, so a timer can tell whether its own is still the one waiting.
+    asks: u64,
 }
 
 /// A project and its threads, wherever they are kept.
@@ -975,6 +981,7 @@ impl Reader {
             isolate: false,
             blank: true,
             applying: None,
+            unanswered: HashSet::new(),
             _enter: enter,
             messages: vec![],
             busy: false,
@@ -1875,19 +1882,22 @@ impl Reader {
                     let watchdog = this.clone();
                     cx.spawn(async move |cx| {
                         cx.background_executor().timer(Duration::from_secs(20)).await;
-                        watchdog
-                            .update(cx, |reader, cx| {
-                                reader.with_thread(id, |reader, _| {
-                                    let thread = &mut reader.thread;
-                                    if thread.generation == generation && !thread.ready && thread.client.is_some() {
-                                        thread.status = "not responding".into();
-                                        thread.fail("The agent did not answer the handshake. Check that its command speaks ACP.".into());
-                                        if thread.blank {
-                                            thread.drop_agent();
+                        handle
+                            .update(cx, |_, window, cx| {
+                                watchdog.update(cx, |reader, cx| {
+                                    reader.with_thread(id, |reader, _| {
+                                        let thread = &reader.thread;
+                                        if thread.generation == generation && !thread.ready && thread.client.is_some() {
+                                            // What was typed goes back to the draft rather than wait for an agent that is gone.
+                                            reader.return_pending();
+                                            reader.restore_queue(window, cx);
+                                            reader.thread.status = "not responding".into();
+                                            reader.thread.fail("The agent did not answer the handshake. Check that its command speaks ACP.".into());
+                                            reader.unstart();
                                         }
-                                    }
-                                });
-                                cx.notify();
+                                    });
+                                    cx.notify();
+                                })
                             })
                             .ok();
                     })
@@ -1968,6 +1978,31 @@ impl Reader {
             let Some(value) = chosen.and_then(|chosen| chosen.get(&option.id)) else { continue };
             if *value != option.current && option.choices.iter().any(|(choice, _)| choice == value) && client.set_option(&option.id, value) {
                 applying.asked = Some(option.id.clone());
+                applying.asks += 1;
+                // An agent that never answers would hold the first message back for good.
+                let (id, generation, asked, ask, handle) =
+                    (thread.id, thread.generation, option.id.clone(), applying.asks, window.window_handle());
+                cx.spawn(async move |this, cx| {
+                    cx.background_executor().timer(Duration::from_secs(20)).await;
+                    handle
+                        .update(cx, |_, window, cx| {
+                            this.update(cx, |reader, cx| {
+                                reader.with_thread(id, |reader, _| {
+                                    let thread = &mut reader.thread;
+                                    let waiting = thread.generation == generation
+                                        && thread.applying.as_ref().is_some_and(|applying| applying.asks == ask && applying.asked.is_some());
+                                    if waiting {
+                                        log::warn!("agent: no answer to the setting {asked}");
+                                        thread.unanswered.insert(asked);
+                                        reader.apply_next(window, cx);
+                                    }
+                                });
+                            })
+                            .ok();
+                        })
+                        .ok();
+                })
+                .detach();
                 return;
             }
         }
@@ -1997,7 +2032,8 @@ impl Reader {
         if carried {
             self.apply_next(window, cx);
         }
-        carried
+        // One given up on was asked for too, so it isn't the user's choice either.
+        carried || self.thread.unanswered.remove(id)
     }
 
     /// Chooses the agent new threads start with. A blank thread on screen switches to it.
@@ -2107,6 +2143,7 @@ impl Reader {
             isolate: false,
             blank: true,
             applying: None,
+            unanswered: HashSet::new(),
             _enter: Self::send_on_enter(&draft, window, cx),
             messages: vec![],
             busy: false,
@@ -2591,10 +2628,11 @@ impl Reader {
 
 
     /// After its agent failed or exited: a blank thread, or one whose first message never got
-    /// a session, starts its agent again when it is next asked for.
+    /// a session, starts its agent again when it is next asked for. That includes one whose
+    /// agent is still held but never became ready, as it would never answer.
     fn unstart(&mut self) {
         let thread = &mut self.thread;
-        if thread.blank || thread.unstarted() {
+        if thread.blank || thread.unstarted() || thread.session.is_none() && !thread.ready && !thread.picking && !thread.loading {
             thread.drop_agent();
         }
     }

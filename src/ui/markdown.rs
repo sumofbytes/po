@@ -383,11 +383,16 @@ impl Selection {
         self.picked = None;
     }
 
-    /// The part of a run of `len` bytes that's highlighted.
-    fn highlight(&self, key: &SharedString, len: usize) -> Option<Range<usize>> {
+    /// The part of the run `text` that's highlighted. A pinned span only counts while the run still
+    /// holds the text it was taken from: just the selected part is compared, so a run that has
+    /// grown since keeps its highlight.
+    fn highlight(&self, key: &SharedString, text: &str) -> Option<Range<usize>> {
         match &self.picked {
-            Some(Picked::All) => Some(0..len),
-            Some(Picked::Spans(spans)) => spans.iter().find(|s| &s.key == key).map(|s| s.range.clone()),
+            Some(Picked::All) => Some(0..text.len()),
+            Some(Picked::Spans(spans)) => spans
+                .iter()
+                .find(|s| &s.key == key && text.get(s.range.clone()).is_some_and(|now| s.text.get(s.range.clone()) == Some(now)))
+                .map(|s| s.range.clone()),
             None => self.dragged(key, &self.before),
         }
     }
@@ -745,7 +750,7 @@ impl Render {
         self.leaf += 1;
         let palette = cx.global::<Palette>();
         let text: SharedString = inline.text.clone().into();
-        let selected = self.selection.read(cx).highlight(&key, text.len());
+        let selected = self.selection.read(cx).highlight(&key, &text);
         let base = self.style.clone();
         let mono = palette.mono_font_family.clone();
 
@@ -900,7 +905,7 @@ mod tests {
     fn select_all_highlights_text_never_laid_out() {
         let mut selection = Selection::default();
         selection.select_all();
-        assert_eq!(selection.highlight(&"reply/3".into(), 12), Some(0..12));
+        assert_eq!(selection.highlight(&"reply/3".into(), "twelve bytes"), Some(0..12));
     }
 
     #[test]
@@ -911,8 +916,9 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(selection.selected_text(), "world\nnext");
-        assert_eq!(selection.highlight(&"a/1".into(), 20), Some(0..4));
-        assert_eq!(selection.highlight(&"a/2".into(), 20), None);
+        assert_eq!(selection.highlight(&"a/1".into(), "next line"), Some(0..4));
+        assert_eq!(selection.highlight(&"a/1".into(), "changed"), None);
+        assert_eq!(selection.highlight(&"a/2".into(), "next line"), None);
     }
 
     #[test]

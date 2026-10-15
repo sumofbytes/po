@@ -123,9 +123,29 @@ fn system_mono() -> &'static [String] {
 fn system_mono_uncached() -> Vec<String> {
     let mut found = Vec::new();
     if cfg!(all(unix, not(target_os = "macos"))) {
-        let output = std::process::Command::new("fc-match").args(["monospace", "-f", "%{family}"]).output();
-        if let Ok(output) = output.map(|o| String::from_utf8_lossy(&o.stdout).into_owned()) {
-            found.extend(output.split(',').map(|name| name.trim().to_string()).filter(|name| !name.is_empty()));
+        // A broken fontconfig can hang; give it a moment rather than hold up startup.
+        let child = std::process::Command::new("fc-match")
+            .args(["monospace", "-f", "%{family}"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+        if let Ok(mut child) = child {
+            let (tx, rx) = std::sync::mpsc::channel();
+            if let Some(mut stdout) = child.stdout.take() {
+                std::thread::spawn(move || {
+                    let mut text = String::new();
+                    std::io::Read::read_to_string(&mut stdout, &mut text).ok();
+                    tx.send(text).ok();
+                });
+            }
+            match rx.recv_timeout(std::time::Duration::from_secs(2)) {
+                Ok(output) => found.extend(output.split(',').map(|name| name.trim().to_string()).filter(|name| !name.is_empty())),
+                Err(_) => log::warn!("fonts: fc-match did not answer; using the well-known monospace fonts"),
+            }
+            // A hung one is stopped, which also ends the thread reading from it.
+            child.kill().ok();
+            child.wait().ok();
         }
     }
     let known: &[&str] = if cfg!(target_os = "macos") {
