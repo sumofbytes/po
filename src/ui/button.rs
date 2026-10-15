@@ -10,7 +10,7 @@ use gpui::{
 };
 
 use super::icon::{Icon, IconName, IconSize};
-use crate::theme::{ButtonStyle, Palette};
+use crate::theme::{ButtonStyle, Palette, tokens::RADIUS_FULL};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Variant {
@@ -119,9 +119,9 @@ impl Button {
         self
     }
 
-    /// Corner radius in place of the theme's.
-    pub fn rounded(mut self, radius: Pixels) -> Self {
-        self.rounded = Some(radius);
+    /// Fully round, in place of the theme's corner radius.
+    pub fn pill(mut self) -> Self {
+        self.rounded = Some(RADIUS_FULL);
         self
     }
 
