@@ -25,6 +25,10 @@ const OFFSET: Pixels = px(4.);
 const MARGIN: Pixels = px(8.);
 /// The tallest a menu grows before its items scroll.
 const MAX_HEIGHT: Pixels = px(480.);
+/// What a menu item's label starts with to mark the current choice.
+pub const CHECKED: &str = "✓ ";
+/// The height of the line showing what's been typed.
+const QUERY_HEIGHT: Pixels = px(24.);
 
 pub fn init(cx: &mut App) {
     cx.bind_keys([
@@ -156,10 +160,22 @@ fn filtered(items: &[MenuItem], query: &str) -> Vec<MenuItem> {
     let query = query.to_lowercase();
     let found: Vec<MenuItem> = items
         .iter()
-        .filter(|item| !item.is_separator() && item.label.trim_start_matches("✓ ").to_lowercase().contains(&query))
+        .filter(|item| !item.is_separator() && item.label.strip_prefix(CHECKED).unwrap_or(&item.label).to_lowercase().contains(&query))
         .cloned()
         .collect();
     if found.is_empty() { vec![MenuItem::disabled("No matches")] } else { found }
+}
+
+/// Applies a key press to the typed `query`, returning whether it changed. A leading space is ignored.
+fn edit_query(query: &mut String, key: &str, key_char: Option<&str>) -> bool {
+    match key_char {
+        _ if key == "backspace" => query.pop().is_some(),
+        Some(text) if !text.chars().any(char::is_control) && !(query.is_empty() && text == " ") => {
+            query.push_str(text);
+            true
+        }
+        _ => false,
+    }
 }
 
 /// The next item from `from` that can be chosen, `step` 1 or -1, wrapping around.
@@ -203,6 +219,7 @@ pub fn menu(state: &Entity<MenuState>, items: Vec<MenuItem>, keep: Option<Bounds
     let radius = palette.radius.min(px(8.));
     let (accent, accent_fg, fg, muted, border) =
         (palette.accent, palette.accent_foreground, palette.foreground, palette.muted_foreground, palette.border);
+    let query_empty = query.is_empty();
     let all = Rc::new(items);
     let items = Rc::new(filtered(&all, &query));
     let rows = items.iter().enumerate().map(|(ix, item)| {
@@ -283,19 +300,12 @@ pub fn menu(state: &Entity<MenuState>, items: Vec<MenuItem>, keep: Option<Bounds
         })
         .on_key_down(move |event, _, cx| {
             let key = &event.keystroke;
-            if key.modifiers.control || key.modifiers.alt || key.modifiers.platform {
+            // Alt alone is how some layouts type characters (and AltGr can show as control + alt).
+            if key.modifiers.platform || (key.modifiers.control && !key.modifiers.alt) {
                 return;
             }
             typed.update(cx, |s, cx| {
-                let changed = match key.key_char.as_deref() {
-                    _ if key.key == "backspace" => s.query.pop().is_some(),
-                    Some(text) if !text.chars().any(char::is_control) && !(s.query.is_empty() && text == " ") => {
-                        s.query.push_str(text);
-                        true
-                    }
-                    _ => false,
-                };
-                if changed {
+                if edit_query(&mut s.query, &key.key, key.key_char.as_deref()) {
                     s.highlighted = next_choosable(&filtered(&all, &s.query), None, 1);
                     s.scroll.set_offset(Point::default());
                     cx.notify();
@@ -307,7 +317,7 @@ pub fn menu(state: &Entity<MenuState>, items: Vec<MenuItem>, keep: Option<Bounds
                 outside.update(cx, |s, cx| s.close(window, cx));
             }
         })
-        .when(!query.is_empty(), |this| this.child(div().px_3().pt_1().text_xs().text_color(muted).child(query)))
+        .when(!query_empty, |this| this.child(div().h(QUERY_HEIGHT).px_3().pt_1().text_xs().text_color(muted).child(query)))
         .child(
             div()
                 .id("popup-menu-items")
@@ -317,7 +327,7 @@ pub fn menu(state: &Entity<MenuState>, items: Vec<MenuItem>, keep: Option<Bounds
                 .gap_y_0p5()
                 .min_w(rems(8.))
                 .max_w(px(500.))
-                .max_h(max_height)
+                .max_h(if query_empty { max_height } else { (max_height - QUERY_HEIGHT).max(QUERY_HEIGHT * 2.) })
                 .overflow_y_scroll()
                 .track_scroll(&scroll)
                 .children(rows),
@@ -373,7 +383,7 @@ impl RenderOnce for Dropdown {
 
 #[cfg(test)]
 mod tests {
-    use super::{MenuItem, filtered, next_choosable};
+    use super::{CHECKED, MenuItem, edit_query, filtered, next_choosable};
 
     #[test]
     fn typing_filters_by_substring_ignoring_case_and_check_mark() {
@@ -385,6 +395,28 @@ mod tests {
         assert_eq!(filtered(&items, "").len(), 3);
         assert_eq!(filtered(&items, "ONN").len(), 1);
         assert_eq!(filtered(&items, "zzz")[0].label.as_ref(), "No matches");
+    }
+
+    #[test]
+    fn typing_edits_the_query() {
+        let mut query = String::new();
+        assert!(!edit_query(&mut query, "space", Some(" ")));
+        assert!(edit_query(&mut query, "s", Some("s")));
+        assert!(edit_query(&mut query, "space", Some(" ")));
+        assert!(!edit_query(&mut query, "enter", Some("\n")));
+        assert!(!edit_query(&mut query, "left", None));
+        assert_eq!(query, "s ");
+        assert!(edit_query(&mut query, "backspace", None));
+        assert!(edit_query(&mut query, "backspace", None));
+        assert!(!edit_query(&mut query, "backspace", None));
+        assert!(query.is_empty());
+    }
+
+    #[test]
+    fn only_one_check_mark_is_ignored() {
+        let items = vec![MenuItem::new(format!("{CHECKED}{CHECKED}x"), |_, _| {})];
+        assert_eq!(filtered(&items, "x").len(), 1);
+        assert_eq!(filtered(&items, "✓").len(), 1);
     }
 
     #[test]

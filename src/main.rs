@@ -30,7 +30,7 @@ use ui::button::Button;
 use ui::icon::{Icon, IconName, IconSize};
 use ui::input::{Input, InputEvent, InputState};
 use ui::list_item::ListItem;
-use ui::menu::{MenuItem, MenuState, dropdown};
+use ui::menu::{CHECKED, MenuItem, MenuState, dropdown};
 use ui::resizable::{SidebarsState, VSplitState, sidebars, vsplit};
 use ui::tree::{TreeEvent, TreeItem, TreeState, tree};
 use futures::StreamExt;
@@ -3791,7 +3791,7 @@ impl Reader {
                         .iter()
                         .map(|(value, name)| {
                             let (this, setting_id, value) = (this.clone(), setting.id.clone(), value.clone());
-                            let label = if *value == setting.current { format!("✓ {name}") } else { name.clone() };
+                            let label = if *value == setting.current { format!("{}{name}", CHECKED) } else { name.clone() };
                             MenuItem::new(label, move |_, cx| this.update(cx, |reader, _| reader.choose_option(&setting_id, &value)))
                         })
                         .collect()
