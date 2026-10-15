@@ -3003,34 +3003,18 @@ impl Reader {
 
     /// Opens every tool call's details, or closes them all when none is left to open.
     fn toggle_tools(&mut self, cx: &mut Context<Self>) {
-        let blocks = || self.thread.messages.iter().filter_map(|m| if let Msg::Agent(b) = m { Some(b) } else { None }).flatten();
-        let open = blocks().any(|b| matches!(b, Block::Tool(tool) if !tool.open));
-        for msg in &mut self.thread.messages {
-            let Msg::Agent(blocks) = msg else { continue };
-            for block in blocks {
-                if let Block::Tool(tool) = block {
-                    tool.open = open;
-                }
-            }
+        if let Some(from) = toggle_all(&mut self.thread.messages, |b| if let Block::Tool(tool) = b { Some(&mut tool.open) } else { None }) {
+            self.thread.relist(from);
+            cx.notify();
         }
-        self.thread.relist(0);
-        cx.notify();
     }
 
     /// Opens every thought, or folds them all when none is left to open.
     fn toggle_thoughts(&mut self, cx: &mut Context<Self>) {
-        let blocks = || self.thread.messages.iter().filter_map(|m| if let Msg::Agent(b) = m { Some(b) } else { None }).flatten();
-        let open = blocks().any(|b| matches!(b, Block::Thought(_, false)));
-        for msg in &mut self.thread.messages {
-            let Msg::Agent(blocks) = msg else { continue };
-            for block in blocks {
-                if let Block::Thought(_, shown) = block {
-                    *shown = open;
-                }
-            }
+        if let Some(from) = toggle_all(&mut self.thread.messages, |b| if let Block::Thought(_, shown) = b { Some(shown) } else { None }) {
+            self.thread.relist(from);
+            cx.notify();
         }
-        self.thread.relist(0);
-        cx.notify();
     }
 
     /// The strip under the explorer header in Changes mode: an input to open a PR for
@@ -4113,6 +4097,26 @@ fn render_msg(
     column.into_any_element()
 }
 
+/// Opens every block `flag` picks out, or closes them all when none is left to open. Returns
+/// the first message that changed, if any.
+fn toggle_all(messages: &mut [Msg], flag: fn(&mut Block) -> Option<&mut bool>) -> Option<usize> {
+    let open = messages.iter_mut().any(|m| match m {
+        Msg::Agent(blocks) => blocks.iter_mut().any(|b| flag(b).is_some_and(|f| !*f)),
+        Msg::User(_) => false,
+    });
+    let mut first = None;
+    for (ix, msg) in messages.iter_mut().enumerate() {
+        let Msg::Agent(blocks) = msg else { continue };
+        for shown in blocks.iter_mut().filter_map(flag) {
+            if *shown != open {
+                *shown = open;
+                first.get_or_insert(ix);
+            }
+        }
+    }
+    first
+}
+
 /// A thought: a quiet "Thinking" row that opens to the agent's reasoning.
 fn thought(ix: usize, n: usize, text: &str, open: bool, this: &Entity<Reader>, selection: &Entity<ui::markdown::Selection>, window: &mut Window, cx: &mut App) -> AnyElement {
     let muted = cx.global::<Palette>().muted_foreground;
@@ -4696,7 +4700,26 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{PermissionOption, language, match_files, primary_option, syntax};
+    fn thought_flag(b: &mut Block) -> Option<&mut bool> {
+        if let Block::Thought(_, shown) = b { Some(shown) } else { None }
+    }
+
+    #[test]
+    fn toggling_opens_all_then_folds_all() {
+        let mut messages = vec![
+            Msg::User("hi".into()),
+            Msg::Agent(vec![Block::Thought("a".into(), true), Block::Text("t".into())]),
+            Msg::Agent(vec![Block::Thought("b".into(), false)]),
+        ];
+        assert_eq!(toggle_all(&mut messages, thought_flag), Some(2));
+        assert!(matches!(&messages[1], Msg::Agent(b) if matches!(b[0], Block::Thought(_, true))));
+        assert!(matches!(&messages[2], Msg::Agent(b) if matches!(b[0], Block::Thought(_, true))));
+        assert_eq!(toggle_all(&mut messages, thought_flag), Some(1));
+        assert!(matches!(&messages[1], Msg::Agent(b) if matches!(b[0], Block::Thought(_, false))));
+        assert_eq!(toggle_all(&mut vec![Msg::User("x".into())], thought_flag), None);
+    }
+
+    use super::{Block, Msg, PermissionOption, language, toggle_all, match_files, primary_option, syntax};
 
     #[test]
     fn file_matches_rank_names_before_paths() {
