@@ -23,10 +23,18 @@ pub mod tokens {
     pub const RADIUS_MARK: Pixels = px(2.);
     /// Alpha of a status tint behind a row (an added or removed diff line).
     pub const TINT: f32 = 0.16;
+    /// Alpha of the faintest tint (the empty side of a split diff).
+    pub const TINT_FAINT: f32 = 0.06;
     /// Alpha of a neutral tint (a diff hunk header).
     pub const TINT_SUBTLE: f32 = 0.12;
     /// Alpha of a muted or de-emphasised foreground.
     pub const MUTED: f32 = 0.6;
+    /// Alpha of an indent guide line over the border colour.
+    pub const GUIDE: f32 = 0.85;
+    /// Alpha of dimmed content, like a model's reasoning.
+    pub const DIM: f32 = 0.7;
+    /// Alpha of a label that isn't the current one.
+    pub const INACTIVE: f32 = 0.78;
 }
 
 /// Where themes are picked from: `<config>/themes/`.

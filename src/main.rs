@@ -3355,7 +3355,7 @@ impl Reader {
                 .rounded(colors.radius_lg)
                 .when(current, |card| card.bg(hover));
             // Inside the selected card the row under the pointer needs a different shade to show.
-            let over = if current { selected.opacity(0.6) } else { hover };
+            let over = if current { selected.opacity(theme::tokens::MUTED) } else { hover };
             group = group.child(
                 div()
                     .id(("agent-project", pid as usize))
@@ -3532,7 +3532,7 @@ impl Reader {
                     let cell = |cell: &Option<diff::Cell>, first: bool| {
                         let half = div().flex_1().min_w_0().self_stretch().flex().items_start().gap_2();
                         let half = if first { half.border_r_1().border_color(border) } else { half };
-                        let Some(cell) = cell else { return half.bg(muted.opacity(0.06)) };
+                        let Some(cell) = cell else { return half.bg(muted.opacity(theme::tokens::TINT_FAINT)) };
                         let tint = match cell.kind {
                             Kind::Added => Some(success.opacity(theme::tokens::TINT)),
                             Kind::Removed => Some(danger.opacity(theme::tokens::TINT)),
@@ -4171,7 +4171,7 @@ fn thought(ix: usize, n: usize, text: &str, open: bool, this: &Entity<Reader>, s
         .child("Thinking");
     let column = div().flex().flex_col().gap_1().child(header);
     if open {
-        column.child(div().opacity(0.7).child(ui::markdown::italic(("thought", ix * 10_000 + n), text, selection, window, cx))).into_any_element()
+        column.child(div().opacity(theme::tokens::DIM).child(ui::markdown::italic(("thought", ix * 10_000 + n), text, selection, window, cx))).into_any_element()
     } else {
         column.into_any_element()
     }
@@ -4262,7 +4262,7 @@ fn tool_card(
         .gap_2()
         .py_1p5()
         .px(text_inset)
-        .rounded(colors.radius)
+        .rounded(radius)
         .hover(move |row| row.bg(hover))
         .child(
             div()
@@ -4364,7 +4364,7 @@ fn permission(ix: usize, n: usize, ask: &Ask, this: &Entity<Reader>, text_inset:
         .rounded(colors.radius)
         .border(px(BOX_BORDER))
         // A question still waiting for you is outlined in the warning tone; an answered one settles.
-        .border_color(if waiting { warning.opacity(0.6) } else { colors.border })
+        .border_color(if waiting { warning.opacity(theme::tokens::MUTED) } else { colors.border })
         .text_sm()
         .child(div().flex().gap_2().child(div().flex_none().text_color(muted).child("Permission")).child(div().flex_1().min_w_0().child(ask.title.clone())))
         .child(row)
@@ -4377,7 +4377,7 @@ fn status_text(text: String, cx: &App) -> impl IntoElement {
 /// The colour of a project's name and folder: the theme's primary, in full for the project on
 /// screen and softer for the rest, so projects read apart from the threads under them.
 fn project_tone(primary: gpui::Hsla, current: bool) -> gpui::Hsla {
-    if current { primary } else { primary.opacity(0.78) }
+    if current { primary } else { primary.opacity(theme::tokens::INACTIVE) }
 }
 
 /// The name that ties a row to the controls that appear only while it is hovered.
