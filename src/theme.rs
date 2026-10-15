@@ -326,8 +326,9 @@ pub fn watch(cx: &mut App) {
             return;
         }
     };
-    let watched = [dir.clone(), themes_dir(&dir)].iter().filter(|path| watcher.watch(path, notify::RecursiveMode::NonRecursive).is_ok()).count();
-    if watched == 0 {
+    // The themes folder may not exist yet; watching the config folder recursively covers it appearing.
+    if let Err(error) = watcher.watch(&dir, notify::RecursiveMode::Recursive) {
+        log::warn!("watch {}: {error}", dir.display());
         return;
     }
     cx.spawn(async move |cx| {

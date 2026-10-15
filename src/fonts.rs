@@ -1,7 +1,7 @@
 //! Which fonts po draws with: the settings (`font.*` in the config over the theme's), checked
 //! against the fonts installed, with a bundled monospace font as the last resort.
 
-use std::sync::Once;
+use std::sync::{Once, OnceLock};
 
 use gpui::{App, SharedString, font};
 use serde_json::Value;
@@ -94,15 +94,19 @@ fn settings(theme: &Value, config: &Value) -> Settings {
     }
 }
 
-fn has(installed: &[String], family: &str) -> bool {
-    family.starts_with('.') || installed.iter().any(|name| name.eq_ignore_ascii_case(family))
+/// The installed spelling of `family`, as fonts are looked up by that. Names starting with a dot are the system's own.
+fn installed_name(installed: &[String], family: &str) -> Option<String> {
+    if family.starts_with('.') {
+        return Some(family.to_string());
+    }
+    installed.iter().find(|name| name.eq_ignore_ascii_case(family)).cloned()
 }
 
 /// The first family of `wanted` that is installed. Each one that isn't is reported, so a typo shows.
-fn pick<'a>(wanted: &'a [String], installed: &[String], what: &str) -> Option<&'a str> {
-    wanted.iter().map(String::as_str).find(|family| {
-        let found = has(installed, family);
-        if !found {
+fn pick(wanted: &[String], installed: &[String], what: &str) -> Option<String> {
+    wanted.iter().find_map(|family| {
+        let found = installed_name(installed, family);
+        if found.is_none() {
             log::warn!("{what} font {family:?} is not installed");
         }
         found
@@ -111,7 +115,12 @@ fn pick<'a>(wanted: &'a [String], installed: &[String], what: &str) -> Option<&'
 
 /// The monospace fonts the system prefers: what fontconfig says `monospace` is, which is
 /// the user's own choice, else a few well-known ones per platform.
-fn system_mono() -> Vec<String> {
+fn system_mono() -> &'static [String] {
+    static FOUND: OnceLock<Vec<String>> = OnceLock::new();
+    FOUND.get_or_init(system_mono_uncached)
+}
+
+fn system_mono_uncached() -> Vec<String> {
     let mut found = Vec::new();
     if cfg!(all(unix, not(target_os = "macos"))) {
         let output = std::process::Command::new("fc-match").args(["monospace", "-f", "%{family}"]).output();
@@ -156,14 +165,14 @@ pub fn resolve(theme: &Value, config: &Value, cx: &App) -> Fonts {
     let installed = cx.text_system().all_font_names();
     let Settings { ui, mono } = settings(theme, config);
     let ui_family = match pick(&ui.families, &installed, "UI") {
-        Some(family) => family.to_string().into(),
+        Some(family) => family.into(),
         None => system_ui(&installed, cx),
     };
     let mono_family = match pick(&mono.families, &installed, "monospace") {
-        Some(family) => family.to_string().into(),
+        Some(family) => family.into(),
         None => system_mono()
-            .into_iter()
-            .find(|family| has(&installed, family))
+            .iter()
+            .find_map(|family| installed_name(&installed, family))
             .unwrap_or_else(|| BUNDLED_MONO_FAMILY.into())
             .into(),
     };
@@ -202,8 +211,8 @@ mod tests {
     fn picks_the_first_installed_family_ignoring_case() {
         let installed = vec!["Noto Sans".to_string(), "Fira Mono".to_string()];
         let wanted = vec!["Nope".to_string(), "fira mono".to_string(), "Noto Sans".to_string()];
-        assert_eq!(pick(&wanted, &installed, "test"), Some("fira mono"));
+        assert_eq!(pick(&wanted, &installed, "test").as_deref(), Some("Fira Mono"));
         assert_eq!(pick(&["Nope".to_string()], &installed, "test"), None);
-        assert_eq!(pick(&[SYSTEM.to_string()], &installed, "test"), Some(SYSTEM));
+        assert_eq!(pick(&[SYSTEM.to_string()], &installed, "test").as_deref(), Some(SYSTEM));
     }
 }
