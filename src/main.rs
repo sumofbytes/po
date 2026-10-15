@@ -1882,9 +1882,7 @@ impl Reader {
                                     if thread.generation == generation && !thread.ready && thread.client.is_some() {
                                         thread.status = "not responding".into();
                                         thread.fail("The agent did not answer the handshake. Check that its command speaks ACP.".into());
-                                        if thread.blank {
-                                            thread.drop_agent();
-                                        }
+                                        reader.unstart();
                                     }
                                 });
                                 cx.notify();
@@ -1968,6 +1966,28 @@ impl Reader {
             let Some(value) = chosen.and_then(|chosen| chosen.get(&option.id)) else { continue };
             if *value != option.current && option.choices.iter().any(|(choice, _)| choice == value) && client.set_option(&option.id, value) {
                 applying.asked = Some(option.id.clone());
+                // An agent that never answers would hold the first message back for good.
+                let (id, generation, asked, handle) = (thread.id, thread.generation, option.id.clone(), window.window_handle());
+                cx.spawn(async move |this, cx| {
+                    cx.background_executor().timer(Duration::from_secs(20)).await;
+                    handle
+                        .update(cx, |_, window, cx| {
+                            this.update(cx, |reader, cx| {
+                                reader.with_thread(id, |reader, _| {
+                                    let thread = &reader.thread;
+                                    let waiting = thread.generation == generation
+                                        && thread.applying.as_ref().is_some_and(|applying| applying.asked.as_deref() == Some(asked.as_str()));
+                                    if waiting {
+                                        log::warn!("agent: no answer to the setting {asked}");
+                                        reader.apply_next(window, cx);
+                                    }
+                                });
+                            })
+                            .ok();
+                        })
+                        .ok();
+                })
+                .detach();
                 return;
             }
         }
@@ -2591,10 +2611,11 @@ impl Reader {
 
 
     /// After its agent failed or exited: a blank thread, or one whose first message never got
-    /// a session, starts its agent again when it is next asked for.
+    /// a session, starts its agent again when it is next asked for. That includes one whose
+    /// agent is still held but never became ready, as it would never answer.
     fn unstart(&mut self) {
         let thread = &mut self.thread;
-        if thread.blank || thread.unstarted() {
+        if thread.blank || thread.unstarted() || thread.session.is_none() && !thread.ready && !thread.picking && !thread.loading {
             thread.drop_agent();
         }
     }

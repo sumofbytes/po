@@ -123,8 +123,13 @@ fn system_mono() -> &'static [String] {
 fn system_mono_uncached() -> Vec<String> {
     let mut found = Vec::new();
     if cfg!(all(unix, not(target_os = "macos"))) {
-        let output = std::process::Command::new("fc-match").args(["monospace", "-f", "%{family}"]).output();
-        if let Ok(output) = output.map(|o| String::from_utf8_lossy(&o.stdout).into_owned()) {
+        // A broken fontconfig can hang; give it a moment rather than hold up startup.
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let output = std::process::Command::new("fc-match").args(["monospace", "-f", "%{family}"]).output();
+            tx.send(output.map(|o| String::from_utf8_lossy(&o.stdout).into_owned())).ok();
+        });
+        if let Ok(Ok(output)) = rx.recv_timeout(std::time::Duration::from_secs(2)) {
             found.extend(output.split(',').map(|name| name.trim().to_string()).filter(|name| !name.is_empty()));
         }
     }

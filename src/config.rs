@@ -105,6 +105,9 @@ pub fn load_choices() -> Choices {
 /// Remembers one choice. The file is read again first, so other windows' choices are kept, and
 /// replaced whole, so a crash can't leave it half written.
 pub fn save_choice(agent: &str, id: &str, value: &str) {
+    // Saves run on background tasks; one at a time keeps a pick from overwriting another.
+    static SAVING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _saving = SAVING.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let path = choices_path();
     let mut choices = load_choices();
     choices.entry(agent.to_string()).or_default().insert(id.to_string(), value.to_string());
