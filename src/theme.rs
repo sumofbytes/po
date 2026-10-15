@@ -1,16 +1,15 @@
 use std::path::{Path, PathBuf};
 
 use crate::config::{self, read_json};
+use crate::fonts::{self, Fonts};
 use crate::schemes;
 
 use std::collections::HashMap;
 
-use gpui::{App, FontStyle, FontWeight, Global, HighlightStyle, Hsla, Pixels, Rgba, SharedString, font, hsla, px};
+use gpui::{App, FontStyle, FontWeight, Global, HighlightStyle, Hsla, Pixels, Rgba, SharedString, hsla, px};
 use serde_json::Value;
 
 const DEFAULT_THEME: &str = "Rose Pine";
-const FONT_SIZE: f64 = 15.0;
-const MONO_FONT_SIZE: f64 = 14.0;
 
 /// Where themes are picked from: `<config>/themes/`.
 fn themes_dir(config_dir: &Path) -> PathBuf {
@@ -50,23 +49,14 @@ pub fn apply(cx: &mut App) {
         .unwrap_or_else(|| DEFAULT_THEME.into());
     let dir = config::dir();
     let dir = dir.as_deref();
-    let mut theme = load_theme(&name, dir)
+    let theme = load_theme(&name, dir)
         .or_else(|| {
             log::warn!("theme {name:?} not found, using {DEFAULT_THEME}");
             load_theme(DEFAULT_THEME, dir)
         })
         .expect("default scheme");
-    let font = &config["font"];
-    let fields = [
-        ("font.family", font["family"].clone()),
-        ("font.size", font["size"].as_f64().unwrap_or(FONT_SIZE).into()),
-        ("mono_font.family", font["mono_family"].clone()),
-        ("mono_font.size", font["mono_size"].as_f64().unwrap_or(MONO_FONT_SIZE).into()),
-    ];
-    for (key, value) in fields.into_iter().filter(|(_, value)| !value.is_null()) {
-        theme[key] = value;
-    }
-    let palette = Palette::new(&theme, cx);
+    let fonts = fonts::resolve(&theme, &config, cx);
+    let palette = Palette::new(&theme, fonts);
     cx.set_global(palette);
 }
 
@@ -314,32 +304,47 @@ fn weight(value: &Value) -> Option<FontWeight> {
     }))
 }
 
-/// The UI font: the theme's, else the family the system UI font resolves to.
-fn ui_font(wanted: Option<&str>, cx: &App) -> SharedString {
-    const SYSTEM: &str = ".SystemUIFont";
-    if let Some(family) = wanted {
-        return family.to_string().into();
-    }
-    let text_system = cx.text_system();
-    let resolved = text_system.get_font_for_id(text_system.resolve_font(&font(SYSTEM))).map(|f| f.family);
-    match resolved {
-        Some(family) if family != SYSTEM && text_system.all_font_names().contains(&family.to_string()) => family,
-        _ => SYSTEM.into(),
-    }
-}
+/// Reapplies the theme and fonts whenever a `.json` file in the config folder or its `themes`
+/// folder changes, so edits show without a restart.
+pub fn watch(cx: &mut App) {
+    use futures::StreamExt;
+    use notify::Watcher;
 
-/// The monospace font: the theme's, else the first of a few common ones that is installed.
-fn mono_font(wanted: Option<&str>, cx: &App) -> SharedString {
-    if let Some(family) = wanted {
-        return family.to_string().into();
+    let Some(dir) = config::dir() else { return };
+    let (tx, mut rx) = futures::channel::mpsc::unbounded();
+    let mut watcher = match notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
+        if let Ok(event) = event
+            && !event.kind.is_access()
+            && event.paths.iter().any(|path| path.extension().is_some_and(|ext| ext == "json"))
+        {
+            tx.unbounded_send(()).ok();
+        }
+    }) {
+        Ok(watcher) => watcher,
+        Err(error) => {
+            log::error!("watch config: {error}");
+            return;
+        }
+    };
+    // The themes folder may not exist yet; watching the config folder recursively covers it appearing.
+    if let Err(error) = watcher.watch(&dir, notify::RecursiveMode::Recursive) {
+        log::warn!("watch {}: {error}", dir.display());
+        return;
     }
-    let installed = cx.text_system().all_font_names();
-    ["DejaVu Sans Mono", "Noto Sans Mono", "Liberation Mono", "Ubuntu Mono"]
-        .into_iter()
-        .find(|candidate| installed.iter().any(|name| name == candidate))
-        .unwrap_or(".SystemUIFont")
-        .to_string()
-        .into()
+    cx.spawn(async move |cx| {
+        // Moved in so the watcher lives as long as this task.
+        let _watcher = watcher;
+        while rx.next().await.is_some() {
+            // Editors save in several steps; let them finish.
+            cx.background_executor().timer(std::time::Duration::from_millis(150)).await;
+            while rx.try_recv().is_ok() {}
+            cx.update(|cx| {
+                apply(cx);
+                cx.refresh_windows();
+            });
+        }
+    })
+    .detach();
 }
 
 /// The colors markdown is drawn with, for the agent's replies and for `.md` files alike. Each
@@ -417,7 +422,7 @@ impl Global for Palette {}
 
 impl Palette {
     /// Resolves the colors, fonts and syntax styles of the theme `theme` (its JSON).
-    pub fn new(theme: &Value, cx: &App) -> Self {
+    pub fn new(theme: &Value, fonts: Fonts) -> Self {
         let dark = theme["mode"].as_str() != Some("light");
         let colors = &theme["colors"];
         let base = Base::new(colors, dark);
@@ -511,10 +516,10 @@ impl Palette {
             editor_active_line: editor("editor.active_line.background"),
             editor_line_number: editor("editor.line_number").unwrap_or(base.muted_foreground),
             radius: px(theme["radius"].as_f64().unwrap_or(6.) as f32),
-            font_family: ui_font(theme["font.family"].as_str(), cx),
-            font_size: px(theme["font.size"].as_f64().unwrap_or(FONT_SIZE) as f32),
-            mono_font_family: mono_font(theme["mono_font.family"].as_str(), cx),
-            mono_font_size: px(theme["mono_font.size"].as_f64().unwrap_or(MONO_FONT_SIZE) as f32),
+            font_family: fonts.ui,
+            font_size: px(fonts.ui_size),
+            mono_font_family: fonts.mono,
+            mono_font_size: px(fonts.mono_size),
             syntax,
         }
     }
