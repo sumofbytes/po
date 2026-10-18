@@ -6,7 +6,7 @@ use crate::schemes;
 
 use std::collections::HashMap;
 
-use gpui::{App, FontStyle, FontWeight, Global, HighlightStyle, Hsla, Pixels, Rgba, SharedString, hsla, px};
+use gpui::{App, BoxShadow, FontStyle, FontWeight, Global, HighlightStyle, Hsla, Pixels, Rgba, SharedString, hsla, point, px};
 use serde_json::Value;
 
 const DEFAULT_THEME: &str = "Rose Pine";
@@ -82,7 +82,11 @@ pub fn apply(cx: &mut App) {
         })
         .expect("default scheme");
     let fonts = fonts::resolve(&theme, &config, cx);
-    let palette = Palette::new(&theme, fonts);
+    let glass = std::env::var("PO_GLASS").map(|value| glass_env(&value)).unwrap_or_else(|_| config["glass"].clone());
+    let mut palette = Palette::new(&theme, fonts);
+    if let Some(opacity) = glass_opacity(&glass) {
+        palette.frost(opacity);
+    }
     cx.set_global(palette);
 }
 
@@ -373,6 +377,48 @@ pub fn watch(cx: &mut App) {
     .detach();
 }
 
+/// How opaque glass panes are by default: enough to keep text crisp over a busy desktop.
+const GLASS_OPACITY: f32 = 0.72;
+
+/// The `glass` setting: `true` for the default opacity, or a number from 0 to 1 for the panes'.
+/// `PO_GLASS` as the `glass` setting: off for empty, `0`, `false`, `off` or `no`, on for `1`,
+/// `true`, `on` or `yes`, a number as the panes' opacity, anything else on.
+fn glass_env(value: &str) -> Value {
+    match value.trim().to_lowercase().as_str() {
+        "" | "0" | "false" | "off" | "no" => Value::Bool(false),
+        "1" | "true" | "on" | "yes" => Value::Bool(true),
+        value => value.parse::<f64>().ok().and_then(serde_json::Number::from_f64).map_or(Value::Bool(true), Value::Number),
+    }
+}
+
+fn glass_opacity(value: &Value) -> Option<f32> {
+    match value {
+        Value::Bool(true) => Some(GLASS_OPACITY),
+        Value::Number(n) => n.as_f64().map(|n| (n as f32).clamp(0.2, 1.)),
+        _ => None,
+    }
+}
+
+/// The frosted look of macOS's Liquid Glass: the window blurs what's behind it, panes are
+/// translucent tints over that blur, and floating panes catch light along their rim.
+#[derive(Clone, Copy)]
+pub struct Glass {
+    /// The bright hairline around a floating pane.
+    pub rim: Hsla,
+    /// The light along a floating pane's top edge, drawn inside it.
+    pub sheen: Hsla,
+    /// The gap between a floating pane and the window's edges.
+    pub inset: Pixels,
+}
+
+impl Glass {
+    /// A floating pane's sheen, inside its top edge. No drop shadow: gpui fills a shadow under
+    /// the whole pane, so it would show through the glass as a grey cast.
+    pub fn shadow(&self) -> Vec<BoxShadow> {
+        vec![BoxShadow { color: self.sheen, offset: point(px(0.), px(1.)), blur_radius: px(0.), spread_radius: px(0.), inset: true }]
+    }
+}
+
 /// The colors markdown is drawn with, for the agent's replies and for `.md` files alike. Each
 /// comes from the theme's `markdown` object (`heading`, `code`, `code_background`,
 /// `inline_code_background`, `quote`, `quote_border`, `rule`, `marker`, `strong`, `emphasis`)
@@ -397,6 +443,11 @@ pub struct MarkdownColors {
 /// apart from the kit's theme so those components don't depend on it.
 pub struct Palette {
     pub buttons: Buttons,
+    /// What the window itself is painted with, under every pane: the background, or with glass
+    /// a faint tint over the blurred desktop.
+    pub window: Hsla,
+    /// Set when the glass look is on.
+    pub glass: Option<Glass>,
     pub background: Hsla,
     pub foreground: Hsla,
     pub primary: Hsla,
@@ -513,6 +564,8 @@ impl Palette {
 
         Self {
             buttons: Buttons::new(&base),
+            window: base.background,
+            glass: None,
             background: base.background,
             foreground: base.foreground,
             primary,
@@ -558,6 +611,36 @@ impl Palette {
             mono_font_size: px(fonts.mono_size),
             syntax,
         }
+    }
+
+    /// Turns on the glass look: the panes become `opacity` tints over the blurred desktop, the
+    /// sidebar more see-through still, and the lines between them fade so the panes read as
+    /// sheets of glass rather than boxes.
+    pub fn frost(&mut self, opacity: f32) {
+        let dark = self.background.l < 0.5;
+        let clear = hsla(0., 0., 0., 0.);
+        self.window = self.background.opacity(opacity * 0.35);
+        self.background = self.background.opacity(opacity);
+        // The editor draws inside a pane that's already tinted; another layer would thicken it.
+        self.editor_background = clear;
+        self.sidebar = self.sidebar.opacity(opacity * 0.6);
+        // Menus float over text and nothing blurs it, so they stay nearly solid.
+        self.popover = self.popover.opacity(opacity.max(0.94));
+        self.secondary = self.secondary.opacity(opacity * 0.85);
+        self.scrollbar_track = clear;
+        self.border = self.border.opacity(0.6);
+        self.resize_handle = clear;
+        let (rim, sheen) = if dark { (0.14, 0.1) } else { (0.55, 0.7) };
+        let glass = Glass {
+            rim: hsla(0., 0., 1., rim),
+            sheen: hsla(0., 0., 1., sheen),
+            inset: px(8.),
+        };
+        // A white rim would vanish around a light menu; light themes keep their dark hairline.
+        if dark {
+            self.popover_ring = glass.rim;
+        }
+        self.glass = Some(glass);
     }
 
     /// The style for a tree-sitter capture: its own, else its first part's, as `keyword.modifier`
@@ -622,6 +705,23 @@ mod tests {
         assert_eq!(load_theme("catppuccin mocha.json", None).unwrap()["colors"], theme["colors"]);
         assert_eq!(load_theme("Catppuccin Latte", None).unwrap()["mode"], "light");
         assert!(load_theme("no-such-theme", None).is_none());
+    }
+
+    #[test]
+    fn glass_is_opt_in() {
+        use serde_json::json;
+        assert_eq!(glass_opacity(&Value::Null), None);
+        assert_eq!(glass_opacity(&json!(false)), None);
+        assert_eq!(glass_opacity(&json!(true)), Some(GLASS_OPACITY));
+        assert_eq!(glass_opacity(&json!(0.5)), Some(0.5));
+        // Too clear to read text on is held back.
+        assert_eq!(glass_opacity(&json!(0)), Some(0.2));
+        for off in ["", "0", "false", "OFF", "no"] {
+            assert_eq!(glass_opacity(&glass_env(off)), None, "{off:?}");
+        }
+        assert_eq!(glass_opacity(&glass_env("1")), Some(GLASS_OPACITY));
+        assert_eq!(glass_opacity(&glass_env("true")), Some(GLASS_OPACITY));
+        assert_eq!(glass_opacity(&glass_env("0.4")), Some(0.4));
     }
 
     #[test]
