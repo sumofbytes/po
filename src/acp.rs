@@ -244,7 +244,8 @@ impl Shared {
                     return;
                 }
                 let cwd = self.cwd.to_string_lossy().to_string();
-                self.request("session/new", json!({ "cwd": cwd, "mcpServers": [] }), Pending::Session);
+                let mcp = crate::config::mcp_servers(&crate::config::load());
+                self.request("session/new", json!({ "cwd": cwd, "mcpServers": mcp }), Pending::Session);
             }
             Pending::List(page) => {
                 let mut listed = self.listed.lock().expect("listed lock");
@@ -423,7 +424,8 @@ impl Client {
     pub fn load(&self, id: &str) -> bool {
         *self.shared.session.lock().expect("session lock") = Some(id.to_string());
         let cwd = self.shared.cwd.to_string_lossy().to_string();
-        self.shared.request("session/load", json!({ "sessionId": id, "cwd": cwd, "mcpServers": [] }), Pending::Load);
+        let mcp = crate::config::mcp_servers(&crate::config::load());
+        self.shared.request("session/load", json!({ "sessionId": id, "cwd": cwd, "mcpServers": mcp }), Pending::Load);
         true
     }
 

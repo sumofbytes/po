@@ -91,6 +91,28 @@ pub fn agents(config: &Value) -> Vec<Agent> {
     agents
 }
 
+/// The `mcp_servers` of the config as ACP's `mcpServers` list, handed to every new or resumed
+/// session. Only stdio servers: `command` is required, `args` and `env` (a name-to-value object)
+/// are optional. An entry that doesn't parse is logged and skipped, so one typo doesn't take the
+/// rest away.
+pub fn mcp_servers(config: &Value) -> Value {
+    let servers = config["mcp_servers"].as_array().into_iter().flatten().filter_map(|entry| {
+        let (Some(name), Some(command)) = (entry["name"].as_str(), entry["command"].as_str()) else {
+            log::warn!("mcp_servers: an entry needs a name and a command: {entry}");
+            return None;
+        };
+        let args: Vec<&str> = entry["args"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+        let env: Vec<Value> = entry["env"]
+            .as_object()
+            .into_iter()
+            .flatten()
+            .filter_map(|(key, value)| Some(serde_json::json!({ "name": key, "value": value.as_str()? })))
+            .collect();
+        Some(serde_json::json!({ "name": name, "command": command, "args": args, "env": env }))
+    });
+    Value::Array(servers.collect())
+}
+
 /// The settings chosen for each agent (by agent id, then option id), reapplied to its new threads.
 pub type Choices = BTreeMap<String, BTreeMap<String, String>>;
 
@@ -128,5 +150,34 @@ pub fn save_choice(agent: &str, id: &str, value: &str) {
         .and_then(|()| std::fs::rename(&temp, &path));
     if let Err(error) = saved {
         log::error!("{}: {error}", path.display());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn mcp_servers_become_acp_stdio_entries() {
+        let config = json!({ "mcp_servers": [
+            { "name": "fs", "command": "npx", "args": ["-y", "server-fs", "."], "env": { "TOKEN": "x" } },
+            { "name": "bare", "command": "tool" },
+        ] });
+        assert_eq!(
+            mcp_servers(&config),
+            json!([
+                { "name": "fs", "command": "npx", "args": ["-y", "server-fs", "."], "env": [{ "name": "TOKEN", "value": "x" }] },
+                { "name": "bare", "command": "tool", "args": [], "env": [] },
+            ])
+        );
+    }
+
+    #[test]
+    fn mcp_servers_skip_bad_entries_and_default_to_none() {
+        assert_eq!(mcp_servers(&Value::Null), json!([]));
+        let config = json!({ "mcp_servers": [{ "name": "no-command" }, { "command": "no-name" }, "text", { "name": "ok", "command": "c", "env": { "N": 1 } }] });
+        assert_eq!(mcp_servers(&config), json!([{ "name": "ok", "command": "c", "args": [], "env": [] }]));
     }
 }

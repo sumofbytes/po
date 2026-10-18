@@ -81,6 +81,24 @@ one replaces it, so you can change flags or the binary path. `command` is split
 on whitespace into program and arguments (no shell quoting). Choose the agent
 in the app, or pass `--agent` / `PO_AGENT`.
 
+#### MCP servers
+
+`mcp_servers` in `config.json` lists [MCP](https://modelcontextprotocol.io) servers that
+`po` hands to every ACP agent session it starts or resumes, so each agent gets the same
+extra tools:
+
+```json
+{ "mcp_servers": [
+  { "name": "fs", "command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "."], "env": { "KEY": "value" } }
+] }
+```
+
+Stdio servers only. `name` and `command` are required; `args` and `env` (an object) are
+optional, and `command` is not split further. An entry missing `name` or `command` is logged
+and skipped. The list is read when a session starts, so a change applies to new and resumed
+threads, not to ones already running. This does not apply to a `daemon` agent. The server is
+started by the agent, not by `po`.
+
 #### Steering and follow-ups (dex daemon)
 
 ACP has no way to add to a turn that is already running, so with an ACP agent a
