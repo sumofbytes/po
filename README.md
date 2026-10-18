@@ -222,7 +222,7 @@ Edits to `config.json` and to theme files apply without a restart.
 
 Set `"glass": true` for a frosted look like macOS's Liquid Glass: the window
 shows the desktop through it, blurred, the panes become translucent tints of the
-theme's colours, and the sidebar floats inset with a bright rim. A number from
+theme's colours and float apart from each other with a bright rim. A number from
 `0.2` to `1` sets how opaque the panes are instead (`true` is `0.72`), and
 `PO_GLASS=1` turns it on for one run. The blur is the platform's: macOS, Windows,
 and Wayland compositors with KDE's blur protocol. On X11 the window is
