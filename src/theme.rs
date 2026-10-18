@@ -82,7 +82,7 @@ pub fn apply(cx: &mut App) {
         })
         .expect("default scheme");
     let fonts = fonts::resolve(&theme, &config, cx);
-    let glass = std::env::var("PO_GLASS").ok().map(|value| Value::Bool(value != "0")).unwrap_or_else(|| config["glass"].clone());
+    let glass = std::env::var("PO_GLASS").map(|value| glass_env(&value)).unwrap_or_else(|_| config["glass"].clone());
     let mut palette = Palette::new(&theme, fonts);
     if let Some(opacity) = glass_opacity(&glass) {
         palette.frost(opacity);
@@ -381,6 +381,16 @@ pub fn watch(cx: &mut App) {
 const GLASS_OPACITY: f32 = 0.72;
 
 /// The `glass` setting: `true` for the default opacity, or a number from 0 to 1 for the panes'.
+/// `PO_GLASS` as the `glass` setting: off for empty, `0`, `false`, `off` or `no`, on for `1`,
+/// `true`, `on` or `yes`, a number as the panes' opacity, anything else on.
+fn glass_env(value: &str) -> Value {
+    match value.trim().to_lowercase().as_str() {
+        "" | "0" | "false" | "off" | "no" => Value::Bool(false),
+        "1" | "true" | "on" | "yes" => Value::Bool(true),
+        value => value.parse::<f64>().ok().and_then(serde_json::Number::from_f64).map_or(Value::Bool(true), Value::Number),
+    }
+}
+
 fn glass_opacity(value: &Value) -> Option<f32> {
     match value {
         Value::Bool(true) => Some(GLASS_OPACITY),
@@ -397,23 +407,15 @@ pub struct Glass {
     pub rim: Hsla,
     /// The light along a floating pane's top edge, drawn inside it.
     pub sheen: Hsla,
-    /// The soft shadow a floating pane casts.
-    pub shade: Hsla,
     /// The gap between a floating pane and the window's edges.
     pub inset: Pixels,
 }
 
 impl Glass {
-    /// A floating pane's shadows: the sheen inside its top edge, and the shade under it.
+    /// A floating pane's sheen, inside its top edge. No drop shadow: gpui fills a shadow under
+    /// the whole pane, so it would show through the glass as a grey cast.
     pub fn shadow(&self) -> Vec<BoxShadow> {
-        let shadow = |y: f32, blur: f32, color: Hsla, inset: bool| BoxShadow {
-            color,
-            offset: point(px(0.), px(y)),
-            blur_radius: px(blur),
-            spread_radius: px(0.),
-            inset,
-        };
-        vec![shadow(1., 0., self.sheen, true), shadow(8., 24., self.shade, false)]
+        vec![BoxShadow { color: self.sheen, offset: point(px(0.), px(1.)), blur_radius: px(0.), spread_radius: px(0.), inset: true }]
     }
 }
 
@@ -617,25 +619,27 @@ impl Palette {
     pub fn frost(&mut self, opacity: f32) {
         let dark = self.background.l < 0.5;
         let clear = hsla(0., 0., 0., 0.);
-        self.window = self.background.alpha(opacity * 0.35);
-        self.background = self.background.alpha(opacity);
+        self.window = self.background.opacity(opacity * 0.35);
+        self.background = self.background.opacity(opacity);
         // The editor draws inside a pane that's already tinted; another layer would thicken it.
         self.editor_background = clear;
-        self.sidebar = self.sidebar.alpha(opacity * 0.6);
+        self.sidebar = self.sidebar.opacity(opacity * 0.6);
         // Menus float over text and nothing blurs it, so they stay nearly solid.
-        self.popover = self.popover.alpha(opacity.max(0.94));
-        self.secondary = self.secondary.alpha(opacity * 0.85);
+        self.popover = self.popover.opacity(opacity.max(0.94));
+        self.secondary = self.secondary.opacity(opacity * 0.85);
         self.scrollbar_track = clear;
-        self.border = self.border.alpha(self.border.a * 0.6);
+        self.border = self.border.opacity(0.6);
         self.resize_handle = clear;
-        let (rim, sheen, shade) = if dark { (0.14, 0.1, 0.35) } else { (0.55, 0.7, 0.12) };
+        let (rim, sheen) = if dark { (0.14, 0.1) } else { (0.55, 0.7) };
         let glass = Glass {
             rim: hsla(0., 0., 1., rim),
             sheen: hsla(0., 0., 1., sheen),
-            shade: hsla(0., 0., 0., shade),
             inset: px(8.),
         };
-        self.popover_ring = glass.rim;
+        // A white rim would vanish around a light menu; light themes keep their dark hairline.
+        if dark {
+            self.popover_ring = glass.rim;
+        }
         self.glass = Some(glass);
     }
 
@@ -712,6 +716,12 @@ mod tests {
         assert_eq!(glass_opacity(&json!(0.5)), Some(0.5));
         // Too clear to read text on is held back.
         assert_eq!(glass_opacity(&json!(0)), Some(0.2));
+        for off in ["", "0", "false", "OFF", "no"] {
+            assert_eq!(glass_opacity(&glass_env(off)), None, "{off:?}");
+        }
+        assert_eq!(glass_opacity(&glass_env("1")), Some(GLASS_OPACITY));
+        assert_eq!(glass_opacity(&glass_env("true")), Some(GLASS_OPACITY));
+        assert_eq!(glass_opacity(&glass_env("0.4")), Some(0.4));
     }
 
     #[test]

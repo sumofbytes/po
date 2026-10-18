@@ -225,8 +225,8 @@ shows the desktop through it, blurred, the panes become translucent tints of the
 theme's colours and float apart from each other with a bright rim. A number from
 `0.2` to `1` sets how opaque the panes are instead (`true` is `0.72`), and
 `PO_GLASS=1` turns it on for one run. The blur is the platform's: macOS, Windows,
-and Wayland compositors with KDE's blur protocol. On X11 the window is
-see-through without blur when a compositor runs.
+and Wayland compositors with KDE's blur protocol. Other Wayland compositors, and
+X11 with a compositor running, show the window see-through without blur.
 
 Markdown, in the agent's replies and in `.md` files (which open rendered; the
 **Source** button or Ctrl+Shift+M switches to the text), is coloured from the

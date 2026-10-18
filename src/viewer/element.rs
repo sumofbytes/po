@@ -438,10 +438,12 @@ impl Element for CodeElement {
         window.with_content_mask(Some(ContentMask { bounds }), |window| {
             window.paint_quad(fill(bounds, colors.background));
             if let Some(color) = colors.active_line {
-                // Like the kit's, the band stops at the right padding.
+                // Like the kit's, the band stops at the right padding. It starts after the gutter,
+                // which paints its own below; two bands there would show through a clear gutter.
                 for row in layout.rows.iter().filter(|row| row.active) {
+                    let left = layout.gutter.right();
                     window.paint_quad(fill(
-                        Bounds::new(point(bounds.left(), row.origin.y), size(bounds.size.width - PADDING.right, line_height)),
+                        Bounds::new(point(left, row.origin.y), size(bounds.right() - PADDING.right - left, line_height)),
                         color,
                     ));
                 }

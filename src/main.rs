@@ -4407,14 +4407,15 @@ fn pane_header(title: &str, right: impl IntoElement, lead: Option<AnyElement>, t
 
 /// `pane` as a sheet of glass floating apart from its neighbours when the glass look is on,
 /// else as it is. Each pane keeps half the gap; the window's padding makes up the other half at
-/// its edges.
+/// its edges. gpui clips to rectangles, not rounded corners, so the pane leaves its bottom
+/// corners' height empty: a row tinted down there would poke square past the rim.
 fn floating(pane: impl IntoElement + Styled, cx: &App) -> AnyElement {
     let colors = cx.global::<Palette>();
     match colors.glass {
         Some(glass) => div()
             .size_full()
             .p(glass.inset / 2.)
-            .child(pane.rounded(colors.radius_xl).border_1().border_color(glass.rim).shadow(glass.shadow()).overflow_hidden())
+            .child(pane.rounded(colors.radius_xl).pb(colors.radius_xl).border_1().border_color(glass.rim).shadow(glass.shadow()).overflow_hidden())
             .into_any_element(),
         None => pane.into_any_element(),
     }
@@ -4462,7 +4463,7 @@ impl Render for Reader {
             }
         }
         let colors = cx.global::<Palette>();
-        let (background, foreground) = (colors.window, colors.foreground);
+        let foreground = colors.foreground;
         let glass = colors.glass;
         let (left_open, side_open, swapped, agent_open) = (self.left_open, self.side_open, self.swapped, self.agent_open);
         // The window's controls live in the headers of the panes at its edges: the sidebar toggle
@@ -4511,7 +4512,7 @@ impl Render for Reader {
             .size_full()
             .flex()
             .flex_col()
-            .bg(background)
+            // No background of its own: the `Shell` around it paints the window's.
             .text_color(foreground)
             .relative()
             .track_focus(&self.focus)
