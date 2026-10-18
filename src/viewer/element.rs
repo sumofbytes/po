@@ -468,12 +468,16 @@ impl Element for CodeElement {
                 }
             }
             let show_caret = focused && window.is_window_active() && state.caret_visible();
-            for row in &layout.rows {
-                row.text.paint(row.origin, line_height, TextAlign::Left, None, window, cx).ok();
-            }
-            if let Some(caret) = layout.caret.filter(|_| show_caret) {
-                window.paint_quad(fill(caret, colors.caret));
-            }
+            // Clipped at the gutter: with glass the gutter is see-through, so it can't hide them.
+            let text_area = Bounds::from_corners(point(layout.gutter.right(), bounds.top()), bounds.bottom_right());
+            window.with_content_mask(Some(ContentMask { bounds: text_area }), |window| {
+                for row in &layout.rows {
+                    row.text.paint(row.origin, line_height, TextAlign::Left, None, window, cx).ok();
+                }
+                if let Some(caret) = layout.caret.filter(|_| show_caret) {
+                    window.paint_quad(fill(caret, colors.caret));
+                }
+            });
             // The gutter sits over the text, so wrapped rows never show through it.
             window.paint_quad(fill(layout.gutter, colors.background));
             for row in &layout.rows {

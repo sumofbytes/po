@@ -38,7 +38,7 @@ use serde_json::Value;
 
 use gpui::{
     AnyElement, App, Pixels, TitlebarOptions, WindowControlArea, point, Bounds, Context, Entity, FontWeight, IntoElement, ListAlignment, ListState, ParentElement,
-    Render, SharedString, StyleRefinement, Styled, StyledText, Subscription, Task, Window, WindowBounds, WindowOptions, div, list,
+    Render, SharedString, StyleRefinement, Styled, StyledText, Subscription, Task, Window, WindowBackgroundAppearance, WindowBounds, WindowOptions, div, list,
     prelude::*, px, rems, size, KeyBinding,
 };
 
@@ -3301,11 +3301,11 @@ impl Reader {
                 .child(div().min_w_0().truncate().child(title.to_string()))
                 .into_any_element()
         };
+        // No background of its own: it sits in the left sidebar, which paints one.
         div()
             .size_full()
             .flex()
             .flex_col()
-            .bg(colors.sidebar)
             .child(header_row(
                 title,
                 div()
@@ -3454,7 +3454,7 @@ impl Reader {
             }
             tree = tree.child(group);
         }
-        div()
+        let pane = div()
             .size_full()
             .flex()
             .flex_col()
@@ -3478,7 +3478,8 @@ impl Reader {
             .children(self.worktree_status.clone().map(|text| {
                 div().px_3().py_1().text_xs().text_color(muted).max_h(rems(5.)).overflow_hidden().child(text)
             }))
-            .child(div().flex_1().min_h_0().child(vsplit(&self.left_split).top(tree).bottom(div().size_full().child(explorer))))
+            .child(div().flex_1().min_h_0().child(vsplit(&self.left_split).top(tree).bottom(div().size_full().child(explorer))));
+        floating(pane, cx)
     }
 
     /// Folds the explorer on the agents view down to its header, or unfolds it to the height it
@@ -3676,13 +3677,12 @@ impl Reader {
     fn markdown_view(&self, doc: &Doc, cx: &mut Context<Self>) -> AnyElement {
         doc.selection.update(cx, |s, _| s.begin_frame());
         let (chunks, selection, focus) = (doc.chunks.clone(), doc.selection.clone(), doc.focus.clone());
-        let background = cx.global::<Palette>().background;
+        // No background of its own: the viewer around it paints one.
         div()
             .id("markdown-file")
             .key_context("Markdown")
             .track_focus(&focus)
             .size_full()
-            .bg(background)
             .on_action(cx.listener({
                 let (chunks, selection) = (chunks.clone(), selection.clone());
                 move |_, _: &ui::markdown::Copy, _, cx| {
@@ -4054,6 +4054,7 @@ impl Reader {
                         .border(px(BOX_BORDER))
                         .border_color(colors.border)
                         .bg(colors.sidebar)
+                        .when_some(colors.glass, |this, glass| this.border_color(glass.rim).shadow(glass.shadow()))
                         .when(!queued.is_empty(), |this| {
                             this.child(div().flex().flex_col().gap_1().pb_1().border_b_1().border_color(border).children(queued))
                         })
@@ -4404,6 +4405,20 @@ fn pane_header(title: &str, right: impl IntoElement, lead: Option<AnyElement>, t
     )
 }
 
+/// `pane` as a sheet of glass floating inset from the window's edges when the glass look is on,
+/// else as it is.
+fn floating(pane: gpui::Div, cx: &App) -> AnyElement {
+    let colors = cx.global::<Palette>();
+    match colors.glass {
+        Some(glass) => div()
+            .size_full()
+            .p(glass.inset)
+            .child(pane.rounded(colors.radius_xl).border_1().border_color(glass.rim).shadow(glass.shadow()).overflow_hidden())
+            .into_any_element(),
+        None => pane.into_any_element(),
+    }
+}
+
 /// A pane header: `left` and `right` on a bar with a line under it.
 fn header_row(left: impl IntoElement, right: impl IntoElement, cx: &App) -> impl IntoElement {
     let colors = cx.global::<Palette>();
@@ -4446,7 +4461,7 @@ impl Render for Reader {
             }
         }
         let colors = cx.global::<Palette>();
-        let (background, foreground) = (colors.background, colors.foreground);
+        let (background, foreground) = (colors.window, colors.foreground);
         let (left_open, side_open, swapped, agent_open) = (self.left_open, self.side_open, self.swapped, self.agent_open);
         // The window's controls live in the headers of the panes at its edges: the sidebar toggle
         // at the left of the leftmost pane, the viewer toggle (and the swap, while the viewer is
@@ -4583,18 +4598,27 @@ fn detach(root: &Path, command: &Option<String>, pr: &Option<pr::Pr>) -> std::io
 /// The window's root: sets the base font, size and colors everything inside inherits.
 struct Shell {
     child: Entity<Reader>,
+    /// What the window was last told to show behind its contents.
+    appearance: WindowBackgroundAppearance,
 }
 
 impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let palette = cx.global::<Palette>();
         window.set_rem_size(palette.font_size);
+        // Glass shows the desktop through the window, blurred where the platform can.
+        let appearance =
+            if palette.glass.is_some() { WindowBackgroundAppearance::Blurred } else { WindowBackgroundAppearance::Opaque };
+        if appearance != self.appearance {
+            self.appearance = appearance;
+            window.set_background_appearance(appearance);
+        }
         div()
             .id("root")
             .relative()
             .size_full()
             .font_family(palette.font_family.clone())
-            .bg(palette.background)
+            .bg(palette.window)
             .text_color(palette.foreground)
             .child(self.child.clone())
     }
@@ -4729,7 +4753,7 @@ fn main() {
                 trace::mark("theme applied");
                 theme::watch(cx);
                 let reader = cx.new(|cx| Reader::new(root, pr, command, prefetch, window, cx));
-                cx.new(|_| Shell { child: reader })
+                cx.new(|_| Shell { child: reader, appearance: WindowBackgroundAppearance::Opaque })
             },
         )
         .expect("window");

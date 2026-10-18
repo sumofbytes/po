@@ -220,6 +220,14 @@ on Linux), then a well-known one for the platform, then the bundled Fira Mono.
 `size` also scales the UI's spacing, since layout is measured in units of it.
 Edits to `config.json` and to theme files apply without a restart.
 
+Set `"glass": true` for a frosted look like macOS's Liquid Glass: the window
+shows the desktop through it, blurred, the panes become translucent tints of the
+theme's colours, and the sidebar floats inset with a bright rim. A number from
+`0.2` to `1` sets how opaque the panes are instead (`true` is `0.72`), and
+`PO_GLASS=1` turns it on for one run. The blur is the platform's: macOS, Windows,
+and Wayland compositors with KDE's blur protocol. On X11 the window is
+see-through without blur when a compositor runs.
+
 Markdown, in the agent's replies and in `.md` files (which open rendered; the
 **Source** button or Ctrl+Shift+M switches to the text), is coloured from the
 theme: headings from the `title` syntax colour, inline code from `string`,
