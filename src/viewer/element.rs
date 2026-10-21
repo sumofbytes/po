@@ -438,10 +438,12 @@ impl Element for CodeElement {
         window.with_content_mask(Some(ContentMask { bounds }), |window| {
             window.paint_quad(fill(bounds, colors.background));
             if let Some(color) = colors.active_line {
-                // Like the kit's, the band stops at the right padding.
+                // Like the kit's, the band stops at the right padding. It starts after the gutter,
+                // which paints its own below; two bands there would show through a clear gutter.
                 for row in layout.rows.iter().filter(|row| row.active) {
+                    let left = layout.gutter.right();
                     window.paint_quad(fill(
-                        Bounds::new(point(bounds.left(), row.origin.y), size(bounds.size.width - PADDING.right, line_height)),
+                        Bounds::new(point(left, row.origin.y), size(bounds.right() - PADDING.right - left, line_height)),
                         color,
                     ));
                 }
@@ -468,12 +470,16 @@ impl Element for CodeElement {
                 }
             }
             let show_caret = focused && window.is_window_active() && state.caret_visible();
-            for row in &layout.rows {
-                row.text.paint(row.origin, line_height, TextAlign::Left, None, window, cx).ok();
-            }
-            if let Some(caret) = layout.caret.filter(|_| show_caret) {
-                window.paint_quad(fill(caret, colors.caret));
-            }
+            // Clipped at the gutter: with glass the gutter is see-through, so it can't hide them.
+            let text_area = Bounds::from_corners(point(layout.gutter.right(), bounds.top()), bounds.bottom_right());
+            window.with_content_mask(Some(ContentMask { bounds: text_area }), |window| {
+                for row in &layout.rows {
+                    row.text.paint(row.origin, line_height, TextAlign::Left, None, window, cx).ok();
+                }
+                if let Some(caret) = layout.caret.filter(|_| show_caret) {
+                    window.paint_quad(fill(caret, colors.caret));
+                }
+            });
             // The gutter sits over the text, so wrapped rows never show through it.
             window.paint_quad(fill(layout.gutter, colors.background));
             for row in &layout.rows {

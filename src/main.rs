@@ -2,7 +2,9 @@
 mod acp;
 mod agent;
 mod alert;
+mod command;
 mod config;
+mod control;
 mod dex;
 mod diff;
 mod fonts;
@@ -31,14 +33,14 @@ use ui::icon::{Icon, IconName, IconSize};
 use ui::input::{Input, InputEvent, InputState};
 use ui::list_item::ListItem;
 use ui::menu::{CHECKED, MenuItem, MenuState, dropdown};
-use ui::resizable::{SidebarsState, VSplitState, sidebars, vsplit};
+use ui::resizable::{SidebarsState, StackState, sidebars, stack};
 use ui::tree::{TreeEvent, TreeItem, TreeState, tree};
 use futures::StreamExt;
 use serde_json::Value;
 
 use gpui::{
     AnyElement, App, Pixels, TitlebarOptions, WindowControlArea, point, Bounds, Context, Entity, FontWeight, IntoElement, ListAlignment, ListState, ParentElement,
-    Render, SharedString, StyleRefinement, Styled, StyledText, Subscription, Task, Window, WindowBounds, WindowOptions, div, list,
+    Render, SharedString, StyleRefinement, Styled, StyledText, Subscription, Task, Window, WindowBackgroundAppearance, WindowBounds, WindowOptions, div, list,
     prelude::*, px, rems, size, KeyBinding,
 };
 
@@ -297,6 +299,10 @@ enum Block {
     Thought(String, bool),
     Tool(ToolBlock),
     Permission(Ask),
+    /// Po wants to run an agent command that isn't one of its own, and waits to be told it may.
+    /// `new_agent` is whether the agent's own command is the question; `mcp` are the config's MCP
+    /// servers it would be handed.
+    Approve { agent: config::Agent, new_agent: bool, mcp: Vec<config::McpServer>, resume: bool, answered: Option<bool> },
     /// The agent's to-do list; each update replaces the whole list.
     Plan(Vec<(String, Step)>),
 }
@@ -412,6 +418,16 @@ fn tool_result(update: &Value) -> String {
     out.join("\n")
 }
 
+/// The sections of the left side, top to bottom.
+const LIVE: usize = 0;
+const PROJECTS: usize = 1;
+const EXPLORER: usize = 2;
+
+/// The height, in pixels, the live agents list starts with.
+const LIVE_HEIGHT: f32 = 136.0;
+/// The height of the live pane while it has no agents to list: its header and a line.
+const LIVE_EMPTY_REMS: f32 = 5.0;
+
 /// What the sidebar lists and the viewer shows.
 #[derive(Clone, Copy, PartialEq)]
 enum Mode {
@@ -493,6 +509,14 @@ impl Project {
 /// One conversation with an agent: its messages, the process behind it and what is waiting to
 /// be sent to it.
 struct Thread {
+    /// Documents the agent put on screen through `po ctl`.
+    views: command::Views,
+    /// The rendered form of each view.
+    docs: HashMap<String, Doc>,
+    /// The view the viewer shows in place of a file or the changes.
+    shown: Option<String>,
+    /// A view the agent added while the user was busy, waiting for a click.
+    offered: Option<String>,
     /// Names the thread to the events of its agent while it isn't the one on screen.
     id: u64,
     /// It finished a turn while another thread was on screen.
@@ -711,12 +735,30 @@ impl Activity {
             Activity::Unread => ("●", colors.added),
         }
     }
+
+    /// Something the user may want to look at: not idle. Lower ranks come first in the live list,
+    /// so a question comes before a finished turn, and both before work still going.
+    fn live_rank(self) -> Option<u8> {
+        match self {
+            Activity::Asking => Some(0),
+            Activity::Unread => Some(1),
+            Activity::Running => Some(2),
+            Activity::Idle => None,
+        }
+    }
 }
 
 impl Thread {
+    /// What it is doing, in a line for the live list.
+    fn preview(&self) -> String {
+        preview_of(&self.messages, self.busy)
+    }
+
     fn activity(&self) -> Activity {
         let asking = match self.messages.last() {
-            Some(Msg::Agent(blocks)) => blocks.iter().any(|b| matches!(b, Block::Permission(ask) if ask.answered.is_none())),
+            Some(Msg::Agent(blocks)) => blocks
+                .iter()
+                .any(|b| matches!(b, Block::Permission(Ask { answered: None, .. }) | Block::Approve { answered: None, .. })),
             _ => false,
         };
         if asking {
@@ -835,7 +877,14 @@ struct Slot {
     parked: Vec<Thread>,
 }
 
+/// How long the user must have been still before an agent may put a view in front of them.
+const QUIET: Duration = Duration::from_secs(4);
+
 struct Reader {
+    /// How agents started from this window reach it; none where there is no socket.
+    control: Option<control::Control>,
+    /// When the user last pressed a key or scrolled; an agent waits for a pause to show something.
+    last_input: Instant,
     mode: Mode,
     /// The project on screen; its methods act on this one.
     project: Project,
@@ -880,8 +929,8 @@ struct Reader {
     /// Widths of the left side and the viewer pane.
     sidebars: Entity<SidebarsState>,
     left_open: bool,
-    /// The boundary between the projects and the explorer on the left.
-    left_split: Entity<VSplitState>,
+    /// The left side's sections: live agents, projects, explorer.
+    sections: Entity<StackState>,
     /// The viewer pane (a file or a diff) on the right is shown.
     side_open: bool,
     /// The viewer is in the middle and the conversation on the right, instead of the reverse.
@@ -937,7 +986,7 @@ impl Reader {
                 .submit_on_enter(true)
                 .placeholder("Message the agent")
         });
-        let left_split = cx.new(|_| VSplitState::new());
+        let sections = cx.new(|_| StackState::new(vec![Some(px(LIVE_HEIGHT)), None, None]));
         let sidebars = cx.new(|_| SidebarsState::new(px(280.0), px(560.0)));
         let subscriptions = vec![
             // Switching modes unmounts whatever was focused (the explorer, the viewer), which
@@ -949,9 +998,9 @@ impl Reader {
                     reader.request_save(cx);
                 }
             }),
-            // Where the split was dragged to is kept, once the drag is over.
-            cx.observe(&left_split, |reader, split, cx| {
-                if !split.read(cx).dragging() {
+            // Where a section was dragged to, or folded, is kept, once the drag is over.
+            cx.observe(&sections, |reader, sections, cx| {
+                if !sections.read(cx).dragging() {
                     reader.request_save(cx);
                 }
             }),
@@ -966,10 +1015,14 @@ impl Reader {
         let mut agents = config::agents(&settings);
         let idle_minutes = settings["idle_minutes"].as_u64().unwrap_or(15);
         if let Some(command) = command.as_ref().filter(|c| !agents.iter().any(|agent| agent.id == **c)) {
-            agents.push(config::Agent { id: command.clone(), name: "Custom".into(), command: command.clone(), daemon: None });
+            agents.push(config::Agent { id: command.clone(), name: "Custom".into(), command: command.clone(), daemon: None, vouched: true });
         }
         let project = Self::build_project(root, pr, files, window, cx);
         let thread = Thread {
+            views: Default::default(),
+            docs: HashMap::new(),
+            shown: None,
+            offered: None,
             id: 0,
             unread: false,
             session: None,
@@ -999,7 +1052,10 @@ impl Reader {
             selection: cx.new(|_| ui::markdown::Selection::default()),
             focus: cx.focus_handle(),
         };
+        let (control, requests) = control::start().unzip();
         let mut reader = Self {
+            control,
+            last_input: Instant::now().checked_sub(QUIET).unwrap_or_else(Instant::now),
             mode: Mode::Source,
             project,
             project_id: 0,
@@ -1028,7 +1084,7 @@ impl Reader {
             max_live: settings["max_live_agents"].as_u64().unwrap_or(8).max(1) as usize,
             sidebars,
             left_open: true,
-            left_split,
+            sections,
             side_open: true,
             swapped: false,
             agent_open: true,
@@ -1041,6 +1097,20 @@ impl Reader {
             save_pending: false,
             _subscriptions: subscriptions,
         };
+        if let Some(mut requests) = requests {
+            cx.spawn(async move |this, cx| {
+                while let Some(request) = requests.next().await {
+                    let answered = this.update(cx, |reader, cx| {
+                        let reply = reader.run_command(request.caller, request.command, cx);
+                        request.reply.send(reply).ok();
+                    });
+                    if answered.is_err() {
+                        break;
+                    }
+                }
+            })
+            .detach();
+        }
         reader.focus.focus(window, cx);
         trace::mark("reader built");
         reader.refresh_tree(cx);
@@ -1106,6 +1176,10 @@ impl Reader {
                     return;
                 }
                 let path = tree.read(cx).selected_entry().filter(|e| !e.folder).map(|e| e.id.to_string());
+                // Only when the user just pressed something: the agent opening a file selects it too.
+                if path.is_some() && reader.last_input.elapsed() < Duration::from_secs(1) {
+                    reader.thread.shown = None;
+                }
                 if let Some(path) = path.filter(|p| reader.mode == Mode::Source && reader.project.current.as_deref() != Some(p)) {
                     reader.open(&path, window, cx);
                 }
@@ -1656,9 +1730,102 @@ impl Reader {
         cx.notify();
     }
 
+    /// The user's answer to a command Po asked about: remember it and start the agent, or leave it stopped.
+    fn answer_approval(&mut self, ix: usize, n: usize, yes: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(Msg::Agent(blocks)) = self.thread.messages.get_mut(ix) else { return };
+        let Some(Block::Approve { agent, new_agent, mcp, resume, answered }) = blocks.get_mut(n) else { return };
+        if answered.is_some() {
+            return;
+        }
+        *answered = Some(yes);
+        let (agent, new_agent, mcp, resume) = (agent.clone(), *new_agent, mcp.clone(), *resume);
+        self.thread.relist(ix);
+        if yes {
+            if new_agent {
+                config::approve(&agent);
+            }
+            config::approve_mcp(&mcp);
+            self.connect(&agent.id, resume, window, cx);
+        } else if new_agent {
+            self.thread.status = "not running".into();
+        } else {
+            // Only the servers were turned down: the agent runs without them.
+            config::decline_mcp(&mcp);
+            self.connect(&agent.id, resume, window, cx);
+        }
+        cx.notify();
+    }
+
+    /// The one way a request from outside the window changes it. Views are the caller's own; the
+    /// layout is the user's, so only the thread on screen may move it.
+    fn run_command(&mut self, caller: command::Caller, command: command::Command, cx: &mut Context<Self>) -> command::Reply {
+        use command::{Command, Preset};
+        let command::Caller::Thread(id) = caller;
+        let reply = match command {
+            Command::LayoutPreset(preset) => self
+                .with_thread(id, |reader, visible| {
+                    if !visible {
+                        return Err("only the thread on screen can change the layout".to_string());
+                    }
+                    match preset {
+                        Preset::Browse => reader.show_viewer(Mode::Source, cx),
+                        Preset::Review => reader.show_viewer(Mode::Diff, cx),
+                        Preset::Chat => reader.show_chat(cx),
+                    }
+                    Ok(serde_json::json!({}))
+                })
+                .unwrap_or_else(|| Err("that thread is gone".into())),
+            views => {
+                let shows = matches!(views, Command::ViewShow { .. });
+                self.with_thread(id, |reader, visible| {
+                    let reply = reader.thread.views.apply(views)?;
+                    reader.sync_view_docs(cx);
+                    if let (true, Some(view)) = (shows, reply["id"].as_str()) {
+                        let view = view.to_string();
+                        if visible && reader.last_input.elapsed() >= QUIET {
+                            reader.show_agent_view(&view, cx);
+                        } else if reader.thread.shown.as_deref() != Some(&view) {
+                            // The user is typing, or this is not the thread they are in: ask first.
+                            reader.thread.offered = Some(view);
+                        }
+                    }
+                    Ok(reply)
+                })
+                .unwrap_or_else(|| Err("that thread is gone".into()))
+            }
+        };
+        cx.notify();
+        reply
+    }
+
+    /// Renders the thread's views again after they changed, and drops what belongs to views that are gone.
+    fn sync_view_docs(&mut self, cx: &mut Context<Self>) {
+        let live: HashSet<String> = self.thread.views.list().iter().map(|view| view.id.clone()).collect();
+        self.thread.docs.retain(|id, _| live.contains(id));
+        for view in self.thread.views.list().to_vec() {
+            let chunks = Rc::new(ui::markdown::chunks(&view.body));
+            let doc = Self::doc_for(self.thread.docs.remove(&view.id), chunks, cx);
+            self.thread.docs.insert(view.id, doc);
+        }
+        for slot in [&mut self.thread.shown, &mut self.thread.offered] {
+            if slot.as_ref().is_some_and(|id| !live.contains(id)) {
+                *slot = None;
+            }
+        }
+    }
+
+    /// Puts the agent's view `id` in the viewer, opening it if it was closed.
+    fn show_agent_view(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.thread.shown = Some(id.to_string());
+        self.thread.offered = None;
+        self.open_viewer_wide(cx);
+        cx.notify();
+    }
+
     /// Browse (files) or Review (changes) in the viewer pane. If the pane was closed it opens wide,
     /// since looking at code or a diff wants room; if it is open its width is left as it was.
     fn show_viewer(&mut self, mode: Mode, cx: &mut Context<Self>) {
+        self.thread.shown = None;
         self.set_mode(mode, cx);
         self.open_viewer_wide(cx);
     }
@@ -1698,6 +1865,7 @@ impl Reader {
 
     /// Shows `path` where it is most useful: its diff if it has changes, the file otherwise.
     fn reveal(&mut self, path: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.thread.shown = None;
         let full = Path::new(path);
         let relative = full.strip_prefix(&self.project.root).unwrap_or(full).to_string_lossy().replace('\\', "/");
         if self.project.changes.iter().any(|change| change.path == relative) {
@@ -1870,9 +2038,22 @@ impl Reader {
             name: key.to_string(),
             command: key.to_string(),
             daemon: None,
+            vouched: false,
         });
+        let new_agent = !config::trusted(&agent);
+        // A dex daemon is not handed MCP servers.
+        let mcp = if agent.daemon.is_none() { config::unapproved_mcp(&config::load()) } else { vec![] };
+        if new_agent || !mcp.is_empty() {
+            // Nothing is started until the user has seen the commands and said yes.
+            self.thread.status = "waiting for approval".into();
+            self.thread.messages.push(Msg::Agent(vec![Block::Approve { agent, new_agent, mcp, resume, answered: None }]));
+            self.thread.relist(0);
+            cx.notify();
+            return;
+        }
         self.thread.status = if resume { "listing sessions…" } else { "starting…" }.into();
-        match Client::spawn(&agent, &self.project.root, resume) {
+        let env = self.control.as_ref().map(|control| control.register(id)).unwrap_or_default();
+        match Client::spawn(&agent, &self.project.root, resume, &env) {
             Ok((client, mut events)) => {
                 self.thread.client = Some(client);
                 let handle = window.window_handle();
@@ -2160,6 +2341,10 @@ impl Reader {
             list: ListState::new(0, ListAlignment::Top, px(400.)),
             selection: cx.new(|_| ui::markdown::Selection::default()),
             focus: cx.focus_handle(),
+            views: Default::default(),
+            docs: HashMap::new(),
+            shown: None,
+            offered: None,
         }
     }
 
@@ -2227,7 +2412,10 @@ impl Reader {
         log::info!("agent: waking {key} session {session}");
         self.connect(&key, true, window, cx);
         self.thread.restore = Some(session);
-        self.thread.status = "waking…".into();
+        // An agent waiting for approval hasn't started, and says so.
+        if self.thread.client.is_some() {
+            self.thread.status = "waking…".into();
+        }
     }
 
     /// Starts the agent of the blank thread on screen if it has none running: its own agent, or
@@ -2268,10 +2456,18 @@ impl Reader {
         self.agent_open = saved.agent_open;
         self.sidebars.update(cx, |sidebars, _| sidebars.set_widths(saved.left_width.map(px), saved.right_width.map(px)));
         self.chosen_agent = saved.agent.clone().or(self.chosen_agent.take());
-        if let Some(height) = saved.split {
-            self.left_split.update(cx, |split, _| split.set_top(px(height)));
-        }
-        self.left_split.update(cx, |split, _| split.set_collapsed(saved.explorer_collapsed));
+        self.sections.update(cx, |sections, _| {
+            for (section, height) in [(LIVE, saved.live_split), (PROJECTS, saved.split)] {
+                if let Some(height) = height {
+                    sections.set_size(section, px(height));
+                }
+            }
+            // A section is never folded if it is the last open one, so a layout that folds all
+            // three, which is never saved, keeps the last open.
+            for (section, folded) in [(LIVE, saved.live_folded), (PROJECTS, saved.projects_folded), (EXPLORER, saved.explorer_collapsed)] {
+                sections.set_folded(section, folded);
+            }
+        });
         for state in saved.projects {
             let worktree = match state.worktree {
                 Some(spec) => {
@@ -2366,7 +2562,7 @@ impl Reader {
                 }
             })
             .collect();
-        workspace::Workspace { projects, viewer_open: self.side_open, agent_open: self.agent_open, swapped: self.swapped, agent: self.chosen_agent.clone(), split: self.left_split.read(cx).top().map(f32::from), explorer_collapsed: self.left_split.read(cx).collapsed(), left_width: Some(self.sidebars.read(cx).widths().0.into()), right_width: self.sidebars.read(cx).widths().1.map(f32::from) }
+        workspace::Workspace { projects, viewer_open: self.side_open, agent_open: self.agent_open, swapped: self.swapped, agent: self.chosen_agent.clone(), split: self.sections.read(cx).size(PROJECTS).map(f32::from), explorer_collapsed: self.sections.read(cx).folded(EXPLORER), live_split: self.sections.read(cx).size(LIVE).map(f32::from), live_folded: self.sections.read(cx).folded(LIVE), projects_folded: self.sections.read(cx).folded(PROJECTS), left_width: Some(self.sidebars.read(cx).widths().0.into()), right_width: self.sidebars.read(cx).widths().1.map(f32::from) }
     }
 
     /// Saves the workspace once the current change has settled, so that a thread that is
@@ -2720,6 +2916,7 @@ impl Reader {
 
     /// Opens `path` in the viewer and closes the finder.
     fn accept_path(&mut self, path: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.thread.shown = None;
         self.open(path, window, cx);
         // A file that can't be shown leaves the finder up so the query isn't lost.
         if self.project.notice.is_none() {
@@ -2814,8 +3011,15 @@ impl Reader {
             return None;
         }
         let chunks = Rc::new(ui::markdown::chunks(text));
-        match self.project.doc.take().filter(|_| self.project.current.as_deref() == Some(path)) {
-            Some(doc) if *doc.chunks == *chunks => Some(doc),
+        let doc = self.project.doc.take().filter(|_| self.project.current.as_deref() == Some(path));
+        Some(Self::doc_for(doc, chunks, cx))
+    }
+
+    /// `doc` showing `chunks`, or a new one: reading the same document again keeps its scroll
+    /// position and its selection, as far as they still make sense.
+    fn doc_for(doc: Option<Doc>, chunks: Rc<Vec<String>>, cx: &mut Context<Self>) -> Doc {
+        match doc {
+            Some(doc) if *doc.chunks == *chunks => doc,
             Some(doc) => {
                 // Splicing resets the scroll to the top, so put it back, and drop a selection
                 // that may now point at different text.
@@ -2826,14 +3030,14 @@ impl Reader {
                 }
                 doc.list.scroll_to(top);
                 doc.selection.update(cx, |s, _| s.clear());
-                Some(Doc { chunks, ..doc })
+                Doc { chunks, ..doc }
             }
-            None => Some(Doc {
+            None => Doc {
                 list: ListState::new(chunks.len(), ListAlignment::Top, px(400.)),
                 chunks,
                 selection: cx.new(|_| ui::markdown::Selection::default()),
                 focus: cx.focus_handle(),
-            }),
+            },
         }
     }
 
@@ -3208,7 +3412,12 @@ impl Reader {
         let marks = if mode == Mode::Diff { self.project.marks.clone() } else { Rc::default() };
         let (muted, danger) = (colors.muted_foreground, colors.danger);
         let kinds = [colors.primary, colors.warning, colors.info, colors.added];
-        let body: AnyElement = if mode == Mode::Diff && self.project.changes.is_empty() {
+        // Folded, only the header shows, so nothing below it is built, and nothing hidden holds
+        // focus.
+        let folded = self.sections.read(cx).folded(EXPLORER);
+        let body: AnyElement = if folded {
+            div().into_any_element()
+        } else if mode == Mode::Diff && self.project.changes.is_empty() {
             centered("No changes".into(), cx)
         } else {
             tree(state, move |ix, entry, selected, right_clicked, _, _| {
@@ -3268,6 +3477,8 @@ impl Reader {
                             return;
                         }
                         this.update(cx, |reader, cx| {
+                            // A file picked in the tree is what the viewer shows, not an agent's view.
+                            reader.thread.shown = None;
                             match mode {
                                 Mode::Source => reader.open(&path, window, cx),
                                 Mode::Diff => reader.pick(&path, cx),
@@ -3279,33 +3490,12 @@ impl Reader {
             })
             .into_any_element()
         };
-        // The explorer can be folded down to this header, so it has a chevron.
-        let title: AnyElement = {
-            let folded = self.left_split.read(cx).collapsed();
-            let fold = cx.entity();
-            div()
-                .id("explorer-fold")
-                .flex()
-                .items_center()
-                .gap_1()
-                .min_w_0()
-                .cursor_pointer()
-                .text_sm()
-                .font_weight(FontWeight::MEDIUM)
-                .on_click(move |_, _, cx| fold.update(cx, |reader, cx| reader.toggle_explorer(cx)))
-                .child(
-                    Icon::new(if folded { IconName::ChevronRight } else { IconName::ChevronDown })
-                        .size(IconSize::XSmall)
-                        .color(colors.muted_foreground),
-                )
-                .child(div().min_w_0().truncate().child(title.to_string()))
-                .into_any_element()
-        };
+        // No background of its own: it sits in the left sidebar, which paints one.
+        let title = self.fold_title(EXPLORER, div().min_w_0().truncate().child(title.to_string()), cx);
         div()
             .size_full()
             .flex()
             .flex_col()
-            .bg(colors.sidebar)
             .child(header_row(
                 title,
                 div()
@@ -3322,8 +3512,8 @@ impl Reader {
                     .child(modes),
                 cx,
             ))
-            .children(self.worktree_strip(cx))
-            .children((mode == Mode::Diff).then(|| self.pr_strip(cx)))
+            .children(self.worktree_strip(cx).filter(|_| !folded))
+            .children((mode == Mode::Diff && !folded).then(|| self.pr_strip(cx)))
             .child(div().flex_1().min_h_0().p_1().child(body))
     }
 
@@ -3340,7 +3530,9 @@ impl Reader {
         let add = cx.entity();
         // Groups are spaced apart by more than anything inside one, so the eye reads them as units.
         let mut tree = div().id("agents-tree").size_full().overflow_y_scroll().flex().flex_col().gap_3().p_2();
-        for view in &views {
+        // Folded, only the header shows, so no project is built.
+        let projects_folded = self.sections.read(cx).folded(PROJECTS);
+        for view in views.iter().filter(|_| !projects_folded) {
             let pid = view.id;
             let (select, close, start) = (cx.entity(), cx.entity(), cx.entity());
             // A project and its threads are one card. The one on screen has a soft tint and its name at
@@ -3454,19 +3646,23 @@ impl Reader {
             }
             tree = tree.child(group);
         }
-        div()
+        let title = self.fold_title(
+            PROJECTS,
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child("Projects")
+                .child(div().text_xs().text_color(muted).child(project_count.to_string())),
+            cx,
+        );
+        let projects = div()
             .size_full()
             .flex()
             .flex_col()
-            .bg(colors.sidebar)
             // The same kind of header as the explorer's below: a title, and what you can do here.
             .child(header_row(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .child(div().text_sm().font_weight(FontWeight::MEDIUM).child("Projects"))
-                    .child(div().text_xs().text_color(muted).child(project_count.to_string())),
+                title,
                 Button::new("agents-add")
                     .icon(IconName::Plus)
                     .tooltip("Add a project: open a folder (Ctrl+Shift+O)")
@@ -3475,31 +3671,231 @@ impl Reader {
                     .on_click(move |_, window, cx| add.update(cx, |reader, cx| reader.pick_project(window, cx))),
                 cx,
             ))
-            .children(self.worktree_status.clone().map(|text| {
+            .children(self.worktree_status.clone().filter(|_| !projects_folded).map(|text| {
                 div().px_3().py_1().text_xs().text_color(muted).max_h(rems(5.)).overflow_hidden().child(text)
             }))
-            .child(div().flex_1().min_h_0().child(vsplit(&self.left_split).top(tree).bottom(div().size_full().child(explorer))))
+            .child(div().flex_1().min_h_0().child(tree));
+        let (live, any_live) = self.live_section(&views, cx);
+        let colors = cx.global::<Palette>();
+        // Live agents sit above everything, in a pane of their own whose height is dragged, so
+        // that the projects below don't move when an agent starts or stops. With none, it is
+        // only its header and a line.
+        let pane = div().size_full().bg(colors.sidebar).child(
+            stack(&self.sections).fixed(LIVE, (!any_live).then_some(rems(LIVE_EMPTY_REMS))).section(live).section(projects).section(div().size_full().child(explorer)),
+        );
+        floating(pane, cx)
     }
 
-    /// Folds the explorer on the agents view down to its header, or unfolds it to the height it
-    /// had.
-    fn toggle_explorer(&mut self, cx: &mut Context<Self>) {
-        self.left_split.update(cx, |split, cx| {
-            let folded = split.collapsed();
-            split.set_collapsed(!folded);
-            cx.notify();
-        });
+    /// The threads that are asking, finished unseen or running, across every project, with a
+    /// line of what each is doing. Jumping to one is a click.
+    /// Also whether there are any, since the pane folds to its header when there are none.
+    fn live_section(&self, views: &[View<'_>], cx: &mut Context<Self>) -> (AnyElement, bool) {
+        let colors = cx.global::<Palette>();
+        let (hover, selected, muted, foreground, radius) =
+            (colors.list_hover, colors.list_selected, colors.muted_foreground, colors.foreground, colors.radius);
+        let mut live: Vec<(u8, &View<'_>, &Thread)> = views
+            .iter()
+            .flat_map(|view| view.threads.iter().map(move |thread| (view, *thread)))
+            .filter_map(|(view, thread)| Some((thread.activity().live_rank()?, view, thread)))
+            .collect();
+        live.sort_by_key(|(rank, _, thread)| (*rank, thread.id));
+        let count = live.len();
+        let folded = self.sections.read(cx).folded(LIVE);
+        // Folded, the most pressing thread's mark stays in view.
+        let (glyph, tint) = if folded { live.first().map_or(("", muted), |(_, _, thread)| thread.activity().mark(colors)) } else { ("", muted) };
+        let (active_project, active_thread) = (self.project_id, self.thread.id);
+        let mut rows = div().id("live-list").size_full().overflow_y_scroll().flex().flex_col().gap_px().p_1p5();
+        if live.is_empty() && !folded {
+            rows = rows.child(div().px_1p5().py_1().text_xs().text_color(muted).child("No active agents"));
+        }
+        for (_, view, thread) in live.into_iter().filter(|_| !folded) {
+            let (pid, tid) = (view.id, thread.id);
+            let (glyph, tint) = thread.activity().mark(colors);
+            let select = cx.entity();
+            let preview = thread.preview();
+            let detail = if preview.is_empty() { view.project.name() } else { format!("{} · {preview}", view.project.name()) };
+            let current = (pid, tid) == (active_project, active_thread);
+            rows = rows.child(
+                div()
+                    .id(("live-thread", tid as usize))
+                    .flex()
+                    .items_start()
+                    .gap_2()
+                    .px_1p5()
+                    .py_1()
+                    .rounded(radius)
+                    .cursor_pointer()
+                    .when(current, |row| row.bg(selected))
+                    .hover(move |row| row.bg(hover))
+                    .on_click(move |_, window, cx| select.update(cx, |reader, cx| reader.open_thread(pid, tid, window, cx)))
+                    .child(div().w(rems(1.)).flex_none().flex().justify_center().text_sm().text_color(tint).child(glyph))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .child(div().truncate().text_sm().text_color(foreground).child(thread.title()))
+                            .child(div().truncate().text_xs().text_color(muted).child(detail)),
+                    ),
+            );
+        }
+        let title = self.fold_title(
+            LIVE,
+            div().flex().items_center().gap_2().child("Live").child(div().text_xs().text_color(muted).child(count.to_string())),
+            cx,
+        );
+        let section = div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .child(header_row(
+                title,
+                div().text_sm().text_color(tint).child(glyph),
+                cx,
+            ))
+            .child(div().flex_1().min_h_0().child(rows))
+            .into_any_element();
+        (section, count > 0)
+    }
+
+    /// A section's title with a chevron, which folds it down to its header or opens it again.
+    fn fold_title(&self, section: usize, label: impl IntoElement, cx: &App) -> AnyElement {
+        let folded = self.sections.read(cx).folded(section);
+        let (sections, muted) = (self.sections.clone(), cx.global::<Palette>().muted_foreground);
+        div()
+            .id(("section-fold", section))
+            .flex()
+            .items_center()
+            .gap_1()
+            .min_w_0()
+            .cursor_pointer()
+            .text_sm()
+            .font_weight(FontWeight::MEDIUM)
+            .on_click(move |_, _, cx| {
+                sections.update(cx, |sections, cx| {
+                    sections.toggle(section);
+                    cx.notify();
+                })
+            })
+            .child(Icon::new(if folded { IconName::ChevronRight } else { IconName::ChevronDown }).size(IconSize::XSmall).color(muted))
+            .child(label)
+            .into_any_element()
     }
 
     /// The viewer or the diff viewer, as the project's mode says.
     fn pane(&self, lead: Option<AnyElement>, trail: Option<AnyElement>, cx: &mut Context<Self>) -> AnyElement {
-        match self.mode {
-            Mode::Source => self.viewer(lead, trail, cx).into_any_element(),
-            Mode::Diff => self.diff_viewer(lead, trail, cx).into_any_element(),
-        }
+        let Some(tabs) = self.view_tabs(cx) else {
+            return match self.mode {
+                Mode::Source => floating(self.viewer(lead, trail, cx), cx),
+                Mode::Diff => floating(self.diff_viewer(lead, trail, cx), cx),
+            };
+        };
+        let shown = self.thread.shown.as_deref().and_then(|id| {
+            let view = self.thread.views.list().iter().find(|view| view.id == id)?;
+            Some((view, self.thread.docs.get(id)?))
+        });
+        let body = match (shown, self.mode) {
+            (Some((view, doc)), _) => self.agent_view(&view.title, doc, lead, trail, cx).into_any_element(),
+            (None, Mode::Source) => self.viewer(lead, trail, cx).into_any_element(),
+            (None, Mode::Diff) => self.diff_viewer(lead, trail, cx).into_any_element(),
+        };
+        let background = cx.global::<Palette>().background;
+        floating(div().size_full().flex().flex_col().bg(background).child(tabs).child(div().flex_1().min_h_0().child(body)), cx)
     }
 
-    fn diff_viewer(&self, lead: Option<AnyElement>, trail: Option<AnyElement>, cx: &mut Context<Self>) -> impl IntoElement {
+    /// A view the agent made, as a markdown document.
+    fn agent_view(&self, title: &str, doc: &Doc, lead: Option<AnyElement>, trail: Option<AnyElement>, cx: &mut Context<Self>) -> impl IntoElement + Styled + use<> {
+        let background = cx.global::<Palette>().background;
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .bg(background)
+            .child(pane_header(title, status_text("from the agent".into(), cx), lead, trail, cx))
+            .child(div().flex_1().min_h_0().child(self.markdown_view(doc, cx)))
+    }
+
+    /// Files (or changes) and the agent's views as tabs, with a prompt for one it added while
+    /// the user was busy. None while the agent has made no views.
+    fn view_tabs(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if self.thread.views.is_empty() {
+            return None;
+        }
+        let colors = cx.global::<Palette>();
+        let border = colors.border;
+        let this = cx.entity();
+        let shown = self.thread.shown.as_deref();
+        let home = {
+            let this = this.clone();
+            Button::new("tab-files")
+                .label(if self.mode == Mode::Diff { "Changes" } else { "Files" })
+                .ghost()
+                .small()
+                .selected(shown.is_none())
+                .on_click(move |_, _, cx| this.update(cx, |reader, cx| {
+                    reader.thread.shown = None;
+                    cx.notify();
+                }))
+        };
+        let tabs = self.thread.views.list().iter().map(|view| {
+            let (open, close, id) = (this.clone(), this.clone(), view.id.clone());
+            let closing = id.clone();
+            div()
+                .flex()
+                .items_center()
+                .child(
+                    Button::new(SharedString::from(format!("tab-{}", view.id)))
+                        .label(view.title.clone())
+                        .ghost()
+                        .small()
+                        .selected(shown == Some(view.id.as_str()))
+                        .on_click(move |_, _, cx| open.update(cx, |reader, cx| reader.show_agent_view(&id, cx))),
+                )
+                .child(
+                    Button::new(SharedString::from(format!("close-{}", view.id)))
+                        .icon(IconName::Close)
+                        .ghost()
+                        .xsmall()
+                        .tooltip("Close this view")
+                        .on_click(move |_, _, cx| close.update(cx, |reader, cx| reader.close_agent_view(&closing, cx))),
+                )
+        });
+        let offer = self.thread.offered.as_ref().and_then(|id| {
+            let view = self.thread.views.list().iter().find(|view| view.id == *id)?;
+            let (this, id) = (this.clone(), id.clone());
+            Some(
+                Button::new("offered-view")
+                    .label(format!("The agent wants to show “{}”", view.title))
+                    .primary()
+                    .small()
+                    .on_click(move |_, _, cx| this.update(cx, |reader, cx| reader.show_agent_view(&id, cx))),
+            )
+        });
+        Some(
+            div()
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap_1()
+                .px_2()
+                .py_1()
+                .border_b_1()
+                .border_color(border)
+                .child(home)
+                .children(tabs)
+                .children(offer)
+                .into_any_element(),
+        )
+    }
+
+    fn close_agent_view(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.thread.views.apply(command::Command::ViewClose { id: id.to_string() }).ok();
+        self.sync_view_docs(cx);
+        cx.notify();
+    }
+
+    fn diff_viewer(&self, lead: Option<AnyElement>, trail: Option<AnyElement>, cx: &mut Context<Self>) -> impl IntoElement + Styled + use<> {
         let colors = cx.global::<Palette>();
         let Some(path) = self.project.picked.clone() else {
             return div()
@@ -3628,7 +4024,7 @@ impl Reader {
             .child(div().flex_1().min_h_0().border_color(border).child(body))
     }
 
-    fn viewer(&self, lead: Option<AnyElement>, trail: Option<AnyElement>, cx: &mut Context<Self>) -> impl IntoElement {
+    fn viewer(&self, lead: Option<AnyElement>, trail: Option<AnyElement>, cx: &mut Context<Self>) -> impl IntoElement + Styled + use<> {
         let background = cx.global::<Palette>().background;
         let title = self.project.current.clone().unwrap_or_else(|| "No file open".into());
         let doc = self.project.doc.as_ref().filter(|_| self.rendered);
@@ -3676,13 +4072,12 @@ impl Reader {
     fn markdown_view(&self, doc: &Doc, cx: &mut Context<Self>) -> AnyElement {
         doc.selection.update(cx, |s, _| s.begin_frame());
         let (chunks, selection, focus) = (doc.chunks.clone(), doc.selection.clone(), doc.focus.clone());
-        let background = cx.global::<Palette>().background;
+        // No background of its own: the viewer around it paints one.
         div()
             .id("markdown-file")
             .key_context("Markdown")
             .track_focus(&focus)
             .size_full()
-            .bg(background)
             .on_action(cx.listener({
                 let (chunks, selection) = (chunks.clone(), selection.clone());
                 move |_, _: &ui::markdown::Copy, _, cx| {
@@ -3798,7 +4193,7 @@ impl Reader {
             .collect()
     }
 
-    fn agent_panel(&self, lead: Option<AnyElement>, trail: Option<AnyElement>, cx: &mut Context<Self>) -> impl IntoElement {
+    fn agent_panel(&self, lead: Option<AnyElement>, trail: Option<AnyElement>, cx: &mut Context<Self>) -> impl IntoElement + Styled + use<> {
         let this = cx.entity();
         self.thread.selection.update(cx, |s, _| s.begin_frame());
         // Only the messages in view are built and laid out, however long the thread gets.
@@ -4054,6 +4449,7 @@ impl Reader {
                         .border(px(BOX_BORDER))
                         .border_color(colors.border)
                         .bg(colors.sidebar)
+                        .when_some(colors.glass, |this, glass| this.border_color(glass.rim).shadow(glass.shadow()))
                         .when(!queued.is_empty(), |this| {
                             this.child(div().flex().flex_col().gap_1().pb_1().border_b_1().border_color(border).children(queued))
                         })
@@ -4127,6 +4523,7 @@ fn render_msg(
             Block::Tool(tool) => (tool_card(ix, n, tool, this, text_inset, selection, window, cx).into_any_element(), true),
             Block::Permission(ask) => (permission(ix, n, ask, this, text_inset, cx).into_any_element(), true),
             Block::Plan(entries) => (plan(entries, cx).into_any_element(), false),
+            Block::Approve { agent, new_agent, mcp, answered, .. } => (approval(ix, n, agent, *new_agent, mcp, *answered, this, text_inset, cx).into_any_element(), true),
         };
         let el = if boxed { el } else { div().px(text_inset).child(el).into_any_element() };
         column = column.child(div().when(n > 0, |this| if run { this.mt_0p5() } else { this.mt_4() }).child(el));
@@ -4370,6 +4767,62 @@ fn permission(ix: usize, n: usize, ask: &Ask, this: &Entity<Reader>, text_inset:
         .child(row)
 }
 
+/// Asks whether Po may run an agent command it doesn't ship with.
+#[allow(clippy::too_many_arguments)]
+fn approval(ix: usize, n: usize, agent: &config::Agent, new_agent: bool, mcp: &[config::McpServer], answered: Option<bool>, this: &Entity<Reader>, text_inset: gpui::Pixels, cx: &App) -> impl IntoElement {
+    let colors = cx.global::<Palette>();
+    let (muted, warning) = (colors.muted_foreground, colors.warning);
+    let row = div().flex().flex_wrap().gap_2();
+    let row = match answered {
+        Some(yes) => row.child(div().text_color(muted).child(match (yes, new_agent) {
+            (true, _) => "→ Approved",
+            (false, true) => "→ Not run",
+            (false, false) => "→ Left out",
+        })),
+        None => row
+            .child({
+                let this = this.clone();
+                Button::new(("approve-run", ix * 100 + n)).label("Run it").primary().small().on_click(move |_, window, cx| {
+                    this.update(cx, |reader, cx| reader.answer_approval(ix, n, true, window, cx))
+                })
+            })
+            .child({
+                let this = this.clone();
+                Button::new(("approve-skip", ix * 100 + n)).label(if new_agent { "Don't run" } else { "Leave out" }).small().on_click(move |_, window, cx| {
+                    this.update(cx, |reader, cx| reader.answer_approval(ix, n, false, window, cx))
+                })
+            }),
+    };
+    let mut lines: Vec<String> = Vec::new();
+    if new_agent {
+        lines.push(match &agent.daemon {
+            Some(url) => format!("{}  (daemon {url})", agent.command),
+            None => agent.command.clone(),
+        });
+    }
+    lines.extend(mcp.iter().map(|server| format!("{}: {}", server.name, server.line())));
+    let question = match (new_agent, mcp.is_empty()) {
+        (true, true) => format!("“{}” is not one of Po's own agents: it comes from your config. Run this command?", agent.name),
+        (true, false) => format!("“{}” is not one of Po's own agents, and your config lists MCP servers for it. Run these commands?", agent.name),
+        (false, _) => "Your config lists MCP servers for the agent to start, which run as you. Hand them over?".to_string(),
+    };
+    div()
+        .flex()
+        .flex_col()
+        .gap_2()
+        .py_3()
+        .px(text_inset - px(BOX_BORDER))
+        .rounded(colors.radius)
+        .border(px(BOX_BORDER))
+        .border_color(if answered.is_none() { warning.opacity(theme::tokens::MUTED) } else { colors.border })
+        .text_sm()
+        .child(div().flex().gap_2().child(div().flex_none().text_color(muted).child("Approve")).child(
+            div().flex_1().min_w_0().child(question),
+        ))
+        .children(lines.into_iter().map(|line| div().font_family(cx.global::<Palette>().mono_font_family.clone()).child(line)))
+        .child(row)
+}
+
 fn status_text(text: String, cx: &App) -> impl IntoElement {
     div().flex_none().truncate().text_xs().text_color(cx.global::<Palette>().muted_foreground).child(text)
 }
@@ -4402,6 +4855,22 @@ fn pane_header(title: &str, right: impl IntoElement, lead: Option<AnyElement>, t
         div().flex().items_center().gap_2().child(right).children(trail),
         cx,
     )
+}
+
+/// `pane` as a sheet of glass floating apart from its neighbours when the glass look is on,
+/// else as it is. Each pane keeps half the gap; the window's padding makes up the other half at
+/// its edges. gpui clips to rectangles, not rounded corners, so the pane leaves its bottom
+/// corners' height empty: a row tinted down there would poke square past the rim.
+fn floating(pane: impl IntoElement + Styled, cx: &App) -> AnyElement {
+    let colors = cx.global::<Palette>();
+    match colors.glass {
+        Some(glass) => div()
+            .size_full()
+            .p(glass.inset / 2.)
+            .child(pane.rounded(colors.radius_xl).pb(colors.radius_xl).border_1().border_color(glass.rim).shadow(glass.shadow()).overflow_hidden())
+            .into_any_element(),
+        None => pane.into_any_element(),
+    }
 }
 
 /// A pane header: `left` and `right` on a bar with a line under it.
@@ -4446,7 +4915,8 @@ impl Render for Reader {
             }
         }
         let colors = cx.global::<Palette>();
-        let (background, foreground) = (colors.background, colors.foreground);
+        let foreground = colors.foreground;
+        let glass = colors.glass;
         let (left_open, side_open, swapped, agent_open) = (self.left_open, self.side_open, self.swapped, self.agent_open);
         // The window's controls live in the headers of the panes at its edges: the sidebar toggle
         // at the left of the leftmost pane, the viewer toggle (and the swap, while the viewer is
@@ -4478,26 +4948,29 @@ impl Render for Reader {
         // With the viewer open they can trade places; with it closed the conversation is the middle
         // either way, and has both controls.
         let (middle, side) = if !side_open {
-            (self.agent_panel(Some(sidebar_toggle), Some(trailing), cx).into_any_element(), self.pane(None, None, cx))
+            (floating(self.agent_panel(Some(sidebar_toggle), Some(trailing), cx), cx), self.pane(None, None, cx))
         } else if swapped {
             // The conversation sits on the right; with it collapsed the viewer keeps the middle
             // and carries both controls.
             if agent_open {
-                (self.pane(Some(sidebar_toggle), None, cx), self.agent_panel(None, Some(trailing), cx).into_any_element())
+                (self.pane(Some(sidebar_toggle), None, cx), floating(self.agent_panel(None, Some(trailing), cx), cx))
             } else {
                 (self.pane(Some(sidebar_toggle), Some(trailing), cx), self.pane(None, None, cx))
             }
         } else {
-            (self.agent_panel(Some(sidebar_toggle), None, cx).into_any_element(), self.pane(None, Some(trailing), cx))
+            (floating(self.agent_panel(Some(sidebar_toggle), None, cx), cx), self.pane(None, Some(trailing), cx))
         };
         div()
             .size_full()
             .flex()
             .flex_col()
-            .bg(background)
+            // No background of its own: the `Shell` around it paints the window's.
             .text_color(foreground)
             .relative()
             .track_focus(&self.focus)
+            .on_key_down(cx.listener(|reader, _, _, _| reader.last_input = Instant::now()))
+            .on_scroll_wheel(cx.listener(|reader, _, _, _| reader.last_input = Instant::now()))
+            .on_mouse_down(gpui::MouseButton::Left, cx.listener(|reader, _, _, _| reader.last_input = Instant::now()))
             .on_action(cx.listener(|reader, _: &ShowFinder, window, cx| reader.show_finder(window, cx)))
             .on_action(cx.listener(|reader, _: &ToggleTools, _, cx| reader.toggle_tools(cx)))
             .on_action(cx.listener(|reader, _: &ToggleThoughts, _, cx| reader.toggle_thoughts(cx)))
@@ -4520,7 +4993,7 @@ impl Render for Reader {
                 this.child(div().h(TITLEBAR_HEIGHT).flex_none().window_control_area(WindowControlArea::Drag))
             })
             .child(
-                div().flex_1().min_h_0().child(
+                div().flex_1().min_h_0().when_some(glass, |this, glass| this.p(glass.inset / 2.)).child(
                     sidebars(&self.sidebars)
                         .left(left_open, px(220.0)..px(520.0), self.left_sidebar(cx))
                         .center(middle)
@@ -4583,18 +5056,27 @@ fn detach(root: &Path, command: &Option<String>, pr: &Option<pr::Pr>) -> std::io
 /// The window's root: sets the base font, size and colors everything inside inherits.
 struct Shell {
     child: Entity<Reader>,
+    /// What the window was last told to show behind its contents.
+    appearance: WindowBackgroundAppearance,
 }
 
 impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let palette = cx.global::<Palette>();
         window.set_rem_size(palette.font_size);
+        // Glass shows the desktop through the window, blurred where the platform can.
+        let appearance =
+            if palette.glass.is_some() { WindowBackgroundAppearance::Blurred } else { WindowBackgroundAppearance::Opaque };
+        if appearance != self.appearance {
+            self.appearance = appearance;
+            window.set_background_appearance(appearance);
+        }
         div()
             .id("root")
             .relative()
             .size_full()
             .font_family(palette.font_family.clone())
-            .bg(palette.background)
+            .bg(palette.window)
             .text_color(palette.foreground)
             .child(self.child.clone())
     }
@@ -4607,6 +5089,16 @@ fn main() {
     // `po update` is a terminal command, not a window: it runs to completion and
     // exits before any GUI is set up (like `dex update`).
     let cli: Vec<String> = std::env::args().skip(1).collect();
+    if cli.first().is_some_and(|arg| arg == "ctl") {
+        match control::ctl(&cli[1..]) {
+            Ok(reply) => println!("{reply}"),
+            Err(error) => {
+                eprintln!("po ctl: {error:#}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
     if cli.len() == 1 && cli[0] == "update" {
         if std::path::Path::new("update").exists() {
             eprintln!("po-update: running self-update (use `po ./update` to open the local path 'update')");
@@ -4729,12 +5221,47 @@ fn main() {
                 trace::mark("theme applied");
                 theme::watch(cx);
                 let reader = cx.new(|cx| Reader::new(root, pr, command, prefetch, window, cx));
-                cx.new(|_| Shell { child: reader })
+                cx.new(|_| Shell { child: reader, appearance: WindowBackgroundAppearance::Opaque })
             },
         )
         .expect("window");
         cx.activate(true);
     });
+}
+
+/// What a thread is doing, in a line for the live list: the question it waits on, the tool it is
+/// running, or the last thing it said.
+fn preview_of(messages: &[Msg], busy: bool) -> String {
+    if let Some(Msg::Agent(blocks)) = messages.last() {
+        if let Some(ask) = blocks.iter().find_map(|b| match b {
+            Block::Permission(ask) if ask.answered.is_none() => Some(ask),
+            _ => None,
+        }) {
+            return format!("Approve: {}", ask.title);
+        }
+        if let Some(what) = blocks.iter().find_map(|b| match b {
+            Block::Approve { agent, new_agent: true, answered: None, .. } => Some(agent.command.clone()),
+            Block::Approve { mcp, answered: None, .. } => Some(format!("MCP servers: {}", mcp.iter().map(|server| server.name.as_str()).collect::<Vec<_>>().join(", "))),
+            _ => None,
+        }) {
+            return format!("Approve running: {what}");
+        }
+        // A tool still going is the latest thing, whatever text came after it.
+        if let Some(tool) = blocks.iter().rev().find_map(|b| match b {
+            Block::Tool(tool) if tool.status == Step::Working => Some(tool),
+            _ => None,
+        }) {
+            return tool.title.clone();
+        }
+        for block in blocks.iter().rev() {
+            if let Block::Text(text) = block
+                && let Some(line) = text.lines().rev().find(|line| !line.trim().is_empty())
+            {
+                return line.trim().to_string();
+            }
+        }
+    }
+    if busy { "Working…".into() } else { String::new() }
 }
 
 #[cfg(test)]
@@ -4758,7 +5285,7 @@ mod tests {
         assert_eq!(toggle_all(&mut vec![Msg::User("x".into())], thought_flag), None);
     }
 
-    use super::{Block, Msg, PermissionOption, language, toggle_all, match_files, primary_option, syntax};
+    use super::{Activity, Block, Msg, PermissionOption, Step, ToolBlock, preview_of, language, toggle_all, match_files, primary_option, syntax};
 
     #[test]
     fn file_matches_rank_names_before_paths() {
@@ -4819,5 +5346,34 @@ mod tests {
     fn names_only_fall_back_to_the_first_allow() {
         let options = vec![option("Allow once", ""), option("Allow for session", ""), option("Deny", "")];
         assert_eq!(primary_option(&options), Some(0));
+    }
+
+    fn tool(title: &str, status: Step) -> Block {
+        Block::Tool(ToolBlock { id: String::new(), title: title.into(), status, open: false, arguments: String::new(), result: String::new(), path: None })
+    }
+
+    #[test]
+    fn a_running_tool_is_the_preview_even_when_text_follows_it() {
+        let messages = vec![Msg::Agent(vec![tool("Run tests", Step::Working), Block::Text("Looking at the output\n".into())])];
+        assert_eq!(preview_of(&messages, true), "Run tests");
+    }
+
+    #[test]
+    fn the_preview_falls_back_to_the_last_line_then_to_working() {
+        let said = vec![Msg::Agent(vec![tool("Read", Step::Done), Block::Text("first\n\nlast line  \n\n".into())])];
+        assert_eq!(preview_of(&said, true), "last line");
+        let silent = vec![Msg::Agent(vec![tool("Read", Step::Done)])];
+        assert_eq!(preview_of(&silent, true), "Working…");
+        assert_eq!(preview_of(&silent, false), "");
+    }
+
+    #[test]
+    fn the_live_list_puts_questions_first_and_leaves_idle_threads_out() {
+        let mut ranks: Vec<_> = [Activity::Running, Activity::Idle, Activity::Unread, Activity::Asking]
+            .into_iter()
+            .filter_map(|a| a.live_rank().map(|rank| (rank, a)))
+            .collect();
+        ranks.sort_by_key(|(rank, _)| *rank);
+        assert!(matches!(ranks.as_slice(), [(_, Activity::Asking), (_, Activity::Unread), (_, Activity::Running)]));
     }
 }
