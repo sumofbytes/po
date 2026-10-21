@@ -920,8 +920,21 @@ impl<T: Copy + PartialEq> AgentChange<T> {
     }
 }
 
+impl PendingMove {
+    /// The agent itself changed the layout, not the user: what it touched (`shown`, the viewer
+    /// being open) is noted, so its move is not dropped for its own doing. A move of another
+    /// thread stays as it was; it is dropped when that thread goes off screen.
+    fn follows_agent(&mut self, on_screen: u64, now: &Screen) {
+        if self.thread == on_screen {
+            self.from.shown.clone_from(&now.shown);
+            self.from.side_open = now.side_open;
+            self.from.agent_open = now.agent_open;
+        }
+    }
+}
+
 /// What the user sees of the viewer: whether it is open, in which mode, and on what.
-#[derive(PartialEq)]
+#[derive(Clone, PartialEq)]
 struct Screen {
     side_open: bool,
     agent_open: bool,
@@ -1882,7 +1895,16 @@ impl Reader {
         self.thread.shown = Some(id.to_string());
         self.thread.offered = None;
         self.open_viewer_wide(cx);
+        self.follow_agent();
         cx.notify();
+    }
+
+    /// The agent itself changed the layout, not the user: its pending move is not dropped for it.
+    fn follow_agent(&mut self) {
+        let (thread, now) = (self.thread.id, self.screen());
+        if let Some(pending) = &mut self.pending_move {
+            pending.follows_agent(thread, &now);
+        }
     }
 
     /// `command` with its path made one inside the project, or why there is nothing to show.
@@ -5458,6 +5480,30 @@ mod tests {
         assert_eq!(AgentChange::saved(Some(&after_user), 'd'), 'c');
         assert_eq!(AgentChange::saved(Some(&after_user), 'x'), 'x');
         assert_eq!(AgentChange::saved(None, 'x'), 'x');
+    }
+
+    #[test]
+    fn an_agents_own_view_show_does_not_drop_its_pending_move() {
+        use super::{Mode, PendingMove, Screen};
+        use crate::command::Command;
+        let from = Screen { side_open: false, agent_open: false, mode: Mode::Source, current: None, picked: None, shown: None };
+        // The agent shows a view on the thread whose file open waits: the move follows what the
+        // agent touched, so it applies once the pause comes.
+        let mut pending = PendingMove {
+            thread: 1,
+            command: Command::FileOpen { path: "a.rs".into(), line: None },
+            from: from.clone(),
+        };
+        let shown = Screen { side_open: true, agent_open: true, mode: Mode::Source, current: None, picked: None, shown: Some("v".into()) };
+        pending.follows_agent(1, &shown);
+        assert_eq!(pending.from.shown.as_deref(), Some("v"));
+        assert!(pending.from.side_open && pending.from.agent_open);
+        // What the agent did not touch stays as deferred, so a user's change to it still counts.
+        assert!(matches!(pending.from.mode, Mode::Source));
+        // A move of another thread does not follow: it drops when its thread goes off screen.
+        let mut other = PendingMove { thread: 2, command: Command::ViewerClose, from };
+        other.follows_agent(1, &shown);
+        assert_eq!(other.from.shown, None);
     }
 
     fn thought_flag(b: &mut Block) -> Option<&mut bool> {
