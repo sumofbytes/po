@@ -507,6 +507,12 @@ impl Project {
 struct Thread {
     /// Documents the agent put on screen through `po ctl`.
     views: command::Views,
+    /// The rendered form of each view.
+    docs: HashMap<String, Doc>,
+    /// The view the viewer shows in place of a file or the changes.
+    shown: Option<String>,
+    /// A view the agent added while the user was busy, waiting for a click.
+    offered: Option<String>,
     /// Names the thread to the events of its agent while it isn't the one on screen.
     id: u64,
     /// It finished a turn while another thread was on screen.
@@ -865,9 +871,14 @@ struct Slot {
     parked: Vec<Thread>,
 }
 
+/// How long the user must have been still before an agent may put a view in front of them.
+const QUIET: Duration = Duration::from_secs(4);
+
 struct Reader {
     /// How agents started from this window reach it; none where there is no socket.
     control: Option<control::Control>,
+    /// When the user last pressed a key or scrolled; an agent waits for a pause to show something.
+    last_input: Instant,
     mode: Mode,
     /// The project on screen; its methods act on this one.
     project: Project,
@@ -1003,6 +1014,9 @@ impl Reader {
         let project = Self::build_project(root, pr, files, window, cx);
         let thread = Thread {
             views: Default::default(),
+            docs: HashMap::new(),
+            shown: None,
+            offered: None,
             id: 0,
             unread: false,
             session: None,
@@ -1035,6 +1049,7 @@ impl Reader {
         let (control, requests) = control::start().unzip();
         let mut reader = Self {
             control,
+            last_input: Instant::now() - QUIET,
             mode: Mode::Source,
             project,
             project_id: 0,
@@ -1726,15 +1741,55 @@ impl Reader {
                     Ok(serde_json::json!({}))
                 })
                 .unwrap_or_else(|| Err("that thread is gone".into())),
-            views => self
-                .with_thread(id, |reader, _| reader.thread.views.apply(views))
-                .unwrap_or_else(|| Err("that thread is gone".into())),
+            views => {
+                let shows = matches!(views, Command::ViewShow { .. });
+                self.with_thread(id, |reader, visible| {
+                    let reply = reader.thread.views.apply(views)?;
+                    reader.sync_view_docs(cx);
+                    if let (true, Some(view)) = (shows, reply["id"].as_str()) {
+                        let view = view.to_string();
+                        if visible && reader.last_input.elapsed() >= QUIET {
+                            reader.show_agent_view(&view, cx);
+                        } else if reader.thread.shown.as_deref() != Some(&view) {
+                            // The user is typing, or this is not the thread they are in: ask first.
+                            reader.thread.offered = Some(view);
+                        }
+                    }
+                    Ok(reply)
+                })
+                .unwrap_or_else(|| Err("that thread is gone".into()))
+            }
         };
         cx.notify();
         reply
     }
 
+    /// Renders the thread's views again after they changed, and drops what belongs to views that are gone.
+    fn sync_view_docs(&mut self, cx: &mut Context<Self>) {
+        let live: HashSet<String> = self.thread.views.list().iter().map(|view| view.id.clone()).collect();
+        self.thread.docs.retain(|id, _| live.contains(id));
+        for view in self.thread.views.list().to_vec() {
+            let chunks = Rc::new(ui::markdown::chunks(&view.body));
+            let doc = Self::doc_for(self.thread.docs.remove(&view.id), chunks, cx);
+            self.thread.docs.insert(view.id, doc);
+        }
+        for slot in [&mut self.thread.shown, &mut self.thread.offered] {
+            if slot.as_ref().is_some_and(|id| !live.contains(id)) {
+                *slot = None;
+            }
+        }
+    }
+
+    /// Puts the agent's view `id` in the viewer, opening it if it was closed.
+    fn show_agent_view(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.thread.shown = Some(id.to_string());
+        self.thread.offered = None;
+        self.open_viewer_wide(cx);
+        cx.notify();
+    }
+
     fn show_viewer(&mut self, mode: Mode, cx: &mut Context<Self>) {
+        self.thread.shown = None;
         self.set_mode(mode, cx);
         self.open_viewer_wide(cx);
     }
@@ -2238,6 +2293,9 @@ impl Reader {
             selection: cx.new(|_| ui::markdown::Selection::default()),
             focus: cx.focus_handle(),
             views: Default::default(),
+            docs: HashMap::new(),
+            shown: None,
+            offered: None,
         }
     }
 
@@ -2900,8 +2958,15 @@ impl Reader {
             return None;
         }
         let chunks = Rc::new(ui::markdown::chunks(text));
-        match self.project.doc.take().filter(|_| self.project.current.as_deref() == Some(path)) {
-            Some(doc) if *doc.chunks == *chunks => Some(doc),
+        let doc = self.project.doc.take().filter(|_| self.project.current.as_deref() == Some(path));
+        Some(Self::doc_for(doc, chunks, cx))
+    }
+
+    /// `doc` showing `chunks`, or a new one: reading the same document again keeps its scroll
+    /// position and its selection, as far as they still make sense.
+    fn doc_for(doc: Option<Doc>, chunks: Rc<Vec<String>>, cx: &mut Context<Self>) -> Doc {
+        match doc {
+            Some(doc) if *doc.chunks == *chunks => doc,
             Some(doc) => {
                 // Splicing resets the scroll to the top, so put it back, and drop a selection
                 // that may now point at different text.
@@ -2912,14 +2977,14 @@ impl Reader {
                 }
                 doc.list.scroll_to(top);
                 doc.selection.update(cx, |s, _| s.clear());
-                Some(Doc { chunks, ..doc })
+                Doc { chunks, ..doc }
             }
-            None => Some(Doc {
+            None => Doc {
                 list: ListState::new(chunks.len(), ListAlignment::Top, px(400.)),
                 chunks,
                 selection: cx.new(|_| ui::markdown::Selection::default()),
                 focus: cx.focus_handle(),
-            }),
+            },
         }
     }
 
@@ -3665,10 +3730,114 @@ impl Reader {
 
     /// The viewer or the diff viewer, as the project's mode says.
     fn pane(&self, lead: Option<AnyElement>, trail: Option<AnyElement>, cx: &mut Context<Self>) -> AnyElement {
-        match self.mode {
-            Mode::Source => floating(self.viewer(lead, trail, cx), cx),
-            Mode::Diff => floating(self.diff_viewer(lead, trail, cx), cx),
+        let Some(tabs) = self.view_tabs(cx) else {
+            return match self.mode {
+                Mode::Source => floating(self.viewer(lead, trail, cx), cx),
+                Mode::Diff => floating(self.diff_viewer(lead, trail, cx), cx),
+            };
+        };
+        let shown = self.thread.shown.as_deref().and_then(|id| {
+            let view = self.thread.views.list().iter().find(|view| view.id == id)?;
+            Some((view, self.thread.docs.get(id)?))
+        });
+        let body = match (shown, self.mode) {
+            (Some((view, doc)), _) => self.agent_view(&view.title, doc, lead, trail, cx).into_any_element(),
+            (None, Mode::Source) => self.viewer(lead, trail, cx).into_any_element(),
+            (None, Mode::Diff) => self.diff_viewer(lead, trail, cx).into_any_element(),
+        };
+        let background = cx.global::<Palette>().background;
+        floating(div().size_full().flex().flex_col().bg(background).child(tabs).child(div().flex_1().min_h_0().child(body)), cx)
+    }
+
+    /// A view the agent made, as a markdown document.
+    fn agent_view(&self, title: &str, doc: &Doc, lead: Option<AnyElement>, trail: Option<AnyElement>, cx: &mut Context<Self>) -> impl IntoElement + Styled + use<> {
+        let background = cx.global::<Palette>().background;
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .bg(background)
+            .child(pane_header(title, status_text("from the agent".into(), cx), lead, trail, cx))
+            .child(div().flex_1().min_h_0().child(self.markdown_view(doc, cx)))
+    }
+
+    /// Files (or changes) and the agent's views as tabs, with a prompt for one it added while
+    /// the user was busy. None while the agent has made no views.
+    fn view_tabs(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if self.thread.views.is_empty() {
+            return None;
         }
+        let colors = cx.global::<Palette>();
+        let border = colors.border;
+        let this = cx.entity();
+        let shown = self.thread.shown.as_deref();
+        let home = {
+            let this = this.clone();
+            Button::new("tab-files")
+                .label(if self.mode == Mode::Diff { "Changes" } else { "Files" })
+                .ghost()
+                .small()
+                .selected(shown.is_none())
+                .on_click(move |_, _, cx| this.update(cx, |reader, cx| {
+                    reader.thread.shown = None;
+                    cx.notify();
+                }))
+        };
+        let tabs = self.thread.views.list().iter().map(|view| {
+            let (open, close, id) = (this.clone(), this.clone(), view.id.clone());
+            let closing = id.clone();
+            div()
+                .flex()
+                .items_center()
+                .child(
+                    Button::new(SharedString::from(format!("tab-{}", view.id)))
+                        .label(view.title.clone())
+                        .ghost()
+                        .small()
+                        .selected(shown == Some(view.id.as_str()))
+                        .on_click(move |_, _, cx| open.update(cx, |reader, cx| reader.show_agent_view(&id, cx))),
+                )
+                .child(
+                    Button::new(SharedString::from(format!("close-{}", view.id)))
+                        .icon(IconName::Close)
+                        .ghost()
+                        .xsmall()
+                        .tooltip("Close this view")
+                        .on_click(move |_, _, cx| close.update(cx, |reader, cx| reader.close_agent_view(&closing, cx))),
+                )
+        });
+        let offer = self.thread.offered.as_ref().and_then(|id| {
+            let view = self.thread.views.list().iter().find(|view| view.id == *id)?;
+            let (this, id) = (this.clone(), id.clone());
+            Some(
+                Button::new("offered-view")
+                    .label(format!("The agent wants to show “{}”", view.title))
+                    .primary()
+                    .small()
+                    .on_click(move |_, _, cx| this.update(cx, |reader, cx| reader.show_agent_view(&id, cx))),
+            )
+        });
+        Some(
+            div()
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap_1()
+                .px_2()
+                .py_1()
+                .border_b_1()
+                .border_color(border)
+                .child(home)
+                .children(tabs)
+                .children(offer)
+                .into_any_element(),
+        )
+    }
+
+    fn close_agent_view(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.thread.views.apply(command::Command::ViewClose { id: id.to_string() }).ok();
+        self.sync_view_docs(cx);
+        cx.notify();
     }
 
     fn diff_viewer(&self, lead: Option<AnyElement>, trail: Option<AnyElement>, cx: &mut Context<Self>) -> impl IntoElement + Styled + use<> {
@@ -4687,6 +4856,8 @@ impl Render for Reader {
             .text_color(foreground)
             .relative()
             .track_focus(&self.focus)
+            .on_key_down(cx.listener(|reader, _, _, _| reader.last_input = Instant::now()))
+            .on_scroll_wheel(cx.listener(|reader, _, _, _| reader.last_input = Instant::now()))
             .on_action(cx.listener(|reader, _: &ShowFinder, window, cx| reader.show_finder(window, cx)))
             .on_action(cx.listener(|reader, _: &ToggleTools, _, cx| reader.toggle_tools(cx)))
             .on_action(cx.listener(|reader, _: &ToggleThoughts, _, cx| reader.toggle_thoughts(cx)))

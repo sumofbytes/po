@@ -94,13 +94,10 @@ pub struct Views {
 }
 
 impl Views {
-    // The viewer's tab strip reads these in the change that draws the views.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn list(&self) -> &[AgentView] {
         &self.list
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn is_empty(&self) -> bool {
         self.list.is_empty()
     }
