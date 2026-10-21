@@ -2,7 +2,9 @@
 mod acp;
 mod agent;
 mod alert;
+mod command;
 mod config;
+mod control;
 mod dex;
 mod diff;
 mod fonts;
@@ -503,6 +505,8 @@ impl Project {
 /// One conversation with an agent: its messages, the process behind it and what is waiting to
 /// be sent to it.
 struct Thread {
+    /// Documents the agent put on screen through `po ctl`.
+    views: command::Views,
     /// Names the thread to the events of its agent while it isn't the one on screen.
     id: u64,
     /// It finished a turn while another thread was on screen.
@@ -862,6 +866,8 @@ struct Slot {
 }
 
 struct Reader {
+    /// How agents started from this window reach it; none where there is no socket.
+    control: Option<control::Control>,
     mode: Mode,
     /// The project on screen; its methods act on this one.
     project: Project,
@@ -996,6 +1002,7 @@ impl Reader {
         }
         let project = Self::build_project(root, pr, files, window, cx);
         let thread = Thread {
+            views: Default::default(),
             id: 0,
             unread: false,
             session: None,
@@ -1025,7 +1032,9 @@ impl Reader {
             selection: cx.new(|_| ui::markdown::Selection::default()),
             focus: cx.focus_handle(),
         };
+        let (control, requests) = control::start().unzip();
         let mut reader = Self {
+            control,
             mode: Mode::Source,
             project,
             project_id: 0,
@@ -1067,6 +1076,20 @@ impl Reader {
             save_pending: false,
             _subscriptions: subscriptions,
         };
+        if let Some(mut requests) = requests {
+            cx.spawn(async move |this, cx| {
+                while let Some(request) = requests.next().await {
+                    let answered = this.update(cx, |reader, cx| {
+                        let reply = reader.run_command(request.caller, request.command, cx);
+                        request.reply.send(reply).ok();
+                    });
+                    if answered.is_err() {
+                        break;
+                    }
+                }
+            })
+            .detach();
+        }
         reader.focus.focus(window, cx);
         trace::mark("reader built");
         reader.refresh_tree(cx);
@@ -1684,6 +1707,33 @@ impl Reader {
 
     /// Browse (files) or Review (changes) in the viewer pane. If the pane was closed it opens wide,
     /// since looking at code or a diff wants room; if it is open its width is left as it was.
+    /// The one way a request from outside the window changes it. Views are the caller's own; the
+    /// layout is the user's, so only the thread on screen may move it.
+    fn run_command(&mut self, caller: command::Caller, command: command::Command, cx: &mut Context<Self>) -> command::Reply {
+        use command::{Command, Preset};
+        let command::Caller::Thread(id) = caller;
+        let reply = match command {
+            Command::LayoutPreset(preset) => self
+                .with_thread(id, |reader, visible| {
+                    if !visible {
+                        return Err("only the thread on screen can change the layout".to_string());
+                    }
+                    match preset {
+                        Preset::Browse => reader.show_viewer(Mode::Source, cx),
+                        Preset::Review => reader.show_viewer(Mode::Diff, cx),
+                        Preset::Chat => reader.show_chat(cx),
+                    }
+                    Ok(serde_json::json!({}))
+                })
+                .unwrap_or_else(|| Err("that thread is gone".into())),
+            views => self
+                .with_thread(id, |reader, _| reader.thread.views.apply(views))
+                .unwrap_or_else(|| Err("that thread is gone".into())),
+        };
+        cx.notify();
+        reply
+    }
+
     fn show_viewer(&mut self, mode: Mode, cx: &mut Context<Self>) {
         self.set_mode(mode, cx);
         self.open_viewer_wide(cx);
@@ -1898,7 +1948,8 @@ impl Reader {
             daemon: None,
         });
         self.thread.status = if resume { "listing sessions…" } else { "starting…" }.into();
-        match Client::spawn(&agent, &self.project.root, resume) {
+        let env = self.control.as_ref().map(|control| control.register(id)).unwrap_or_default();
+        match Client::spawn(&agent, &self.project.root, resume, &env) {
             Ok((client, mut events)) => {
                 self.thread.client = Some(client);
                 let handle = window.window_handle();
@@ -2186,6 +2237,7 @@ impl Reader {
             list: ListState::new(0, ListAlignment::Top, px(400.)),
             selection: cx.new(|_| ui::markdown::Selection::default()),
             focus: cx.focus_handle(),
+            views: Default::default(),
         }
     }
 
@@ -4753,6 +4805,16 @@ fn main() {
     // `po update` is a terminal command, not a window: it runs to completion and
     // exits before any GUI is set up (like `dex update`).
     let cli: Vec<String> = std::env::args().skip(1).collect();
+    if cli.first().is_some_and(|arg| arg == "ctl") {
+        match control::ctl(&cli[1..]) {
+            Ok(reply) => println!("{reply}"),
+            Err(error) => {
+                eprintln!("po ctl: {error:#}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
     if cli.len() == 1 && cli[0] == "update" {
         if std::path::Path::new("update").exists() {
             eprintln!("po-update: running self-update (use `po ./update` to open the local path 'update')");
