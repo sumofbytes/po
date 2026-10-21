@@ -38,7 +38,7 @@ use serde_json::Value;
 
 use gpui::{
     AnyElement, App, Pixels, TitlebarOptions, WindowControlArea, point, Bounds, Context, Entity, FontWeight, IntoElement, ListAlignment, ListState, ParentElement,
-    Render, SharedString, StyleRefinement, Styled, StyledText, Subscription, Task, Window, WindowBounds, WindowOptions, div, list,
+    Render, SharedString, StyleRefinement, Styled, StyledText, Subscription, Task, Window, WindowBackgroundAppearance, WindowBounds, WindowOptions, div, list,
     prelude::*, px, rems, size, KeyBinding,
 };
 
@@ -3338,11 +3338,11 @@ impl Reader {
                 .child(div().min_w_0().truncate().child(title.to_string()))
                 .into_any_element()
         };
+        // No background of its own: it sits in the left sidebar, which paints one.
         div()
             .size_full()
             .flex()
             .flex_col()
-            .bg(colors.sidebar)
             .child(header_row(
                 title,
                 div()
@@ -3519,7 +3519,8 @@ impl Reader {
         let colors = cx.global::<Palette>();
         // Live agents sit above everything, in a pane of their own whose height is dragged, so
         // that the projects below don't move when an agent starts or stops.
-        div().size_full().bg(colors.sidebar).child(vsplit(&self.live_split).fixed_top((!any_live).then(|| rems(LIVE_EMPTY_REMS))).top(live).bottom(projects))
+        let pane = div().size_full().bg(colors.sidebar).child(vsplit(&self.live_split).fixed_top((!any_live).then(|| rems(LIVE_EMPTY_REMS))).top(live).bottom(projects));
+        floating(pane, cx)
     }
 
     /// The threads that are asking, finished unseen or running, across every project, with a
@@ -3605,12 +3606,12 @@ impl Reader {
     /// The viewer or the diff viewer, as the project's mode says.
     fn pane(&self, lead: Option<AnyElement>, trail: Option<AnyElement>, cx: &mut Context<Self>) -> AnyElement {
         match self.mode {
-            Mode::Source => self.viewer(lead, trail, cx).into_any_element(),
-            Mode::Diff => self.diff_viewer(lead, trail, cx).into_any_element(),
+            Mode::Source => floating(self.viewer(lead, trail, cx), cx),
+            Mode::Diff => floating(self.diff_viewer(lead, trail, cx), cx),
         }
     }
 
-    fn diff_viewer(&self, lead: Option<AnyElement>, trail: Option<AnyElement>, cx: &mut Context<Self>) -> impl IntoElement {
+    fn diff_viewer(&self, lead: Option<AnyElement>, trail: Option<AnyElement>, cx: &mut Context<Self>) -> impl IntoElement + Styled + use<> {
         let colors = cx.global::<Palette>();
         let Some(path) = self.project.picked.clone() else {
             return div()
@@ -3739,7 +3740,7 @@ impl Reader {
             .child(div().flex_1().min_h_0().border_color(border).child(body))
     }
 
-    fn viewer(&self, lead: Option<AnyElement>, trail: Option<AnyElement>, cx: &mut Context<Self>) -> impl IntoElement {
+    fn viewer(&self, lead: Option<AnyElement>, trail: Option<AnyElement>, cx: &mut Context<Self>) -> impl IntoElement + Styled + use<> {
         let background = cx.global::<Palette>().background;
         let title = self.project.current.clone().unwrap_or_else(|| "No file open".into());
         let doc = self.project.doc.as_ref().filter(|_| self.rendered);
@@ -3787,13 +3788,12 @@ impl Reader {
     fn markdown_view(&self, doc: &Doc, cx: &mut Context<Self>) -> AnyElement {
         doc.selection.update(cx, |s, _| s.begin_frame());
         let (chunks, selection, focus) = (doc.chunks.clone(), doc.selection.clone(), doc.focus.clone());
-        let background = cx.global::<Palette>().background;
+        // No background of its own: the viewer around it paints one.
         div()
             .id("markdown-file")
             .key_context("Markdown")
             .track_focus(&focus)
             .size_full()
-            .bg(background)
             .on_action(cx.listener({
                 let (chunks, selection) = (chunks.clone(), selection.clone());
                 move |_, _: &ui::markdown::Copy, _, cx| {
@@ -3909,7 +3909,7 @@ impl Reader {
             .collect()
     }
 
-    fn agent_panel(&self, lead: Option<AnyElement>, trail: Option<AnyElement>, cx: &mut Context<Self>) -> impl IntoElement {
+    fn agent_panel(&self, lead: Option<AnyElement>, trail: Option<AnyElement>, cx: &mut Context<Self>) -> impl IntoElement + Styled + use<> {
         let this = cx.entity();
         self.thread.selection.update(cx, |s, _| s.begin_frame());
         // Only the messages in view are built and laid out, however long the thread gets.
@@ -4165,6 +4165,7 @@ impl Reader {
                         .border(px(BOX_BORDER))
                         .border_color(colors.border)
                         .bg(colors.sidebar)
+                        .when_some(colors.glass, |this, glass| this.border_color(glass.rim).shadow(glass.shadow()))
                         .when(!queued.is_empty(), |this| {
                             this.child(div().flex().flex_col().gap_1().pb_1().border_b_1().border_color(border).children(queued))
                         })
@@ -4515,6 +4516,22 @@ fn pane_header(title: &str, right: impl IntoElement, lead: Option<AnyElement>, t
     )
 }
 
+/// `pane` as a sheet of glass floating apart from its neighbours when the glass look is on,
+/// else as it is. Each pane keeps half the gap; the window's padding makes up the other half at
+/// its edges. gpui clips to rectangles, not rounded corners, so the pane leaves its bottom
+/// corners' height empty: a row tinted down there would poke square past the rim.
+fn floating(pane: impl IntoElement + Styled, cx: &App) -> AnyElement {
+    let colors = cx.global::<Palette>();
+    match colors.glass {
+        Some(glass) => div()
+            .size_full()
+            .p(glass.inset / 2.)
+            .child(pane.rounded(colors.radius_xl).pb(colors.radius_xl).border_1().border_color(glass.rim).shadow(glass.shadow()).overflow_hidden())
+            .into_any_element(),
+        None => pane.into_any_element(),
+    }
+}
+
 /// A pane header: `left` and `right` on a bar with a line under it.
 fn header_row(left: impl IntoElement, right: impl IntoElement, cx: &App) -> impl IntoElement {
     let colors = cx.global::<Palette>();
@@ -4557,7 +4574,8 @@ impl Render for Reader {
             }
         }
         let colors = cx.global::<Palette>();
-        let (background, foreground) = (colors.background, colors.foreground);
+        let foreground = colors.foreground;
+        let glass = colors.glass;
         let (left_open, side_open, swapped, agent_open) = (self.left_open, self.side_open, self.swapped, self.agent_open);
         // The window's controls live in the headers of the panes at its edges: the sidebar toggle
         // at the left of the leftmost pane, the viewer toggle (and the swap, while the viewer is
@@ -4589,23 +4607,23 @@ impl Render for Reader {
         // With the viewer open they can trade places; with it closed the conversation is the middle
         // either way, and has both controls.
         let (middle, side) = if !side_open {
-            (self.agent_panel(Some(sidebar_toggle), Some(trailing), cx).into_any_element(), self.pane(None, None, cx))
+            (floating(self.agent_panel(Some(sidebar_toggle), Some(trailing), cx), cx), self.pane(None, None, cx))
         } else if swapped {
             // The conversation sits on the right; with it collapsed the viewer keeps the middle
             // and carries both controls.
             if agent_open {
-                (self.pane(Some(sidebar_toggle), None, cx), self.agent_panel(None, Some(trailing), cx).into_any_element())
+                (self.pane(Some(sidebar_toggle), None, cx), floating(self.agent_panel(None, Some(trailing), cx), cx))
             } else {
                 (self.pane(Some(sidebar_toggle), Some(trailing), cx), self.pane(None, None, cx))
             }
         } else {
-            (self.agent_panel(Some(sidebar_toggle), None, cx).into_any_element(), self.pane(None, Some(trailing), cx))
+            (floating(self.agent_panel(Some(sidebar_toggle), None, cx), cx), self.pane(None, Some(trailing), cx))
         };
         div()
             .size_full()
             .flex()
             .flex_col()
-            .bg(background)
+            // No background of its own: the `Shell` around it paints the window's.
             .text_color(foreground)
             .relative()
             .track_focus(&self.focus)
@@ -4631,7 +4649,7 @@ impl Render for Reader {
                 this.child(div().h(TITLEBAR_HEIGHT).flex_none().window_control_area(WindowControlArea::Drag))
             })
             .child(
-                div().flex_1().min_h_0().child(
+                div().flex_1().min_h_0().when_some(glass, |this, glass| this.p(glass.inset / 2.)).child(
                     sidebars(&self.sidebars)
                         .left(left_open, px(220.0)..px(520.0), self.left_sidebar(cx))
                         .center(middle)
@@ -4694,18 +4712,27 @@ fn detach(root: &Path, command: &Option<String>, pr: &Option<pr::Pr>) -> std::io
 /// The window's root: sets the base font, size and colors everything inside inherits.
 struct Shell {
     child: Entity<Reader>,
+    /// What the window was last told to show behind its contents.
+    appearance: WindowBackgroundAppearance,
 }
 
 impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let palette = cx.global::<Palette>();
         window.set_rem_size(palette.font_size);
+        // Glass shows the desktop through the window, blurred where the platform can.
+        let appearance =
+            if palette.glass.is_some() { WindowBackgroundAppearance::Blurred } else { WindowBackgroundAppearance::Opaque };
+        if appearance != self.appearance {
+            self.appearance = appearance;
+            window.set_background_appearance(appearance);
+        }
         div()
             .id("root")
             .relative()
             .size_full()
             .font_family(palette.font_family.clone())
-            .bg(palette.background)
+            .bg(palette.window)
             .text_color(palette.foreground)
             .child(self.child.clone())
     }
@@ -4840,7 +4867,7 @@ fn main() {
                 trace::mark("theme applied");
                 theme::watch(cx);
                 let reader = cx.new(|cx| Reader::new(root, pr, command, prefetch, window, cx));
-                cx.new(|_| Shell { child: reader })
+                cx.new(|_| Shell { child: reader, appearance: WindowBackgroundAppearance::Opaque })
             },
         )
         .expect("window");

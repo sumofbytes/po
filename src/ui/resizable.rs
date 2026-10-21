@@ -340,7 +340,9 @@ impl RenderOnce for VSplit {
             (state.top.map(|top| fitted_top(top, state.bounds.size.height)), state.dragging, state.collapsed)
         };
         let palette = cx.global::<Palette>();
-        let color = if dragging { palette.resize_handle_active } else { palette.resize_handle };
+        // A plain border, not the sidebars' handle colour, which glass clears: this line divides
+        // the two halves of one pane.
+        let color = if dragging { palette.resize_handle_active } else { palette.border };
         let tracker = self.state.clone();
         let grab = self.state.clone();
         let handle = div()
