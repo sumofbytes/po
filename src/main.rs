@@ -906,7 +906,6 @@ struct Reader {
     /// Widths of the left side and the viewer pane.
     sidebars: Entity<SidebarsState>,
     left_open: bool,
-    /// The boundary between the projects and the explorer on the left.
     /// The left side's sections: live agents, projects, explorer.
     sections: Entity<StackState>,
     /// The viewer pane (a file or a diff) on the right is shown.
@@ -2301,6 +2300,8 @@ impl Reader {
                     sections.set_size(section, px(height));
                 }
             }
+            // A section is never folded if it is the last open one, so a layout that folds all
+            // three, which is never saved, keeps the last open.
             for (section, folded) in [(LIVE, saved.live_folded), (PROJECTS, saved.projects_folded), (EXPLORER, saved.explorer_collapsed)] {
                 sections.set_folded(section, folded);
             }
@@ -3521,7 +3522,8 @@ impl Reader {
         live.sort_by_key(|(rank, _, thread)| (*rank, thread.id));
         let count = live.len();
         let folded = self.sections.read(cx).folded(LIVE);
-        let (glyph, tint) = live.first().map_or(("", muted), |(_, _, thread)| thread.activity().mark(colors));
+        // Folded, the most pressing thread's mark stays in view.
+        let (glyph, tint) = if folded { live.first().map_or(("", muted), |(_, _, thread)| thread.activity().mark(colors)) } else { ("", muted) };
         let (active_project, active_thread) = (self.project_id, self.thread.id);
         let mut rows = div().id("live-list").size_full().overflow_y_scroll().flex().flex_col().gap_px().p_1p5();
         if live.is_empty() {
@@ -3570,8 +3572,7 @@ impl Reader {
             .flex_col()
             .child(header_row(
                 title,
-                // Folded, the most pressing thread's mark stays in view.
-                div().text_sm().text_color(tint).child(if folded { glyph } else { "" }),
+                div().text_sm().text_color(tint).child(glyph),
                 cx,
             ))
             .child(div().flex_1().min_h_0().child(rows))

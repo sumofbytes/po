@@ -328,10 +328,15 @@ impl Stack {
     }
 }
 
-/// The height an open section gets for a saved `size`: the most that leaves each of the `after`
-/// sections under it their minimum in a stack of `height`. A stack not yet measured keeps `size`.
-fn fitted_size(size: Pixels, height: Pixels, after: usize) -> Pixels {
-    if height <= px(0.) { size } else { size.min((height - MIN_SECTION * after as f32).max(MIN_SECTION)) }
+/// The room the sections after `section` need: their header when folded, else their minimum.
+fn room_below(folded: &[bool], section: usize, folded_height: Pixels) -> Pixels {
+    folded[section + 1..].iter().map(|folded| if *folded { folded_height } else { MIN_SECTION }).fold(Pixels::default(), |sum, height| sum + height)
+}
+
+/// The height an open section gets for a saved `size`: the most that leaves `below` for the
+/// sections under it in a stack of `height`. A stack not yet measured keeps `size`.
+fn fitted_size(size: Pixels, height: Pixels, below: Pixels) -> Pixels {
+    if height <= px(0.) { size } else { size.min((height - below).max(MIN_SECTION)) }
 }
 
 /// The height a drag to `y` gives a section that begins at `top`, leaving `below` for the
@@ -347,7 +352,6 @@ impl RenderOnce for Stack {
             let state = self.state.read(cx);
             (state.sizes.clone(), state.folded.clone(), state.dragging, state.bounds.size.height)
         };
-        let count = self.sections.len();
         let folded_height = window.rem_size() * FOLDED_REMS;
         let palette = cx.global::<Palette>();
         // A plain border for the line at rest, not the sidebars' handle colour, which glass
@@ -379,10 +383,11 @@ impl RenderOnce for Stack {
                                 }
                                 moving.update(cx, |state, cx| {
                                     let Some(section) = state.dragging else { return };
-                                    let below = state.folded[section + 1..]
-                                        .iter()
-                                        .map(|folded| if *folded { folded_height } else { MIN_SECTION })
-                                        .fold(Pixels::default(), |sum, height| sum + height);
+                                    // A section folded since the drag began has nothing to resize.
+                                    if state.folded[section] {
+                                        return;
+                                    }
+                                    let below = room_below(&state.folded, section, folded_height);
                                     let height = dragged_height(event.position.y, state.tops[section], state.bounds, below);
                                     state.sizes[section] = Some(height);
                                     cx.notify();
@@ -404,12 +409,14 @@ impl RenderOnce for Stack {
             );
         for (ix, element) in self.sections.into_iter().enumerate() {
             let measure = self.state.clone();
-            let mut section = div().relative().overflow_hidden().child(
+            // The content clips, not the section, so that a handle can reach above its edge.
+            let mut section = div().relative().child(
                 canvas(move |bounds, _, cx| measure.update(cx, |state, _| state.tops[ix] = bounds.top()), |_, _, _, _| {})
                     .absolute()
                     .size_full(),
             );
-            let pinned = self.fixed.filter(|(pinned, _)| *pinned == ix && !folded[ix]).map(|(_, height)| height);
+            // The last open section fills the stack, so it is never held at a height.
+            let pinned = self.fixed.filter(|(pinned, _)| *pinned == ix && !folded[ix] && Some(ix) != last_open).map(|(_, height)| height);
             if let Some(height) = pinned {
                 section = section.flex_none().h(height);
             } else if folded[ix] {
@@ -420,11 +427,11 @@ impl RenderOnce for Stack {
             } else {
                 section = section.flex_grow(0.).flex_shrink(1.).min_h(MIN_SECTION);
                 section = match sizes[ix] {
-                    Some(height) => section.flex_basis(fitted_size(height, bounds_height, count - 1 - ix)),
+                    Some(height) => section.flex_basis(fitted_size(height, bounds_height, room_below(&folded, ix, folded_height))),
                     None => section.flex_basis(gpui::relative(0.5)),
                 };
             }
-            section = section.child(div().size_full().child(element));
+            section = section.child(div().size_full().overflow_hidden().child(element));
             // The boundary with the open section above sets that section's height.
             if let (false, Some(resized), None) = (folded[ix], above, pinned) {
                 let grab = self.state.clone();
@@ -463,7 +470,7 @@ impl RenderOnce for Stack {
 
 #[cfg(test)]
 mod tests {
-    use super::{MIN_CENTER, MIN_SECTION, Side, SidebarsState, StackState, dragged_height, dragged_width, fitted_size};
+    use super::{MIN_CENTER, MIN_SECTION, Side, SidebarsState, StackState, dragged_height, dragged_width, fitted_size, room_below};
     use gpui::{Bounds, point, px, size};
 
     #[test]
@@ -493,10 +500,19 @@ mod tests {
 
     #[test]
     fn a_saved_height_is_fitted_to_the_stack() {
-        assert_eq!(fitted_size(px(900.), px(800.), 2), px(800.) - MIN_SECTION * 2.);
-        assert_eq!(fitted_size(px(300.), px(800.), 2), px(300.));
-        assert_eq!(fitted_size(px(900.), px(100.), 2), MIN_SECTION);
-        assert_eq!(fitted_size(px(900.), px(0.), 2), px(900.));
+        let below = MIN_SECTION * 2.;
+        assert_eq!(fitted_size(px(900.), px(800.), below), px(800.) - below);
+        assert_eq!(fitted_size(px(300.), px(800.), below), px(300.));
+        assert_eq!(fitted_size(px(900.), px(100.), below), MIN_SECTION);
+        assert_eq!(fitted_size(px(900.), px(0.), below), px(900.));
+    }
+
+    #[test]
+    fn folded_sections_below_need_only_their_header() {
+        let header = px(44.);
+        assert_eq!(room_below(&[false, false, false], 0, header), MIN_SECTION * 2.);
+        assert_eq!(room_below(&[false, false, true], 0, header), MIN_SECTION + header);
+        assert_eq!(room_below(&[false, false, true], 2, header), px(0.));
     }
 
     #[test]
