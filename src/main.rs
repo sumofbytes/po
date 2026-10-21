@@ -414,6 +414,8 @@ fn tool_result(update: &Value) -> String {
 
 /// The height, in pixels, the live agents list starts with.
 const LIVE_HEIGHT: f32 = 136.0;
+/// The height of the live pane while it has no agents to list: its header and a line.
+const LIVE_EMPTY_REMS: f32 = 5.0;
 
 /// What the sidebar lists and the viewer shows.
 #[derive(Clone, Copy, PartialEq)]
@@ -714,9 +716,7 @@ impl Activity {
             Activity::Unread => ("●", colors.added),
         }
     }
-}
 
-impl Activity {
     /// Something the user may want to look at: not idle. Lower ranks come first in the live list,
     /// so a question comes before a finished turn, and both before work still going.
     fn live_rank(self) -> Option<u8> {
@@ -730,29 +730,9 @@ impl Activity {
 }
 
 impl Thread {
-    /// What it is doing, in a line for the live list: the question it waits on, the tool it is
-    /// running, or the last thing it said.
+    /// What it is doing, in a line for the live list.
     fn preview(&self) -> String {
-        if let Some(Msg::Agent(blocks)) = self.messages.last() {
-            if let Some(ask) = blocks.iter().find_map(|b| match b {
-                Block::Permission(ask) if ask.answered.is_none() => Some(ask),
-                _ => None,
-            }) {
-                return format!("Approve: {}", ask.title);
-            }
-            for block in blocks.iter().rev() {
-                match block {
-                    Block::Tool(tool) if tool.status == Step::Working => return tool.title.clone(),
-                    Block::Text(text) => {
-                        if let Some(line) = text.lines().rev().find(|line| !line.trim().is_empty()) {
-                            return line.trim().to_string();
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-        if self.busy { "Working…".into() } else { String::new() }
+        preview_of(&self.messages, self.busy)
     }
 
     fn activity(&self) -> Activity {
@@ -3535,16 +3515,17 @@ impl Reader {
                 div().px_3().py_1().text_xs().text_color(muted).max_h(rems(5.)).overflow_hidden().child(text)
             }))
             .child(div().flex_1().min_h_0().child(vsplit(&self.left_split).top(tree).bottom(div().size_full().child(explorer))));
-        let live = self.live_section(&views, cx);
+        let (live, any_live) = self.live_section(&views, cx);
         let colors = cx.global::<Palette>();
         // Live agents sit above everything, in a pane of their own whose height is dragged, so
         // that the projects below don't move when an agent starts or stops.
-        div().size_full().bg(colors.sidebar).child(vsplit(&self.live_split).top(live).bottom(projects))
+        div().size_full().bg(colors.sidebar).child(vsplit(&self.live_split).fixed_top((!any_live).then(|| rems(LIVE_EMPTY_REMS))).top(live).bottom(projects))
     }
 
     /// The threads that are asking, finished unseen or running, across every project, with a
     /// line of what each is doing. Jumping to one is a click.
-    fn live_section(&self, views: &[View<'_>], cx: &mut Context<Self>) -> AnyElement {
+    /// Also whether there are any, since the pane folds to its header when there are none.
+    fn live_section(&self, views: &[View<'_>], cx: &mut Context<Self>) -> (AnyElement, bool) {
         let colors = cx.global::<Palette>();
         let (hover, selected, muted, foreground, radius) =
             (colors.list_hover, colors.list_selected, colors.muted_foreground, colors.foreground, colors.radius);
@@ -3592,7 +3573,7 @@ impl Reader {
                     ),
             );
         }
-        div()
+        let section = div()
             .size_full()
             .flex()
             .flex_col()
@@ -3607,7 +3588,8 @@ impl Reader {
                 cx,
             ))
             .child(div().flex_1().min_h_0().child(rows))
-            .into_any_element()
+            .into_any_element();
+        (section, count > 0)
     }
 
     /// Folds the explorer on the agents view down to its header, or unfolds it to the height it
@@ -4866,6 +4848,34 @@ fn main() {
     });
 }
 
+/// What a thread is doing, in a line for the live list: the question it waits on, the tool it is
+/// running, or the last thing it said.
+fn preview_of(messages: &[Msg], busy: bool) -> String {
+    if let Some(Msg::Agent(blocks)) = messages.last() {
+        if let Some(ask) = blocks.iter().find_map(|b| match b {
+            Block::Permission(ask) if ask.answered.is_none() => Some(ask),
+            _ => None,
+        }) {
+            return format!("Approve: {}", ask.title);
+        }
+        // A tool still going is the latest thing, whatever text came after it.
+        if let Some(tool) = blocks.iter().rev().find_map(|b| match b {
+            Block::Tool(tool) if tool.status == Step::Working => Some(tool),
+            _ => None,
+        }) {
+            return tool.title.clone();
+        }
+        for block in blocks.iter().rev() {
+            if let Block::Text(text) = block
+                && let Some(line) = text.lines().rev().find(|line| !line.trim().is_empty())
+            {
+                return line.trim().to_string();
+            }
+        }
+    }
+    if busy { "Working…".into() } else { String::new() }
+}
+
 #[cfg(test)]
 mod tests {
     fn thought_flag(b: &mut Block) -> Option<&mut bool> {
@@ -4887,7 +4897,7 @@ mod tests {
         assert_eq!(toggle_all(&mut vec![Msg::User("x".into())], thought_flag), None);
     }
 
-    use super::{Activity, Block, Msg, PermissionOption, language, toggle_all, match_files, primary_option, syntax};
+    use super::{Activity, Block, Msg, PermissionOption, Step, ToolBlock, preview_of, language, toggle_all, match_files, primary_option, syntax};
 
     #[test]
     fn file_matches_rank_names_before_paths() {
@@ -4948,6 +4958,25 @@ mod tests {
     fn names_only_fall_back_to_the_first_allow() {
         let options = vec![option("Allow once", ""), option("Allow for session", ""), option("Deny", "")];
         assert_eq!(primary_option(&options), Some(0));
+    }
+
+    fn tool(title: &str, status: Step) -> Block {
+        Block::Tool(ToolBlock { id: String::new(), title: title.into(), status, open: false, arguments: String::new(), result: String::new(), path: None })
+    }
+
+    #[test]
+    fn a_running_tool_is_the_preview_even_when_text_follows_it() {
+        let messages = vec![Msg::Agent(vec![tool("Run tests", Step::Working), Block::Text("Looking at the output\n".into())])];
+        assert_eq!(preview_of(&messages, true), "Run tests");
+    }
+
+    #[test]
+    fn the_preview_falls_back_to_the_last_line_then_to_working() {
+        let said = vec![Msg::Agent(vec![tool("Read", Step::Done), Block::Text("first\n\nlast line  \n\n".into())])];
+        assert_eq!(preview_of(&said, true), "last line");
+        let silent = vec![Msg::Agent(vec![tool("Read", Step::Done)])];
+        assert_eq!(preview_of(&silent, true), "Working…");
+        assert_eq!(preview_of(&silent, false), "");
     }
 
     #[test]
