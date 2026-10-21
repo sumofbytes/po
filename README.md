@@ -88,6 +88,29 @@ and waits for you to choose **Run it**. Your answer is kept for that exact comma
 command asks again. A command you pass with `--agent` / `PO_AGENT` is yours, so it is not asked
 about; a value that is an agent's `id` picks that agent, and its command is checked as above.
 
+#### MCP servers
+
+`mcp_servers` in `config.json` lists [MCP](https://modelcontextprotocol.io) servers that
+`po` hands to every ACP agent session it starts or resumes, so each agent gets the same
+extra tools:
+
+```json
+{ "mcp_servers": [
+  { "name": "fs", "command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "."], "env": { "KEY": "value" } }
+] }
+```
+
+Stdio servers only. `name` and `command` are required; `args` and `env` (an object) are
+optional, and `command` is not split further. An entry missing `name` or `command`, a repeated
+`name`, or an `args` or `env` value of the wrong type is logged and skipped. The list is read
+when a session starts, so a change applies to new and resumed threads, not to ones already
+running. This does not apply to a `daemon` agent.
+
+The agent starts the server, but it runs as you, so a server is treated like an agent command:
+the first time one is about to be handed to an agent, `po` shows its command line and waits for
+**Run it**. The answer is kept for that command, arguments and `env` (not the `name`), and
+changing any of them asks again. A server you decline is left out until `po` is restarted.
+
 #### Steering and follow-ups (dex daemon)
 
 ACP has no way to add to a turn that is already running, so with an ACP agent a

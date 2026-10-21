@@ -93,6 +93,132 @@ pub fn agents(config: &Value) -> Vec<Agent> {
     agents
 }
 
+/// A stdio MCP server from the config's `mcp_servers`, which an agent is asked to start.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct McpServer {
+    pub name: String,
+    pub command: String,
+    pub args: Vec<String>,
+    pub env: Vec<(String, String)>,
+}
+
+impl McpServer {
+    /// What the user is asked to approve: the command line, which is what will run.
+    pub fn line(&self) -> String {
+        std::iter::once(self.command.as_str()).chain(self.args.iter().map(String::as_str)).collect::<Vec<_>>().join(" ")
+    }
+
+    /// The server as ACP's `mcpServers` entry.
+    fn acp(&self) -> Value {
+        let env: Vec<Value> = self.env.iter().map(|(name, value)| serde_json::json!({ "name": name, "value": value })).collect();
+        serde_json::json!({ "name": self.name, "command": self.command, "args": self.args, "env": env })
+    }
+
+    /// What an approval is for: everything that decides what runs, not the name.
+    fn approval(&self) -> Value {
+        serde_json::json!({ "mcp": { "command": self.command, "args": self.args, "env": self.env } })
+    }
+}
+
+/// The servers of the config's `mcp_servers`. An entry that doesn't parse is logged and skipped,
+/// so one typo doesn't take the rest away; so is a second entry with a name already used.
+pub fn mcp_entries(config: &Value) -> Vec<McpServer> {
+    let mut servers: Vec<McpServer> = Vec::new();
+    for entry in config["mcp_servers"].as_array().into_iter().flatten() {
+        let (Some(name), Some(command)) = (entry["name"].as_str(), entry["command"].as_str()) else {
+            log::warn!("mcp_servers: an entry needs a name and a command: {entry}");
+            continue;
+        };
+        if servers.iter().any(|known| known.name == name) {
+            log::warn!("mcp_servers: `{name}` is listed twice; only the first is used");
+            continue;
+        }
+        let mut args = Vec::new();
+        match &entry["args"] {
+            Value::Null => {}
+            Value::Array(list) => {
+                for item in list {
+                    match item.as_str() {
+                        Some(arg) => args.push(arg.to_string()),
+                        None => log::warn!("mcp_servers: `{name}`: an argument is not a string and is skipped: {item}"),
+                    }
+                }
+            }
+            other => log::warn!("mcp_servers: `{name}`: `args` is not a list and is ignored: {other}"),
+        }
+        let mut env = Vec::new();
+        match &entry["env"] {
+            Value::Null => {}
+            Value::Object(map) => {
+                for (key, value) in map {
+                    match value.as_str() {
+                        Some(value) => env.push((key.clone(), value.to_string())),
+                        None => log::warn!("mcp_servers: `{name}`: `env` value for {key} is not a string and is skipped: {value}"),
+                    }
+                }
+            }
+            other => log::warn!("mcp_servers: `{name}`: `env` is not an object and is ignored: {other}"),
+        }
+        servers.push(McpServer { name: name.to_string(), command: command.to_string(), args, env });
+    }
+    servers
+}
+
+/// Servers the user said no to for this run, so that Po doesn't ask again until it is restarted.
+static DECLINED: std::sync::Mutex<Vec<Value>> = std::sync::Mutex::new(Vec::new());
+
+fn declined(server: &McpServer) -> bool {
+    DECLINED.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).contains(&server.approval())
+}
+
+fn approved_mcp(path: &Path, server: &McpServer) -> bool {
+    let wanted = server.approval();
+    approved_this_run_value(&wanted) || read_json(path).and_then(|list| list.as_array().map(|list| list.contains(&wanted))).unwrap_or(false)
+}
+
+/// The config's servers that Po has not been told it may hand to an agent, and the user has not
+/// declined this run. A server is code the agent runs as the user, like an agent's own command.
+pub fn unapproved_mcp(config: &Value) -> Vec<McpServer> {
+    let path = approvals_path();
+    mcp_entries(config).into_iter().filter(|server| !approved_mcp(&path, server) && !declined(server)).collect()
+}
+
+/// The config's `mcp_servers` that are approved, as ACP's `mcpServers` list for a new or resumed
+/// session. The others are left out and say so in the log.
+pub fn mcp_servers(config: &Value) -> Value {
+    let path = approvals_path();
+    let servers = mcp_entries(config).into_iter().filter(|server| {
+        let approved = approved_mcp(&path, server);
+        if !approved {
+            log::info!("mcp_servers: `{}` is not approved, so it is not given to the agent", server.name);
+        }
+        approved
+    });
+    Value::Array(servers.map(|server| server.acp()).collect())
+}
+
+/// Records that the user approved handing `servers` to agents, for this run and, if the file can be
+/// written, the next ones.
+pub fn approve_mcp(servers: &[McpServer]) {
+    let path = approvals_path();
+    for server in servers {
+        approve_value_this_run(server.approval());
+        if let Err(error) = approve_value_in(&path, server.approval()) {
+            log::error!("{}: {error}; the approval holds until Po is closed", path.display());
+        }
+    }
+}
+
+/// Leaves `servers` out for the rest of this run.
+pub fn decline_mcp(servers: &[McpServer]) {
+    let mut declined = DECLINED.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    for server in servers {
+        if !declined.contains(&server.approval()) {
+            declined.push(server.approval());
+        }
+    }
+}
+
 /// Whether Po may run `agent` without asking: it is one of the bundled agents as shipped, the user
 /// named it on the command line, or they approved this exact command before. A command that came
 /// from `config.json` or changed there is asked about, so editing the config (or something editing
@@ -106,13 +232,21 @@ pub fn trusted(agent: &Agent) -> bool {
 static THIS_RUN: std::sync::Mutex<Vec<Value>> = std::sync::Mutex::new(Vec::new());
 
 fn approved_this_run(agent: &Agent) -> bool {
-    THIS_RUN.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).contains(&entry(agent))
+    approved_this_run_value(&entry(agent))
+}
+
+fn approved_this_run_value(wanted: &Value) -> bool {
+    THIS_RUN.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).contains(wanted)
 }
 
 fn approve_this_run(agent: &Agent) {
+    approve_value_this_run(entry(agent));
+}
+
+fn approve_value_this_run(value: Value) {
     let mut approved = THIS_RUN.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    if !approved.contains(&entry(agent)) {
-        approved.push(entry(agent));
+    if !approved.contains(&value) {
+        approved.push(value);
     }
 }
 
@@ -149,6 +283,10 @@ fn approved_in(path: &Path, agent: &Agent) -> bool {
 /// crash can't leave half of one. A file that isn't a list is left alone rather than replaced,
 /// since it may hold approvals that a person can still recover.
 fn approve_in(path: &Path, agent: &Agent) -> std::io::Result<()> {
+    approve_value_in(path, entry(agent))
+}
+
+fn approve_value_in(path: &Path, wanted: Value) -> std::io::Result<()> {
     let invalid = |why: &str| std::io::Error::new(std::io::ErrorKind::InvalidData, why.to_string());
     let mut list = match std::fs::read_to_string(path) {
         Ok(text) => match serde_json::from_str::<Value>(&text) {
@@ -158,7 +296,6 @@ fn approve_in(path: &Path, agent: &Agent) -> std::io::Result<()> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
         Err(error) => return Err(error),
     };
-    let wanted = entry(agent);
     if list.contains(&wanted) {
         return Ok(());
     }
@@ -226,6 +363,69 @@ mod tests {
         assert!(!shipped(&agent("claude-agent-acp --other")));
         assert!(!shipped(&agent("./my-agent")));
         assert!(trusted(&Agent { vouched: true, ..agent("./mine") }));
+    }
+
+    fn server(name: &str, command: &str) -> McpServer {
+        McpServer { name: name.into(), command: command.into(), args: vec![], env: vec![] }
+    }
+
+    #[test]
+    fn mcp_entries_become_acp_stdio_servers() {
+        let config = serde_json::json!({ "mcp_servers": [
+            { "name": "fs", "command": "npx", "args": ["-y", "server-fs", "."], "env": { "TOKEN": "x" } },
+            { "name": "bare", "command": "tool" },
+        ] });
+        let servers = mcp_entries(&config);
+        assert_eq!(servers.len(), 2);
+        assert_eq!(
+            servers[0].acp(),
+            serde_json::json!({ "name": "fs", "command": "npx", "args": ["-y", "server-fs", "."], "env": [{ "name": "TOKEN", "value": "x" }] })
+        );
+        assert_eq!(servers[1].acp(), serde_json::json!({ "name": "bare", "command": "tool", "args": [], "env": [] }));
+        assert_eq!(servers[0].line(), "npx -y server-fs .");
+    }
+
+    #[test]
+    fn mcp_entries_skip_what_does_not_parse_and_repeated_names() {
+        assert!(mcp_entries(&Value::Null).is_empty());
+        let config = serde_json::json!({ "mcp_servers": [
+            { "name": "no-command" },
+            { "command": "no-name" },
+            "text",
+            { "name": "ok", "command": "c", "args": ["a", 1], "env": { "N": 1, "S": "s" } },
+            { "name": "ok", "command": "other" },
+            { "name": "odd", "command": "c", "args": "not a list", "env": ["not", "an", "object"] },
+        ] });
+        let servers = mcp_entries(&config);
+        assert_eq!(servers.len(), 2);
+        assert_eq!(servers[0].args, vec!["a".to_string()]);
+        assert_eq!(servers[0].env, vec![("S".to_string(), "s".to_string())]);
+        assert_eq!(servers[0].command, "c");
+        assert!(servers[1].args.is_empty() && servers[1].env.is_empty());
+    }
+
+    #[test]
+    fn a_server_is_approved_for_what_it_runs_not_its_name() {
+        let path = std::env::temp_dir().join(format!("po-mcp-approvals-{}/approved.json", std::process::id()));
+        let fs = server("fs", "npx");
+        assert!(!approved_mcp(&path, &fs));
+        approve_value_in(&path, fs.approval()).unwrap();
+        assert!(approved_mcp(&path, &fs));
+        assert!(approved_mcp(&path, &server("renamed", "npx")));
+        assert!(!approved_mcp(&path, &server("fs", "other")));
+        assert!(!approved_mcp(&path, &McpServer { args: vec!["--more".into()], ..fs.clone() }));
+        assert!(!approved_mcp(&path, &McpServer { env: vec![("K".into(), "v".into())], ..fs }));
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn a_declined_server_is_not_asked_about_again_this_run() {
+        let config = serde_json::json!({ "mcp_servers": [{ "name": "d", "command": "po-test-declined-server" }] });
+        assert_eq!(unapproved_mcp(&config).len(), 1);
+        decline_mcp(&mcp_entries(&config));
+        assert!(unapproved_mcp(&config).is_empty());
+        // Declined is not approved: it stays out of what the agent gets.
+        assert_eq!(mcp_servers(&config), serde_json::json!([]));
     }
 
     #[test]
