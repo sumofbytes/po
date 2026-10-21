@@ -412,6 +412,11 @@ fn tool_result(update: &Value) -> String {
     out.join("\n")
 }
 
+/// The height, in pixels, the live agents list starts with.
+const LIVE_HEIGHT: f32 = 136.0;
+/// The height of the live pane while it has no agents to list: its header and a line.
+const LIVE_EMPTY_REMS: f32 = 5.0;
+
 /// What the sidebar lists and the viewer shows.
 #[derive(Clone, Copy, PartialEq)]
 enum Mode {
@@ -711,9 +716,25 @@ impl Activity {
             Activity::Unread => ("●", colors.added),
         }
     }
+
+    /// Something the user may want to look at: not idle. Lower ranks come first in the live list,
+    /// so a question comes before a finished turn, and both before work still going.
+    fn live_rank(self) -> Option<u8> {
+        match self {
+            Activity::Asking => Some(0),
+            Activity::Unread => Some(1),
+            Activity::Running => Some(2),
+            Activity::Idle => None,
+        }
+    }
 }
 
 impl Thread {
+    /// What it is doing, in a line for the live list.
+    fn preview(&self) -> String {
+        preview_of(&self.messages, self.busy)
+    }
+
     fn activity(&self) -> Activity {
         let asking = match self.messages.last() {
             Some(Msg::Agent(blocks)) => blocks.iter().any(|b| matches!(b, Block::Permission(ask) if ask.answered.is_none())),
@@ -882,6 +903,8 @@ struct Reader {
     left_open: bool,
     /// The boundary between the projects and the explorer on the left.
     left_split: Entity<VSplitState>,
+    /// The boundary between the live agents above and the projects and explorer below.
+    live_split: Entity<VSplitState>,
     /// The viewer pane (a file or a diff) on the right is shown.
     side_open: bool,
     /// The viewer is in the middle and the conversation on the right, instead of the reverse.
@@ -938,6 +961,11 @@ impl Reader {
                 .placeholder("Message the agent")
         });
         let left_split = cx.new(|_| VSplitState::new());
+        let live_split = cx.new(|_| {
+            let mut split = VSplitState::new();
+            split.set_top(px(LIVE_HEIGHT));
+            split
+        });
         let sidebars = cx.new(|_| SidebarsState::new(px(280.0), px(560.0)));
         let subscriptions = vec![
             // Switching modes unmounts whatever was focused (the explorer, the viewer), which
@@ -951,6 +979,11 @@ impl Reader {
             }),
             // Where the split was dragged to is kept, once the drag is over.
             cx.observe(&left_split, |reader, split, cx| {
+                if !split.read(cx).dragging() {
+                    reader.request_save(cx);
+                }
+            }),
+            cx.observe(&live_split, |reader, split, cx| {
                 if !split.read(cx).dragging() {
                     reader.request_save(cx);
                 }
@@ -1029,6 +1062,7 @@ impl Reader {
             sidebars,
             left_open: true,
             left_split,
+            live_split,
             side_open: true,
             swapped: false,
             agent_open: true,
@@ -2272,6 +2306,9 @@ impl Reader {
             self.left_split.update(cx, |split, _| split.set_top(px(height)));
         }
         self.left_split.update(cx, |split, _| split.set_collapsed(saved.explorer_collapsed));
+        if let Some(height) = saved.live_split {
+            self.live_split.update(cx, |split, _| split.set_top(px(height)));
+        }
         for state in saved.projects {
             let worktree = match state.worktree {
                 Some(spec) => {
@@ -2366,7 +2403,7 @@ impl Reader {
                 }
             })
             .collect();
-        workspace::Workspace { projects, viewer_open: self.side_open, agent_open: self.agent_open, swapped: self.swapped, agent: self.chosen_agent.clone(), split: self.left_split.read(cx).top().map(f32::from), explorer_collapsed: self.left_split.read(cx).collapsed(), left_width: Some(self.sidebars.read(cx).widths().0.into()), right_width: self.sidebars.read(cx).widths().1.map(f32::from) }
+        workspace::Workspace { projects, viewer_open: self.side_open, agent_open: self.agent_open, swapped: self.swapped, agent: self.chosen_agent.clone(), split: self.left_split.read(cx).top().map(f32::from), explorer_collapsed: self.left_split.read(cx).collapsed(), live_split: self.live_split.read(cx).top().map(f32::from), left_width: Some(self.sidebars.read(cx).widths().0.into()), right_width: self.sidebars.read(cx).widths().1.map(f32::from) }
     }
 
     /// Saves the workspace once the current change has settled, so that a thread that is
@@ -3454,11 +3491,10 @@ impl Reader {
             }
             tree = tree.child(group);
         }
-        let pane = div()
+        let projects = div()
             .size_full()
             .flex()
             .flex_col()
-            .bg(colors.sidebar)
             // The same kind of header as the explorer's below: a title, and what you can do here.
             .child(header_row(
                 div()
@@ -3479,7 +3515,82 @@ impl Reader {
                 div().px_3().py_1().text_xs().text_color(muted).max_h(rems(5.)).overflow_hidden().child(text)
             }))
             .child(div().flex_1().min_h_0().child(vsplit(&self.left_split).top(tree).bottom(div().size_full().child(explorer))));
+        let (live, any_live) = self.live_section(&views, cx);
+        let colors = cx.global::<Palette>();
+        // Live agents sit above everything, in a pane of their own whose height is dragged, so
+        // that the projects below don't move when an agent starts or stops.
+        let pane = div().size_full().bg(colors.sidebar).child(vsplit(&self.live_split).fixed_top((!any_live).then(|| rems(LIVE_EMPTY_REMS))).top(live).bottom(projects));
         floating(pane, cx)
+    }
+
+    /// The threads that are asking, finished unseen or running, across every project, with a
+    /// line of what each is doing. Jumping to one is a click.
+    /// Also whether there are any, since the pane folds to its header when there are none.
+    fn live_section(&self, views: &[View<'_>], cx: &mut Context<Self>) -> (AnyElement, bool) {
+        let colors = cx.global::<Palette>();
+        let (hover, selected, muted, foreground, radius) =
+            (colors.list_hover, colors.list_selected, colors.muted_foreground, colors.foreground, colors.radius);
+        let mut live: Vec<(u8, &View<'_>, &Thread)> = views
+            .iter()
+            .flat_map(|view| view.threads.iter().map(move |thread| (view, *thread)))
+            .filter_map(|(view, thread)| Some((thread.activity().live_rank()?, view, thread)))
+            .collect();
+        live.sort_by_key(|(rank, _, thread)| (*rank, thread.id));
+        let count = live.len();
+        let (active_project, active_thread) = (self.project_id, self.thread.id);
+        let mut rows = div().id("live-list").size_full().overflow_y_scroll().flex().flex_col().gap_px().p_1p5();
+        if live.is_empty() {
+            rows = rows.child(div().px_1p5().py_1().text_xs().text_color(muted).child("No active agents"));
+        }
+        for (_, view, thread) in live {
+            let (pid, tid) = (view.id, thread.id);
+            let (glyph, tint) = thread.activity().mark(colors);
+            let select = cx.entity();
+            let preview = thread.preview();
+            let detail = if preview.is_empty() { view.project.name() } else { format!("{} · {preview}", view.project.name()) };
+            let current = (pid, tid) == (active_project, active_thread);
+            rows = rows.child(
+                div()
+                    .id(("live-thread", tid as usize))
+                    .flex()
+                    .items_start()
+                    .gap_2()
+                    .px_1p5()
+                    .py_1()
+                    .rounded(radius)
+                    .cursor_pointer()
+                    .when(current, |row| row.bg(selected))
+                    .hover(move |row| row.bg(hover))
+                    .on_click(move |_, window, cx| select.update(cx, |reader, cx| reader.open_thread(pid, tid, window, cx)))
+                    .child(div().w(rems(1.)).flex_none().flex().justify_center().text_sm().text_color(tint).child(glyph))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .child(div().truncate().text_sm().text_color(foreground).child(thread.title()))
+                            .child(div().truncate().text_xs().text_color(muted).child(detail)),
+                    ),
+            );
+        }
+        let section = div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .child(header_row(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(div().text_sm().font_weight(FontWeight::MEDIUM).child("Live"))
+                    .child(div().text_xs().text_color(muted).child(count.to_string())),
+                div(),
+                cx,
+            ))
+            .child(div().flex_1().min_h_0().child(rows))
+            .into_any_element();
+        (section, count > 0)
     }
 
     /// Folds the explorer on the agents view down to its header, or unfolds it to the height it
@@ -4764,6 +4875,34 @@ fn main() {
     });
 }
 
+/// What a thread is doing, in a line for the live list: the question it waits on, the tool it is
+/// running, or the last thing it said.
+fn preview_of(messages: &[Msg], busy: bool) -> String {
+    if let Some(Msg::Agent(blocks)) = messages.last() {
+        if let Some(ask) = blocks.iter().find_map(|b| match b {
+            Block::Permission(ask) if ask.answered.is_none() => Some(ask),
+            _ => None,
+        }) {
+            return format!("Approve: {}", ask.title);
+        }
+        // A tool still going is the latest thing, whatever text came after it.
+        if let Some(tool) = blocks.iter().rev().find_map(|b| match b {
+            Block::Tool(tool) if tool.status == Step::Working => Some(tool),
+            _ => None,
+        }) {
+            return tool.title.clone();
+        }
+        for block in blocks.iter().rev() {
+            if let Block::Text(text) = block
+                && let Some(line) = text.lines().rev().find(|line| !line.trim().is_empty())
+            {
+                return line.trim().to_string();
+            }
+        }
+    }
+    if busy { "Working…".into() } else { String::new() }
+}
+
 #[cfg(test)]
 mod tests {
     fn thought_flag(b: &mut Block) -> Option<&mut bool> {
@@ -4785,7 +4924,7 @@ mod tests {
         assert_eq!(toggle_all(&mut vec![Msg::User("x".into())], thought_flag), None);
     }
 
-    use super::{Block, Msg, PermissionOption, language, toggle_all, match_files, primary_option, syntax};
+    use super::{Activity, Block, Msg, PermissionOption, Step, ToolBlock, preview_of, language, toggle_all, match_files, primary_option, syntax};
 
     #[test]
     fn file_matches_rank_names_before_paths() {
@@ -4846,5 +4985,34 @@ mod tests {
     fn names_only_fall_back_to_the_first_allow() {
         let options = vec![option("Allow once", ""), option("Allow for session", ""), option("Deny", "")];
         assert_eq!(primary_option(&options), Some(0));
+    }
+
+    fn tool(title: &str, status: Step) -> Block {
+        Block::Tool(ToolBlock { id: String::new(), title: title.into(), status, open: false, arguments: String::new(), result: String::new(), path: None })
+    }
+
+    #[test]
+    fn a_running_tool_is_the_preview_even_when_text_follows_it() {
+        let messages = vec![Msg::Agent(vec![tool("Run tests", Step::Working), Block::Text("Looking at the output\n".into())])];
+        assert_eq!(preview_of(&messages, true), "Run tests");
+    }
+
+    #[test]
+    fn the_preview_falls_back_to_the_last_line_then_to_working() {
+        let said = vec![Msg::Agent(vec![tool("Read", Step::Done), Block::Text("first\n\nlast line  \n\n".into())])];
+        assert_eq!(preview_of(&said, true), "last line");
+        let silent = vec![Msg::Agent(vec![tool("Read", Step::Done)])];
+        assert_eq!(preview_of(&silent, true), "Working…");
+        assert_eq!(preview_of(&silent, false), "");
+    }
+
+    #[test]
+    fn the_live_list_puts_questions_first_and_leaves_idle_threads_out() {
+        let mut ranks: Vec<_> = [Activity::Running, Activity::Idle, Activity::Unread, Activity::Asking]
+            .into_iter()
+            .filter_map(|a| a.live_rank().map(|rank| (rank, a)))
+            .collect();
+        ranks.sort_by_key(|(rank, _)| *rank);
+        assert!(matches!(ranks.as_slice(), [(_, Activity::Asking), (_, Activity::Unread), (_, Activity::Running)]));
     }
 }

@@ -295,10 +295,11 @@ pub struct VSplit {
     state: Entity<VSplitState>,
     top: Option<AnyElement>,
     bottom: Option<AnyElement>,
+    fixed_top: Option<gpui::Rems>,
 }
 
 pub fn vsplit(state: &Entity<VSplitState>) -> VSplit {
-    VSplit { state: state.clone(), top: None, bottom: None }
+    VSplit { state: state.clone(), top: None, bottom: None, fixed_top: None }
 }
 
 impl VSplit {
@@ -311,6 +312,19 @@ impl VSplit {
         self.bottom = Some(element.into_any_element());
         self
     }
+
+    /// Holds the top pane at this height, with no handle, for as long as it is set. The boundary
+    /// the user dragged to is kept for when it is not.
+    pub fn fixed_top(mut self, height: Option<gpui::Rems>) -> Self {
+        self.fixed_top = height;
+        self
+    }
+}
+
+/// The height the top pane gets for a saved `top`: the most that leaves the bottom its minimum in
+/// a split of `height`. A split not yet measured keeps `top`.
+fn fitted_top(top: Pixels, height: Pixels) -> Pixels {
+    if height <= px(0.) { top } else { top.min((height - MIN_BOTTOM).max(MIN_TOP)) }
 }
 
 /// The height a drag to `y` gives the top pane, leaving both panes their minimum.
@@ -323,7 +337,7 @@ impl RenderOnce for VSplit {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
         let (top, dragging, collapsed) = {
             let state = self.state.read(cx);
-            (state.top, state.dragging, state.collapsed)
+            (state.top.map(|top| fitted_top(top, state.bounds.size.height)), state.dragging, state.collapsed)
         };
         let palette = cx.global::<Palette>();
         // A plain border, not the sidebars' handle colour, which glass clears: this line divides
@@ -355,6 +369,7 @@ impl RenderOnce for VSplit {
             None => pane.flex_basis(gpui::relative(0.5)),
         };
         // Folded, the top pane fills the space and the bottom shows only its header-high strip.
+        let fixed = self.fixed_top;
         let (pane, bottom) = if collapsed {
             (
                 div().flex_1().min_h(MIN_TOP),
@@ -362,6 +377,10 @@ impl RenderOnce for VSplit {
             )
         } else {
             (pane, div().flex_1().min_h(MIN_BOTTOM))
+        };
+        let pane = match fixed {
+            Some(height) => div().flex_none().h(height),
+            None => pane,
         };
 
         div()
@@ -404,13 +423,13 @@ impl RenderOnce for VSplit {
                 .size_full(),
             )
             .child(pane.relative().overflow_hidden().children(self.top))
-            .child(bottom.relative().children(self.bottom).when(!collapsed, |bottom| bottom.child(handle)))
+            .child(bottom.relative().children(self.bottom).when(!collapsed && fixed.is_none(), |bottom| bottom.child(handle)))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{MIN_BOTTOM, MIN_CENTER, MIN_TOP, Side, SidebarsState, dragged_height, dragged_width};
+    use super::{MIN_BOTTOM, MIN_CENTER, MIN_TOP, Side, SidebarsState, dragged_height, dragged_width, fitted_top};
     use gpui::{Bounds, point, px, size};
 
     #[test]
@@ -434,6 +453,14 @@ mod tests {
         // A split too short for both minimums doesn't panic; the top gets its minimum.
         let short = Bounds::new(point(px(0.), px(0.)), size(px(300.), px(100.)));
         assert_eq!(dragged_height(px(90.), short), MIN_TOP);
+    }
+
+    #[test]
+    fn a_saved_height_is_fitted_to_the_split() {
+        assert_eq!(fitted_top(px(900.), px(800.)), px(800.) - MIN_BOTTOM);
+        assert_eq!(fitted_top(px(300.), px(800.)), px(300.));
+        assert_eq!(fitted_top(px(900.), px(100.)), MIN_TOP);
+        assert_eq!(fitted_top(px(900.), px(0.)), px(900.));
     }
 
     #[test]
