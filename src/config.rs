@@ -14,6 +14,8 @@ pub struct Agent {
     pub command: String,
     /// URL of a dex daemon to talk to instead of ACP.
     pub daemon: Option<String>,
+    /// The user named this command themselves, on the command line, so it needs no approval.
+    pub vouched: bool,
 }
 
 /// The user's home directory: `$HOME`, or `%USERPROFILE%` on Windows.
@@ -74,7 +76,7 @@ fn parse(list: &Value) -> Vec<Agent> {
             let command = entry["command"].as_str()?.to_string();
             let name = entry["name"].as_str().unwrap_or(&id).to_string();
             let daemon = entry["daemon"].as_str().map(String::from);
-            Some(Agent { id, name, command, daemon })
+            Some(Agent { id, name, command, daemon, vouched: false })
         })
         .collect()
 }
@@ -89,6 +91,53 @@ pub fn agents(config: &Value) -> Vec<Agent> {
         }
     }
     agents
+}
+
+/// Whether Po may run `agent` without asking: it is one of the bundled agents as shipped, the user
+/// named it on the command line, or they approved this exact command before. A command that came
+/// from `config.json` or changed there is asked about, so editing the config (or something editing
+/// it) can't make Po run a program the user never saw.
+pub fn trusted(agent: &Agent) -> bool {
+    agent.vouched || shipped(agent) || approved_in(&approvals_path(), agent)
+}
+
+fn shipped(agent: &Agent) -> bool {
+    let bundled = serde_json::from_str(DEFAULT_AGENTS).map(|list: Value| parse(&list)).unwrap_or_default();
+    bundled.iter().any(|known| known.command == agent.command && known.daemon == agent.daemon)
+}
+
+/// Remembers that the user approved running `agent`'s command.
+pub fn approve(agent: &Agent) {
+    let path = approvals_path();
+    if let Err(error) = approve_in(&path, agent) {
+        log::error!("{}: {error}", path.display());
+    }
+}
+
+/// In Po's own data directory rather than the config's, which is what an agent is asked to edit.
+fn approvals_path() -> PathBuf {
+    data_dir().join("approved-agents.json")
+}
+
+fn entry(agent: &Agent) -> Value {
+    serde_json::json!({ "command": agent.command, "daemon": agent.daemon })
+}
+
+fn approved_in(path: &Path, agent: &Agent) -> bool {
+    let wanted = entry(agent);
+    read_json(path).and_then(|list| list.as_array().map(|list| list.contains(&wanted))).unwrap_or(false)
+}
+
+fn approve_in(path: &Path, agent: &Agent) -> std::io::Result<()> {
+    let mut list = read_json(path).and_then(|list| list.as_array().cloned()).unwrap_or_default();
+    let wanted = entry(agent);
+    if !list.contains(&wanted) {
+        list.push(wanted);
+    }
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::write(path, serde_json::to_string_pretty(&list).expect("a list of objects"))
 }
 
 /// The settings chosen for each agent (by agent id, then option id), reapplied to its new threads.
@@ -128,5 +177,36 @@ pub fn save_choice(agent: &str, id: &str, value: &str) {
         .and_then(|()| std::fs::rename(&temp, &path));
     if let Err(error) = saved {
         log::error!("{}: {error}", path.display());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn agent(command: &str) -> Agent {
+        Agent { id: "x".into(), name: "X".into(), command: command.into(), daemon: None, vouched: false }
+    }
+
+    #[test]
+    fn the_agents_that_ship_need_no_approval_but_others_do() {
+        assert!(shipped(&agent("claude-agent-acp")));
+        // The same program with other arguments is a change.
+        assert!(!shipped(&agent("claude-agent-acp --other")));
+        assert!(!shipped(&agent("./my-agent")));
+        assert!(trusted(&Agent { vouched: true, ..agent("./mine") }));
+    }
+
+    #[test]
+    fn an_approval_is_for_that_exact_command() {
+        let path = std::env::temp_dir().join(format!("po-approvals-{}/approved.json", std::process::id()));
+        assert!(!approved_in(&path, &agent("./a")));
+        approve_in(&path, &agent("./a")).unwrap();
+        approve_in(&path, &agent("./a")).unwrap();
+        assert!(approved_in(&path, &agent("./a")));
+        assert!(!approved_in(&path, &agent("./a --more")));
+        assert!(!approved_in(&path, &Agent { daemon: Some("http://x".into()), ..agent("./a") }));
+        assert_eq!(read_json(&path).unwrap().as_array().unwrap().len(), 1);
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
     }
 }
