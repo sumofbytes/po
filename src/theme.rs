@@ -614,7 +614,7 @@ impl Palette {
     }
 
     /// Turns on the glass look: the panes become `opacity` tints over the blurred desktop, the
-    /// sidebar more see-through still, and the lines between them fade so the panes read as
+    /// sidebar alike, and the lines between them fade so the panes read as
     /// sheets of glass rather than boxes.
     pub fn frost(&mut self, opacity: f32) {
         let dark = self.background.l < 0.5;
@@ -623,7 +623,7 @@ impl Palette {
         self.background = self.background.opacity(opacity);
         // The editor draws inside a pane that's already tinted; another layer would thicken it.
         self.editor_background = clear;
-        self.sidebar = self.sidebar.opacity(opacity * 0.6);
+        self.sidebar = self.sidebar.opacity(opacity);
         // Menus float over text and nothing blurs it, so they stay nearly solid.
         self.popover = self.popover.opacity(opacity.max(0.94));
         self.secondary = self.secondary.opacity(opacity * 0.85);
