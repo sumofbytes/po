@@ -1049,7 +1049,7 @@ impl Reader {
         let (control, requests) = control::start().unzip();
         let mut reader = Self {
             control,
-            last_input: Instant::now() - QUIET,
+            last_input: Instant::now().checked_sub(QUIET).unwrap_or_else(Instant::now),
             mode: Mode::Source,
             project,
             project_id: 0,
@@ -1170,6 +1170,10 @@ impl Reader {
                     return;
                 }
                 let path = tree.read(cx).selected_entry().filter(|e| !e.folder).map(|e| e.id.to_string());
+                // Only when the user just pressed something: the agent opening a file selects it too.
+                if path.is_some() && reader.last_input.elapsed() < Duration::from_secs(1) {
+                    reader.thread.shown = None;
+                }
                 if let Some(path) = path.filter(|p| reader.mode == Mode::Source && reader.project.current.as_deref() != Some(p)) {
                     reader.open(&path, window, cx);
                 }
@@ -1829,6 +1833,7 @@ impl Reader {
 
     /// Shows `path` where it is most useful: its diff if it has changes, the file otherwise.
     fn reveal(&mut self, path: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.thread.shown = None;
         let full = Path::new(path);
         let relative = full.strip_prefix(&self.project.root).unwrap_or(full).to_string_lossy().replace('\\', "/");
         if self.project.changes.iter().any(|change| change.path == relative) {
@@ -2864,6 +2869,7 @@ impl Reader {
 
     /// Opens `path` in the viewer and closes the finder.
     fn accept_path(&mut self, path: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.thread.shown = None;
         self.open(path, window, cx);
         // A file that can't be shown leaves the finder up so the query isn't lost.
         if self.project.notice.is_none() {
@@ -3424,6 +3430,8 @@ impl Reader {
                             return;
                         }
                         this.update(cx, |reader, cx| {
+                            // A file picked in the tree is what the viewer shows, not an agent's view.
+                            reader.thread.shown = None;
                             match mode {
                                 Mode::Source => reader.open(&path, window, cx),
                                 Mode::Diff => reader.pick(&path, cx),
@@ -4858,6 +4866,7 @@ impl Render for Reader {
             .track_focus(&self.focus)
             .on_key_down(cx.listener(|reader, _, _, _| reader.last_input = Instant::now()))
             .on_scroll_wheel(cx.listener(|reader, _, _, _| reader.last_input = Instant::now()))
+            .on_mouse_down(gpui::MouseButton::Left, cx.listener(|reader, _, _, _| reader.last_input = Instant::now()))
             .on_action(cx.listener(|reader, _: &ShowFinder, window, cx| reader.show_finder(window, cx)))
             .on_action(cx.listener(|reader, _: &ToggleTools, _, cx| reader.toggle_tools(cx)))
             .on_action(cx.listener(|reader, _: &ToggleThoughts, _, cx| reader.toggle_thoughts(cx)))

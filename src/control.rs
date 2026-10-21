@@ -64,12 +64,16 @@ fn answer(line: &str, tokens: &Tokens, send: &dyn Fn(Request) -> Result<(), Stri
 #[cfg(unix)]
 mod server {
     use std::io::{BufRead, BufReader, Read, Write};
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::os::unix::{fs::PermissionsExt, net::UnixListener};
 
     use futures::channel::mpsc::{UnboundedSender, unbounded};
     use serde_json::json;
 
     use super::*;
+
+    /// Requests handled at once; more are dropped unanswered.
+    const MAX_CONNECTIONS: usize = 16;
 
     /// A directory only this user can enter, so the socket needs no permissions of its own.
     fn directory() -> std::path::PathBuf {
@@ -101,9 +105,18 @@ mod server {
         let (requests, receiver) = unbounded();
         let shared = tokens.clone();
         std::thread::spawn(move || {
+            let open = Arc::new(AtomicUsize::new(0));
             for stream in listener.incoming().map_while(Result::ok) {
-                let (tokens, requests) = (shared.clone(), requests.clone());
-                std::thread::spawn(move || serve(stream, &tokens, &requests));
+                // A client that connects and says nothing holds a thread for the read timeout.
+                if open.fetch_add(1, Ordering::SeqCst) >= MAX_CONNECTIONS {
+                    open.fetch_sub(1, Ordering::SeqCst);
+                    continue;
+                }
+                let (tokens, requests, open) = (shared.clone(), requests.clone(), open.clone());
+                std::thread::spawn(move || {
+                    serve(stream, &tokens, &requests);
+                    open.fetch_sub(1, Ordering::SeqCst);
+                });
             }
         });
         Some((Control { tokens, socket }, receiver))
@@ -156,8 +169,9 @@ pub fn start() -> Option<(Control, UnboundedReceiver<Request>)> {
     None
 }
 
-/// `po ctl <command> [--key value]…`: a command for the window that started this agent. A view's
-/// body is read from standard input unless `--body` is given.
+/// `po ctl <command> [--key value]…`: a command for the window that started this agent. The body
+/// of `view.show` is read from standard input unless `--body` is given; `view.update` reads
+/// standard input only for `--body -`, so changing a title alone never waits on a pipe.
 pub fn ctl(args: &[String]) -> Result<String> {
     use anyhow::Context;
     let (name, flags) = args.split_first().context("usage: po ctl <command> [--key value]…, e.g. po ctl view.show --title Plan < plan.md")?;
@@ -167,13 +181,11 @@ pub fn ctl(args: &[String]) -> Result<String> {
         let key = flag.strip_prefix("--").with_context(|| format!("unexpected `{flag}`"))?;
         request[key] = flags.next().with_context(|| format!("--{key} needs a value"))?.clone().into();
     }
-    if name.starts_with("view.") && name != "view.close" && request["body"].is_null() {
+    if reads_stdin(name, &request["body"]) {
         use std::io::Read;
         let mut body = String::new();
         std::io::stdin().read_to_string(&mut body).context("could not read the body from standard input")?;
-        if !body.is_empty() || name == "view.show" {
-            request["body"] = body.into();
-        }
+        request["body"] = body.into();
     }
     request["token"] = std::env::var("PO_TOKEN").context("PO_TOKEN is not set")?.into();
     let reply = call(&request)?;
@@ -183,9 +195,30 @@ pub fn ctl(args: &[String]) -> Result<String> {
     }
 }
 
+/// Whether `po ctl name` takes its body from standard input: a new view does unless given
+/// one, and `--body -` asks for it on any command that has a body.
+fn reads_stdin(name: &str, body: &Value) -> bool {
+    match body.as_str() {
+        Some("-") => name.starts_with("view.") && name != "view.close",
+        Some(_) => false,
+        None => name == "view.show",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn standard_input_is_read_only_when_it_is_the_body() {
+        let none = Value::Null;
+        assert!(reads_stdin("view.show", &none));
+        assert!(!reads_stdin("view.update", &none));
+        assert!(!reads_stdin("view.close", &none));
+        assert!(reads_stdin("view.update", &Value::from("-")));
+        assert!(!reads_stdin("view.show", &Value::from("text")));
+        assert!(!reads_stdin("layout.preset", &Value::from("-")));
+    }
 
     fn tokens() -> Tokens {
         Arc::new(Mutex::new(HashMap::from([("good".to_string(), 7)])))

@@ -41,6 +41,8 @@ pub type Reply = Result<Value, String>;
 /// The most views a thread may keep, and the longest body one may have.
 pub const MAX_VIEWS: usize = 16;
 pub const MAX_BODY: usize = 256 * 1024;
+/// The longest title, which has to fit a tab.
+pub const MAX_TITLE: usize = 120;
 
 fn text<'a>(request: &'a Value, key: &str) -> Option<&'a str> {
     request[key].as_str()
@@ -74,11 +76,14 @@ impl Command {
     }
 
     fn check(&self) -> Result<(), String> {
-        let body = match self {
-            Self::ViewShow { body, .. } => Some(body),
-            Self::ViewUpdate { body, .. } => body.as_ref(),
-            _ => None,
+        let (title, body) = match self {
+            Self::ViewShow { title, body, .. } => (Some(title), Some(body)),
+            Self::ViewUpdate { title, body, .. } => (title.as_ref(), body.as_ref()),
+            _ => (None, None),
         };
+        if title.is_some_and(|title| title.chars().count() > MAX_TITLE) {
+            return Err(format!("a title is at most {MAX_TITLE} characters"));
+        }
         if body.is_some_and(|body| body.len() > MAX_BODY) {
             return Err(format!("a view is at most {} KiB", MAX_BODY / 1024));
         }
@@ -171,6 +176,14 @@ mod tests {
         assert!(Command::parse(&json!({ "command": "layout.preset", "name": "wide" })).is_err());
         let huge = "x".repeat(MAX_BODY + 1);
         assert!(Command::parse(&json!({ "command": "view.show", "title": "t", "body": huge })).is_err());
+    }
+
+    #[test]
+    fn a_title_has_to_fit_a_tab() {
+        let long = "t".repeat(MAX_TITLE + 1);
+        assert!(Command::parse(&json!({ "command": "view.show", "title": long, "body": "" })).is_err());
+        assert!(Command::parse(&json!({ "command": "view.update", "id": "v1", "title": long })).is_err());
+        assert!(Command::parse(&json!({ "command": "view.show", "title": "t".repeat(MAX_TITLE), "body": "" })).is_ok());
     }
 
     #[test]
