@@ -17,15 +17,16 @@ pub enum Client {
 }
 
 impl Client {
-    /// Starts `agent` in `cwd`. With `resume`, lists its sessions rather than opening a new one.
-    pub fn spawn(agent: &config::Agent, cwd: &Path, resume: bool) -> Result<(Self, UnboundedReceiver<Event>)> {
+    /// Starts `agent` in `cwd`, with `env` added to its environment (a dex daemon has its own).
+    /// With `resume`, lists its sessions rather than opening a new one.
+    pub fn spawn(agent: &config::Agent, cwd: &Path, resume: bool, env: &[(String, String)]) -> Result<(Self, UnboundedReceiver<Event>)> {
         match &agent.daemon {
             Some(url) => {
                 let (client, events) = dex::Client::spawn(url, &agent.command, cwd, resume)?;
                 Ok((Self::Dex(client), events))
             }
             None => {
-                let (client, events) = acp::Client::spawn(&agent.command, cwd, resume)?;
+                let (client, events) = acp::Client::spawn(&agent.command, cwd, resume, env)?;
                 Ok((Self::Acp(client), events))
             }
         }

@@ -342,12 +342,13 @@ pub struct Client {
 impl Client {
     /// Starts `command` (program and arguments) in `cwd` and begins the handshake.
     /// With `resume`, lists the agent's sessions rather than opening a new one; `load` picks one.
-    pub fn spawn(command: &str, cwd: &Path, resume: bool) -> Result<(Self, UnboundedReceiver<Event>)> {
+    pub fn spawn(command: &str, cwd: &Path, resume: bool, env: &[(String, String)]) -> Result<(Self, UnboundedReceiver<Event>)> {
         let mut parts = command.split_whitespace();
         let program = parts.next().context("empty agent command")?;
         let mut child = Command::new(program)
             .args(parts)
             .current_dir(cwd)
+            .envs(env.iter().map(|(key, value)| (key, value)))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
