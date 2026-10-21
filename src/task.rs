@@ -13,6 +13,8 @@ pub const LIMIT: Duration = Duration::from_secs(15 * 60);
 /// Lines of output kept from the end of a run.
 const TAIL_LINES: usize = 60;
 const TAIL_BYTES: usize = 8 * 1024;
+/// Warnings listed in the document; the JSON carries them all.
+const MAX_LISTED: usize = 20;
 
 /// A check Po knows how to run in a project.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -69,6 +71,8 @@ pub struct Outcome {
     pub exit: Option<i32>,
     pub seconds: f64,
     pub failures: Vec<Failure>,
+    /// Compiler and clippy warnings, which don't fail a check but are what a lint is for.
+    pub warnings: Vec<Failure>,
     pub summary: Option<String>,
     pub tail: String,
     /// Why there is no exit status: it did not start, or ran out of time.
@@ -88,6 +92,7 @@ impl Outcome {
             "seconds": (self.seconds * 10.0).round() / 10.0,
             "commit": commit,
             "failures": self.failures.iter().map(|f| json!({ "name": f.name, "location": f.location, "message": f.message })).collect::<Vec<_>>(),
+            "warnings": self.warnings.iter().map(|f| json!({ "name": f.name, "location": f.location, "message": f.message })).collect::<Vec<_>>(),
             "summary": self.summary,
             "problem": self.problem,
             "output_tail": self.tail,
@@ -98,6 +103,7 @@ impl Outcome {
     pub fn to_markdown(&self, commit: &str) -> String {
         let verdict = match (&self.problem, self.exit) {
             (Some(_), _) => "did not finish".to_string(),
+            (None, Some(0)) if !self.warnings.is_empty() => format!("passed with {} warnings", self.warnings.len()),
             (None, Some(0)) => "passed".to_string(),
             (None, _) if self.failures.is_empty() => "failed".to_string(),
             (None, _) => format!("failed ({} found)", self.failures.len()),
@@ -124,6 +130,20 @@ impl Outcome {
             }
             out.push('\n');
         }
+        if !self.warnings.is_empty() {
+            out.push_str("## Warnings\n\n");
+            for warning in self.warnings.iter().take(MAX_LISTED) {
+                out.push_str(&format!("- {}", warning.message));
+                if let Some(location) = &warning.location {
+                    out.push_str(&format!(" at `{location}`"));
+                }
+                out.push('\n');
+            }
+            if self.warnings.len() > MAX_LISTED {
+                out.push_str(&format!("- … and {} more\n", self.warnings.len() - MAX_LISTED));
+            }
+            out.push('\n');
+        }
         if !self.passed() && !self.tail.is_empty() {
             out.push_str(&format!("\n## End of the output\n\n```\n{}\n```\n", self.tail.trim_end()));
         }
@@ -135,7 +155,7 @@ impl Outcome {
 pub fn run(root: &Path, spec: &Spec, limit: Duration) -> Outcome {
     let started = Instant::now();
     let command = spec.label();
-    let mut outcome = Outcome { command, exit: None, seconds: 0.0, failures: vec![], summary: None, tail: String::new(), problem: None };
+    let mut outcome = Outcome { command, exit: None, seconds: 0.0, failures: vec![], warnings: vec![], summary: None, tail: String::new(), problem: None };
     let child = Command::new(spec.program)
         .args(spec.args)
         .current_dir(root)
@@ -183,6 +203,9 @@ pub fn run(root: &Path, spec: &Spec, limit: Duration) -> Outcome {
         "go" => go_failures(&text),
         _ => vec![],
     };
+    if spec.ecosystem == "cargo" {
+        outcome.warnings = cargo_warnings(&text);
+    }
     outcome.summary = (spec.ecosystem == "cargo").then(|| cargo_summary(&text)).flatten();
     outcome.tail = tail(&text);
     outcome
@@ -243,6 +266,22 @@ fn panic_of(lines: &[&str], name: &str) -> (Option<String>, String) {
         }
     }
     (None, String::new())
+}
+
+/// `warning:` diagnostics with a location, which leaves out cargo's own "generated N warnings" lines.
+fn cargo_warnings(text: &str) -> Vec<Failure> {
+    let lines: Vec<&str> = text.lines().collect();
+    lines
+        .iter()
+        .enumerate()
+        .filter_map(|(ix, line)| {
+            let message = line.strip_prefix("warning: ").or_else(|| line.strip_prefix("warning["))?;
+            let location = lines.get(ix + 1)?.trim_start().strip_prefix("--> ")?;
+            // `warning[E0…]: text` keeps only the text.
+            let message = message.split_once("]: ").map_or(message, |(_, text)| text);
+            Some(Failure { name: "warning".into(), location: Some(location.to_string()), message: message.to_string() })
+        })
+        .collect()
 }
 
 fn cargo_summary(text: &str) -> Option<String> {
@@ -315,6 +354,15 @@ test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; 
         assert_eq!(failures.len(), 1);
         assert_eq!(failures[0].location.as_deref(), Some("src/main.rs:3:5"));
         assert!(failures[0].message.contains("cannot find value"));
+    }
+
+    #[test]
+    fn cargo_warnings_are_listed_without_the_totals() {
+        let text = "warning: unused variable: `x`\n --> src/lib.rs:4:9\n  |\n4 |     let x = 1;\n\nwarning: `demo` (lib) generated 1 warning\n";
+        let warnings = cargo_warnings(text);
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].location.as_deref(), Some("src/lib.rs:4:9"));
+        assert_eq!(warnings[0].message, "unused variable: `x`");
     }
 
     #[test]
