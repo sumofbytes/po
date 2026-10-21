@@ -890,6 +890,36 @@ struct PendingMove {
     from: Screen,
 }
 
+/// Which panes are open, as the workspace saves it.
+#[derive(Clone, Copy, PartialEq)]
+struct Panes {
+    viewer: bool,
+    agent: bool,
+}
+
+/// A layout an agent changed: what it was before, which is the user's, and what the agent left.
+/// The workspace saves the user's while the agent's is still on screen, so an agent's move lasts
+/// only until `po` is closed; once the user changes it again, what they leave is theirs.
+#[derive(Clone, Copy)]
+struct AgentChange<T> {
+    before: T,
+    left: T,
+}
+
+impl<T: Copy + PartialEq> AgentChange<T> {
+    /// The record after an agent moved `from` to `to`: an earlier move it builds on keeps the
+    /// user's layout from before that one.
+    fn after(earlier: Option<Self>, from: T, to: T) -> Self {
+        let before = earlier.filter(|change| change.left == from).map_or(from, |change| change.before);
+        Self { before, left: to }
+    }
+
+    /// What to save of `now`.
+    fn saved(change: Option<&Self>, now: T) -> T {
+        change.filter(|change| change.left == now).map_or(now, |change| change.before)
+    }
+}
+
 /// What the user sees of the viewer: whether it is open, in which mode, and on what.
 #[derive(PartialEq)]
 struct Screen {
@@ -908,6 +938,10 @@ struct Reader {
     last_input: Instant,
     /// A viewer move the thread on screen asked for while the user was busy, waiting for a pause.
     pending_move: Option<PendingMove>,
+    /// The panes an agent last opened or closed, and each project's mode an agent last changed,
+    /// by project id; see [`AgentChange`].
+    agent_panes: Option<AgentChange<Panes>>,
+    agent_modes: HashMap<u64, AgentChange<Mode>>,
     mode: Mode,
     /// The project on screen; its methods act on this one.
     project: Project,
@@ -1080,6 +1114,8 @@ impl Reader {
             control,
             last_input: Instant::now().checked_sub(QUIET).unwrap_or_else(Instant::now),
             pending_move: None,
+            agent_panes: None,
+            agent_modes: HashMap::new(),
             mode: Mode::Source,
             project,
             project_id: 0,
@@ -1799,7 +1835,7 @@ impl Reader {
                     return Ok(serde_json::json!({ "deferred": true }));
                 }
                 reader.pending_move = None;
-                reader.apply_move(command, window, cx);
+                reader.as_agent(cx, |reader, cx| reader.apply_move(command, window, cx));
                 Ok(serde_json::json!({}))
             })
             .unwrap_or_else(|| Err("that thread is gone".into()))
@@ -1811,7 +1847,7 @@ impl Reader {
                 if let (true, Some(view)) = (shows, reply["id"].as_str()) {
                     let view = view.to_string();
                     if visible && reader.last_input.elapsed() >= QUIET {
-                        reader.show_agent_view(&view, cx);
+                        reader.as_agent(cx, |reader, cx| reader.show_agent_view(&view, cx));
                     } else if reader.thread.shown.as_deref() != Some(&view) {
                         // The user is typing, or this is not the thread they are in: ask first.
                         reader.thread.offered = Some(view);
@@ -1893,6 +1929,24 @@ impl Reader {
         }
     }
 
+    fn panes(&self) -> Panes {
+        Panes { viewer: self.side_open, agent: self.agent_open }
+    }
+
+    /// Runs `change`, which an agent asked for, noting what it did to the layout so the
+    /// workspace goes on saving the user's.
+    fn as_agent(&mut self, cx: &mut Context<Self>, change: impl FnOnce(&mut Self, &mut Context<Self>)) {
+        let (panes, project, mode) = (self.panes(), self.project_id, self.mode);
+        change(self, cx);
+        if self.panes() != panes {
+            self.agent_panes = Some(AgentChange::after(self.agent_panes, panes, self.panes()));
+        }
+        if self.mode != mode {
+            let change = AgentChange::after(self.agent_modes.get(&project).copied(), mode, self.mode);
+            self.agent_modes.insert(project, change);
+        }
+    }
+
     fn screen(&self) -> Screen {
         Screen {
             side_open: self.side_open,
@@ -1940,7 +1994,7 @@ impl Reader {
             return Some(QUIET - still);
         }
         let pending = self.pending_move.take()?;
-        self.apply_move(pending.command, window, cx);
+        self.as_agent(cx, |reader, cx| reader.apply_move(pending.command, window, cx));
         cx.notify();
         None
     }
@@ -2673,7 +2727,7 @@ impl Reader {
                 threads.sort_by_key(|t| t.id);
                 workspace::ProjectState {
                     root: view.project.root.clone(),
-                    review: view.mode == Mode::Diff,
+                    review: AgentChange::saved(self.agent_modes.get(&view.id), view.mode) == Mode::Diff,
                     worktree: view.project.worktree.as_ref().map(|wt| wt.spec.clone()),
                     active: threads.iter().position(|t| t.id == view.shown).unwrap_or(0),
                     threads: threads
@@ -2685,7 +2739,8 @@ impl Reader {
                 }
             })
             .collect();
-        workspace::Workspace { projects, viewer_open: self.side_open, agent_open: self.agent_open, swapped: self.swapped, agent: self.chosen_agent.clone(), split: self.sections.read(cx).size(PROJECTS).map(f32::from), explorer_collapsed: self.sections.read(cx).folded(EXPLORER), live_split: self.sections.read(cx).size(LIVE).map(f32::from), live_folded: self.sections.read(cx).folded(LIVE), projects_folded: self.sections.read(cx).folded(PROJECTS), left_width: Some(self.sidebars.read(cx).widths().0.into()), right_width: self.sidebars.read(cx).widths().1.map(f32::from) }
+        let panes = AgentChange::saved(self.agent_panes.as_ref(), self.panes());
+        workspace::Workspace { projects, viewer_open: panes.viewer, agent_open: panes.agent, swapped: self.swapped, agent: self.chosen_agent.clone(), split: self.sections.read(cx).size(PROJECTS).map(f32::from), explorer_collapsed: self.sections.read(cx).folded(EXPLORER), live_split: self.sections.read(cx).size(LIVE).map(f32::from), live_folded: self.sections.read(cx).folded(LIVE), projects_folded: self.sections.read(cx).folded(PROJECTS), left_width: Some(self.sidebars.read(cx).widths().0.into()), right_width: self.sidebars.read(cx).widths().1.map(f32::from) }
     }
 
     /// Saves the workspace once the current change has settled, so that a thread that is
@@ -5396,6 +5451,25 @@ fn preview_of(messages: &[Msg], busy: bool) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn an_agents_layout_is_saved_as_the_users_until_the_user_changes_it() {
+        use super::AgentChange;
+        // The agent opened the viewer: while it is open, the user's closed one is what is saved.
+        let change = AgentChange::after(None, 1, 2);
+        assert_eq!(AgentChange::saved(Some(&change), 2), 1);
+        // The user moved on from it: what they left is theirs.
+        assert_eq!(AgentChange::saved(Some(&change), 3), 3);
+        // A second move on top of the agent's keeps the user's from before the first.
+        let modes = AgentChange::after(None, 'f', 'd');
+        let again = AgentChange::after(Some(modes), 'd', 'c');
+        assert_eq!(AgentChange::saved(Some(&again), 'c'), 'f');
+        // A move after the user changed it starts from theirs.
+        let after_user = AgentChange::after(Some(modes), 'c', 'd');
+        assert_eq!(AgentChange::saved(Some(&after_user), 'd'), 'c');
+        assert_eq!(AgentChange::saved(Some(&after_user), 'x'), 'x');
+        assert_eq!(AgentChange::saved(None, 'x'), 'x');
+    }
+
     fn thought_flag(b: &mut Block) -> Option<&mut bool> {
         if let Block::Thought(_, shown) = b { Some(shown) } else { None }
     }
