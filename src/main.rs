@@ -880,13 +880,24 @@ struct Slot {
 /// How long the user must have been still before an agent may put a view in front of them.
 const QUIET: Duration = Duration::from_secs(4);
 
-/// A layout preset held back until the user is still.
-struct PendingPreset {
+/// A command that moves the viewer, held back until the user is still.
+struct PendingMove {
     thread: u64,
-    preset: command::Preset,
-    /// The layout when it was asked for. If it is not the same when the pause comes, the user
-    /// chose one themselves, and theirs stands.
-    from: (bool, bool, Mode),
+    command: command::Command,
+    /// What was on screen when it was asked for. If that is not the same when the pause comes,
+    /// the user moved the viewer themselves, and theirs stands.
+    from: Screen,
+}
+
+/// What the user sees of the viewer: whether it is open, in which mode, and on what.
+#[derive(PartialEq)]
+struct Screen {
+    side_open: bool,
+    agent_open: bool,
+    mode: Mode,
+    current: Option<String>,
+    picked: Option<String>,
+    shown: Option<String>,
 }
 
 struct Reader {
@@ -894,8 +905,8 @@ struct Reader {
     control: Option<control::Control>,
     /// When the user last pressed a key or scrolled; an agent waits for a pause to show something.
     last_input: Instant,
-    /// A layout the thread on screen asked for while the user was busy, waiting for a pause.
-    pending_preset: Option<PendingPreset>,
+    /// A viewer move the thread on screen asked for while the user was busy, waiting for a pause.
+    pending_move: Option<PendingMove>,
     mode: Mode,
     /// The project on screen; its methods act on this one.
     project: Project,
@@ -1067,7 +1078,7 @@ impl Reader {
         let mut reader = Self {
             control,
             last_input: Instant::now().checked_sub(QUIET).unwrap_or_else(Instant::now),
-            pending_preset: None,
+            pending_move: None,
             mode: Mode::Source,
             project,
             project_id: 0,
@@ -1110,11 +1121,14 @@ impl Reader {
             _subscriptions: subscriptions,
         };
         if let Some(mut requests) = requests {
+            let handle = window.window_handle();
             cx.spawn(async move |this, cx| {
                 while let Some(request) = requests.next().await {
-                    let answered = this.update(cx, |reader, cx| {
-                        let reply = reader.run_command(request.caller, request.command, cx);
-                        request.reply.send(reply).ok();
+                    let answered = handle.update(cx, |_, window, cx| {
+                        this.update(cx, |reader, cx| {
+                            let reply = reader.run_command(request.caller, request.command, window, cx);
+                            request.reply.send(reply).ok();
+                        })
                     });
                     if answered.is_err() {
                         break;
@@ -1769,43 +1783,42 @@ impl Reader {
     }
 
     /// The one way a request from outside the window changes it. Views are the caller's own; the
-    /// layout is the user's, so only the thread on screen may move it, and not while they are busy.
-    fn run_command(&mut self, caller: command::Caller, command: command::Command, cx: &mut Context<Self>) -> command::Reply {
+    /// viewer is the user's, so only the thread on screen may move it, and not while they are busy.
+    fn run_command(&mut self, caller: command::Caller, command: command::Command, window: &mut Window, cx: &mut Context<Self>) -> command::Reply {
         use command::Command;
         let command::Caller::Thread(id) = caller;
-        let reply = match command {
-            Command::LayoutPreset(preset) => self
-                .with_thread(id, |reader, visible| {
-                    if !visible {
-                        return Err("only the thread on screen can change the layout".to_string());
+        let reply = if command.moves_viewer() {
+            self.with_thread(id, |reader, visible| {
+                if !visible {
+                    return Err("only the thread on screen can move the viewer".to_string());
+                }
+                let command = reader.check_move(command)?;
+                if reader.last_input.elapsed() < QUIET {
+                    reader.defer_move(id, command, window, cx);
+                    return Ok(serde_json::json!({ "deferred": true }));
+                }
+                reader.pending_move = None;
+                reader.apply_move(command, window, cx);
+                Ok(serde_json::json!({}))
+            })
+            .unwrap_or_else(|| Err("that thread is gone".into()))
+        } else {
+            let shows = matches!(command, Command::ViewShow { .. });
+            self.with_thread(id, |reader, visible| {
+                let reply = reader.thread.views.apply(command)?;
+                reader.sync_view_docs(cx);
+                if let (true, Some(view)) = (shows, reply["id"].as_str()) {
+                    let view = view.to_string();
+                    if visible && reader.last_input.elapsed() >= QUIET {
+                        reader.show_agent_view(&view, cx);
+                    } else if reader.thread.shown.as_deref() != Some(&view) {
+                        // The user is typing, or this is not the thread they are in: ask first.
+                        reader.thread.offered = Some(view);
                     }
-                    if reader.last_input.elapsed() < QUIET {
-                        reader.defer_preset(id, preset, cx);
-                        return Ok(serde_json::json!({ "deferred": true }));
-                    }
-                    reader.pending_preset = None;
-                    reader.apply_preset(preset, cx);
-                    Ok(serde_json::json!({}))
-                })
-                .unwrap_or_else(|| Err("that thread is gone".into())),
-            views => {
-                let shows = matches!(views, Command::ViewShow { .. });
-                self.with_thread(id, |reader, visible| {
-                    let reply = reader.thread.views.apply(views)?;
-                    reader.sync_view_docs(cx);
-                    if let (true, Some(view)) = (shows, reply["id"].as_str()) {
-                        let view = view.to_string();
-                        if visible && reader.last_input.elapsed() >= QUIET {
-                            reader.show_agent_view(&view, cx);
-                        } else if reader.thread.shown.as_deref() != Some(&view) {
-                            // The user is typing, or this is not the thread they are in: ask first.
-                            reader.thread.offered = Some(view);
-                        }
-                    }
-                    Ok(reply)
-                })
-                .unwrap_or_else(|| Err("that thread is gone".into()))
-            }
+                }
+                Ok(reply)
+            })
+            .unwrap_or_else(|| Err("that thread is gone".into()))
         };
         cx.notify();
         reply
@@ -1835,33 +1848,78 @@ impl Reader {
         cx.notify();
     }
 
-    fn apply_preset(&mut self, preset: command::Preset, cx: &mut Context<Self>) {
-        match preset {
-            command::Preset::Browse => self.show_viewer(Mode::Source, cx),
-            command::Preset::Review => self.show_viewer(Mode::Diff, cx),
-            command::Preset::Chat => self.show_chat(cx),
+    /// `command` with its path made one inside the project, or why there is nothing to show.
+    fn check_move(&self, command: command::Command) -> Result<command::Command, String> {
+        use command::Command;
+        let root = &self.project.root;
+        Ok(match command {
+            Command::FileOpen { path, line } => {
+                let path = command::project_path(root, &path)?;
+                if !root.join(&path).is_file() {
+                    return Err(format!("no file `{path}` in the project"));
+                }
+                Command::FileOpen { path, line }
+            }
+            Command::DiffShow { path: Some(path) } => {
+                let path = command::project_path(root, &path)?;
+                if !self.project.changes.iter().any(|change| change.path == path) {
+                    return Err(format!("`{path}` has no changes"));
+                }
+                Command::DiffShow { path: Some(path) }
+            }
+            other => other,
+        })
+    }
+
+    fn apply_move(&mut self, command: command::Command, window: &mut Window, cx: &mut Context<Self>) {
+        use command::Command;
+        match command {
+            Command::FileOpen { path, line } => {
+                self.show_viewer(Mode::Source, cx);
+                self.open(&path, window, cx);
+                if let (Some(line), Some(code)) = (line, &self.project.code) {
+                    code.update(cx, |code, cx| code.go_to_line(line - 1, cx));
+                }
+            }
+            Command::DiffShow { path } => {
+                self.show_viewer(Mode::Diff, cx);
+                if let Some(path) = path {
+                    self.pick(&path, cx);
+                }
+            }
+            Command::ViewerClose => self.show_chat(cx),
+            _ => {}
         }
     }
 
-    fn layout_now(&self) -> (bool, bool, Mode) {
-        (self.side_open, self.agent_open, self.mode)
+    fn screen(&self) -> Screen {
+        Screen {
+            side_open: self.side_open,
+            agent_open: self.agent_open,
+            mode: self.mode,
+            current: self.project.current.clone(),
+            picked: self.project.picked.clone(),
+            shown: self.thread.shown.clone(),
+        }
     }
 
-    /// Holds `preset` from thread `thread` until the user has been still for [`QUIET`]. A later
-    /// request replaces it; it is dropped if another thread comes on screen or the user changes
-    /// the layout first.
-    fn defer_preset(&mut self, thread: u64, preset: command::Preset, cx: &mut Context<Self>) {
-        let waiting = self.pending_preset.is_some();
-        self.pending_preset = Some(PendingPreset { thread, preset, from: self.layout_now() });
+    /// Holds `command` from thread `thread` until the user has been still for [`QUIET`]. A later
+    /// request replaces it; it is dropped if another thread comes on screen or the user moves the
+    /// viewer first.
+    fn defer_move(&mut self, thread: u64, command: command::Command, window: &mut Window, cx: &mut Context<Self>) {
+        let waiting = self.pending_move.is_some();
+        self.pending_move = Some(PendingMove { thread, command, from: self.screen() });
         if waiting {
             return;
         }
         let mut wait = QUIET.saturating_sub(self.last_input.elapsed());
+        let handle = window.window_handle();
         cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor().timer(wait).await;
-                match this.update(cx, |reader, cx| reader.try_pending_preset(cx)) {
-                    Ok(Some(more)) => wait = more,
+                let next = handle.update(cx, |_, window, cx| this.update(cx, |reader, cx| reader.try_pending_move(window, cx)));
+                match next {
+                    Ok(Ok(Some(more))) => wait = more,
                     _ => break,
                 }
             }
@@ -1869,20 +1927,20 @@ impl Reader {
         .detach();
     }
 
-    /// Applies the held preset if the user has gone still, or says how much longer to wait.
-    fn try_pending_preset(&mut self, cx: &mut Context<Self>) -> Option<Duration> {
-        let pending = self.pending_preset.as_ref()?;
-        if pending.thread != self.thread.id || pending.from != self.layout_now() {
-            self.pending_preset = None;
+    /// Applies the held move if the user has gone still, or says how much longer to wait.
+    fn try_pending_move(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<Duration> {
+        let pending = self.pending_move.as_ref()?;
+        if pending.thread != self.thread.id || pending.from != self.screen() {
+            self.pending_move = None;
             return None;
         }
         let still = self.last_input.elapsed();
         if still < QUIET {
             return Some(QUIET - still);
         }
-        let preset = pending.preset;
-        self.pending_preset = None;
-        self.apply_preset(preset, cx);
+        let pending = self.pending_move.take()?;
+        self.apply_move(pending.command, window, cx);
+        cx.notify();
         None
     }
 

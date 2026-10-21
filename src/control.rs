@@ -217,7 +217,7 @@ mod tests {
         assert!(!reads_stdin("view.close", &none));
         assert!(reads_stdin("view.update", &Value::from("-")));
         assert!(!reads_stdin("view.show", &Value::from("text")));
-        assert!(!reads_stdin("layout.preset", &Value::from("-")));
+        assert!(!reads_stdin("file.open", &Value::from("-")));
     }
 
     fn tokens() -> Tokens {
