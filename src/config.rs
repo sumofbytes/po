@@ -98,7 +98,22 @@ pub fn agents(config: &Value) -> Vec<Agent> {
 /// from `config.json` or changed there is asked about, so editing the config (or something editing
 /// it) can't make Po run a program the user never saw.
 pub fn trusted(agent: &Agent) -> bool {
-    agent.vouched || shipped(agent) || approved_in(&approvals_path(), agent)
+    agent.vouched || shipped(agent) || approved_this_run(agent) || approved_in(&approvals_path(), agent)
+}
+
+/// Commands approved since Po started, kept apart from the file so that a yes holds even if the
+/// file can't be written.
+static THIS_RUN: std::sync::Mutex<Vec<Value>> = std::sync::Mutex::new(Vec::new());
+
+fn approved_this_run(agent: &Agent) -> bool {
+    THIS_RUN.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).contains(&entry(agent))
+}
+
+fn approve_this_run(agent: &Agent) {
+    let mut approved = THIS_RUN.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if !approved.contains(&entry(agent)) {
+        approved.push(entry(agent));
+    }
 }
 
 fn shipped(agent: &Agent) -> bool {
@@ -106,11 +121,13 @@ fn shipped(agent: &Agent) -> bool {
     bundled.iter().any(|known| known.command == agent.command && known.daemon == agent.daemon)
 }
 
-/// Remembers that the user approved running `agent`'s command.
+/// Records that the user approved running `agent`'s command: for this run always, and for the
+/// next ones if the approvals file can be written.
 pub fn approve(agent: &Agent) {
+    approve_this_run(agent);
     let path = approvals_path();
     if let Err(error) = approve_in(&path, agent) {
-        log::error!("{}: {error}", path.display());
+        log::error!("{}: {error}; the approval holds until Po is closed", path.display());
     }
 }
 
@@ -128,16 +145,30 @@ fn approved_in(path: &Path, agent: &Agent) -> bool {
     read_json(path).and_then(|list| list.as_array().map(|list| list.contains(&wanted))).unwrap_or(false)
 }
 
+/// Adds `agent` to the approvals file, writing a new file and renaming it over the old so that a
+/// crash can't leave half of one. A file that isn't a list is left alone rather than replaced,
+/// since it may hold approvals that a person can still recover.
 fn approve_in(path: &Path, agent: &Agent) -> std::io::Result<()> {
-    let mut list = read_json(path).and_then(|list| list.as_array().cloned()).unwrap_or_default();
+    let invalid = |why: &str| std::io::Error::new(std::io::ErrorKind::InvalidData, why.to_string());
+    let mut list = match std::fs::read_to_string(path) {
+        Ok(text) => match serde_json::from_str::<Value>(&text) {
+            Ok(Value::Array(list)) => list,
+            _ => return Err(invalid("not a list of approved commands; fix or delete it")),
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => return Err(error),
+    };
     let wanted = entry(agent);
-    if !list.contains(&wanted) {
-        list.push(wanted);
+    if list.contains(&wanted) {
+        return Ok(());
     }
+    list.push(wanted);
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    std::fs::write(path, serde_json::to_string_pretty(&list).expect("a list of objects"))
+    let temp = path.with_extension("json.tmp");
+    std::fs::write(&temp, serde_json::to_string_pretty(&list).expect("a list of objects"))?;
+    std::fs::rename(&temp, path)
 }
 
 /// The settings chosen for each agent (by agent id, then option id), reapplied to its new threads.
@@ -195,6 +226,28 @@ mod tests {
         assert!(!shipped(&agent("claude-agent-acp --other")));
         assert!(!shipped(&agent("./my-agent")));
         assert!(trusted(&Agent { vouched: true, ..agent("./mine") }));
+    }
+
+    #[test]
+    fn an_approval_holds_for_the_run_even_if_nothing_can_be_written() {
+        let agent = agent("./approved-only-in-memory");
+        assert!(!approved_this_run(&agent));
+        approve_this_run(&agent);
+        approve_this_run(&agent);
+        assert!(approved_this_run(&agent));
+        assert!(trusted(&agent));
+        assert!(!approved_this_run(&Agent { command: "./another".into(), ..agent }));
+    }
+
+    #[test]
+    fn a_file_that_is_not_a_list_is_not_overwritten() {
+        let dir = std::env::temp_dir().join(format!("po-approvals-bad-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("approved.json");
+        std::fs::write(&path, "{ not json").unwrap();
+        assert!(approve_in(&path, &agent("./a")).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{ not json");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

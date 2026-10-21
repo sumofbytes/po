@@ -1686,8 +1686,6 @@ impl Reader {
         cx.notify();
     }
 
-    /// Browse (files) or Review (changes) in the viewer pane. If the pane was closed it opens wide,
-    /// since looking at code or a diff wants room; if it is open its width is left as it was.
     /// The user's answer to a command Po asked about: remember it and start the agent, or leave it stopped.
     fn answer_approval(&mut self, ix: usize, n: usize, yes: bool, window: &mut Window, cx: &mut Context<Self>) {
         let Some(Msg::Agent(blocks)) = self.thread.messages.get_mut(ix) else { return };
@@ -1707,6 +1705,8 @@ impl Reader {
         cx.notify();
     }
 
+    /// Browse (files) or Review (changes) in the viewer pane. If the pane was closed it opens wide,
+    /// since looking at code or a diff wants room; if it is open its width is left as it was.
     fn show_viewer(&mut self, mode: Mode, cx: &mut Context<Self>) {
         self.set_mode(mode, cx);
         self.open_viewer_wide(cx);
@@ -2285,7 +2285,10 @@ impl Reader {
         log::info!("agent: waking {key} session {session}");
         self.connect(&key, true, window, cx);
         self.thread.restore = Some(session);
-        self.thread.status = "waking…".into();
+        // An agent waiting for approval hasn't started, and says so.
+        if self.thread.client.is_some() {
+            self.thread.status = "waking…".into();
+        }
     }
 
     /// Starts the agent of the blank thread on screen if it has none running: its own agent, or

@@ -85,7 +85,8 @@ The first time `po` is about to run a command that isn't one of the bundled ones
 shipped, because it is new in `config.json` or changes a bundled entry, it shows the command
 and waits for you to choose **Run it**. Your answer is kept for that exact command in
 `approved-agents.json` in `po`'s data directory (next to the worktrees), and changing the
-command asks again. A command you pass with `--agent` / `PO_AGENT` is yours, so it is not asked about.
+command asks again. A command you pass with `--agent` / `PO_AGENT` is yours, so it is not asked
+about; a value that is an agent's `id` picks that agent, and its command is checked as above.
 
 #### Steering and follow-ups (dex daemon)
 
