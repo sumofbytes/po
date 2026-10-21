@@ -49,6 +49,15 @@ pub fn repo_of(dir: &Path) -> Option<PathBuf> {
     git(dir, &["rev-parse", "--show-toplevel"]).ok().map(PathBuf::from)
 }
 
+/// The commit `dir` is at, with a note if there are changes on top of it: what a check ran against.
+pub fn describe_head(dir: &Path) -> String {
+    let Ok(head) = git(dir, &["rev-parse", "--short", "HEAD"]) else { return "no commit".into() };
+    match git(dir, &["status", "--porcelain"]) {
+        Ok(status) if !status.is_empty() => format!("{head} plus uncommitted changes"),
+        _ => head,
+    }
+}
+
 /// Whether `dir` is inside a git repository. Looks for `.git` rather than asking git, so it is
 /// cheap enough to ask while drawing.
 pub fn in_repo(dir: &Path) -> bool {

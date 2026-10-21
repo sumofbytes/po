@@ -57,8 +57,9 @@ fn answer(line: &str, tokens: &Tokens, send: &dyn Fn(Request) -> Result<(), Stri
     let thread = tokens.lock().expect("tokens lock").get(token).copied().ok_or("unknown token")?;
     let command = Command::parse(&request)?;
     let (reply, answer) = std::sync::mpsc::channel();
+    let patience = command.patience();
     send(Request { caller: Caller::Thread(thread), command, reply })?;
-    answer.recv_timeout(std::time::Duration::from_secs(10)).map_err(|_| "Po did not answer".to_string())?
+    answer.recv_timeout(patience).map_err(|_| "Po did not answer".to_string())?
 }
 
 #[cfg(unix)]
@@ -135,7 +136,8 @@ mod server {
     pub(super) fn call_at(socket: &str, request: &Value) -> Result<Value> {
         use anyhow::Context;
         let mut stream = std::os::unix::net::UnixStream::connect(socket).with_context(|| format!("could not reach Po at {socket}"))?;
-        stream.set_read_timeout(Some(std::time::Duration::from_secs(15))).ok();
+        // The window enforces how long each command may take.
+        stream.set_read_timeout(None).ok();
         stream.write_all(format!("{request}\n").as_bytes())?;
         let mut line = String::new();
         BufReader::new(&stream).read_line(&mut line)?;

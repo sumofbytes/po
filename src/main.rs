@@ -11,6 +11,7 @@ mod fonts;
 mod pr;
 mod schemes;
 mod theme;
+mod task;
 mod trace;
 mod ui;
 mod update;
@@ -507,6 +508,8 @@ impl Project {
 struct Thread {
     /// Documents the agent put on screen through `po ctl`.
     views: command::Views,
+    /// A check Po is running for the agent.
+    running_task: bool,
     /// The rendered form of each view.
     docs: HashMap<String, Doc>,
     /// The view the viewer shows in place of a file or the changes.
@@ -1014,6 +1017,7 @@ impl Reader {
         let project = Self::build_project(root, pr, files, window, cx);
         let thread = Thread {
             views: Default::default(),
+            running_task: false,
             docs: HashMap::new(),
             shown: None,
             offered: None,
@@ -1095,8 +1099,7 @@ impl Reader {
             cx.spawn(async move |this, cx| {
                 while let Some(request) = requests.next().await {
                     let answered = this.update(cx, |reader, cx| {
-                        let reply = reader.run_command(request.caller, request.command, cx);
-                        request.reply.send(reply).ok();
+                        reader.run_command(request.caller, request.command, request.reply, cx);
                     });
                     if answered.is_err() {
                         break;
@@ -1720,11 +1723,9 @@ impl Reader {
         cx.notify();
     }
 
-    /// Browse (files) or Review (changes) in the viewer pane. If the pane was closed it opens wide,
-    /// since looking at code or a diff wants room; if it is open its width is left as it was.
     /// The one way a request from outside the window changes it. Views are the caller's own; the
     /// layout is the user's, so only the thread on screen may move it.
-    fn run_command(&mut self, caller: command::Caller, command: command::Command, cx: &mut Context<Self>) -> command::Reply {
+    fn run_command(&mut self, caller: command::Caller, command: command::Command, answer: std::sync::mpsc::Sender<command::Reply>, cx: &mut Context<Self>) {
         use command::{Command, Preset};
         let command::Caller::Thread(id) = caller;
         let reply = match command {
@@ -1741,27 +1742,79 @@ impl Reader {
                     Ok(serde_json::json!({}))
                 })
                 .unwrap_or_else(|| Err("that thread is gone".into())),
+            Command::TaskRun { kind } => {
+                // The answer comes when the check is done.
+                self.run_task(id, kind, answer, cx);
+                return;
+            }
             views => {
                 let shows = matches!(views, Command::ViewShow { .. });
                 self.with_thread(id, |reader, visible| {
                     let reply = reader.thread.views.apply(views)?;
                     reader.sync_view_docs(cx);
                     if let (true, Some(view)) = (shows, reply["id"].as_str()) {
-                        let view = view.to_string();
-                        if visible && reader.last_input.elapsed() >= QUIET {
-                            reader.show_agent_view(&view, cx);
-                        } else if reader.thread.shown.as_deref() != Some(&view) {
-                            // The user is typing, or this is not the thread they are in: ask first.
-                            reader.thread.offered = Some(view);
-                        }
+                        reader.present_view(view, visible, cx);
                     }
                     Ok(reply)
                 })
                 .unwrap_or_else(|| Err("that thread is gone".into()))
             }
         };
+        answer.send(reply).ok();
         cx.notify();
-        reply
+    }
+
+    /// Puts a view an agent or a check just made in front of the user, or, if they are typing or
+    /// it is not their thread, offers it behind a button.
+    fn present_view(&mut self, view: &str, visible: bool, cx: &mut Context<Self>) {
+        if visible && self.last_input.elapsed() >= QUIET {
+            self.show_agent_view(view, cx);
+        } else if self.thread.shown.as_deref() != Some(view) {
+            self.thread.offered = Some(view.to_string());
+        }
+    }
+
+    /// Runs the project's check `kind` for thread `id` off the UI thread and answers `answer` with
+    /// what failed. The result also goes on the thread's views as Po's own, which an agent can't forge.
+    fn run_task(&mut self, id: u64, kind: String, answer: std::sync::mpsc::Sender<command::Reply>, cx: &mut Context<Self>) {
+        let started = self.with_thread(id, |reader, _| {
+            if reader.thread.running_task {
+                return Err("a check is already running in this thread".to_string());
+            }
+            let spec = task::detect(&reader.project.root, &kind)?;
+            reader.thread.running_task = true;
+            Ok((reader.project.root.clone(), spec))
+        });
+        let (root, spec) = match started {
+            Some(Ok(started)) => started,
+            Some(Err(error)) => return drop(answer.send(Err(error))),
+            None => return drop(answer.send(Err("that thread is gone".into()))),
+        };
+        let (done, outcome) = futures::channel::oneshot::channel();
+        let dir = root.clone();
+        std::thread::spawn(move || {
+            let commit = worktree::describe_head(&dir);
+            done.send((task::run(&dir, &spec, task::LIMIT), commit)).ok();
+        });
+        cx.spawn(async move |this, cx| {
+            let Ok((outcome, commit)) = outcome.await else { return };
+            this.update(cx, |reader, cx| {
+                let reply = reader
+                    .with_thread(id, |reader, visible| {
+                        reader.thread.running_task = false;
+                        let view = format!("task-{kind}");
+                        reader.thread.views.record(&view, &outcome.command, outcome.to_markdown(&commit));
+                        reader.sync_view_docs(cx);
+                        reader.present_view(&view, visible, cx);
+                        Ok(outcome.to_json(&commit))
+                    })
+                    .unwrap_or_else(|| Err("that thread is gone".into()));
+                answer.send(reply).ok();
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Renders the thread's views again after they changed, and drops what belongs to views that are gone.
@@ -1788,6 +1841,8 @@ impl Reader {
         cx.notify();
     }
 
+    /// Browse (files) or Review (changes) in the viewer pane. If the pane was closed it opens wide,
+    /// since looking at code or a diff wants room; if it is open its width is left as it was.
     fn show_viewer(&mut self, mode: Mode, cx: &mut Context<Self>) {
         self.thread.shown = None;
         self.set_mode(mode, cx);
@@ -2293,6 +2348,7 @@ impl Reader {
             selection: cx.new(|_| ui::markdown::Selection::default()),
             focus: cx.focus_handle(),
             views: Default::default(),
+            running_task: false,
             docs: HashMap::new(),
             shown: None,
             offered: None,
@@ -3741,7 +3797,7 @@ impl Reader {
             Some((view, self.thread.docs.get(id)?))
         });
         let body = match (shown, self.mode) {
-            (Some((view, doc)), _) => self.agent_view(&view.title, doc, lead, trail, cx).into_any_element(),
+            (Some((view, doc)), _) => self.agent_view(&view.title, view.origin, doc, lead, trail, cx).into_any_element(),
             (None, Mode::Source) => self.viewer(lead, trail, cx).into_any_element(),
             (None, Mode::Diff) => self.diff_viewer(lead, trail, cx).into_any_element(),
         };
@@ -3750,14 +3806,14 @@ impl Reader {
     }
 
     /// A view the agent made, as a markdown document.
-    fn agent_view(&self, title: &str, doc: &Doc, lead: Option<AnyElement>, trail: Option<AnyElement>, cx: &mut Context<Self>) -> impl IntoElement + Styled + use<> {
+    fn agent_view(&self, title: &str, origin: command::Origin, doc: &Doc, lead: Option<AnyElement>, trail: Option<AnyElement>, cx: &mut Context<Self>) -> impl IntoElement + Styled + use<> {
         let background = cx.global::<Palette>().background;
         div()
             .size_full()
             .flex()
             .flex_col()
             .bg(background)
-            .child(pane_header(title, status_text("from the agent".into(), cx), lead, trail, cx))
+            .child(pane_header(title, status_text(if origin == command::Origin::Po { "ran in Po" } else { "from the agent" }.into(), cx), lead, trail, cx))
             .child(div().flex_1().min_h_0().child(self.markdown_view(doc, cx)))
     }
 
