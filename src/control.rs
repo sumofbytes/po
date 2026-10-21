@@ -187,11 +187,18 @@ pub fn ctl(args: &[String]) -> Result<String> {
         std::io::stdin().read_to_string(&mut body).context("could not read the body from standard input")?;
         request["body"] = body.into();
     }
+    Ok(send(request)?.to_string())
+}
+
+/// Sends `request`, signed with this agent's `PO_TOKEN`, to the window that started it, and
+/// returns what it answered or why it refused.
+pub fn send(mut request: Value) -> Result<Value> {
+    use anyhow::Context;
     request["token"] = std::env::var("PO_TOKEN").context("PO_TOKEN is not set")?.into();
-    let reply = call(&request)?;
+    let mut reply = call(&request)?;
     match reply["error"].as_str() {
         Some(error) => anyhow::bail!("{error}"),
-        None => Ok(reply["ok"].to_string()),
+        None => Ok(reply["ok"].take()),
     }
 }
 

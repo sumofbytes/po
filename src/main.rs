@@ -8,6 +8,7 @@ mod control;
 mod dex;
 mod diff;
 mod fonts;
+mod mcp;
 mod pr;
 mod schemes;
 mod theme;
@@ -5211,6 +5212,13 @@ fn main() {
     // `po update` is a terminal command, not a window: it runs to completion and
     // exits before any GUI is set up (like `dex update`).
     let cli: Vec<String> = std::env::args().skip(1).collect();
+    if cli.len() == 1 && cli[0] == "mcp" {
+        if let Err(error) = mcp::serve() {
+            eprintln!("po mcp: {error:#}");
+            std::process::exit(1);
+        }
+        return;
+    }
     if cli.first().is_some_and(|arg| arg == "ctl") {
         match control::ctl(&cli[1..]) {
             Ok(reply) => println!("{reply}"),
