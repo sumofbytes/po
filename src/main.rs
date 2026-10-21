@@ -31,7 +31,7 @@ use ui::icon::{Icon, IconName, IconSize};
 use ui::input::{Input, InputEvent, InputState};
 use ui::list_item::ListItem;
 use ui::menu::{CHECKED, MenuItem, MenuState, dropdown};
-use ui::resizable::{SidebarsState, VSplitState, sidebars, vsplit};
+use ui::resizable::{SidebarsState, StackState, sidebars, stack};
 use ui::tree::{TreeEvent, TreeItem, TreeState, tree};
 use futures::StreamExt;
 use serde_json::Value;
@@ -411,6 +411,11 @@ fn tool_result(update: &Value) -> String {
     }
     out.join("\n")
 }
+
+/// The sections of the left side, top to bottom.
+const LIVE: usize = 0;
+const PROJECTS: usize = 1;
+const EXPLORER: usize = 2;
 
 /// The height, in pixels, the live agents list starts with.
 const LIVE_HEIGHT: f32 = 136.0;
@@ -901,10 +906,8 @@ struct Reader {
     /// Widths of the left side and the viewer pane.
     sidebars: Entity<SidebarsState>,
     left_open: bool,
-    /// The boundary between the projects and the explorer on the left.
-    left_split: Entity<VSplitState>,
-    /// The boundary between the live agents above and the projects and explorer below.
-    live_split: Entity<VSplitState>,
+    /// The left side's sections: live agents, projects, explorer.
+    sections: Entity<StackState>,
     /// The viewer pane (a file or a diff) on the right is shown.
     side_open: bool,
     /// The viewer is in the middle and the conversation on the right, instead of the reverse.
@@ -960,12 +963,7 @@ impl Reader {
                 .submit_on_enter(true)
                 .placeholder("Message the agent")
         });
-        let left_split = cx.new(|_| VSplitState::new());
-        let live_split = cx.new(|_| {
-            let mut split = VSplitState::new();
-            split.set_top(px(LIVE_HEIGHT));
-            split
-        });
+        let sections = cx.new(|_| StackState::new(vec![Some(px(LIVE_HEIGHT)), None, None]));
         let sidebars = cx.new(|_| SidebarsState::new(px(280.0), px(560.0)));
         let subscriptions = vec![
             // Switching modes unmounts whatever was focused (the explorer, the viewer), which
@@ -977,14 +975,9 @@ impl Reader {
                     reader.request_save(cx);
                 }
             }),
-            // Where the split was dragged to is kept, once the drag is over.
-            cx.observe(&left_split, |reader, split, cx| {
-                if !split.read(cx).dragging() {
-                    reader.request_save(cx);
-                }
-            }),
-            cx.observe(&live_split, |reader, split, cx| {
-                if !split.read(cx).dragging() {
+            // Where a section was dragged to, or folded, is kept, once the drag is over.
+            cx.observe(&sections, |reader, sections, cx| {
+                if !sections.read(cx).dragging() {
                     reader.request_save(cx);
                 }
             }),
@@ -1061,8 +1054,7 @@ impl Reader {
             max_live: settings["max_live_agents"].as_u64().unwrap_or(8).max(1) as usize,
             sidebars,
             left_open: true,
-            left_split,
-            live_split,
+            sections,
             side_open: true,
             swapped: false,
             agent_open: true,
@@ -2302,13 +2294,18 @@ impl Reader {
         self.agent_open = saved.agent_open;
         self.sidebars.update(cx, |sidebars, _| sidebars.set_widths(saved.left_width.map(px), saved.right_width.map(px)));
         self.chosen_agent = saved.agent.clone().or(self.chosen_agent.take());
-        if let Some(height) = saved.split {
-            self.left_split.update(cx, |split, _| split.set_top(px(height)));
-        }
-        self.left_split.update(cx, |split, _| split.set_collapsed(saved.explorer_collapsed));
-        if let Some(height) = saved.live_split {
-            self.live_split.update(cx, |split, _| split.set_top(px(height)));
-        }
+        self.sections.update(cx, |sections, _| {
+            for (section, height) in [(LIVE, saved.live_split), (PROJECTS, saved.split)] {
+                if let Some(height) = height {
+                    sections.set_size(section, px(height));
+                }
+            }
+            // A section is never folded if it is the last open one, so a layout that folds all
+            // three, which is never saved, keeps the last open.
+            for (section, folded) in [(LIVE, saved.live_folded), (PROJECTS, saved.projects_folded), (EXPLORER, saved.explorer_collapsed)] {
+                sections.set_folded(section, folded);
+            }
+        });
         for state in saved.projects {
             let worktree = match state.worktree {
                 Some(spec) => {
@@ -2403,7 +2400,7 @@ impl Reader {
                 }
             })
             .collect();
-        workspace::Workspace { projects, viewer_open: self.side_open, agent_open: self.agent_open, swapped: self.swapped, agent: self.chosen_agent.clone(), split: self.left_split.read(cx).top().map(f32::from), explorer_collapsed: self.left_split.read(cx).collapsed(), live_split: self.live_split.read(cx).top().map(f32::from), left_width: Some(self.sidebars.read(cx).widths().0.into()), right_width: self.sidebars.read(cx).widths().1.map(f32::from) }
+        workspace::Workspace { projects, viewer_open: self.side_open, agent_open: self.agent_open, swapped: self.swapped, agent: self.chosen_agent.clone(), split: self.sections.read(cx).size(PROJECTS).map(f32::from), explorer_collapsed: self.sections.read(cx).folded(EXPLORER), live_split: self.sections.read(cx).size(LIVE).map(f32::from), live_folded: self.sections.read(cx).folded(LIVE), projects_folded: self.sections.read(cx).folded(PROJECTS), left_width: Some(self.sidebars.read(cx).widths().0.into()), right_width: self.sidebars.read(cx).widths().1.map(f32::from) }
     }
 
     /// Saves the workspace once the current change has settled, so that a thread that is
@@ -3245,7 +3242,12 @@ impl Reader {
         let marks = if mode == Mode::Diff { self.project.marks.clone() } else { Rc::default() };
         let (muted, danger) = (colors.muted_foreground, colors.danger);
         let kinds = [colors.primary, colors.warning, colors.info, colors.added];
-        let body: AnyElement = if mode == Mode::Diff && self.project.changes.is_empty() {
+        // Folded, only the header shows, so nothing below it is built, and nothing hidden holds
+        // focus.
+        let folded = self.sections.read(cx).folded(EXPLORER);
+        let body: AnyElement = if folded {
+            div().into_any_element()
+        } else if mode == Mode::Diff && self.project.changes.is_empty() {
             centered("No changes".into(), cx)
         } else {
             tree(state, move |ix, entry, selected, right_clicked, _, _| {
@@ -3316,29 +3318,8 @@ impl Reader {
             })
             .into_any_element()
         };
-        // The explorer can be folded down to this header, so it has a chevron.
-        let title: AnyElement = {
-            let folded = self.left_split.read(cx).collapsed();
-            let fold = cx.entity();
-            div()
-                .id("explorer-fold")
-                .flex()
-                .items_center()
-                .gap_1()
-                .min_w_0()
-                .cursor_pointer()
-                .text_sm()
-                .font_weight(FontWeight::MEDIUM)
-                .on_click(move |_, _, cx| fold.update(cx, |reader, cx| reader.toggle_explorer(cx)))
-                .child(
-                    Icon::new(if folded { IconName::ChevronRight } else { IconName::ChevronDown })
-                        .size(IconSize::XSmall)
-                        .color(colors.muted_foreground),
-                )
-                .child(div().min_w_0().truncate().child(title.to_string()))
-                .into_any_element()
-        };
         // No background of its own: it sits in the left sidebar, which paints one.
+        let title = self.fold_title(EXPLORER, div().min_w_0().truncate().child(title.to_string()), cx);
         div()
             .size_full()
             .flex()
@@ -3359,8 +3340,8 @@ impl Reader {
                     .child(modes),
                 cx,
             ))
-            .children(self.worktree_strip(cx))
-            .children((mode == Mode::Diff).then(|| self.pr_strip(cx)))
+            .children(self.worktree_strip(cx).filter(|_| !folded))
+            .children((mode == Mode::Diff && !folded).then(|| self.pr_strip(cx)))
             .child(div().flex_1().min_h_0().p_1().child(body))
     }
 
@@ -3377,7 +3358,9 @@ impl Reader {
         let add = cx.entity();
         // Groups are spaced apart by more than anything inside one, so the eye reads them as units.
         let mut tree = div().id("agents-tree").size_full().overflow_y_scroll().flex().flex_col().gap_3().p_2();
-        for view in &views {
+        // Folded, only the header shows, so no project is built.
+        let projects_folded = self.sections.read(cx).folded(PROJECTS);
+        for view in views.iter().filter(|_| !projects_folded) {
             let pid = view.id;
             let (select, close, start) = (cx.entity(), cx.entity(), cx.entity());
             // A project and its threads are one card. The one on screen has a soft tint and its name at
@@ -3491,18 +3474,23 @@ impl Reader {
             }
             tree = tree.child(group);
         }
+        let title = self.fold_title(
+            PROJECTS,
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .child("Projects")
+                .child(div().text_xs().text_color(muted).child(project_count.to_string())),
+            cx,
+        );
         let projects = div()
             .size_full()
             .flex()
             .flex_col()
             // The same kind of header as the explorer's below: a title, and what you can do here.
             .child(header_row(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .child(div().text_sm().font_weight(FontWeight::MEDIUM).child("Projects"))
-                    .child(div().text_xs().text_color(muted).child(project_count.to_string())),
+                title,
                 Button::new("agents-add")
                     .icon(IconName::Plus)
                     .tooltip("Add a project: open a folder (Ctrl+Shift+O)")
@@ -3511,15 +3499,18 @@ impl Reader {
                     .on_click(move |_, window, cx| add.update(cx, |reader, cx| reader.pick_project(window, cx))),
                 cx,
             ))
-            .children(self.worktree_status.clone().map(|text| {
+            .children(self.worktree_status.clone().filter(|_| !projects_folded).map(|text| {
                 div().px_3().py_1().text_xs().text_color(muted).max_h(rems(5.)).overflow_hidden().child(text)
             }))
-            .child(div().flex_1().min_h_0().child(vsplit(&self.left_split).top(tree).bottom(div().size_full().child(explorer))));
+            .child(div().flex_1().min_h_0().child(tree));
         let (live, any_live) = self.live_section(&views, cx);
         let colors = cx.global::<Palette>();
         // Live agents sit above everything, in a pane of their own whose height is dragged, so
-        // that the projects below don't move when an agent starts or stops.
-        let pane = div().size_full().bg(colors.sidebar).child(vsplit(&self.live_split).fixed_top((!any_live).then(|| rems(LIVE_EMPTY_REMS))).top(live).bottom(projects));
+        // that the projects below don't move when an agent starts or stops. With none, it is
+        // only its header and a line.
+        let pane = div().size_full().bg(colors.sidebar).child(
+            stack(&self.sections).fixed(LIVE, (!any_live).then_some(rems(LIVE_EMPTY_REMS))).section(live).section(projects).section(div().size_full().child(explorer)),
+        );
         floating(pane, cx)
     }
 
@@ -3537,12 +3528,15 @@ impl Reader {
             .collect();
         live.sort_by_key(|(rank, _, thread)| (*rank, thread.id));
         let count = live.len();
+        let folded = self.sections.read(cx).folded(LIVE);
+        // Folded, the most pressing thread's mark stays in view.
+        let (glyph, tint) = if folded { live.first().map_or(("", muted), |(_, _, thread)| thread.activity().mark(colors)) } else { ("", muted) };
         let (active_project, active_thread) = (self.project_id, self.thread.id);
         let mut rows = div().id("live-list").size_full().overflow_y_scroll().flex().flex_col().gap_px().p_1p5();
-        if live.is_empty() {
+        if live.is_empty() && !folded {
             rows = rows.child(div().px_1p5().py_1().text_xs().text_color(muted).child("No active agents"));
         }
-        for (_, view, thread) in live {
+        for (_, view, thread) in live.into_iter().filter(|_| !folded) {
             let (pid, tid) = (view.id, thread.id);
             let (glyph, tint) = thread.activity().mark(colors);
             let select = cx.entity();
@@ -3574,18 +3568,18 @@ impl Reader {
                     ),
             );
         }
+        let title = self.fold_title(
+            LIVE,
+            div().flex().items_center().gap_2().child("Live").child(div().text_xs().text_color(muted).child(count.to_string())),
+            cx,
+        );
         let section = div()
             .size_full()
             .flex()
             .flex_col()
             .child(header_row(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .child(div().text_sm().font_weight(FontWeight::MEDIUM).child("Live"))
-                    .child(div().text_xs().text_color(muted).child(count.to_string())),
-                div(),
+                title,
+                div().text_sm().text_color(tint).child(glyph),
                 cx,
             ))
             .child(div().flex_1().min_h_0().child(rows))
@@ -3593,14 +3587,28 @@ impl Reader {
         (section, count > 0)
     }
 
-    /// Folds the explorer on the agents view down to its header, or unfolds it to the height it
-    /// had.
-    fn toggle_explorer(&mut self, cx: &mut Context<Self>) {
-        self.left_split.update(cx, |split, cx| {
-            let folded = split.collapsed();
-            split.set_collapsed(!folded);
-            cx.notify();
-        });
+    /// A section's title with a chevron, which folds it down to its header or opens it again.
+    fn fold_title(&self, section: usize, label: impl IntoElement, cx: &App) -> AnyElement {
+        let folded = self.sections.read(cx).folded(section);
+        let (sections, muted) = (self.sections.clone(), cx.global::<Palette>().muted_foreground);
+        div()
+            .id(("section-fold", section))
+            .flex()
+            .items_center()
+            .gap_1()
+            .min_w_0()
+            .cursor_pointer()
+            .text_sm()
+            .font_weight(FontWeight::MEDIUM)
+            .on_click(move |_, _, cx| {
+                sections.update(cx, |sections, cx| {
+                    sections.toggle(section);
+                    cx.notify();
+                })
+            })
+            .child(Icon::new(if folded { IconName::ChevronRight } else { IconName::ChevronDown }).size(IconSize::XSmall).color(muted))
+            .child(label)
+            .into_any_element()
     }
 
     /// The viewer or the diff viewer, as the project's mode says.
