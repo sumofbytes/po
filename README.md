@@ -81,6 +81,13 @@ one replaces it, so you can change flags or the binary path. `command` is split
 on whitespace into program and arguments (no shell quoting). Choose the agent
 in the app, or pass `--agent` / `PO_AGENT`.
 
+The first time `po` is about to run a command that isn't one of the bundled ones as
+shipped, because it is new in `config.json` or changes a bundled entry, it shows the command
+and waits for you to choose **Run it**. Your answer is kept for that exact command in
+`approved-agents.json` in `po`'s data directory (next to the worktrees), and changing the
+command asks again. A command you pass with `--agent` / `PO_AGENT` is yours, so it is not asked
+about; a value that is an agent's `id` picks that agent, and its command is checked as above.
+
 #### Steering and follow-ups (dex daemon)
 
 ACP has no way to add to a turn that is already running, so with an ACP agent a

@@ -299,6 +299,8 @@ enum Block {
     Thought(String, bool),
     Tool(ToolBlock),
     Permission(Ask),
+    /// Po wants to run an agent command that isn't one of its own, and waits to be told it may.
+    Approve { agent: config::Agent, resume: bool, answered: Option<bool> },
     /// The agent's to-do list; each update replaces the whole list.
     Plan(Vec<(String, Step)>),
 }
@@ -752,7 +754,9 @@ impl Thread {
 
     fn activity(&self) -> Activity {
         let asking = match self.messages.last() {
-            Some(Msg::Agent(blocks)) => blocks.iter().any(|b| matches!(b, Block::Permission(ask) if ask.answered.is_none())),
+            Some(Msg::Agent(blocks)) => blocks
+                .iter()
+                .any(|b| matches!(b, Block::Permission(Ask { answered: None, .. }) | Block::Approve { answered: None, .. })),
             _ => false,
         };
         if asking {
@@ -1009,7 +1013,7 @@ impl Reader {
         let mut agents = config::agents(&settings);
         let idle_minutes = settings["idle_minutes"].as_u64().unwrap_or(15);
         if let Some(command) = command.as_ref().filter(|c| !agents.iter().any(|agent| agent.id == **c)) {
-            agents.push(config::Agent { id: command.clone(), name: "Custom".into(), command: command.clone(), daemon: None });
+            agents.push(config::Agent { id: command.clone(), name: "Custom".into(), command: command.clone(), daemon: None, vouched: true });
         }
         let project = Self::build_project(root, pr, files, window, cx);
         let thread = Thread {
@@ -1724,6 +1728,25 @@ impl Reader {
         cx.notify();
     }
 
+    /// The user's answer to a command Po asked about: remember it and start the agent, or leave it stopped.
+    fn answer_approval(&mut self, ix: usize, n: usize, yes: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(Msg::Agent(blocks)) = self.thread.messages.get_mut(ix) else { return };
+        let Some(Block::Approve { agent, resume, answered }) = blocks.get_mut(n) else { return };
+        if answered.is_some() {
+            return;
+        }
+        *answered = Some(yes);
+        let (agent, resume) = (agent.clone(), *resume);
+        self.thread.relist(ix);
+        if yes {
+            config::approve(&agent);
+            self.connect(&agent.id, resume, window, cx);
+        } else {
+            self.thread.status = "not running".into();
+        }
+        cx.notify();
+    }
+
     /// Browse (files) or Review (changes) in the viewer pane. If the pane was closed it opens wide,
     /// since looking at code or a diff wants room; if it is open its width is left as it was.
     /// The one way a request from outside the window changes it. Views are the caller's own; the
@@ -2006,7 +2029,16 @@ impl Reader {
             name: key.to_string(),
             command: key.to_string(),
             daemon: None,
+            vouched: false,
         });
+        if !config::trusted(&agent) {
+            // Nothing is started until the user has seen the command and said yes.
+            self.thread.status = "waiting for approval".into();
+            self.thread.messages.push(Msg::Agent(vec![Block::Approve { agent, resume, answered: None }]));
+            self.thread.relist(0);
+            cx.notify();
+            return;
+        }
         self.thread.status = if resume { "listing sessions…" } else { "starting…" }.into();
         let env = self.control.as_ref().map(|control| control.register(id)).unwrap_or_default();
         match Client::spawn(&agent, &self.project.root, resume, &env) {
@@ -2368,7 +2400,10 @@ impl Reader {
         log::info!("agent: waking {key} session {session}");
         self.connect(&key, true, window, cx);
         self.thread.restore = Some(session);
-        self.thread.status = "waking…".into();
+        // An agent waiting for approval hasn't started, and says so.
+        if self.thread.client.is_some() {
+            self.thread.status = "waking…".into();
+        }
     }
 
     /// Starts the agent of the blank thread on screen if it has none running: its own agent, or
@@ -4476,6 +4511,7 @@ fn render_msg(
             Block::Tool(tool) => (tool_card(ix, n, tool, this, text_inset, selection, window, cx).into_any_element(), true),
             Block::Permission(ask) => (permission(ix, n, ask, this, text_inset, cx).into_any_element(), true),
             Block::Plan(entries) => (plan(entries, cx).into_any_element(), false),
+            Block::Approve { agent, answered, .. } => (approval(ix, n, agent, *answered, this, text_inset, cx).into_any_element(), true),
         };
         let el = if boxed { el } else { div().px(text_inset).child(el).into_any_element() };
         column = column.child(div().when(n > 0, |this| if run { this.mt_0p5() } else { this.mt_4() }).child(el));
@@ -4716,6 +4752,48 @@ fn permission(ix: usize, n: usize, ask: &Ask, this: &Entity<Reader>, text_inset:
         .border_color(if waiting { warning.opacity(theme::tokens::MUTED) } else { colors.border })
         .text_sm()
         .child(div().flex().gap_2().child(div().flex_none().text_color(muted).child("Permission")).child(div().flex_1().min_w_0().child(ask.title.clone())))
+        .child(row)
+}
+
+/// Asks whether Po may run an agent command it doesn't ship with.
+fn approval(ix: usize, n: usize, agent: &config::Agent, answered: Option<bool>, this: &Entity<Reader>, text_inset: gpui::Pixels, cx: &App) -> impl IntoElement {
+    let colors = cx.global::<Palette>();
+    let (muted, warning) = (colors.muted_foreground, colors.warning);
+    let row = div().flex().flex_wrap().gap_2();
+    let row = match answered {
+        Some(yes) => row.child(div().text_color(muted).child(if yes { "→ Approved" } else { "→ Not run" })),
+        None => row
+            .child({
+                let this = this.clone();
+                Button::new(("approve-run", ix * 100 + n)).label("Run it").primary().small().on_click(move |_, window, cx| {
+                    this.update(cx, |reader, cx| reader.answer_approval(ix, n, true, window, cx))
+                })
+            })
+            .child({
+                let this = this.clone();
+                Button::new(("approve-skip", ix * 100 + n)).label("Don't run").small().on_click(move |_, window, cx| {
+                    this.update(cx, |reader, cx| reader.answer_approval(ix, n, false, window, cx))
+                })
+            }),
+    };
+    let command = match &agent.daemon {
+        Some(url) => format!("{}  (daemon {url})", agent.command),
+        None => agent.command.clone(),
+    };
+    div()
+        .flex()
+        .flex_col()
+        .gap_2()
+        .py_3()
+        .px(text_inset - px(BOX_BORDER))
+        .rounded(colors.radius)
+        .border(px(BOX_BORDER))
+        .border_color(if answered.is_none() { warning.opacity(theme::tokens::MUTED) } else { colors.border })
+        .text_sm()
+        .child(div().flex().gap_2().child(div().flex_none().text_color(muted).child("Approve")).child(
+            div().flex_1().min_w_0().child(format!("“{}” is not one of Po's own agents: it comes from your config. Run this command?", agent.name)),
+        ))
+        .child(div().font_family(cx.global::<Palette>().mono_font_family.clone()).child(command))
         .child(row)
 }
 
@@ -5134,6 +5212,12 @@ fn preview_of(messages: &[Msg], busy: bool) -> String {
             _ => None,
         }) {
             return format!("Approve: {}", ask.title);
+        }
+        if let Some(command) = blocks.iter().find_map(|b| match b {
+            Block::Approve { agent, answered: None, .. } => Some(&agent.command),
+            _ => None,
+        }) {
+            return format!("Approve running: {command}");
         }
         // A tool still going is the latest thing, whatever text came after it.
         if let Some(tool) = blocks.iter().rev().find_map(|b| match b {
