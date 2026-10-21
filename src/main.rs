@@ -3242,7 +3242,12 @@ impl Reader {
         let marks = if mode == Mode::Diff { self.project.marks.clone() } else { Rc::default() };
         let (muted, danger) = (colors.muted_foreground, colors.danger);
         let kinds = [colors.primary, colors.warning, colors.info, colors.added];
-        let body: AnyElement = if mode == Mode::Diff && self.project.changes.is_empty() {
+        // Folded, only the header shows, so nothing below it is built, and nothing hidden holds
+        // focus.
+        let folded = self.sections.read(cx).folded(EXPLORER);
+        let body: AnyElement = if folded {
+            div().into_any_element()
+        } else if mode == Mode::Diff && self.project.changes.is_empty() {
             centered("No changes".into(), cx)
         } else {
             tree(state, move |ix, entry, selected, right_clicked, _, _| {
@@ -3335,8 +3340,8 @@ impl Reader {
                     .child(modes),
                 cx,
             ))
-            .children(self.worktree_strip(cx))
-            .children((mode == Mode::Diff).then(|| self.pr_strip(cx)))
+            .children(self.worktree_strip(cx).filter(|_| !folded))
+            .children((mode == Mode::Diff && !folded).then(|| self.pr_strip(cx)))
             .child(div().flex_1().min_h_0().p_1().child(body))
     }
 
@@ -3353,7 +3358,9 @@ impl Reader {
         let add = cx.entity();
         // Groups are spaced apart by more than anything inside one, so the eye reads them as units.
         let mut tree = div().id("agents-tree").size_full().overflow_y_scroll().flex().flex_col().gap_3().p_2();
-        for view in &views {
+        // Folded, only the header shows, so no project is built.
+        let projects_folded = self.sections.read(cx).folded(PROJECTS);
+        for view in views.iter().filter(|_| !projects_folded) {
             let pid = view.id;
             let (select, close, start) = (cx.entity(), cx.entity(), cx.entity());
             // A project and its threads are one card. The one on screen has a soft tint and its name at
@@ -3492,7 +3499,7 @@ impl Reader {
                     .on_click(move |_, window, cx| add.update(cx, |reader, cx| reader.pick_project(window, cx))),
                 cx,
             ))
-            .children(self.worktree_status.clone().map(|text| {
+            .children(self.worktree_status.clone().filter(|_| !projects_folded).map(|text| {
                 div().px_3().py_1().text_xs().text_color(muted).max_h(rems(5.)).overflow_hidden().child(text)
             }))
             .child(div().flex_1().min_h_0().child(tree));
@@ -3526,10 +3533,10 @@ impl Reader {
         let (glyph, tint) = if folded { live.first().map_or(("", muted), |(_, _, thread)| thread.activity().mark(colors)) } else { ("", muted) };
         let (active_project, active_thread) = (self.project_id, self.thread.id);
         let mut rows = div().id("live-list").size_full().overflow_y_scroll().flex().flex_col().gap_px().p_1p5();
-        if live.is_empty() {
+        if live.is_empty() && !folded {
             rows = rows.child(div().px_1p5().py_1().text_xs().text_color(muted).child("No active agents"));
         }
-        for (_, view, thread) in live {
+        for (_, view, thread) in live.into_iter().filter(|_| !folded) {
             let (pid, tid) = (view.id, thread.id);
             let (glyph, tint) = thread.activity().mark(colors);
             let select = cx.entity();
