@@ -45,7 +45,7 @@ fn text<'a>(request: &'a Value, key: &str) -> Option<&'a str> {
     request[key].as_str()
 }
 
-/// A line number from 1. `po ctl` sends every flag as a string, so a number in one is read too.
+/// A line number from 1, as a number or a string holding one.
 fn line(request: &Value) -> Result<Option<usize>, String> {
     let line = match &request["line"] {
         Value::Null => return Ok(None),

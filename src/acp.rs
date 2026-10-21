@@ -356,13 +356,13 @@ pub struct Client {
 impl Client {
     /// Starts `command` (program and arguments) in `cwd` and begins the handshake.
     /// With `resume`, lists the agent's sessions rather than opening a new one; `load` picks one.
-    pub fn spawn(command: &str, cwd: &Path, resume: bool, env: &[(String, String)]) -> Result<(Self, UnboundedReceiver<Event>)> {
+    /// `control` is the environment Po's MCP server for this thread gets; the agent itself does not.
+    pub fn spawn(command: &str, cwd: &Path, resume: bool, control: &[(String, String)]) -> Result<(Self, UnboundedReceiver<Event>)> {
         let mut parts = command.split_whitespace();
         let program = parts.next().context("empty agent command")?;
         let mut child = Command::new(program)
             .args(parts)
             .current_dir(cwd)
-            .envs(env.iter().map(|(key, value)| (key, value)))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
@@ -381,7 +381,7 @@ impl Client {
             agent: Mutex::new(program.to_string()),
             resume,
             listed: Mutex::new(Vec::new()),
-            po_mcp: if env.is_empty() { None } else { crate::mcp::server(env) },
+            po_mcp: if control.is_empty() { None } else { crate::mcp::server(control) },
         });
         let child = Arc::new(Mutex::new(child));
         let (reader, reaper) = (shared.clone(), child.clone());

@@ -510,7 +510,7 @@ impl Project {
 /// One conversation with an agent: its messages, the process behind it and what is waiting to
 /// be sent to it.
 struct Thread {
-    /// Documents the agent put on screen through `po ctl`.
+    /// Documents the agent put on screen through Po's MCP server.
     views: command::Views,
     /// The rendered form of each view.
     docs: HashMap<String, Doc>,
@@ -2229,8 +2229,8 @@ impl Reader {
             return;
         }
         self.thread.status = if resume { "listing sessions…" } else { "starting…" }.into();
-        let env = self.control.as_ref().map(|control| control.register(id)).unwrap_or_default();
-        match Client::spawn(&agent, &self.project.root, resume, &env) {
+        let control = self.control.as_ref().map(|control| control.register(id)).unwrap_or_default();
+        match Client::spawn(&agent, &self.project.root, resume, &control) {
             Ok((client, mut events)) => {
                 self.thread.client = Some(client);
                 let handle = window.window_handle();
@@ -5271,16 +5271,6 @@ fn main() {
         if let Err(error) = mcp::serve() {
             eprintln!("po mcp: {error:#}");
             std::process::exit(1);
-        }
-        return;
-    }
-    if cli.first().is_some_and(|arg| arg == "ctl") {
-        match control::ctl(&cli[1..]) {
-            Ok(reply) => println!("{reply}"),
-            Err(error) => {
-                eprintln!("po ctl: {error:#}");
-                std::process::exit(1);
-            }
         }
         return;
     }

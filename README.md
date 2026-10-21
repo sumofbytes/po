@@ -117,17 +117,18 @@ Every ACP agent `po` starts is also handed `po`'s own MCP server, named `po` (it
 itself, so it is not asked about). Its tools let the agent put what it is talking about in
 front of you:
 
-| Tool | `po ctl` command | What it does |
-|---|---|---|
-| `show_view` | `view.show --title T [--id I] < body.md` | Shows a markdown document as a tab in the viewer |
-| `update_view` | `view.update --id I [--title T] [--body -]` | Changes one of its views |
-| `close_view` | `view.close --id I` | Closes one of its views |
-| `open_file` | `file.open --path P [--line N]` | Opens a file of the project, at a line |
-| `show_diff` | `diff.show [--path P]` | Shows the changes, at one file's diff |
-| `close_viewer` | `viewer.close` | Closes the viewer |
+| Tool | What it does |
+|---|---|
+| `show_view` | Shows a markdown document as a tab in the viewer |
+| `update_view` | Changes one of its views |
+| `close_view` | Closes one of its views |
+| `open_file` | Opens a file of the project, at a line |
+| `show_diff` | Shows the changes, at one file's diff |
+| `close_viewer` | Closes the viewer |
 
-The same commands are available to scripts the agent runs, as `po ctl`. Only the thread on
-screen can move the viewer, and only files inside the project can be opened. While you are
+The server reaches the window through a socket, with a token for its thread that is passed in
+the server's environment, not the agent's, so programs the agent runs don't inherit it. Only the
+thread on screen can move the viewer, and only files inside the project can be opened. While you are
 typing or scrolling, a move waits until you have been still for a few seconds and is dropped if
 you change the viewer yourself first; a new view is offered as a button rather than shown.
 

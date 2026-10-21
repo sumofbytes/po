@@ -1,5 +1,5 @@
 //! `po mcp`: the commands of [`crate::command`] as an MCP server, so an agent finds them among its
-//! tools rather than having to know about `po ctl`. Po hands it to each agent it starts, with the
+//! tools. Po hands it to each agent it starts, with the
 //! socket and token of that agent's thread; every tool call becomes one request to the window.
 use serde_json::{Value, json};
 

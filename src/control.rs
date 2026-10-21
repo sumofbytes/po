@@ -1,6 +1,6 @@
-//! How a process outside the window, an agent through `po ctl`, asks Po for something: a local
-//! socket that takes one JSON request per connection. Each thread's agent is handed a token in its
-//! environment, and the token is the only thing that says who is asking.
+//! How a process outside the window, Po's MCP server for an agent, asks Po for something: a
+//! local socket that takes one JSON request per connection. Each thread's server is handed a token
+//! in its environment, and the token is the only thing that says who is asking.
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, mpsc::Sender};
 
@@ -25,7 +25,7 @@ pub struct Control {
 }
 
 impl Control {
-    /// The environment that lets thread `id`'s agent reach this window. A thread asking again
+    /// The environment that lets thread `id`'s MCP server reach this window. A thread asking again
     /// gets a new token, and the old one stops working.
     pub fn register(&self, id: u64) -> Vec<(String, String)> {
         let token = token();
@@ -141,7 +141,7 @@ mod server {
     /// Sends one request to the window named by `PO_SOCKET` and returns its answer.
     pub fn call(request: &Value) -> Result<Value> {
         use anyhow::Context;
-        let socket = std::env::var("PO_SOCKET").context("PO_SOCKET is not set: `po ctl` works from an agent that Po started")?;
+        let socket = std::env::var("PO_SOCKET").context("PO_SOCKET is not set: `po mcp` works when Po starts it for an agent")?;
         call_at(&socket, request)
     }
 
@@ -161,7 +161,7 @@ pub use server::{call, start};
 
 #[cfg(not(unix))]
 fn call(_: &Value) -> Result<Value> {
-    anyhow::bail!("po ctl is not available on this platform yet")
+    anyhow::bail!("Po's MCP server is not available on this platform yet")
 }
 
 #[cfg(not(unix))]
@@ -169,28 +169,7 @@ pub fn start() -> Option<(Control, UnboundedReceiver<Request>)> {
     None
 }
 
-/// `po ctl <command> [--key value]…`: a command for the window that started this agent. The body
-/// of `view.show` is read from standard input unless `--body` is given; `view.update` reads
-/// standard input only for `--body -`, so changing a title alone never waits on a pipe.
-pub fn ctl(args: &[String]) -> Result<String> {
-    use anyhow::Context;
-    let (name, flags) = args.split_first().context("usage: po ctl <command> [--key value]…, e.g. po ctl view.show --title Plan < plan.md")?;
-    let mut request = serde_json::json!({ "command": name });
-    let mut flags = flags.iter();
-    while let Some(flag) = flags.next() {
-        let key = flag.strip_prefix("--").with_context(|| format!("unexpected `{flag}`"))?;
-        request[key] = flags.next().with_context(|| format!("--{key} needs a value"))?.clone().into();
-    }
-    if reads_stdin(name, &request["body"]) {
-        use std::io::Read;
-        let mut body = String::new();
-        std::io::stdin().read_to_string(&mut body).context("could not read the body from standard input")?;
-        request["body"] = body.into();
-    }
-    Ok(send(request)?.to_string())
-}
-
-/// Sends `request`, signed with this agent's `PO_TOKEN`, to the window that started it, and
+/// Sends `request`, signed with this thread's `PO_TOKEN`, to the window that started it, and
 /// returns what it answered or why it refused.
 pub fn send(mut request: Value) -> Result<Value> {
     use anyhow::Context;
@@ -202,30 +181,9 @@ pub fn send(mut request: Value) -> Result<Value> {
     }
 }
 
-/// Whether `po ctl name` takes its body from standard input: a new view does unless given
-/// one, and `--body -` asks for it on any command that has a body.
-fn reads_stdin(name: &str, body: &Value) -> bool {
-    match body.as_str() {
-        Some("-") => name.starts_with("view.") && name != "view.close",
-        Some(_) => false,
-        None => name == "view.show",
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn standard_input_is_read_only_when_it_is_the_body() {
-        let none = Value::Null;
-        assert!(reads_stdin("view.show", &none));
-        assert!(!reads_stdin("view.update", &none));
-        assert!(!reads_stdin("view.close", &none));
-        assert!(reads_stdin("view.update", &Value::from("-")));
-        assert!(!reads_stdin("view.show", &Value::from("text")));
-        assert!(!reads_stdin("file.open", &Value::from("-")));
-    }
 
     fn tokens() -> Tokens {
         Arc::new(Mutex::new(HashMap::from([("good".to_string(), 7)])))
