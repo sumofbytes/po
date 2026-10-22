@@ -3431,9 +3431,12 @@ impl Reader {
         self.thread.blank = false;
         self.thread.busy = true;
         self.thread.touched = Instant::now();
+        // The message that was last stops being so: it loses its bottom padding and folds its
+        // finished runs of tool calls, so it is laid out again too.
+        let was_last = self.thread.messages.len().saturating_sub(1);
         self.thread.messages.push(Msg::User(prompt.to_string()));
         self.thread.messages.push(Msg::Agent(vec![]));
-        self.thread.relist(self.thread.messages.len() - 2);
+        self.thread.relist(was_last);
         self.thread.list.scroll_to_end();
     }
 
@@ -3481,8 +3484,32 @@ impl Reader {
         cx.notify();
     }
 
-    /// Opens every tool call's details, or closes them all when none is left to open.
+    /// Opens every tool call's details, or closes them all when none is left to open. Runs folded
+    /// to a line count as something left to open: they are unfolded, details and all.
     fn toggle_tools(&mut self, cx: &mut Context<Self>) {
+        let count = self.thread.messages.len();
+        let mut from = None;
+        for (ix, msg) in self.thread.messages.iter_mut().enumerate() {
+            let Msg::Agent(blocks) = msg else { continue };
+            for start in folded_runs(blocks, ix + 1 == count) {
+                let Some(Block::Tool(tool)) = blocks.get_mut(start) else { continue };
+                tool.fold = Some(false);
+                from.get_or_insert(ix);
+            }
+        }
+        if let Some(from) = from {
+            for msg in &mut self.thread.messages {
+                let Msg::Agent(blocks) = msg else { continue };
+                for block in blocks {
+                    if let Block::Tool(tool) = block {
+                        tool.open = true;
+                    }
+                }
+            }
+            self.thread.relist(from);
+            cx.notify();
+            return;
+        }
         if let Some(from) = toggle_all(&mut self.thread.messages, |b| if let Block::Tool(tool) = b { Some(&mut tool.open) } else { None }) {
             self.thread.relist(from);
             cx.notify();
@@ -4783,6 +4810,24 @@ fn run_folded(run: &[Block], last: bool) -> bool {
     first.fold.unwrap_or(!last && run.iter().all(|b| matches!(b, Block::Tool(t) if t.status == Step::Done)))
 }
 
+/// Where each run of tool calls shown folded starts in `blocks`.
+fn folded_runs(blocks: &[Block], last: bool) -> Vec<usize> {
+    let mut starts = vec![];
+    let mut n = 0;
+    while n < blocks.len() {
+        if !matches!(blocks[n], Block::Tool(_)) {
+            n += 1;
+            continue;
+        }
+        let len = blocks[n..].iter().take_while(|b| matches!(b, Block::Tool(_))).count();
+        if len >= 3 && run_folded(&blocks[n..n + len], last) {
+            starts.push(n);
+        }
+        n += len;
+    }
+    starts
+}
+
 /// The header of a run of tool calls: how many there were, and a click folds or unfolds them.
 fn tool_run(ix: usize, n: usize, run: &[Block], folded: bool, this: &Entity<Reader>, text_inset: gpui::Pixels, cx: &App) -> impl IntoElement {
     let colors = cx.global::<Palette>();
@@ -5618,7 +5663,7 @@ mod tests {
         assert_eq!(toggle_all(&mut vec![Msg::User("x".into())], thought_flag), None);
     }
 
-    use super::{Activity, Block, Msg, PermissionOption, Step, ToolBlock, preview_of, language, toggle_all, match_files, primary_option, syntax};
+    use super::{Activity, Block, Msg, PermissionOption, Step, ToolBlock, folded_runs, preview_of, language, run_folded, toggle_all, match_files, primary_option, syntax};
 
     #[test]
     fn file_matches_rank_names_before_paths() {
@@ -5683,6 +5728,43 @@ mod tests {
 
     fn tool(title: &str, status: Step) -> Block {
         Block::Tool(ToolBlock { id: String::new(), title: title.into(), status, open: false, fold: None, arguments: String::new(), result: String::new(), path: None })
+    }
+
+    #[test]
+    fn a_run_of_finished_calls_folds_once_it_is_behind_the_latest_message() {
+        let run = vec![tool("a", Step::Done), tool("b", Step::Done), tool("c", Step::Done)];
+        assert!(run_folded(&run, false));
+        assert!(!run_folded(&run, true), "the latest message stays open");
+        let failed = vec![tool("a", Step::Done), tool("b", Step::Failed), tool("c", Step::Done)];
+        assert!(!run_folded(&failed, false), "a failure doesn't hide");
+        let running = vec![tool("a", Step::Done), tool("b", Step::Working), tool("c", Step::Waiting)];
+        assert!(!run_folded(&running, false), "a call still going doesn't hide");
+    }
+
+    #[test]
+    fn a_click_on_a_run_overrides_the_default() {
+        let mut run = vec![tool("a", Step::Done), tool("b", Step::Done), tool("c", Step::Done)];
+        let Block::Tool(first) = &mut run[0] else { unreachable!() };
+        first.fold = Some(false);
+        assert!(!run_folded(&run, false));
+        let mut failed = vec![tool("a", Step::Failed), tool("b", Step::Done), tool("c", Step::Done)];
+        let Block::Tool(first) = &mut failed[0] else { unreachable!() };
+        first.fold = Some(true);
+        assert!(run_folded(&failed, true));
+    }
+
+    #[test]
+    fn only_runs_of_three_or_more_are_found_folded() {
+        let blocks = vec![
+            tool("a", Step::Done),
+            tool("b", Step::Done),
+            Block::Text("x".into()),
+            tool("c", Step::Done),
+            tool("d", Step::Done),
+            tool("e", Step::Done),
+        ];
+        assert_eq!(folded_runs(&blocks, false), vec![3]);
+        assert!(folded_runs(&blocks, true).is_empty());
     }
 
     #[test]
