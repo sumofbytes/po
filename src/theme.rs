@@ -488,8 +488,6 @@ pub struct Palette {
     pub editor_line_number: Hsla,
     /// The corner radius of small parts, like scrollbar thumbs.
     pub radius: Pixels,
-    /// Larger parts, like cards and sidebar groups: a third more than `radius`.
-    pub radius_lg: Pixels,
     /// The largest: chat bubbles and the composer, twice `radius`.
     pub radius_xl: Pixels,
     /// Green for added and unread. Themes may lack one (Rosé Pine's success is teal), so it is fixed.
@@ -602,7 +600,6 @@ impl Palette {
             editor_active_line: editor("editor.active_line.background"),
             editor_line_number: editor("editor.line_number").unwrap_or(base.muted_foreground),
             radius,
-            radius_lg: radius * (4. / 3.),
             radius_xl: radius * 2.,
             added: hsla(0.37, 0.5, 0.5, 1.0),
             font_family: fonts.ui,

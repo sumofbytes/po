@@ -280,6 +280,9 @@ struct ToolBlock {
     title: String,
     status: Step,
     open: bool,
+    /// On the first call of a run of three or more: whether the run is folded to one line. `None`
+    /// leaves it to `run_folded`'s default, until the user clicks the run's header.
+    fold: Option<bool>,
     arguments: String,
     result: String,
     path: Option<String>,
@@ -670,6 +673,7 @@ impl Thread {
                 title: update["title"].as_str().unwrap_or("Tool").to_string(),
                 status: step(update["status"].as_str().unwrap_or("pending")),
                 open: false,
+                fold: None,
                 arguments: pretty(&update["rawInput"]),
                 result: tool_result(update),
                 path: touched(update),
@@ -3427,9 +3431,12 @@ impl Reader {
         self.thread.blank = false;
         self.thread.busy = true;
         self.thread.touched = Instant::now();
+        // The message that was last stops being so: it loses its bottom padding and folds its
+        // finished runs of tool calls, so it is laid out again too.
+        let was_last = self.thread.messages.len().saturating_sub(1);
         self.thread.messages.push(Msg::User(prompt.to_string()));
         self.thread.messages.push(Msg::Agent(vec![]));
-        self.thread.relist(self.thread.messages.len() - 2);
+        self.thread.relist(was_last);
         self.thread.list.scroll_to_end();
     }
 
@@ -3460,6 +3467,15 @@ impl Reader {
         cx.notify();
     }
 
+    /// Folds or unfolds the run of tool calls that starts at `block`.
+    fn fold_run(&mut self, msg: usize, block: usize, folded: bool, cx: &mut Context<Self>) {
+        let Some(Msg::Agent(blocks)) = self.thread.messages.get_mut(msg) else { return };
+        let Some(Block::Tool(tool)) = blocks.get_mut(block) else { return };
+        tool.fold = Some(folded);
+        self.thread.relist(msg);
+        cx.notify();
+    }
+
     fn toggle_thought(&mut self, msg: usize, block: usize, cx: &mut Context<Self>) {
         let Some(Msg::Agent(blocks)) = self.thread.messages.get_mut(msg) else { return };
         let Some(Block::Thought(_, open)) = blocks.get_mut(block) else { return };
@@ -3468,8 +3484,32 @@ impl Reader {
         cx.notify();
     }
 
-    /// Opens every tool call's details, or closes them all when none is left to open.
+    /// Opens every tool call's details, or closes them all when none is left to open. Runs folded
+    /// to a line count as something left to open: they are unfolded, details and all.
     fn toggle_tools(&mut self, cx: &mut Context<Self>) {
+        let count = self.thread.messages.len();
+        let mut from = None;
+        for (ix, msg) in self.thread.messages.iter_mut().enumerate() {
+            let Msg::Agent(blocks) = msg else { continue };
+            for start in folded_runs(blocks, ix + 1 == count) {
+                let Some(Block::Tool(tool)) = blocks.get_mut(start) else { continue };
+                tool.fold = Some(false);
+                from.get_or_insert(ix);
+            }
+        }
+        if let Some(from) = from {
+            for msg in &mut self.thread.messages {
+                let Msg::Agent(blocks) = msg else { continue };
+                for block in blocks {
+                    if let Block::Tool(tool) = block {
+                        tool.open = true;
+                    }
+                }
+            }
+            self.thread.relist(from);
+            cx.notify();
+            return;
+        }
         if let Some(from) = toggle_all(&mut self.thread.messages, |b| if let Block::Tool(tool) = b { Some(&mut tool.open) } else { None }) {
             self.thread.relist(from);
             cx.notify();
@@ -3754,25 +3794,18 @@ impl Reader {
         let many = project_count > 1;
         let add = cx.entity();
         // Groups are spaced apart by more than anything inside one, so the eye reads them as units.
-        let mut tree = div().id("agents-tree").size_full().overflow_y_scroll().flex().flex_col().gap_3().p_2();
+        let mut tree = div().id("agents-tree").size_full().overflow_y_scroll().flex().flex_col().gap_3().p_1p5();
         // Folded, only the header shows, so no project is built.
         let projects_folded = self.sections.read(cx).folded(PROJECTS);
         for view in views.iter().filter(|_| !projects_folded) {
             let pid = view.id;
             let (select, close, start) = (cx.entity(), cx.entity(), cx.entity());
-            // A project and its threads are one card. The one on screen has a soft tint and its name at
-            // full strength; the others have neither, but the same padding, so nothing shifts. Names
-            // and thread titles share one left edge, after a column for the folder or status mark.
+            // A project and its threads are one group, set apart from the next by space, not a box.
+            // The one on screen has its name at full strength; the selected thread is the only
+            // filled row. Names and thread titles share one left edge, after a column for the
+            // folder or status mark.
             let current = pid == active_project;
-            let mut group = div()
-                .flex()
-                .flex_col()
-                .gap_px()
-                .p_1p5()
-                .rounded(colors.radius_lg)
-                .when(current, |card| card.bg(hover));
-            // Inside the selected card the row under the pointer needs a different shade to show.
-            let over = if current { selected.opacity(theme::tokens::MUTED) } else { hover };
+            let mut group = div().flex().flex_col().gap_px();
             group = group.child(
                 div()
                     .id(("agent-project", pid as usize))
@@ -3786,7 +3819,7 @@ impl Reader {
                     .mb_0p5()
                     .rounded(colors.radius)
                     .cursor_pointer()
-                    .hover(move |row| row.bg(over))
+                    .hover(move |row| row.bg(hover))
                     .on_click(move |_, window, cx| select.update(cx, |reader, cx| reader.show_project(pid, window, cx)))
                     .child(
                         div()
@@ -3844,7 +3877,7 @@ impl Reader {
                         .rounded(colors.radius)
                         .cursor_pointer()
                         .when((pid, tid) == (active_project, active_thread), |row| row.bg(selected))
-                        .hover(move |row| row.bg(over))
+                        .when((pid, tid) != (active_project, active_thread), |row| row.hover(move |row| row.bg(hover)))
                         .on_click(move |_, window, cx| select.update(cx, |reader, cx| reader.open_thread(pid, tid, window, cx)))
                         .child(div().w(rems(1.)).flex_none().flex().justify_center().text_sm().text_color(tint).child(glyph))
                         .child(
@@ -4442,7 +4475,7 @@ impl Reader {
                     div()
                         .pt_6()
                         .when(last, |this| this.pb_6())
-                        .child(render_msg(ix, msg, &this, &selection, window, cx))
+                        .child(render_msg(ix, msg, last, &this, &selection, window, cx))
                         .into_any_element()
                 }),
             )
@@ -4674,7 +4707,6 @@ impl Reader {
                         .border(px(BOX_BORDER))
                         .border_color(colors.border)
                         .bg(colors.sidebar)
-                        .when_some(colors.glass, |this, glass| this.border_color(glass.rim).shadow(glass.shadow()))
                         .when(!queued.is_empty(), |this| {
                             this.child(div().flex().flex_col().gap_1().pb_1().border_b_1().border_color(border).children(queued))
                         })
@@ -4703,6 +4735,7 @@ fn text_inset(window: &Window) -> gpui::Pixels {
 fn render_msg(
     ix: usize,
     msg: &Msg,
+    last: bool,
     this: &Entity<Reader>,
     selection: &Entity<ui::markdown::Selection>,
     window: &mut Window,
@@ -4738,11 +4771,24 @@ fn render_msg(
         let thinking = div().text_sm().text_color(colors.muted_foreground).child("Thinking…");
         column = column.child(div().px(text_inset).child(thinking));
     }
-    for (n, block) in blocks.iter().enumerate() {
+    let mut n = 0;
+    while n < blocks.len() {
         let id = ix * 10_000 + n;
         // Runs of tool calls read as one list; anything else is set a step apart.
-        let run = n > 0 && matches!((&blocks[n - 1], block), (Block::Tool(_), Block::Tool(_)));
-        let (el, boxed) = match block {
+        let run = n > 0 && matches!((&blocks[n - 1], &blocks[n]), (Block::Tool(_), Block::Tool(_)));
+        // A run of three or more tool calls gets a header that can fold it to a single line, and
+        // its first call sits as close under that as the calls do to each other.
+        let len = if matches!(blocks[n], Block::Tool(_)) && !run { blocks[n..].iter().take_while(|b| matches!(b, Block::Tool(_))).count() } else { 0 };
+        let titled = len >= 3;
+        if titled {
+            let folded = run_folded(&blocks[n..n + len], last);
+            column = column.child(div().when(n > 0, |this| this.mt_4()).child(tool_run(ix, n, &blocks[n..n + len], folded, this, text_inset, cx)));
+            if folded {
+                n += len;
+                continue;
+            }
+        }
+        let (el, boxed) = match &blocks[n] {
             Block::Text(text) => (ui::markdown::markdown(("answer", id), text, selection, window, cx).into_any_element(), false),
             Block::Thought(text, open) => (thought(ix, n, text, *open, this, selection, window, cx), false),
             Block::Tool(tool) => (tool_card(ix, n, tool, this, text_inset, selection, window, cx).into_any_element(), true),
@@ -4751,9 +4797,66 @@ fn render_msg(
             Block::Approve { agent, new_agent, mcp, answered, .. } => (approval(ix, n, agent, *new_agent, mcp, *answered, this, text_inset, cx).into_any_element(), true),
         };
         let el = if boxed { el } else { div().px(text_inset).child(el).into_any_element() };
-        column = column.child(div().when(n > 0, |this| if run { this.mt_0p5() } else { this.mt_4() }).child(el));
+        column = column.child(div().when(n > 0, |this| if run || titled { this.mt_0p5() } else { this.mt_4() }).child(el));
+        n += 1;
     }
     column.into_any_element()
+}
+
+/// Whether a run of tool calls shows as one line. A run the user hasn't clicked folds once it is
+/// behind the latest message and everything in it went well, so nothing running or failed hides.
+fn run_folded(run: &[Block], last: bool) -> bool {
+    let Some(Block::Tool(first)) = run.first() else { return false };
+    first.fold.unwrap_or(!last && run.iter().all(|b| matches!(b, Block::Tool(t) if t.status == Step::Done)))
+}
+
+/// Where each run of tool calls shown folded starts in `blocks`.
+fn folded_runs(blocks: &[Block], last: bool) -> Vec<usize> {
+    let mut starts = vec![];
+    let mut n = 0;
+    while n < blocks.len() {
+        if !matches!(blocks[n], Block::Tool(_)) {
+            n += 1;
+            continue;
+        }
+        let len = blocks[n..].iter().take_while(|b| matches!(b, Block::Tool(_))).count();
+        if len >= 3 && run_folded(&blocks[n..n + len], last) {
+            starts.push(n);
+        }
+        n += len;
+    }
+    starts
+}
+
+/// The header of a run of tool calls: how many there were, and a click folds or unfolds them.
+fn tool_run(ix: usize, n: usize, run: &[Block], folded: bool, this: &Entity<Reader>, text_inset: gpui::Pixels, cx: &App) -> impl IntoElement {
+    let colors = cx.global::<Palette>();
+    let tools: Vec<&ToolBlock> = run.iter().filter_map(|b| if let Block::Tool(t) = b { Some(t) } else { None }).collect();
+    let status = if tools.iter().any(|t| t.status == Step::Failed) {
+        Step::Failed
+    } else if tools.iter().all(|t| t.status == Step::Done) {
+        Step::Done
+    } else {
+        Step::Working
+    };
+    let (mark, tint) = step_mark(status, colors);
+    let (muted, hover, radius) = (colors.muted_foreground, colors.list_hover, colors.radius);
+    let toggle = this.clone();
+    div()
+        .id(("tool-run", ix * 10_000 + n))
+        .flex()
+        .items_center()
+        .gap_2()
+        .py_1p5()
+        .px(text_inset)
+        .rounded(radius)
+        .cursor_pointer()
+        .text_sm()
+        .hover(move |row| row.bg(hover))
+        .on_click(move |_, _, cx| toggle.update(cx, |reader, cx| reader.fold_run(ix, n, !folded, cx)))
+        .child(div().text_color(tint).child(mark))
+        .child(div().text_color(muted).child(format!("{} tool calls", tools.len())))
+        .child(Icon::new(if folded { IconName::ChevronRight } else { IconName::ChevronDown }).size(IconSize::XSmall).color(muted))
 }
 
 /// Opens every block `flag` picks out, or closes them all when none is left to open. Returns
@@ -4869,7 +4972,7 @@ fn tool_card(
 ) -> impl IntoElement {
     let colors = cx.global::<Palette>();
     let (mark, tint) = step_mark(tool.status, colors);
-    let (muted, hover, panel) = (colors.muted_foreground, colors.list_hover, colors.markdown.code_background);
+    let (muted, hover, border) = (colors.muted_foreground, colors.list_hover, colors.border);
     let radius = colors.radius;
     let settled = tool.status == Step::Done;
     let toggle = this.clone();
@@ -4932,12 +5035,12 @@ fn tool_card(
                 );
                 card = card.child(
                     div()
+                        .id(("tool-pane", (ix * 10_000 + n) * 2 + which))
                         .max_h(rems(16.))
-                        .overflow_hidden()
-                        .rounded(radius)
-                        .bg(panel)
-                        .px_3()
-                        .py_2()
+                        .overflow_y_scroll()
+                        .border_l_2()
+                        .border_color(border)
+                        .pl_3()
                         .font_family(mono)
                         .text_xs()
                         .text_color(muted)
@@ -5071,7 +5174,7 @@ fn show_on_hover(group: SharedString, control: impl IntoElement) -> gpui::Div {
 /// A pane's header. The window's own controls sit in the headers of the panes at its edges:
 /// `lead` before the title in the leftmost pane, `trail` after what is on the right in the
 /// rightmost one.
-fn pane_header(title: &str, right: impl IntoElement, lead: Option<AnyElement>, trail: Option<AnyElement>, cx: &App) -> impl IntoElement {
+fn pane_header(title: &str, right: impl IntoElement, lead: Option<AnyElement>, trail: Option<AnyElement>, cx: &App) -> gpui::Div {
     let colors = cx.global::<Palette>();
     header_row(
         div().flex().items_center().gap_1().min_w_0().children(lead).child(
@@ -5080,6 +5183,8 @@ fn pane_header(title: &str, right: impl IntoElement, lead: Option<AnyElement>, t
         div().flex().items_center().gap_2().child(right).children(trail),
         cx,
     )
+    // The transcript scrolls under this one, so it keeps its line.
+    .when(colors.glass.is_some(), |row| row.border_b_1().border_color(colors.border))
 }
 
 /// `pane` as a sheet of glass floating apart from its neighbours when the glass look is on,
@@ -5099,7 +5204,7 @@ fn floating(pane: impl IntoElement + Styled, cx: &App) -> AnyElement {
 }
 
 /// A pane header: `left` and `right` on a bar with a line under it.
-fn header_row(left: impl IntoElement, right: impl IntoElement, cx: &App) -> impl IntoElement {
+fn header_row(left: impl IntoElement, right: impl IntoElement, cx: &App) -> gpui::Div {
     let colors = cx.global::<Palette>();
     div()
         .h_11()
@@ -5109,8 +5214,8 @@ fn header_row(left: impl IntoElement, right: impl IntoElement, cx: &App) -> impl
         .justify_between()
         .gap_3()
         .px_3()
-        .border_b_1()
-        .border_color(colors.border)
+        // On glass the headers' titles set the sections apart; no line is drawn under them.
+        .when(colors.glass.is_none(), |row| row.border_b_1().border_color(colors.border))
         .text_color(colors.foreground)
         .child(left)
         .child(right)
@@ -5558,7 +5663,7 @@ mod tests {
         assert_eq!(toggle_all(&mut vec![Msg::User("x".into())], thought_flag), None);
     }
 
-    use super::{Activity, Block, Msg, PermissionOption, Step, ToolBlock, preview_of, language, toggle_all, match_files, primary_option, syntax};
+    use super::{Activity, Block, Msg, PermissionOption, Step, ToolBlock, folded_runs, preview_of, language, run_folded, toggle_all, match_files, primary_option, syntax};
 
     #[test]
     fn file_matches_rank_names_before_paths() {
@@ -5622,7 +5727,44 @@ mod tests {
     }
 
     fn tool(title: &str, status: Step) -> Block {
-        Block::Tool(ToolBlock { id: String::new(), title: title.into(), status, open: false, arguments: String::new(), result: String::new(), path: None })
+        Block::Tool(ToolBlock { id: String::new(), title: title.into(), status, open: false, fold: None, arguments: String::new(), result: String::new(), path: None })
+    }
+
+    #[test]
+    fn a_run_of_finished_calls_folds_once_it_is_behind_the_latest_message() {
+        let run = vec![tool("a", Step::Done), tool("b", Step::Done), tool("c", Step::Done)];
+        assert!(run_folded(&run, false));
+        assert!(!run_folded(&run, true), "the latest message stays open");
+        let failed = vec![tool("a", Step::Done), tool("b", Step::Failed), tool("c", Step::Done)];
+        assert!(!run_folded(&failed, false), "a failure doesn't hide");
+        let running = vec![tool("a", Step::Done), tool("b", Step::Working), tool("c", Step::Waiting)];
+        assert!(!run_folded(&running, false), "a call still going doesn't hide");
+    }
+
+    #[test]
+    fn a_click_on_a_run_overrides_the_default() {
+        let mut run = vec![tool("a", Step::Done), tool("b", Step::Done), tool("c", Step::Done)];
+        let Block::Tool(first) = &mut run[0] else { unreachable!() };
+        first.fold = Some(false);
+        assert!(!run_folded(&run, false));
+        let mut failed = vec![tool("a", Step::Failed), tool("b", Step::Done), tool("c", Step::Done)];
+        let Block::Tool(first) = &mut failed[0] else { unreachable!() };
+        first.fold = Some(true);
+        assert!(run_folded(&failed, true));
+    }
+
+    #[test]
+    fn only_runs_of_three_or_more_are_found_folded() {
+        let blocks = vec![
+            tool("a", Step::Done),
+            tool("b", Step::Done),
+            Block::Text("x".into()),
+            tool("c", Step::Done),
+            tool("d", Step::Done),
+            tool("e", Step::Done),
+        ];
+        assert_eq!(folded_runs(&blocks, false), vec![3]);
+        assert!(folded_runs(&blocks, true).is_empty());
     }
 
     #[test]
