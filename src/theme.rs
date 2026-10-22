@@ -407,7 +407,7 @@ pub struct Glass {
     pub rim: Hsla,
     /// The light along a floating pane's top edge, drawn inside it.
     pub sheen: Hsla,
-    /// The gap between a floating pane and the window's edges.
+    /// The gap between neighbouring floating panes; each pane keeps half, so the window's edges get half.
     pub inset: Pixels,
 }
 
