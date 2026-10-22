@@ -407,7 +407,7 @@ pub struct Glass {
     pub rim: Hsla,
     /// The light along a floating pane's top edge, drawn inside it.
     pub sheen: Hsla,
-    /// The gap between a floating pane and the window's edges.
+    /// The gap between neighbouring floating panes; each pane keeps half, so the window's edges get half.
     pub inset: Pixels,
 }
 
@@ -631,7 +631,7 @@ impl Palette {
         let glass = Glass {
             rim: hsla(0., 0., 1., rim),
             sheen: hsla(0., 0., 1., sheen),
-            inset: px(8.),
+            inset: px(4.),
         };
         // A white rim would vanish around a light menu; light themes keep their dark hairline.
         if dark {

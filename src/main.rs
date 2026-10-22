@@ -5000,7 +5000,7 @@ fn tool_card(
                         .flex_1()
                         .min_w_0()
                         .flex()
-                        .items_center()
+                        .items_start()
                         .gap_2()
                         .cursor_pointer()
                         .text_sm()
