@@ -290,8 +290,8 @@ bullets from `punctuation`, links from `colors.link`. An optional top-level
 ## License
 
 Dual-licensed under [MIT](LICENSE) or [Apache-2.0](LICENSE-APACHE), at your
-option. Bundled third-party material keeps its own license: `vendor/gpui-pre-wgpu`
-(Apache-2.0), `src/viewer/languages` queries (Apache-2.0), and the Lucide icons
-in `assets/icons` (ISC).
+option. Bundled third-party material keeps its own license: `vendor/gpui-pre-wgpu`,
+`vendor/gpui-pre-apple`, and `vendor/gpui-pre-windows` (Apache-2.0), `src/viewer/languages`
+queries (Apache-2.0), and the Lucide icons in `assets/icons` (ISC).
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md).

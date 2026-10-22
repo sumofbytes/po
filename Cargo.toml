@@ -68,6 +68,10 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Securit
 [profile.dev]
 debug = "line-tables-only"
 
-# Tries Vulkan alone before probing GL/EGL, which costs ~75 ms at launch.
+# Tries Vulkan alone before probing GL/EGL, which costs ~75 ms at launch. The apple copy carries
+# zed #65571's blend fix (destination alpha was `One`, so a translucent fill over a translucent
+# window background turned opaque — the glass look) ahead of the next gpui-pre release.
 [patch.crates-io]
 gpui-pre-wgpu = { path = "vendor/gpui-pre-wgpu" }
+gpui-pre-apple = { path = "vendor/gpui-pre-apple" }
+gpui-pre-windows = { path = "vendor/gpui-pre-windows" }
