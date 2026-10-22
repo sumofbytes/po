@@ -914,6 +914,12 @@ impl<T: Copy + PartialEq> AgentChange<T> {
         Self { before, left: to }
     }
 
+    /// The record if the layout is still what the agent left; once the user has moved on it is
+    /// gone, and coming back to the agent's layout by hand is theirs.
+    fn settled(change: Option<Self>, now: T) -> Option<Self> {
+        change.filter(|change| change.left == now)
+    }
+
     /// What to save of `now`.
     fn saved(change: Option<&Self>, now: T) -> T {
         change.filter(|change| change.left == now).map_or(now, |change| change.before)
@@ -1860,7 +1866,10 @@ impl Reader {
                 if let (true, Some(view)) = (shows, reply["id"].as_str()) {
                     let view = view.to_string();
                     if visible && reader.last_input.elapsed() >= QUIET {
-                        reader.as_agent(cx, |reader, cx| reader.show_agent_view(&view, cx));
+                        reader.as_agent(cx, |reader, cx| {
+                            reader.show_agent_view(&view, cx);
+                            reader.follow_agent();
+                        });
                     } else if reader.thread.shown.as_deref() != Some(&view) {
                         // The user is typing, or this is not the thread they are in: ask first.
                         reader.thread.offered = Some(view);
@@ -1895,7 +1904,6 @@ impl Reader {
         self.thread.shown = Some(id.to_string());
         self.thread.offered = None;
         self.open_viewer_wide(cx);
-        self.follow_agent();
         cx.notify();
     }
 
@@ -1914,8 +1922,14 @@ impl Reader {
         Ok(match command {
             Command::FileOpen { path, line } => {
                 let path = command::project_path(root, &path)?;
-                if !root.join(&path).is_file() {
+                let file = root.join(&path);
+                if !file.is_file() {
                     return Err(format!("no file `{path}` in the project"));
+                }
+                // A link inside the project may lead out of it.
+                let inside = file.canonicalize().and_then(|file| root.canonicalize().map(|root| file.starts_with(root))).unwrap_or(false);
+                if !inside {
+                    return Err(format!("`{path}` is not in the project"));
                 }
                 Command::FileOpen { path, line }
             }
@@ -1967,6 +1981,17 @@ impl Reader {
             let change = AgentChange::after(self.agent_modes.get(&project).copied(), mode, self.mode);
             self.agent_modes.insert(project, change);
         }
+    }
+
+    /// Forgets an agent's change once the layout is no longer what it left: the user moved on, and
+    /// coming back to it by hand is their choice, not the agent's.
+    fn settle_agent_changes(&mut self) {
+        self.agent_panes = AgentChange::settled(self.agent_panes, self.panes());
+        let mode = AgentChange::settled(self.agent_modes.get(&self.project_id).copied(), self.mode);
+        match mode {
+            Some(change) => self.agent_modes.insert(self.project_id, change),
+            None => self.agent_modes.remove(&self.project_id),
+        };
     }
 
     fn screen(&self) -> Screen {
@@ -5107,6 +5132,7 @@ fn centered(text: String, cx: &App) -> AnyElement {
 
 impl Render for Reader {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.settle_agent_changes();
         if !self.painted {
             self.painted = true;
             trace::mark("first render");
@@ -5480,6 +5506,13 @@ mod tests {
         assert_eq!(AgentChange::saved(Some(&after_user), 'd'), 'c');
         assert_eq!(AgentChange::saved(Some(&after_user), 'x'), 'x');
         assert_eq!(AgentChange::saved(None, 'x'), 'x');
+        // The user moved off the agent's layout and back by hand: the record is gone, so what
+        // they came back to is what is saved.
+        let change = AgentChange::after(None, 1, 2);
+        assert!(AgentChange::settled(Some(change), 2).is_some());
+        let gone = AgentChange::settled(Some(change), 3);
+        assert!(gone.is_none());
+        assert_eq!(AgentChange::saved(gone.as_ref(), 2), 2);
     }
 
     #[test]

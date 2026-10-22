@@ -157,10 +157,20 @@ pub fn serve() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Po's binary. After `po update` replaces it under a running window, Linux names the old one
+/// with a ` (deleted)` suffix; the new one is at the path without it.
+fn own_binary() -> Option<std::path::PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    match exe.to_str().and_then(|path| path.strip_suffix(" (deleted)")) {
+        Some(path) => Some(path.into()),
+        None => Some(exe),
+    }
+}
+
 /// The entry for Po's own server in ACP's `mcpServers`, carrying `env` (the thread's socket and
 /// token). None if Po can't name its own binary.
 pub fn server(env: &[(String, String)]) -> Option<Value> {
-    let exe = std::env::current_exe().ok()?;
+    let exe = own_binary()?;
     let env: Vec<Value> = env.iter().map(|(name, value)| json!({ "name": name, "value": value })).collect();
     Some(json!({ "name": "po", "command": exe.to_string_lossy(), "args": ["mcp"], "env": env }))
 }
