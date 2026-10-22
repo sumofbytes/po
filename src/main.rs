@@ -8,6 +8,7 @@ mod control;
 mod dex;
 mod diff;
 mod fonts;
+mod mcp;
 mod pr;
 mod schemes;
 mod theme;
@@ -509,7 +510,7 @@ impl Project {
 /// One conversation with an agent: its messages, the process behind it and what is waiting to
 /// be sent to it.
 struct Thread {
-    /// Documents the agent put on screen through `po ctl`.
+    /// Documents the agent put on screen through Po's MCP server.
     views: command::Views,
     /// The rendered form of each view.
     docs: HashMap<String, Doc>,
@@ -880,11 +881,86 @@ struct Slot {
 /// How long the user must have been still before an agent may put a view in front of them.
 const QUIET: Duration = Duration::from_secs(4);
 
+/// A command that moves the viewer, held back until the user is still.
+struct PendingMove {
+    thread: u64,
+    command: command::Command,
+    /// What was on screen when it was asked for. If that is not the same when the pause comes,
+    /// the user moved the viewer themselves, and theirs stands.
+    from: Screen,
+}
+
+/// Which panes are open, as the workspace saves it.
+#[derive(Clone, Copy, PartialEq)]
+struct Panes {
+    viewer: bool,
+    agent: bool,
+}
+
+/// A layout an agent changed: what it was before, which is the user's, and what the agent left.
+/// The workspace saves the user's while the agent's is still on screen, so an agent's move lasts
+/// only until `po` is closed; once the user changes it again, what they leave is theirs.
+#[derive(Clone, Copy)]
+struct AgentChange<T> {
+    before: T,
+    left: T,
+}
+
+impl<T: Copy + PartialEq> AgentChange<T> {
+    /// The record after an agent moved `from` to `to`: an earlier move it builds on keeps the
+    /// user's layout from before that one.
+    fn after(earlier: Option<Self>, from: T, to: T) -> Self {
+        let before = earlier.filter(|change| change.left == from).map_or(from, |change| change.before);
+        Self { before, left: to }
+    }
+
+    /// The record if the layout is still what the agent left; once the user has moved on it is
+    /// gone, and coming back to the agent's layout by hand is theirs.
+    fn settled(change: Option<Self>, now: T) -> Option<Self> {
+        change.filter(|change| change.left == now)
+    }
+
+    /// What to save of `now`.
+    fn saved(change: Option<&Self>, now: T) -> T {
+        change.filter(|change| change.left == now).map_or(now, |change| change.before)
+    }
+}
+
+impl PendingMove {
+    /// The agent itself changed the layout, not the user: what it touched (`shown`, the viewer
+    /// being open) is noted, so its move is not dropped for its own doing. A move of another
+    /// thread stays as it was; it is dropped when that thread goes off screen.
+    fn follows_agent(&mut self, on_screen: u64, now: &Screen) {
+        if self.thread == on_screen {
+            self.from.shown.clone_from(&now.shown);
+            self.from.side_open = now.side_open;
+            self.from.agent_open = now.agent_open;
+        }
+    }
+}
+
+/// What the user sees of the viewer: whether it is open, in which mode, and on what.
+#[derive(Clone, PartialEq)]
+struct Screen {
+    side_open: bool,
+    agent_open: bool,
+    mode: Mode,
+    current: Option<String>,
+    picked: Option<String>,
+    shown: Option<String>,
+}
+
 struct Reader {
     /// How agents started from this window reach it; none where there is no socket.
     control: Option<control::Control>,
     /// When the user last pressed a key or scrolled; an agent waits for a pause to show something.
     last_input: Instant,
+    /// A viewer move the thread on screen asked for while the user was busy, waiting for a pause.
+    pending_move: Option<PendingMove>,
+    /// The panes an agent last opened or closed, and each project's mode an agent last changed,
+    /// by project id; see [`AgentChange`].
+    agent_panes: Option<AgentChange<Panes>>,
+    agent_modes: HashMap<u64, AgentChange<Mode>>,
     mode: Mode,
     /// The project on screen; its methods act on this one.
     project: Project,
@@ -1056,6 +1132,9 @@ impl Reader {
         let mut reader = Self {
             control,
             last_input: Instant::now().checked_sub(QUIET).unwrap_or_else(Instant::now),
+            pending_move: None,
+            agent_panes: None,
+            agent_modes: HashMap::new(),
             mode: Mode::Source,
             project,
             project_id: 0,
@@ -1098,11 +1177,14 @@ impl Reader {
             _subscriptions: subscriptions,
         };
         if let Some(mut requests) = requests {
+            let handle = window.window_handle();
             cx.spawn(async move |this, cx| {
                 while let Some(request) = requests.next().await {
-                    let answered = this.update(cx, |reader, cx| {
-                        let reply = reader.run_command(request.caller, request.command, cx);
-                        request.reply.send(reply).ok();
+                    let answered = handle.update(cx, |_, window, cx| {
+                        this.update(cx, |reader, cx| {
+                            let reply = reader.run_command(request.caller, request.command, window, cx);
+                            request.reply.send(reply).ok();
+                        })
                     });
                     if answered.is_err() {
                         break;
@@ -1757,42 +1839,45 @@ impl Reader {
     }
 
     /// The one way a request from outside the window changes it. Views are the caller's own; the
-    /// layout is the user's, so only the thread on screen may move it.
-    fn run_command(&mut self, caller: command::Caller, command: command::Command, cx: &mut Context<Self>) -> command::Reply {
-        use command::{Command, Preset};
+    /// viewer is the user's, so only the thread on screen may move it, and not while they are busy.
+    fn run_command(&mut self, caller: command::Caller, command: command::Command, window: &mut Window, cx: &mut Context<Self>) -> command::Reply {
+        use command::Command;
         let command::Caller::Thread(id) = caller;
-        let reply = match command {
-            Command::LayoutPreset(preset) => self
-                .with_thread(id, |reader, visible| {
-                    if !visible {
-                        return Err("only the thread on screen can change the layout".to_string());
-                    }
-                    match preset {
-                        Preset::Browse => reader.show_viewer(Mode::Source, cx),
-                        Preset::Review => reader.show_viewer(Mode::Diff, cx),
-                        Preset::Chat => reader.show_chat(cx),
-                    }
-                    Ok(serde_json::json!({}))
-                })
-                .unwrap_or_else(|| Err("that thread is gone".into())),
-            views => {
-                let shows = matches!(views, Command::ViewShow { .. });
-                self.with_thread(id, |reader, visible| {
-                    let reply = reader.thread.views.apply(views)?;
-                    reader.sync_view_docs(cx);
-                    if let (true, Some(view)) = (shows, reply["id"].as_str()) {
-                        let view = view.to_string();
-                        if visible && reader.last_input.elapsed() >= QUIET {
+        let reply = if command.moves_viewer() {
+            self.with_thread(id, |reader, visible| {
+                if !visible {
+                    return Err("only the thread on screen can move the viewer".to_string());
+                }
+                let command = reader.check_move(command)?;
+                if reader.last_input.elapsed() < QUIET {
+                    reader.defer_move(id, command, window, cx);
+                    return Ok(serde_json::json!({ "deferred": true }));
+                }
+                reader.pending_move = None;
+                reader.as_agent(cx, |reader, cx| reader.apply_move(command, window, cx));
+                Ok(serde_json::json!({}))
+            })
+            .unwrap_or_else(|| Err("that thread is gone".into()))
+        } else {
+            let shows = matches!(command, Command::ViewShow { .. });
+            self.with_thread(id, |reader, visible| {
+                let reply = reader.thread.views.apply(command)?;
+                reader.sync_view_docs(cx);
+                if let (true, Some(view)) = (shows, reply["id"].as_str()) {
+                    let view = view.to_string();
+                    if visible && reader.last_input.elapsed() >= QUIET {
+                        reader.as_agent(cx, |reader, cx| {
                             reader.show_agent_view(&view, cx);
-                        } else if reader.thread.shown.as_deref() != Some(&view) {
-                            // The user is typing, or this is not the thread they are in: ask first.
-                            reader.thread.offered = Some(view);
-                        }
+                            reader.follow_agent();
+                        });
+                    } else if reader.thread.shown.as_deref() != Some(&view) {
+                        // The user is typing, or this is not the thread they are in: ask first.
+                        reader.thread.offered = Some(view);
                     }
-                    Ok(reply)
-                })
-                .unwrap_or_else(|| Err("that thread is gone".into()))
-            }
+                }
+                Ok(reply)
+            })
+            .unwrap_or_else(|| Err("that thread is gone".into()))
         };
         cx.notify();
         reply
@@ -1820,6 +1905,145 @@ impl Reader {
         self.thread.offered = None;
         self.open_viewer_wide(cx);
         cx.notify();
+    }
+
+    /// The agent itself changed the layout, not the user: its pending move is not dropped for it.
+    fn follow_agent(&mut self) {
+        let (thread, now) = (self.thread.id, self.screen());
+        if let Some(pending) = &mut self.pending_move {
+            pending.follows_agent(thread, &now);
+        }
+    }
+
+    /// `command` with its path made one inside the project, or why there is nothing to show.
+    fn check_move(&self, command: command::Command) -> Result<command::Command, String> {
+        use command::Command;
+        let root = &self.project.root;
+        Ok(match command {
+            Command::FileOpen { path, line } => {
+                let path = command::project_path(root, &path)?;
+                let file = root.join(&path);
+                if !file.is_file() {
+                    return Err(format!("no file `{path}` in the project"));
+                }
+                // A link inside the project may lead out of it.
+                let inside = file.canonicalize().and_then(|file| root.canonicalize().map(|root| file.starts_with(root))).unwrap_or(false);
+                if !inside {
+                    return Err(format!("`{path}` is not in the project"));
+                }
+                Command::FileOpen { path, line }
+            }
+            Command::DiffShow { path: Some(path) } => {
+                let path = command::project_path(root, &path)?;
+                if !self.project.changes.iter().any(|change| change.path == path) {
+                    return Err(format!("`{path}` has no changes"));
+                }
+                Command::DiffShow { path: Some(path) }
+            }
+            other => other,
+        })
+    }
+
+    fn apply_move(&mut self, command: command::Command, window: &mut Window, cx: &mut Context<Self>) {
+        use command::Command;
+        match command {
+            Command::FileOpen { path, line } => {
+                self.show_viewer(Mode::Source, cx);
+                self.open(&path, window, cx);
+                if let (Some(line), Some(code)) = (line, &self.project.code) {
+                    code.update(cx, |code, cx| code.go_to_line(line - 1, cx));
+                }
+            }
+            Command::DiffShow { path } => {
+                self.show_viewer(Mode::Diff, cx);
+                if let Some(path) = path {
+                    self.pick(&path, cx);
+                }
+            }
+            Command::ViewerClose => self.show_chat(cx),
+            _ => {}
+        }
+    }
+
+    fn panes(&self) -> Panes {
+        Panes { viewer: self.side_open, agent: self.agent_open }
+    }
+
+    /// Runs `change`, which an agent asked for, noting what it did to the layout so the
+    /// workspace goes on saving the user's.
+    fn as_agent(&mut self, cx: &mut Context<Self>, change: impl FnOnce(&mut Self, &mut Context<Self>)) {
+        let (panes, project, mode) = (self.panes(), self.project_id, self.mode);
+        change(self, cx);
+        if self.panes() != panes {
+            self.agent_panes = Some(AgentChange::after(self.agent_panes, panes, self.panes()));
+        }
+        if self.mode != mode {
+            let change = AgentChange::after(self.agent_modes.get(&project).copied(), mode, self.mode);
+            self.agent_modes.insert(project, change);
+        }
+    }
+
+    /// Forgets an agent's change once the layout is no longer what it left: the user moved on, and
+    /// coming back to it by hand is their choice, not the agent's.
+    fn settle_agent_changes(&mut self) {
+        self.agent_panes = AgentChange::settled(self.agent_panes, self.panes());
+        let mode = AgentChange::settled(self.agent_modes.get(&self.project_id).copied(), self.mode);
+        match mode {
+            Some(change) => self.agent_modes.insert(self.project_id, change),
+            None => self.agent_modes.remove(&self.project_id),
+        };
+    }
+
+    fn screen(&self) -> Screen {
+        Screen {
+            side_open: self.side_open,
+            agent_open: self.agent_open,
+            mode: self.mode,
+            current: self.project.current.clone(),
+            picked: self.project.picked.clone(),
+            shown: self.thread.shown.clone(),
+        }
+    }
+
+    /// Holds `command` from thread `thread` until the user has been still for [`QUIET`]. A later
+    /// request replaces it; it is dropped if another thread comes on screen or the user moves the
+    /// viewer first.
+    fn defer_move(&mut self, thread: u64, command: command::Command, window: &mut Window, cx: &mut Context<Self>) {
+        let waiting = self.pending_move.is_some();
+        self.pending_move = Some(PendingMove { thread, command, from: self.screen() });
+        if waiting {
+            return;
+        }
+        let mut wait = QUIET.saturating_sub(self.last_input.elapsed());
+        let handle = window.window_handle();
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(wait).await;
+                let next = handle.update(cx, |_, window, cx| this.update(cx, |reader, cx| reader.try_pending_move(window, cx)));
+                match next {
+                    Ok(Ok(Some(more))) => wait = more,
+                    _ => break,
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// Applies the held move if the user has gone still, or says how much longer to wait.
+    fn try_pending_move(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<Duration> {
+        let pending = self.pending_move.as_ref()?;
+        if pending.thread != self.thread.id || pending.from != self.screen() {
+            self.pending_move = None;
+            return None;
+        }
+        let still = self.last_input.elapsed();
+        if still < QUIET {
+            return Some(QUIET - still);
+        }
+        let pending = self.pending_move.take()?;
+        self.as_agent(cx, |reader, cx| reader.apply_move(pending.command, window, cx));
+        cx.notify();
+        None
     }
 
     /// Browse (files) or Review (changes) in the viewer pane. If the pane was closed it opens wide,
@@ -2052,8 +2276,8 @@ impl Reader {
             return;
         }
         self.thread.status = if resume { "listing sessions…" } else { "starting…" }.into();
-        let env = self.control.as_ref().map(|control| control.register(id)).unwrap_or_default();
-        match Client::spawn(&agent, &self.project.root, resume, &env) {
+        let control = self.control.as_ref().map(|control| control.register(id)).unwrap_or_default();
+        match Client::spawn(&agent, &self.project.root, resume, &control) {
             Ok((client, mut events)) => {
                 self.thread.client = Some(client);
                 let handle = window.window_handle();
@@ -2550,7 +2774,7 @@ impl Reader {
                 threads.sort_by_key(|t| t.id);
                 workspace::ProjectState {
                     root: view.project.root.clone(),
-                    review: view.mode == Mode::Diff,
+                    review: AgentChange::saved(self.agent_modes.get(&view.id), view.mode) == Mode::Diff,
                     worktree: view.project.worktree.as_ref().map(|wt| wt.spec.clone()),
                     active: threads.iter().position(|t| t.id == view.shown).unwrap_or(0),
                     threads: threads
@@ -2562,7 +2786,8 @@ impl Reader {
                 }
             })
             .collect();
-        workspace::Workspace { projects, viewer_open: self.side_open, agent_open: self.agent_open, swapped: self.swapped, agent: self.chosen_agent.clone(), split: self.sections.read(cx).size(PROJECTS).map(f32::from), explorer_collapsed: self.sections.read(cx).folded(EXPLORER), live_split: self.sections.read(cx).size(LIVE).map(f32::from), live_folded: self.sections.read(cx).folded(LIVE), projects_folded: self.sections.read(cx).folded(PROJECTS), left_width: Some(self.sidebars.read(cx).widths().0.into()), right_width: self.sidebars.read(cx).widths().1.map(f32::from) }
+        let panes = AgentChange::saved(self.agent_panes.as_ref(), self.panes());
+        workspace::Workspace { projects, viewer_open: panes.viewer, agent_open: panes.agent, swapped: self.swapped, agent: self.chosen_agent.clone(), split: self.sections.read(cx).size(PROJECTS).map(f32::from), explorer_collapsed: self.sections.read(cx).folded(EXPLORER), live_split: self.sections.read(cx).size(LIVE).map(f32::from), live_folded: self.sections.read(cx).folded(LIVE), projects_folded: self.sections.read(cx).folded(PROJECTS), left_width: Some(self.sidebars.read(cx).widths().0.into()), right_width: self.sidebars.read(cx).widths().1.map(f32::from) }
     }
 
     /// Saves the workspace once the current change has settled, so that a thread that is
@@ -4907,6 +5132,7 @@ fn centered(text: String, cx: &App) -> AnyElement {
 
 impl Render for Reader {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.settle_agent_changes();
         if !self.painted {
             self.painted = true;
             trace::mark("first render");
@@ -5089,13 +5315,10 @@ fn main() {
     // `po update` is a terminal command, not a window: it runs to completion and
     // exits before any GUI is set up (like `dex update`).
     let cli: Vec<String> = std::env::args().skip(1).collect();
-    if cli.first().is_some_and(|arg| arg == "ctl") {
-        match control::ctl(&cli[1..]) {
-            Ok(reply) => println!("{reply}"),
-            Err(error) => {
-                eprintln!("po ctl: {error:#}");
-                std::process::exit(1);
-            }
+    if cli.len() == 1 && cli[0] == "mcp" {
+        if let Err(error) = mcp::serve() {
+            eprintln!("po mcp: {error:#}");
+            std::process::exit(1);
         }
         return;
     }
@@ -5266,6 +5489,56 @@ fn preview_of(messages: &[Msg], busy: bool) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn an_agents_layout_is_saved_as_the_users_until_the_user_changes_it() {
+        use super::AgentChange;
+        // The agent opened the viewer: while it is open, the user's closed one is what is saved.
+        let change = AgentChange::after(None, 1, 2);
+        assert_eq!(AgentChange::saved(Some(&change), 2), 1);
+        // The user moved on from it: what they left is theirs.
+        assert_eq!(AgentChange::saved(Some(&change), 3), 3);
+        // A second move on top of the agent's keeps the user's from before the first.
+        let modes = AgentChange::after(None, 'f', 'd');
+        let again = AgentChange::after(Some(modes), 'd', 'c');
+        assert_eq!(AgentChange::saved(Some(&again), 'c'), 'f');
+        // A move after the user changed it starts from theirs.
+        let after_user = AgentChange::after(Some(modes), 'c', 'd');
+        assert_eq!(AgentChange::saved(Some(&after_user), 'd'), 'c');
+        assert_eq!(AgentChange::saved(Some(&after_user), 'x'), 'x');
+        assert_eq!(AgentChange::saved(None, 'x'), 'x');
+        // The user moved off the agent's layout and back by hand: the record is gone, so what
+        // they came back to is what is saved.
+        let change = AgentChange::after(None, 1, 2);
+        assert!(AgentChange::settled(Some(change), 2).is_some());
+        let gone = AgentChange::settled(Some(change), 3);
+        assert!(gone.is_none());
+        assert_eq!(AgentChange::saved(gone.as_ref(), 2), 2);
+    }
+
+    #[test]
+    fn an_agents_own_view_show_does_not_drop_its_pending_move() {
+        use super::{Mode, PendingMove, Screen};
+        use crate::command::Command;
+        let from = Screen { side_open: false, agent_open: false, mode: Mode::Source, current: None, picked: None, shown: None };
+        // The agent shows a view on the thread whose file open waits: the move follows what the
+        // agent touched, so it applies once the pause comes.
+        let mut pending = PendingMove {
+            thread: 1,
+            command: Command::FileOpen { path: "a.rs".into(), line: None },
+            from: from.clone(),
+        };
+        let shown = Screen { side_open: true, agent_open: true, mode: Mode::Source, current: None, picked: None, shown: Some("v".into()) };
+        pending.follows_agent(1, &shown);
+        assert_eq!(pending.from.shown.as_deref(), Some("v"));
+        assert!(pending.from.side_open && pending.from.agent_open);
+        // What the agent did not touch stays as deferred, so a user's change to it still counts.
+        assert!(matches!(pending.from.mode, Mode::Source));
+        // A move of another thread does not follow: it drops when its thread goes off screen.
+        let mut other = PendingMove { thread: 2, command: Command::ViewerClose, from };
+        other.follows_agent(1, &shown);
+        assert_eq!(other.from.shown, None);
+    }
+
     fn thought_flag(b: &mut Block) -> Option<&mut bool> {
         if let Block::Thought(_, shown) = b { Some(shown) } else { None }
     }

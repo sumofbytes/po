@@ -18,21 +18,18 @@ pub struct AgentView {
     pub body: String,
 }
 
-/// The shapes the viewer takes, as the three shortcuts name them.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Preset {
-    Browse,
-    Review,
-    Chat,
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Command {
     /// Adds a markdown view, or replaces the caller's view with the same `id`.
     ViewShow { id: Option<String>, title: String, body: String },
     ViewUpdate { id: String, title: Option<String>, body: Option<String> },
     ViewClose { id: String },
-    LayoutPreset(Preset),
+    /// Opens a file of the project in the viewer, at a line (from 1) if one is given.
+    FileOpen { path: String, line: Option<usize> },
+    /// Shows the changes in the viewer, at one file's diff if `path` is given.
+    DiffShow { path: Option<String> },
+    /// Closes the viewer, leaving the conversation the middle.
+    ViewerClose,
 }
 
 /// A command's answer: a JSON value, or why it was refused.
@@ -48,7 +45,47 @@ fn text<'a>(request: &'a Value, key: &str) -> Option<&'a str> {
     request[key].as_str()
 }
 
+/// A line number from 1, as a number or a string holding one.
+fn line(request: &Value) -> Result<Option<usize>, String> {
+    let line = match &request["line"] {
+        Value::Null => return Ok(None),
+        Value::Number(number) => number.as_u64(),
+        Value::String(text) => text.parse().ok(),
+        _ => None,
+    };
+    match line {
+        Some(line) if line >= 1 => Ok(Some(line as usize)),
+        _ => Err("`line` is a number from 1".into()),
+    }
+}
+
+/// `path` as a path inside the project at `root`, with `/` between its parts. An absolute path
+/// is taken as one under `root`; anything that would reach outside it is refused.
+pub fn project_path(root: &std::path::Path, path: &str) -> Result<String, String> {
+    use std::path::{Component, Path};
+    let full = Path::new(path);
+    let relative = if full.is_absolute() { full.strip_prefix(root).map_err(|_| format!("`{path}` is not in the project"))? } else { full };
+    let mut parts = vec![];
+    for part in relative.components() {
+        match part {
+            Component::Normal(part) => parts.push(part.to_string_lossy()),
+            Component::CurDir => {}
+            _ => return Err(format!("`{path}` is not in the project")),
+        }
+    }
+    if parts.is_empty() {
+        return Err("no path".into());
+    }
+    Ok(parts.join("/"))
+}
+
 impl Command {
+    /// Whether the command moves what the viewer shows, which is the user's to decide while
+    /// they are busy, rather than only changing the caller's own views.
+    pub fn moves_viewer(&self) -> bool {
+        matches!(self, Self::FileOpen { .. } | Self::DiffShow { .. } | Self::ViewerClose)
+    }
+
     /// Reads a request such as `{"command": "view.show", "title": "Plan", "body": "…"}`.
     pub fn parse(request: &Value) -> Result<Self, String> {
         let name = text(request, "command").ok_or("no command")?;
@@ -63,12 +100,9 @@ impl Command {
                 Self::ViewUpdate { id: need("id")?, title: opt("title"), body: opt("body") }
             }
             "view.close" => Self::ViewClose { id: need("id")? },
-            "layout.preset" => Self::LayoutPreset(match need("name")?.as_str() {
-                "browse" => Preset::Browse,
-                "review" => Preset::Review,
-                "chat" => Preset::Chat,
-                other => return Err(format!("no preset `{other}`: browse, review or chat")),
-            }),
+            "file.open" => Self::FileOpen { path: need("path")?, line: line(request)? },
+            "diff.show" => Self::DiffShow { path: opt("path") },
+            "viewer.close" => Self::ViewerClose,
             other => return Err(format!("no command `{other}`")),
         };
         command.check()?;
@@ -107,7 +141,7 @@ impl Views {
         self.list.is_empty()
     }
 
-    /// Applies a view command. Layout presets are the window's, not the views'.
+    /// Applies a view command. What the viewer shows is the window's, not the views'.
     pub fn apply(&mut self, command: Command) -> Reply {
         match command {
             Command::ViewShow { id, title, body } => {
@@ -144,7 +178,7 @@ impl Views {
                 self.list.retain(|view| view.id != id);
                 if self.list.len() == before { Err(format!("no view `{id}`")) } else { Ok(json!({ "id": id })) }
             }
-            Command::LayoutPreset(_) => Err("not a view command".into()),
+            _ => Err("not a view command".into()),
         }
     }
 }
@@ -164,7 +198,13 @@ mod tests {
         let request = json!({ "command": "view.update", "id": "v1", "body": "x" });
         assert_eq!(Command::parse(&request), Ok(Command::ViewUpdate { id: "v1".into(), title: None, body: Some("x".into()) }));
         assert_eq!(Command::parse(&json!({ "command": "view.close", "id": "v1" })), Ok(Command::ViewClose { id: "v1".into() }));
-        assert_eq!(Command::parse(&json!({ "command": "layout.preset", "name": "review" })), Ok(Command::LayoutPreset(Preset::Review)));
+        let open = |line| Ok(Command::FileOpen { path: "src/main.rs".into(), line });
+        assert_eq!(Command::parse(&json!({ "command": "file.open", "path": "src/main.rs" })), open(None));
+        assert_eq!(Command::parse(&json!({ "command": "file.open", "path": "src/main.rs", "line": "12" })), open(Some(12)));
+        assert_eq!(Command::parse(&json!({ "command": "file.open", "path": "src/main.rs", "line": 12 })), open(Some(12)));
+        assert_eq!(Command::parse(&json!({ "command": "diff.show" })), Ok(Command::DiffShow { path: None }));
+        assert_eq!(Command::parse(&json!({ "command": "diff.show", "path": "a.rs" })), Ok(Command::DiffShow { path: Some("a.rs".into()) }));
+        assert_eq!(Command::parse(&json!({ "command": "viewer.close" })), Ok(Command::ViewerClose));
     }
 
     #[test]
@@ -173,9 +213,26 @@ mod tests {
         assert!(Command::parse(&json!({ "command": "rm" })).is_err());
         assert!(Command::parse(&json!({ "command": "view.show", "title": "t" })).is_err());
         assert!(Command::parse(&json!({ "command": "view.update", "id": "v1" })).is_err());
-        assert!(Command::parse(&json!({ "command": "layout.preset", "name": "wide" })).is_err());
+        assert!(Command::parse(&json!({ "command": "layout.preset", "name": "review" })).is_err());
+        assert!(Command::parse(&json!({ "command": "file.open" })).is_err());
+        for line in [json!(0), json!("0"), json!("ten"), json!(-3), json!(true)] {
+            assert!(Command::parse(&json!({ "command": "file.open", "path": "a", "line": line })).is_err());
+        }
         let huge = "x".repeat(MAX_BODY + 1);
         assert!(Command::parse(&json!({ "command": "view.show", "title": "t", "body": huge })).is_err());
+    }
+
+    #[test]
+    fn a_path_stays_inside_the_project() {
+        let root = std::path::Path::new("/work/po");
+        assert_eq!(project_path(root, "src/main.rs"), Ok("src/main.rs".into()));
+        assert_eq!(project_path(root, "./src/./main.rs"), Ok("src/main.rs".into()));
+        assert_eq!(project_path(root, "/work/po/src/main.rs"), Ok("src/main.rs".into()));
+        assert!(project_path(root, "../secret").is_err());
+        assert!(project_path(root, "src/../../secret").is_err());
+        assert!(project_path(root, "/etc/passwd").is_err());
+        assert!(project_path(root, "/work/po").is_err());
+        assert!(project_path(root, "").is_err());
     }
 
     #[test]

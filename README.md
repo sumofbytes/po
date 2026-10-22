@@ -111,6 +111,27 @@ the first time one is about to be handed to an agent, `po` shows its command lin
 **Run it**. The answer is kept for that command, arguments and `env` (not the `name`), and
 changing any of them asks again. A server you decline is left out until `po` is restarted.
 
+#### Letting the agent show you things
+
+Every ACP agent `po` starts is also handed `po`'s own MCP server, named `po` (it is `po`
+itself, so it is not asked about). Its tools let the agent put what it is talking about in
+front of you:
+
+| Tool | What it does |
+|---|---|
+| `show_view` | Shows a markdown document as a tab in the viewer |
+| `update_view` | Changes one of its views |
+| `close_view` | Closes one of its views |
+| `open_file` | Opens a file of the project, at a line |
+| `show_diff` | Shows the changes, at one file's diff |
+| `close_viewer` | Closes the viewer |
+
+The server reaches the window through a socket, with a token for its thread that is passed in
+the server's environment, not the agent's, so programs the agent runs don't inherit it. Only the
+thread on screen can move the viewer, and only files inside the project can be opened. While you are
+typing or scrolling, a move waits until you have been still for a few seconds and is dropped if
+you change the viewer yourself first; a new view is offered as a button rather than shown.
+
 #### Steering and follow-ups (dex daemon)
 
 ACP has no way to add to a turn that is already running, so with an ACP agent a
