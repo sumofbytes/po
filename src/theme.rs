@@ -631,7 +631,7 @@ impl Palette {
         let glass = Glass {
             rim: hsla(0., 0., 1., rim),
             sheen: hsla(0., 0., 1., sheen),
-            inset: px(8.),
+            inset: px(4.),
         };
         // A white rim would vanish around a light menu; light themes keep their dark hairline.
         if dark {
