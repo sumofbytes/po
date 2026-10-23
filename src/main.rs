@@ -345,7 +345,10 @@ fn tool_result(update: &Value) -> String {
 /// The sections of the left side, top to bottom.
 const LIVE: usize = 0;
 const PROJECTS: usize = 1;
-const EXPLORER: usize = 2;
+
+/// The width, in pixels, the viewer's file tree starts with, and the range it is dragged within.
+const TREE_WIDTH: f32 = 240.0;
+const TREE_RANGE: std::ops::Range<gpui::Pixels> = px(160.)..px(420.);
 
 /// The height, in pixels, the live agents list starts with.
 const LIVE_HEIGHT: f32 = 136.0;
@@ -929,8 +932,12 @@ struct Reader {
     /// Widths of the left side and the viewer pane.
     sidebars: Entity<SidebarsState>,
     left_open: bool,
-    /// The left side's sections: live agents, projects, explorer.
+    /// The left side's sections: live agents and projects.
     sections: Entity<StackState>,
+    /// The width of the file tree inside the viewer pane.
+    tree_cols: Entity<SidebarsState>,
+    /// The file tree in the viewer is hidden.
+    tree_hidden: bool,
     /// The viewer pane (a file or a diff) on the right is shown.
     side_open: bool,
     /// The viewer is in the middle and the conversation on the right, instead of the reverse.
@@ -986,8 +993,9 @@ impl Reader {
                 .submit_on_enter(true)
                 .placeholder("Message the agent")
         });
-        let sections = cx.new(|_| StackState::new(vec![Some(px(LIVE_HEIGHT)), None, None]));
+        let sections = cx.new(|_| StackState::new(vec![Some(px(LIVE_HEIGHT)), None]));
         let sidebars = cx.new(|_| SidebarsState::new(px(280.0), px(560.0)));
+        let tree_cols = cx.new(|_| SidebarsState::new(px(TREE_WIDTH), px(0.0)));
         let subscriptions = vec![
             // Switching modes unmounts whatever was focused (the explorer, the viewer), which
             // leaves nothing focused and the shortcuts unrouted, so take focus back.
@@ -1088,6 +1096,8 @@ impl Reader {
             sidebars,
             left_open: true,
             sections,
+            tree_cols,
+            tree_hidden: false,
             side_open: true,
             swapped: false,
             agent_open: true,
@@ -2570,6 +2580,8 @@ impl Reader {
         self.swapped = saved.swapped;
         self.agent_open = saved.agent_open;
         self.sidebars.update(cx, |sidebars, _| sidebars.set_widths(saved.left_width.map(px), saved.right_width.map(px)));
+        self.tree_hidden = saved.explorer_collapsed;
+        self.tree_cols.update(cx, |cols, _| cols.set_widths(saved.explorer_width.map(px), None));
         self.chosen_agent = saved.agent.clone().or(self.chosen_agent.take());
         self.sections.update(cx, |sections, _| {
             for (section, height) in [(LIVE, saved.live_split), (PROJECTS, saved.split)] {
@@ -2577,9 +2589,9 @@ impl Reader {
                     sections.set_size(section, px(height));
                 }
             }
-            // A section is never folded if it is the last open one, so a layout that folds all
-            // three, which is never saved, keeps the last open.
-            for (section, folded) in [(LIVE, saved.live_folded), (PROJECTS, saved.projects_folded), (EXPLORER, saved.explorer_collapsed)] {
+            // A section is never folded if it is the last open one, so a layout that folds both,
+            // which is never saved, keeps the last open.
+            for (section, folded) in [(LIVE, saved.live_folded), (PROJECTS, saved.projects_folded)] {
                 sections.set_folded(section, folded);
             }
         });
@@ -2678,7 +2690,7 @@ impl Reader {
             })
             .collect();
         let panes = AgentChange::saved(self.agent_panes.as_ref(), self.panes());
-        workspace::Workspace { projects, viewer_open: panes.viewer, agent_open: panes.agent, swapped: self.swapped, agent: self.chosen_agent.clone(), split: self.sections.read(cx).size(PROJECTS).map(f32::from), explorer_collapsed: self.sections.read(cx).folded(EXPLORER), live_split: self.sections.read(cx).size(LIVE).map(f32::from), live_folded: self.sections.read(cx).folded(LIVE), projects_folded: self.sections.read(cx).folded(PROJECTS), left_width: Some(self.sidebars.read(cx).widths().0.into()), right_width: self.sidebars.read(cx).widths().1.map(f32::from) }
+        workspace::Workspace { projects, viewer_open: panes.viewer, agent_open: panes.agent, swapped: self.swapped, agent: self.chosen_agent.clone(), split: self.sections.read(cx).size(PROJECTS).map(f32::from), explorer_collapsed: self.tree_hidden, explorer_width: Some(self.tree_cols.read(cx).widths().0.into()), live_split: self.sections.read(cx).size(LIVE).map(f32::from), live_folded: self.sections.read(cx).folded(LIVE), projects_folded: self.sections.read(cx).folded(PROJECTS), left_width: Some(self.sidebars.read(cx).widths().0.into()), right_width: self.sidebars.read(cx).widths().1.map(f32::from) }
     }
 
     /// Saves the workspace once the current change has settled, so that a thread that is
@@ -3523,11 +3535,14 @@ impl Reader {
         )
     }
 
-    fn explorer(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// The file tree beside the viewer: every file, or the changed ones in Changes mode, under a
+    /// header with the mode switch. `lead` is the window's own control, when this is the
+    /// leftmost pane.
+    fn explorer(&self, lead: Option<AnyElement>, cx: &mut Context<Self>) -> AnyElement {
         let colors = cx.global::<Palette>();
         let this = cx.entity();
         let mode = self.mode;
-        let (source, changes) = (cx.entity(), cx.entity());
+        let (source, changes, hide) = (cx.entity(), cx.entity(), cx.entity());
         let modes = div()
             .flex_none()
             .flex()
@@ -3550,6 +3565,14 @@ impl Reader {
                     .tooltip("Changes (Ctrl+2)")
                     .selected(mode == Mode::Diff)
                     .on_click(move |_, _, cx| changes.update(cx, |reader, cx| reader.set_mode(Mode::Diff, cx))),
+            )
+            .child(
+                Button::new("hide-tree")
+                    .icon(IconName::PanelLeftClose)
+                    .ghost()
+                    .small()
+                    .tooltip("Hide the file tree")
+                    .on_click(move |_, _, cx| hide.update(cx, |reader, cx| reader.set_tree_hidden(true, cx))),
             );
         let title = match mode {
             Mode::Source => "Explorer",
@@ -3559,12 +3582,7 @@ impl Reader {
         let marks = if mode == Mode::Diff { self.project.marks.clone() } else { Rc::default() };
         let (muted, danger) = (colors.muted_foreground, colors.danger);
         let kinds = [colors.primary, colors.warning, colors.info, colors.added];
-        // Folded, only the header shows, so nothing below it is built, and nothing hidden holds
-        // focus.
-        let folded = self.sections.read(cx).folded(EXPLORER);
-        let body: AnyElement = if folded {
-            div().into_any_element()
-        } else if mode == Mode::Diff && self.project.changes.is_empty() {
+        let body: AnyElement = if mode == Mode::Diff && self.project.changes.is_empty() {
             centered("No changes".into(), cx)
         } else {
             tree(state, move |ix, entry, selected, right_clicked, _, _| {
@@ -3637,36 +3655,37 @@ impl Reader {
             })
             .into_any_element()
         };
-        // No background of its own: it sits in the left sidebar, which paints one.
-        let title = self.fold_title(EXPLORER, div().min_w_0().truncate().child(title.to_string()), cx);
+        let foreground = colors.foreground;
         div()
             .size_full()
             .flex()
             .flex_col()
             .child(header_row(
-                title,
                 div()
                     .flex()
                     .items_center()
-                    .gap_2()
-                    .child(status_text(
-                        match &self.project.pr {
-                            Some(pr) => format!("PR #{} {}", pr.number, pr.title),
-                            None => self.project.root.file_name().map_or(String::new(), |n| n.to_string_lossy().to_string()),
-                        },
-                        cx,
-                    ))
-                    .child(modes),
+                    .gap_1()
+                    .min_w_0()
+                    .children(lead)
+                    .child(div().min_w_0().truncate().text_sm().font_weight(FontWeight::MEDIUM).text_color(foreground).child(title.to_string())),
+                modes,
                 cx,
             ))
-            .children(self.worktree_strip(cx).filter(|_| !folded))
-            .children((mode == Mode::Diff && !folded).then(|| self.pr_strip(cx)))
+            .children(self.worktree_strip(cx))
+            .children((mode == Mode::Diff).then(|| self.pr_strip(cx)))
             .child(div().flex_1().min_h_0().p_1().child(body))
+            .into_any_element()
     }
 
-    /// The left side: every project with its threads, and the active project's files below.
+    /// Hides the file tree beside the viewer, or shows it again.
+    fn set_tree_hidden(&mut self, hidden: bool, cx: &mut Context<Self>) {
+        self.tree_hidden = hidden;
+        self.request_save(cx);
+        cx.notify();
+    }
+
+    /// The left side: the live agents, and every project with its threads.
     fn left_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let explorer = self.explorer(cx).into_any_element();
         let colors = cx.global::<Palette>();
         let (hover, selected, muted, foreground) = (colors.list_hover, colors.list_selected, colors.muted_foreground, colors.foreground);
         let views = self.views();
@@ -3820,7 +3839,7 @@ impl Reader {
         // that the projects below don't move when an agent starts or stops. With none, it is
         // only its header and a line.
         let pane = div().size_full().bg(colors.sidebar).child(
-            stack(&self.sections).fixed(LIVE, (!any_live).then_some(rems(LIVE_EMPTY_REMS))).section(live).section(projects).section(div().size_full().child(explorer)),
+            stack(&self.sections).fixed(LIVE, (!any_live).then_some(rems(LIVE_EMPTY_REMS))).section(live).section(projects),
         );
         floating(pane, cx)
     }
@@ -3922,25 +3941,45 @@ impl Reader {
             .into_any_element()
     }
 
-    /// The viewer or the diff viewer, as the project's mode says.
+    /// The viewer or the diff viewer, as the project's mode says, with the file tree beside it
+    /// unless that is hidden or the agent's own view is shown, which has no files to pick.
     fn pane(&self, lead: Option<AnyElement>, trail: Option<AnyElement>, cx: &mut Context<Self>) -> AnyElement {
-        let Some(tabs) = self.view_tabs(cx) else {
-            return match self.mode {
-                Mode::Source => floating(self.viewer(lead, trail, cx), cx),
-                Mode::Diff => floating(self.diff_viewer(lead, trail, cx), cx),
-            };
-        };
+        let tabs = self.view_tabs(cx);
         let shown = self.thread.shown.as_deref().and_then(|id| {
             let view = self.thread.views.list().iter().find(|view| view.id == id)?;
             Some((view, self.thread.docs.get(id)?))
         });
+        let with_tree = shown.is_none() && !self.tree_hidden;
+        // The window's own control goes in the leftmost header: the tree's, or the viewer's when
+        // the tree is away, where a button brings it back.
+        let (tree_lead, body_lead) = if with_tree {
+            (lead, None)
+        } else if shown.is_none() {
+            let show = cx.entity();
+            let button = Button::new("show-tree")
+                .icon(IconName::PanelLeftOpen)
+                .ghost()
+                .small()
+                .tooltip("Show the file tree")
+                .on_click(move |_, _, cx| show.update(cx, |reader, cx| reader.set_tree_hidden(false, cx)))
+                .into_any_element();
+            (None, Some(div().flex().items_center().gap_1().children(lead).child(button).into_any_element()))
+        } else {
+            (None, lead)
+        };
         let body = match (shown, self.mode) {
-            (Some((view, doc)), _) => self.agent_view(&view.title, doc, lead, trail, cx).into_any_element(),
-            (None, Mode::Source) => self.viewer(lead, trail, cx).into_any_element(),
-            (None, Mode::Diff) => self.diff_viewer(lead, trail, cx).into_any_element(),
+            (Some((view, doc)), _) => self.agent_view(&view.title, doc, body_lead, trail, cx).into_any_element(),
+            (None, Mode::Source) => self.viewer(body_lead, trail, cx).into_any_element(),
+            (None, Mode::Diff) => self.diff_viewer(body_lead, trail, cx).into_any_element(),
+        };
+        let body = if with_tree {
+            let column = self.explorer(tree_lead, cx);
+            sidebars(&self.tree_cols).id("tree").left(true, TREE_RANGE, column).center(div().size_full().child(body)).into_any_element()
+        } else {
+            body
         };
         let background = cx.global::<Palette>().background;
-        floating(div().size_full().flex().flex_col().bg(background).child(tabs).child(div().flex_1().min_h_0().child(body)), cx)
+        floating(div().size_full().flex().flex_col().bg(background).children(tabs).child(div().flex_1().min_h_0().child(body)), cx)
     }
 
     /// A view the agent made, as a markdown document.

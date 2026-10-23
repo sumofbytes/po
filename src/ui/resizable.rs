@@ -83,16 +83,23 @@ struct Sidebar {
 #[derive(IntoElement)]
 pub struct Sidebars {
     state: Entity<SidebarsState>,
+    /// Names the handles, so that layouts nested in one another keep theirs apart.
+    id: &'static str,
     left: Option<Sidebar>,
     center: Option<AnyElement>,
     right: Option<Sidebar>,
 }
 
 pub fn sidebars(state: &Entity<SidebarsState>) -> Sidebars {
-    Sidebars { state: state.clone(), left: None, center: None, right: None }
+    Sidebars { state: state.clone(), id: "sidebar", left: None, center: None, right: None }
 }
 
 impl Sidebars {
+    pub fn id(mut self, id: &'static str) -> Self {
+        self.id = id;
+        self
+    }
+
     pub fn left(mut self, visible: bool, range: Range<Pixels>, element: impl IntoElement) -> Self {
         self.left = Some(Sidebar { element: element.into_any_element(), range, visible });
         self
@@ -125,15 +132,12 @@ fn sidebar(width: Pixels, range: &Range<Pixels>) -> gpui::Div {
     div().flex_grow(0.).flex_shrink(1.).flex_basis(width).min_w(range.start).max_w(range.end).h_full().relative()
 }
 
-fn handle(state: &Entity<SidebarsState>, side: Side, active: bool, cx: &App) -> impl IntoElement {
+fn handle(state: &Entity<SidebarsState>, id: &'static str, side: Side, active: bool, cx: &App) -> impl IntoElement {
     let palette = cx.global::<Palette>();
     let color = if active { palette.resize_handle_active } else { palette.resize_handle };
     let state = state.clone();
     div()
-        .id(match side {
-            Side::Left => "sidebar-handle-left",
-            Side::Right => "sidebar-handle-right",
-        })
+        .id((id, if side == Side::Left { 0usize } else { 1 }))
         .occlude()
         .absolute()
         .top_0()
@@ -230,13 +234,13 @@ impl RenderOnce for Sidebars {
                     .h_full()
                     .relative()
                     .children(self.center)
-                    .when(left_shown, |this| this.child(handle(&self.state, Side::Left, dragging == Some(Side::Left), cx))),
+                    .when(left_shown, |this| this.child(handle(&self.state, self.id, Side::Left, dragging == Some(Side::Left), cx))),
             )
             .when_some(right, |this, right| {
                 this.child(
                     sidebar(right_width, &right.range)
                         .child(right.element)
-                        .child(handle(&self.state, Side::Right, dragging == Some(Side::Right), cx)),
+                        .child(handle(&self.state, self.id, Side::Right, dragging == Some(Side::Right), cx)),
                 )
             })
     }
