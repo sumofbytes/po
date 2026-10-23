@@ -19,7 +19,7 @@ mod viewer;
 mod workspace;
 mod worktree;
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::{Duration, Instant, SystemTime};
@@ -35,7 +35,8 @@ use ui::input::{Input, InputEvent, InputState};
 use ui::list_item::ListItem;
 use ui::menu::{CHECKED, MenuItem, MenuState, dropdown};
 use ui::resizable::{SidebarsState, StackState, sidebars, stack};
-use ui::tree::{TreeEvent, TreeItem, TreeState, tree};
+use ui::file_tree::{FileKind, Folders, file_items, file_kind};
+use ui::tree::{TreeEvent, TreeState, tree};
 use futures::StreamExt;
 use serde_json::Value;
 
@@ -183,87 +184,6 @@ fn common_syntaxes(files: &[String]) -> Vec<String> {
     let mut out: Vec<String> = counts.into_iter().take(4).map(|(name, _)| name.to_string()).collect();
     out.push("md".into());
     out
-}
-
-/// A folder in the explorer, built from the flat file list.
-#[derive(Default)]
-struct Dir {
-    dirs: BTreeMap<String, Dir>,
-    files: Vec<String>,
-}
-
-/// Every folder that holds one of `files`.
-fn folders(files: &[String]) -> HashSet<SharedString> {
-    let mut out = HashSet::new();
-    for file in files {
-        for (ix, _) in file.match_indices('/') {
-            out.insert(SharedString::from(file[..ix].to_string()));
-        }
-    }
-    out
-}
-
-/// A colour family per file kind, drawn as a small square rather than a glyph so it
-/// looks the same whatever fonts are installed.
-#[derive(Clone, Copy)]
-enum FileKind {
-    Code,
-    Data,
-    Doc,
-    Web,
-    Image,
-    Other,
-}
-
-fn file_kind(name: &str) -> FileKind {
-    let Some((stem, ext)) = name.rsplit_once('.') else { return FileKind::Other };
-    if stem.is_empty() {
-        return FileKind::Other;
-    }
-    match ext.to_ascii_lowercase().as_str() {
-        "rs" | "go" | "js" | "mjs" | "cjs" | "ts" | "tsx" | "jsx" | "py" | "rb" | "java" | "kt" | "c" | "h" | "cc"
-        | "cpp" | "hpp" | "cs" | "php" | "swift" | "lua" | "ex" | "exs" | "scala" | "dart" | "sh" | "bash" | "zsh"
-        | "sql" => FileKind::Code,
-        "json" | "yaml" | "yml" | "toml" | "ini" | "xml" | "csv" | "env" | "lock" | "mod" | "sum" => FileKind::Data,
-        "md" | "markdown" | "txt" | "rst" | "adoc" => FileKind::Doc,
-        "html" | "htm" | "css" | "scss" | "less" | "svg" | "vue" => FileKind::Web,
-        "png" | "jpg" | "jpeg" | "gif" | "webp" | "ico" | "avif" => FileKind::Image,
-        _ => FileKind::Other,
-    }
-}
-
-/// The explorer's tree.
-fn explorer_items(files: &[String], expanded: &HashSet<SharedString>) -> Vec<TreeItem> {
-    let mut root = Dir::default();
-    for file in files {
-        let mut dir = &mut root;
-        let mut parts = file.split('/').peekable();
-        while let Some(part) = parts.next() {
-            if parts.peek().is_some() {
-                dir = dir.dirs.entry(part.to_string()).or_default();
-            } else {
-                dir.files.push(file.clone());
-            }
-        }
-    }
-    fn items(
-        dir: &Dir,
-        prefix: &str,
-        expanded: &HashSet<SharedString>,
-    ) -> Vec<TreeItem> {
-        let folders = dir.dirs.iter().map(|(name, child)| {
-            let id = format!("{prefix}{name}");
-            let open = expanded.contains(id.as_str());
-            let children = items(child, &format!("{id}/"), expanded);
-            TreeItem::new(id, name.clone()).children(children).expanded(open)
-        });
-        let files = dir.files.iter().map(|path| {
-            let name = path.rsplit('/').next().unwrap_or(path);
-            TreeItem::new(path.clone(), name.to_string())
-        });
-        folders.chain(files).collect()
-    }
-    items(&root, "", expanded)
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -470,7 +390,8 @@ struct Project {
     scanning: Option<Task<()>>,
     watching: Option<gpui::Task<()>>,
     changes_tree: Entity<TreeState>,
-    collapsed: HashSet<SharedString>,
+    /// Which of the changes list's folders are open; all, until the user closes some.
+    changes_open: Folders,
     picked: Option<String>,
     /// The picked file's diff, its side-by-side pairs and how many lines it adds and removes.
     rows: Rc<Vec<Row>>,
@@ -487,7 +408,8 @@ struct Project {
     doc: Option<Doc>,
     notice: Option<String>,
     tree: Entity<TreeState>,
-    expanded: HashSet<SharedString>,
+    /// Which of the explorer's folders are open; none, until the user opens some.
+    expanded: Folders,
     /// Set when this is a thread's own checkout, made from another project's repository.
     worktree: Option<worktree::Worktree>,
     /// Keep the explorer and changes list wired to this project.
@@ -1236,10 +1158,10 @@ impl Reader {
                 }
                 match event {
                     TreeEvent::Expanded(id) => {
-                        reader.project.expanded.insert(id.clone());
+                        reader.project.expanded.set(id, true);
                     }
                     TreeEvent::Collapsed(id) => {
-                        reader.project.expanded.remove(id);
+                        reader.project.expanded.set(id, false);
                     }
                 }
             }),
@@ -1249,10 +1171,10 @@ impl Reader {
                 }
                 match event {
                     TreeEvent::Expanded(id) => {
-                        reader.project.collapsed.remove(id);
+                        reader.project.changes_open.set(id, true);
                     }
                     TreeEvent::Collapsed(id) => {
-                        reader.project.collapsed.insert(id.clone());
+                        reader.project.changes_open.set(id, false);
                     }
                 }
             }),
@@ -1292,7 +1214,7 @@ impl Reader {
             scanning: None,
             watching: None,
             changes_tree,
-            collapsed: HashSet::new(),
+            changes_open: Folders::new(true),
             picked: None,
             rows: Rc::new(vec![]),
             pairs: Rc::new(vec![]),
@@ -1305,7 +1227,7 @@ impl Reader {
             doc: None,
             notice: None,
             tree,
-            expanded: HashSet::new(),
+            expanded: Folders::new(false),
             worktree: None,
             _subscriptions: subscriptions,
         }
@@ -1313,7 +1235,7 @@ impl Reader {
 
     /// Rebuilds the explorer from `files`, keeping folders open and the current file selected.
     fn refresh_tree(&mut self, cx: &mut Context<Self>) {
-        let items = explorer_items(&self.project.files, &self.project.expanded);
+        let items = file_items(&self.project.files, &self.project.expanded);
         let current = self.project.current.clone().map(SharedString::from);
         self.project.tree.update(cx, |tree, cx| {
             tree.set_items(items, cx);
@@ -1336,9 +1258,7 @@ impl Reader {
         }
         if listed {
             let paths: Vec<String> = self.project.changes.iter().map(|c| c.path.clone()).collect();
-            let mut expanded = folders(&paths);
-            expanded.retain(|id| !self.project.collapsed.contains(id));
-            let items = explorer_items(&paths, &expanded);
+            let items = file_items(&paths, &self.project.changes_open);
             self.project.changes_tree.update(cx, |tree, cx| tree.set_items(items, cx));
         }
         let keep = self.project.picked.clone().filter(|path| self.project.changes.iter().any(|c| &c.path == path));
