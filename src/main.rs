@@ -3952,10 +3952,22 @@ impl Reader {
         !self.tree_hidden && !self.viewer_narrow.get()
     }
 
+    /// What an empty viewer says to do: pick from the tree, or how to get it back.
+    fn pick_hint(&self, what: &str) -> String {
+        if self.tree_visible() {
+            format!("Pick {what} in the tree")
+        } else if self.tree_hidden {
+            format!("Pick {what} with Ctrl+P, or show the file tree")
+        } else {
+            format!("Pick {what} with Ctrl+P, or widen the pane to show the file tree")
+        }
+    }
+
     /// The viewer or the diff viewer, as the project's mode says, with the file tree beside it
     /// unless that is hidden or the agent's own view is shown, which has no files to pick.
     fn pane(&self, lead: Option<AnyElement>, trail: Option<AnyElement>, cx: &mut Context<Self>) -> AnyElement {
         let tabs = self.view_tabs(cx);
+        let has_tabs = tabs.is_some();
         let shown = self.thread.shown.as_deref().and_then(|id| {
             let view = self.thread.views.list().iter().find(|view| view.id == id)?;
             Some((view, self.thread.docs.get(id)?))
@@ -3983,13 +3995,15 @@ impl Reader {
             (None, Mode::Source) => self.viewer(body_lead, trail, cx).into_any_element(),
             (None, Mode::Diff) => self.diff_viewer(body_lead, trail, cx).into_any_element(),
         };
+        let background = cx.global::<Palette>().background;
         let body = if with_tree {
-            let column = self.explorer(tree_lead, cx);
+            // The viewers paint their own background; the column paints its own too, unless the
+            // pane does for both, which would lay a second translucent layer under glass.
+            let column = div().size_full().when(!has_tabs, |d| d.bg(background)).child(self.explorer(tree_lead, cx));
             sidebars(&self.tree_cols).id("tree").left(true, TREE_RANGE, column).center(div().size_full().child(body)).into_any_element()
         } else {
             body
         };
-        let background = cx.global::<Palette>().background;
         // Measures the pane, which it is drawn at whatever the tree is doing, and draws again
         // when that changes whether the tree fits.
         let narrow = self.viewer_narrow.clone();
@@ -4004,7 +4018,7 @@ impl Reader {
         )
         .absolute()
         .size_full();
-        floating(div().size_full().flex().flex_col().relative().bg(background).child(measure).children(tabs).child(div().flex_1().min_h_0().child(body)), cx)
+        floating(div().size_full().flex().flex_col().relative().when(has_tabs, |d| d.bg(background)).child(measure).children(tabs).child(div().flex_1().min_h_0().child(body)), cx)
     }
 
     /// A view the agent made, as a markdown document.
@@ -4107,7 +4121,7 @@ impl Reader {
                 .flex_col()
                 .bg(colors.background)
                 .child(pane_header("Changes", status_text(String::new(), cx), lead, trail, cx))
-                .child(div().flex_1().min_h_0().child(centered(if self.tree_visible() { "Pick a changed file" } else { "Pick a changed file in the tree, or widen the pane" }.into(), cx)));
+                .child(div().flex_1().min_h_0().child(centered(self.pick_hint("a changed file"), cx)));
         };
         let (rows, pairs, syntax) = (self.project.rows.clone(), self.project.pairs.clone(), self.project.colors.clone());
         let palettes = syntax.palettes(cx);
@@ -4236,7 +4250,7 @@ impl Reader {
             (_, None) if let Some(doc) = doc => self.markdown_view(doc, cx),
             // Cached: the viewer redraws when it changes, not with every agent update or caret blink elsewhere.
             (Some(code), None) => code.clone().cached(StyleRefinement::default().size_full()).into_any_element(),
-            (None, None) => centered(if self.tree_visible() { "Pick a file in the tree" } else { "Open a file with Ctrl+P, or show the file tree" }.into(), cx),
+            (None, None) => centered(self.pick_hint("a file"), cx),
         };
         div()
             .size_full()

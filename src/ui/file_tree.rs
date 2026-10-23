@@ -77,7 +77,7 @@ pub fn order(path: &str) -> Vec<(bool, String)> {
 
 /// A folder in the explorer, built from the flat file list.
 #[derive(Default)]
-pub(crate) struct Dir {
+struct Dir {
     dirs: BTreeMap<String, Dir>,
     files: Vec<String>,
 }
