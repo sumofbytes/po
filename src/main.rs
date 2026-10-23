@@ -4615,7 +4615,7 @@ impl Reader {
                     .child(div().size_full().flex().justify_center().px_3().child(div().h_full().w_full().max_w(px(860.0)).child(thread))),
             )
             .child(
-                div().flex_none().px_3().pt_2().pb_4().flex().justify_center().child(
+                div().flex_none().px_3().pt_2().when(cx.global::<Palette>().glass.is_none(), |this| this.pb_3()).flex().justify_center().child(
                     div()
                         .w_full()
                         .max_w(px(860.0))
