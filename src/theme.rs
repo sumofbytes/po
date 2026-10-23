@@ -33,8 +33,6 @@ pub mod tokens {
     pub const GUIDE: f32 = 0.85;
     /// Alpha of dimmed content, like a model's reasoning.
     pub const DIM: f32 = 0.7;
-    /// Alpha of a label that isn't the current one.
-    pub const INACTIVE: f32 = 0.78;
 }
 
 /// Where themes are picked from: `<config>/themes/`.
