@@ -1,9 +1,9 @@
 //! A file tree built from a flat list of relative paths, for the explorer and the changes list.
 use std::collections::{BTreeMap, HashSet};
 
-use gpui::SharedString;
+use gpui::{App, AppContext, Entity, SharedString};
 
-use super::tree::TreeItem;
+use super::tree::{TreeEvent, TreeItem, TreeState};
 
 /// Which folders are open: those the user flipped from `open_by_default`.
 pub struct Folders {
@@ -27,6 +27,52 @@ impl Folders {
             self.flipped.insert(id.clone());
         }
     }
+}
+
+/// A tree of files with its open folders: the explorer's, or the changes list's.
+pub struct FileTree {
+    pub state: Entity<TreeState>,
+    open: Folders,
+}
+
+impl FileTree {
+    pub fn new(open_by_default: bool, cx: &mut App) -> Self {
+        Self { state: cx.new(TreeState::new), open: Folders::new(open_by_default) }
+    }
+
+    /// Remembers a folder the user opened or closed.
+    pub fn note(&mut self, event: &TreeEvent) {
+        match event {
+            TreeEvent::Expanded(id) => self.open.set(id, true),
+            TreeEvent::Collapsed(id) => self.open.set(id, false),
+        }
+    }
+
+    /// Shows `paths`, with `selected` selected if it is among them.
+    pub fn set_paths(&self, paths: &[String], selected: Option<&str>, cx: &mut App) {
+        let items = file_items(paths, &self.open);
+        self.state.update(cx, |tree, cx| {
+            tree.set_items(items, cx);
+            if let Some(ix) = selected.and_then(|id| tree.index_of(id)) {
+                tree.set_selected_index(Some(ix), cx);
+            }
+        });
+    }
+
+    /// Selects `id`, if it is shown.
+    pub fn select(&self, id: &str, cx: &mut App) {
+        self.state.update(cx, |tree, cx| {
+            if let Some(ix) = tree.index_of(id) {
+                tree.set_selected_index(Some(ix), cx);
+            }
+        });
+    }
+}
+
+/// A sort key that puts `path` where the tree lists it: folders before files at every level.
+pub fn order(path: &str) -> Vec<(bool, String)> {
+    let last = path.matches('/').count();
+    path.split('/').enumerate().map(|(ix, part)| (ix == last, part.to_string())).collect()
 }
 
 /// A folder in the explorer, built from the flat file list.
@@ -119,6 +165,12 @@ mod tests {
         assert!(!open.is_open("src"));
         open.set(&id, true);
         assert!(open.is_open("src"));
+    }
+
+    #[test]
+    fn order_puts_folders_before_files() {
+        assert!(order("a/z.rs") < order("b.rs"));
+        assert!(order("a/b/c.rs") < order("a/a.rs"));
     }
 
     #[test]

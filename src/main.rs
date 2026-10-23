@@ -35,8 +35,8 @@ use ui::input::{Input, InputEvent, InputState};
 use ui::list_item::ListItem;
 use ui::menu::{CHECKED, MenuItem, MenuState, dropdown};
 use ui::resizable::{SidebarsState, StackState, sidebars, stack};
-use ui::file_tree::{FileKind, Folders, file_items, file_kind};
-use ui::tree::{TreeEvent, TreeState, tree};
+use ui::file_tree::{FileKind, FileTree, file_kind};
+use ui::tree::{TreeEvent, tree};
 use futures::StreamExt;
 use serde_json::Value;
 
@@ -389,9 +389,8 @@ struct Project {
     listing: Option<Task<()>>,
     scanning: Option<Task<()>>,
     watching: Option<gpui::Task<()>>,
-    changes_tree: Entity<TreeState>,
-    /// Which of the changes list's folders are open; all, until the user closes some.
-    changes_open: Folders,
+    /// The changed files, folders open until the user closes them.
+    changes_tree: FileTree,
     picked: Option<String>,
     /// The picked file's diff, its side-by-side pairs and how many lines it adds and removes.
     rows: Rc<Vec<Row>>,
@@ -407,9 +406,8 @@ struct Project {
     /// The current file rendered, when it is markdown.
     doc: Option<Doc>,
     notice: Option<String>,
-    tree: Entity<TreeState>,
-    /// Which of the explorer's folders are open; none, until the user opens some.
-    expanded: Folders,
+    /// Every file, folders closed until the user opens them.
+    files_tree: FileTree,
     /// Set when this is a thread's own checkout, made from another project's repository.
     worktree: Option<worktree::Worktree>,
     /// Keep the explorer and changes list wired to this project.
@@ -1147,40 +1145,24 @@ impl Reader {
 
     /// A project over `root`, showing `files` in its explorer until the next walk.
     fn build_project(root: PathBuf, pr: Option<pr::Pr>, files: Vec<String>, window: &mut Window, cx: &mut Context<Self>) -> Project {
-        let tree = cx.new(TreeState::new);
-        let changes_tree = cx.new(TreeState::new);
+        let files_tree = FileTree::new(false, cx);
+        let changes_tree = FileTree::new(true, cx);
         // Only the project on screen has its trees touched, so these act on `reader.project`;
         // the check keeps a stray event from another project's tree off it.
         let subscriptions = vec![
-            cx.subscribe(&tree, |reader, tree, event: &TreeEvent, _| {
-                if reader.project.tree != tree {
-                    return;
-                }
-                match event {
-                    TreeEvent::Expanded(id) => {
-                        reader.project.expanded.set(id, true);
-                    }
-                    TreeEvent::Collapsed(id) => {
-                        reader.project.expanded.set(id, false);
-                    }
+            cx.subscribe(&files_tree.state, |reader, tree, event: &TreeEvent, _| {
+                if reader.project.files_tree.state == tree {
+                    reader.project.files_tree.note(event);
                 }
             }),
-            cx.subscribe(&changes_tree, |reader, tree, event: &TreeEvent, _| {
-                if reader.project.changes_tree != tree {
-                    return;
-                }
-                match event {
-                    TreeEvent::Expanded(id) => {
-                        reader.project.changes_open.set(id, true);
-                    }
-                    TreeEvent::Collapsed(id) => {
-                        reader.project.changes_open.set(id, false);
-                    }
+            cx.subscribe(&changes_tree.state, |reader, tree, event: &TreeEvent, _| {
+                if reader.project.changes_tree.state == tree {
+                    reader.project.changes_tree.note(event);
                 }
             }),
             // Moving the selection with the keyboard opens the file too, like a click.
-            cx.observe_in(&tree, window, |reader, tree, window, cx| {
-                if reader.project.tree != tree {
+            cx.observe_in(&files_tree.state, window, |reader, tree, window, cx| {
+                if reader.project.files_tree.state != tree {
                     return;
                 }
                 let path = tree.read(cx).selected_entry().filter(|e| !e.folder).map(|e| e.id.to_string());
@@ -1192,8 +1174,8 @@ impl Reader {
                     reader.open(&path, window, cx);
                 }
             }),
-            cx.observe(&changes_tree, |reader, tree, cx| {
-                if reader.project.changes_tree != tree {
+            cx.observe(&changes_tree.state, |reader, tree, cx| {
+                if reader.project.changes_tree.state != tree {
                     return;
                 }
                 let path = tree.read(cx).selected_entry().filter(|e| !e.folder).map(|e| e.id.to_string());
@@ -1214,7 +1196,6 @@ impl Reader {
             scanning: None,
             watching: None,
             changes_tree,
-            changes_open: Folders::new(true),
             picked: None,
             rows: Rc::new(vec![]),
             pairs: Rc::new(vec![]),
@@ -1226,8 +1207,7 @@ impl Reader {
             code: None,
             doc: None,
             notice: None,
-            tree,
-            expanded: Folders::new(false),
+            files_tree,
             worktree: None,
             _subscriptions: subscriptions,
         }
@@ -1235,14 +1215,7 @@ impl Reader {
 
     /// Rebuilds the explorer from `files`, keeping folders open and the current file selected.
     fn refresh_tree(&mut self, cx: &mut Context<Self>) {
-        let items = file_items(&self.project.files, &self.project.expanded);
-        let current = self.project.current.clone().map(SharedString::from);
-        self.project.tree.update(cx, |tree, cx| {
-            tree.set_items(items, cx);
-            if let Some(ix) = current.and_then(|id| tree.index_of(&id)) {
-                tree.set_selected_index(Some(ix), cx);
-            }
-        });
+        self.project.files_tree.set_paths(&self.project.files, self.project.current.as_deref(), cx);
     }
 
     /// Takes a fresh list of changed files. In diff mode it picks a file if none is, and
@@ -1258,8 +1231,7 @@ impl Reader {
         }
         if listed {
             let paths: Vec<String> = self.project.changes.iter().map(|c| c.path.clone()).collect();
-            let items = file_items(&paths, &self.project.changes_open);
-            self.project.changes_tree.update(cx, |tree, cx| tree.set_items(items, cx));
+            self.project.changes_tree.set_paths(&paths, None, cx);
         }
         let keep = self.project.picked.clone().filter(|path| self.project.changes.iter().any(|c| &c.path == path));
         match keep {
@@ -1351,12 +1323,7 @@ impl Reader {
             self.project.picked = Some(path.to_string());
             // The last file's diff isn't shown under this one's name while this one loads.
             self.set_rows(vec![], diff::Colors::default());
-            let id = SharedString::from(path.to_string());
-            self.project.changes_tree.update(cx, |tree, cx| {
-                if let Some(ix) = tree.index_of(&id) {
-                    tree.set_selected_index(Some(ix), cx);
-                }
-            });
+            self.project.changes_tree.select(path, cx);
         }
         let (root, base, path) = (self.project.root.clone(), self.project.base.clone(), path.to_string());
         self.project.diffing = Some(cx.spawn(async move |this, cx| {
@@ -3220,12 +3187,7 @@ impl Reader {
         }
         self.project.current = Some(path.to_string());
         self.project.stamp = stamp(&full);
-        let id = SharedString::from(path.to_string());
-        self.project.tree.update(cx, |tree, cx| {
-            if let Some(ix) = tree.index_of(&id) {
-                tree.set_selected_index(Some(ix), cx);
-            }
-        });
+        self.project.files_tree.select(path, cx);
         cx.notify();
     }
 
@@ -3593,7 +3555,7 @@ impl Reader {
             Mode::Source => "Explorer",
             Mode::Diff => "Changes",
         };
-        let state = if mode == Mode::Diff { &self.project.changes_tree } else { &self.project.tree };
+        let state = &if mode == Mode::Diff { &self.project.changes_tree } else { &self.project.files_tree }.state;
         let marks = if mode == Mode::Diff { self.project.marks.clone() } else { Rc::default() };
         let (muted, danger) = (colors.muted_foreground, colors.danger);
         let kinds = [colors.primary, colors.warning, colors.info, colors.added];
