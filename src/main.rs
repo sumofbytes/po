@@ -3706,8 +3706,7 @@ impl Reader {
     fn left_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let explorer = self.explorer(cx).into_any_element();
         let colors = cx.global::<Palette>();
-        let (hover, selected, muted, foreground, primary) =
-            (colors.list_hover, colors.list_selected, colors.muted_foreground, colors.foreground, colors.primary);
+        let (hover, selected, muted, foreground) = (colors.list_hover, colors.list_selected, colors.muted_foreground, colors.foreground);
         let views = self.views();
         let (active_project, active_thread) = (self.project_id, self.thread.id);
         let project_count = views.len();
@@ -3721,10 +3720,10 @@ impl Reader {
             let pid = view.id;
             let (select, close, start) = (cx.entity(), cx.entity(), cx.entity());
             // A project and its threads are one group, set apart from the next by space, not a box.
-            // The one on screen has its name at full strength; the selected thread is the only
-            // filled row. Names and thread titles share one left edge, after a column for the
+            // The one on screen has its name at full strength, the rest are muted; the selected
+            // thread is the only filled row. Names and thread titles share one left edge, after a column for the
             // folder or status mark.
-            let current = pid == active_project;
+            let label = if pid == active_project { foreground } else { muted };
             let mut group = div().flex().flex_col().gap_px();
             group = group.child(
                 div()
@@ -3747,16 +3746,16 @@ impl Reader {
                             .flex_none()
                             .flex()
                             .justify_center()
-                            .child(Icon::new(IconName::Folder).size(IconSize::XSmall).color(project_tone(primary, current))),
+                            .child(Icon::new(IconName::Folder).size(IconSize::XSmall).color(label)),
                     )
                     .child(
                         div()
                             .flex_1()
                             .min_w_0()
                             .truncate()
-                            .text_sm()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(project_tone(primary, current))
+                            .text_xs()
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(label)
                             .child(view.project.name()),
                     )
                     // Starting a thread is on the project's own row, shown when it is hovered.
@@ -3801,14 +3800,14 @@ impl Reader {
                         .on_click(move |_, window, cx| select.update(cx, |reader, cx| reader.open_thread(pid, tid, window, cx)))
                         .child(div().w(rems(1.)).flex_none().flex().justify_center().text_sm().text_color(tint).child(glyph))
                         .child(
-                            // Threads sit a step below their project: smaller and regular, bright only
-                            // for the one on screen.
+                            // The project is a quiet label; the threads are what you pick, so they
+                            // carry the weight.
                             div()
                                 .flex_1()
                                 .min_w_0()
                                 .truncate()
                                 .text_sm()
-                                .text_color(if (pid, tid) == (active_project, active_thread) { foreground } else { muted })
+                                .text_color(foreground)
                                 .child(thread.title()),
                         )
                         .child(show_on_hover(
@@ -5073,12 +5072,6 @@ fn approval(ix: usize, n: usize, agent: &config::Agent, new_agent: bool, mcp: &[
 
 fn status_text(text: String, cx: &App) -> impl IntoElement {
     div().flex_none().truncate().text_xs().text_color(cx.global::<Palette>().muted_foreground).child(text)
-}
-
-/// The colour of a project's name and folder: the theme's primary, in full for the project on
-/// screen and softer for the rest, so projects read apart from the threads under them.
-fn project_tone(primary: gpui::Hsla, current: bool) -> gpui::Hsla {
-    if current { primary } else { primary.opacity(theme::tokens::INACTIVE) }
 }
 
 /// The name that ties a row to the controls that appear only while it is hovered.
