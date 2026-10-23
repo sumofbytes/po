@@ -349,9 +349,26 @@ const PROJECTS: usize = 1;
 
 /// The width, in pixels, the viewer's file tree starts with, and the range it is dragged within.
 const TREE_WIDTH: f32 = 240.0;
-const TREE_RANGE: std::ops::Range<gpui::Pixels> = px(160.)..px(420.);
-/// A viewer pane narrower than this, in pixels, has no room for the file tree beside the file.
+const TREE_RANGE: std::ops::Range<gpui::Pixels> = px(160.)..px(340.);
+/// A viewer pane narrower than this, in pixels, has no room for the file tree beside the file:
+/// the widest tree leaves the file this much less than that.
 const TREE_MIN_PANE: f32 = 560.0;
+
+/// Whether a viewer pane `width` pixels wide has room for the file tree beside the file.
+fn tree_fits(width: f32) -> bool {
+    width >= TREE_MIN_PANE
+}
+
+/// What an empty viewer says to do: pick from the tree, or how to get it back.
+fn pick_hint(what: &str, tree_visible: bool, tree_hidden: bool) -> String {
+    if tree_visible {
+        format!("Pick {what} in the tree")
+    } else if tree_hidden {
+        format!("Pick {what} with Ctrl+P, or show the file tree")
+    } else {
+        format!("Pick {what} with Ctrl+P, or widen the pane to show the file tree")
+    }
+}
 
 /// The height, in pixels, the live agents list starts with.
 const LIVE_HEIGHT: f32 = 136.0;
@@ -3952,15 +3969,8 @@ impl Reader {
         !self.tree_hidden && !self.viewer_narrow.get()
     }
 
-    /// What an empty viewer says to do: pick from the tree, or how to get it back.
     fn pick_hint(&self, what: &str) -> String {
-        if self.tree_visible() {
-            format!("Pick {what} in the tree")
-        } else if self.tree_hidden {
-            format!("Pick {what} with Ctrl+P, or show the file tree")
-        } else {
-            format!("Pick {what} with Ctrl+P, or widen the pane to show the file tree")
-        }
+        pick_hint(what, self.tree_visible(), self.tree_hidden)
     }
 
     /// The viewer or the diff viewer, as the project's mode says, with the file tree beside it
@@ -4009,7 +4019,7 @@ impl Reader {
         let narrow = self.viewer_narrow.clone();
         let measure = gpui::canvas(
             move |bounds, window, _| {
-                let now = bounds.size.width < px(TREE_MIN_PANE);
+                let now = !tree_fits(bounds.size.width.into());
                 if narrow.replace(now) != now {
                     window.refresh();
                 }
@@ -5547,6 +5557,21 @@ fn preview_of(messages: &[Msg], busy: bool) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_file_tree_needs_a_pane_of_at_least_the_minimum_width() {
+        use super::{TREE_MIN_PANE, tree_fits};
+        assert!(tree_fits(TREE_MIN_PANE));
+        assert!(!tree_fits(TREE_MIN_PANE - 1.0));
+    }
+
+    #[test]
+    fn an_empty_viewer_says_how_to_get_the_tree_back() {
+        use super::pick_hint;
+        assert_eq!(pick_hint("a file", true, false), "Pick a file in the tree");
+        assert!(pick_hint("a file", false, true).ends_with("show the file tree"));
+        assert!(pick_hint("a file", false, false).contains("widen the pane"));
+    }
+
     #[test]
     fn an_agents_layout_is_saved_as_the_users_until_the_user_changes_it() {
         use super::AgentChange;
