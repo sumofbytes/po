@@ -21,6 +21,7 @@ mod worktree;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::cell::Cell;
 use std::rc::Rc;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -349,6 +350,8 @@ const PROJECTS: usize = 1;
 /// The width, in pixels, the viewer's file tree starts with, and the range it is dragged within.
 const TREE_WIDTH: f32 = 240.0;
 const TREE_RANGE: std::ops::Range<gpui::Pixels> = px(160.)..px(420.);
+/// A viewer pane narrower than this, in pixels, has no room for the file tree beside the file.
+const TREE_MIN_PANE: f32 = 560.0;
 
 /// The height, in pixels, the live agents list starts with.
 const LIVE_HEIGHT: f32 = 136.0;
@@ -938,6 +941,8 @@ struct Reader {
     tree_cols: Entity<SidebarsState>,
     /// The file tree in the viewer is hidden.
     tree_hidden: bool,
+    /// The viewer pane is too narrow for the file tree, as of the last frame it was drawn.
+    viewer_narrow: Rc<Cell<bool>>,
     /// The viewer pane (a file or a diff) on the right is shown.
     side_open: bool,
     /// The viewer is in the middle and the conversation on the right, instead of the reverse.
@@ -1098,6 +1103,7 @@ impl Reader {
             sections,
             tree_cols,
             tree_hidden: false,
+            viewer_narrow: Rc::default(),
             side_open: true,
             swapped: false,
             agent_open: true,
@@ -3941,6 +3947,11 @@ impl Reader {
             .into_any_element()
     }
 
+    /// The file tree is drawn beside the viewer: not hidden, and the pane wide enough for both.
+    fn tree_visible(&self) -> bool {
+        !self.tree_hidden && !self.viewer_narrow.get()
+    }
+
     /// The viewer or the diff viewer, as the project's mode says, with the file tree beside it
     /// unless that is hidden or the agent's own view is shown, which has no files to pick.
     fn pane(&self, lead: Option<AnyElement>, trail: Option<AnyElement>, cx: &mut Context<Self>) -> AnyElement {
@@ -3949,12 +3960,12 @@ impl Reader {
             let view = self.thread.views.list().iter().find(|view| view.id == id)?;
             Some((view, self.thread.docs.get(id)?))
         });
-        let with_tree = shown.is_none() && !self.tree_hidden;
+        let with_tree = shown.is_none() && self.tree_visible();
         // The window's own control goes in the leftmost header: the tree's, or the viewer's when
         // the tree is away, where a button brings it back.
         let (tree_lead, body_lead) = if with_tree {
             (lead, None)
-        } else if shown.is_none() {
+        } else if shown.is_none() && self.tree_hidden {
             let show = cx.entity();
             let button = Button::new("show-tree")
                 .icon(IconName::PanelLeftOpen)
@@ -3979,7 +3990,21 @@ impl Reader {
             body
         };
         let background = cx.global::<Palette>().background;
-        floating(div().size_full().flex().flex_col().bg(background).children(tabs).child(div().flex_1().min_h_0().child(body)), cx)
+        // Measures the pane, which it is drawn at whatever the tree is doing, and draws again
+        // when that changes whether the tree fits.
+        let narrow = self.viewer_narrow.clone();
+        let measure = gpui::canvas(
+            move |bounds, window, _| {
+                let now = bounds.size.width < px(TREE_MIN_PANE);
+                if narrow.replace(now) != now {
+                    window.refresh();
+                }
+            },
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .size_full();
+        floating(div().size_full().flex().flex_col().relative().bg(background).child(measure).children(tabs).child(div().flex_1().min_h_0().child(body)), cx)
     }
 
     /// A view the agent made, as a markdown document.
@@ -4082,7 +4107,7 @@ impl Reader {
                 .flex_col()
                 .bg(colors.background)
                 .child(pane_header("Changes", status_text(String::new(), cx), lead, trail, cx))
-                .child(div().flex_1().min_h_0().child(centered("Pick a changed file".into(), cx)));
+                .child(div().flex_1().min_h_0().child(centered(if self.tree_visible() { "Pick a changed file" } else { "Pick a changed file in the tree, or widen the pane" }.into(), cx)));
         };
         let (rows, pairs, syntax) = (self.project.rows.clone(), self.project.pairs.clone(), self.project.colors.clone());
         let palettes = syntax.palettes(cx);
@@ -4211,7 +4236,7 @@ impl Reader {
             (_, None) if let Some(doc) = doc => self.markdown_view(doc, cx),
             // Cached: the viewer redraws when it changes, not with every agent update or caret blink elsewhere.
             (Some(code), None) => code.clone().cached(StyleRefinement::default().size_full()).into_any_element(),
-            (None, None) => centered("Pick a file in the explorer".into(), cx),
+            (None, None) => centered(if self.tree_visible() { "Pick a file in the tree" } else { "Open a file with Ctrl+P, or show the file tree" }.into(), cx),
         };
         div()
             .size_full()
