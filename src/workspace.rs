@@ -15,6 +15,9 @@ pub struct ThreadState {
     pub title: String,
     /// When it last did anything, in milliseconds since the Unix epoch; 0 if unknown.
     pub active_at: u64,
+    /// The session of the thread that started this one, which survives a restart where its id
+    /// does not; the child is linked to it again when both come back in one window.
+    pub parent_session: Option<String>,
 }
 
 pub struct ProjectState {
@@ -99,7 +102,7 @@ impl Workspace {
                     })),
                     "active": project.active,
                     "threads": project.threads.iter().map(|t| json!({
-                        "agent": t.agent, "session": t.session, "title": t.title, "active_at": t.active_at,
+                        "agent": t.agent, "session": t.session, "title": t.title, "active_at": t.active_at, "parent_session": t.parent_session,
                     })).collect::<Vec<_>>(),
                 })
             })
@@ -126,7 +129,7 @@ impl Workspace {
                     .into_iter()
                     .flatten()
                     .filter_map(|t| {
-                        Some(ThreadState { agent: text(&t["agent"])?, session: text(&t["session"])?, title: text(&t["title"]).unwrap_or_default(), active_at: t["active_at"].as_u64().unwrap_or(0) })
+                        Some(ThreadState { agent: text(&t["agent"])?, session: text(&t["session"])?, title: text(&t["title"]).unwrap_or_default(), active_at: t["active_at"].as_u64().unwrap_or(0), parent_session: text(&t["parent_session"]) })
                     })
                     .collect();
                 Some(ProjectState {
@@ -290,8 +293,8 @@ mod tests {
                     worktree: None,
                     active: 1,
                     threads: vec![
-                        ThreadState { agent: "dex".into(), session: "s1".into(), title: "fix the retry".into(), active_at: 1_700_000_000_000 },
-                        ThreadState { agent: "opencode".into(), session: "s2".into(), title: "quote \"this\"".into(), active_at: 0 },
+                        ThreadState { agent: "dex".into(), session: "s1".into(), title: "fix the retry".into(), active_at: 1_700_000_000_000, parent_session: None },
+                        ThreadState { agent: "opencode".into(), session: "s2".into(), title: "quote \"this\"".into(), active_at: 0, parent_session: Some("s1".into()) },
                     ],
                 },
                 ProjectState {
@@ -357,7 +360,7 @@ mod tests {
     }
 
     fn project(root: &str, sessions: &[&str]) -> ProjectState {
-        let threads = sessions.iter().map(|s| ThreadState { agent: "a".into(), session: s.to_string(), title: String::new(), active_at: 1 }).collect();
+        let threads = sessions.iter().map(|s| ThreadState { agent: "a".into(), session: s.to_string(), title: String::new(), active_at: 1, parent_session: None }).collect();
         ProjectState { root: root.into(), review: false, worktree: None, active: 0, threads }
     }
 

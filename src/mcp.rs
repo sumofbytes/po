@@ -3,20 +3,56 @@
 //! socket and token of that agent's thread; every tool call becomes one request to the window.
 use serde_json::{Value, json};
 
+use crate::command::{Command, Grant, Relation, Scope};
+
 /// What the server tells the agent it is for.
-const INSTRUCTIONS: &str = "You are running inside Po, a desktop app that shows the user your \
+const BASE: &str = "You are running inside Po, a desktop app that shows the user your \
 conversation next to a viewer of the project's files and changes. Use these tools to put in front \
 of the user what you are talking about: open the file or diff you refer to, or show a plan or \
 summary as a markdown view. The user decides what they look at: while they are typing or \
 scrolling, a move of the viewer waits for a pause (the reply says `deferred`) and a new view is \
 offered rather than shown. Don't fight that by asking again.";
 
+/// What every thread may read, added to [`BASE`].
+const READS: &str = "You can also ask about yourself and your project: control_info says who \
+you are and what the user has granted; get_thread, thread_messages and last_reply read your \
+thread's state and transcript; thread_options lists its settings; list_threads, list_agents, \
+list_projects and project_changes say what else Po has open. Reading the threads of others, \
+rather than your own, needs a grant the user gives in Po.";
+
+/// What an orchestrator may do, added when its grant says so. The tools of this scope arrive
+/// with phase 2 of the control plan.
+const ORCHESTRATE: &str = "You may start and steer other threads: each starts with the agent \
+and settings you choose, answers you when it finishes or asks, and is yours to read and close. \
+They start with the smallest grant, and nothing they do can reach further than yours does.";
+
+/// What a globally granted thread may do, added when its grant says so.
+const GLOBAL: &str = "You may open other projects and offer them to the user: opening a new \
+folder asks them first, and nothing switches the screen by itself.";
+
+fn instructions(grant: Option<&Grant>) -> String {
+    let mut out = BASE.to_string();
+    out.push_str("\n\n");
+    out.push_str(READS);
+    let Some(grant) = grant else { return out };
+    if grant.scope >= Scope::Orchestrate {
+        out.push_str("\n\n");
+        out.push_str(ORCHESTRATE);
+    }
+    if grant.scope >= Scope::Global {
+        out.push_str("\n\n");
+        out.push_str(GLOBAL);
+    }
+    out
+}
+
 /// Protocol versions this server speaks, newest first.
 const VERSIONS: [&str; 3] = ["2025-06-18", "2025-03-26", "2024-11-05"];
 
 /// Each tool, the command it sends, what it is for and its arguments.
-fn tools() -> Vec<(&'static str, &'static str, &'static str, Value)> {
+fn tools() -> Vec<(&'static str, &'static str, &'static str, Value, Scope)> {
     let string = |description: &str| json!({ "type": "string", "description": description });
+    let number = |description: &str| json!({ "type": "integer", "minimum": 1, "description": description });
     vec![
         (
             "show_view",
@@ -32,6 +68,7 @@ fn tools() -> Vec<(&'static str, &'static str, &'static str, Value)> {
                 },
                 "required": ["title", "body"],
             }),
+            Scope::Viewer,
         ),
         (
             "update_view",
@@ -46,12 +83,14 @@ fn tools() -> Vec<(&'static str, &'static str, &'static str, Value)> {
                 },
                 "required": ["id"],
             }),
+            Scope::Viewer,
         ),
         (
             "close_view",
             "view.close",
             "Close one of your views.",
             json!({ "type": "object", "properties": { "id": string("The view to close.") }, "required": ["id"] }),
+            Scope::Viewer,
         ),
         (
             "open_file",
@@ -62,10 +101,11 @@ fn tools() -> Vec<(&'static str, &'static str, &'static str, Value)> {
                 "type": "object",
                 "properties": {
                     "path": string("The file, relative to the project root or absolute inside it."),
-                    "line": { "type": "integer", "minimum": 1, "description": "The line to put in view, from 1." },
+                    "line": number("The line to put in view, from 1."),
                 },
                 "required": ["path"],
             }),
+            Scope::Viewer,
         ),
         (
             "show_diff",
@@ -75,41 +115,356 @@ fn tools() -> Vec<(&'static str, &'static str, &'static str, Value)> {
                 "type": "object",
                 "properties": { "path": string("A changed file, relative to the project root.") },
             }),
+            Scope::Viewer,
         ),
         (
             "close_viewer",
             "viewer.close",
             "Close Po's viewer, so the conversation has the window to itself.",
             json!({ "type": "object", "properties": {} }),
+            Scope::Viewer,
+        ),
+        (
+            "control_info",
+            "control.info",
+            "Who you are to Po: your thread, and what the user has granted it. Call it first; it \
+             says which of the other tools you may use.",
+            json!({ "type": "object", "properties": {} }),
+            Scope::Viewer,
+        ),
+        (
+            "list_agents",
+            "agent.list",
+            "The agents Po can run: their ids for starting threads, and which the user trusts.",
+            json!({ "type": "object", "properties": {} }),
+            Scope::Viewer,
+        ),
+        (
+            "list_projects",
+            "project.list",
+            "The projects open in Po's window, with their branches and whether they have \
+            changes.",
+            json!({ "type": "object", "properties": {} }),
+            Scope::Viewer,
+        ),
+        (
+            "project_changes",
+            "project.changes",
+            "The project's changed files, with their status; give `path` for one file's diff.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "path": string("A changed file, relative to the project root, to read its diff."),
+                },
+            }),
+            Scope::Viewer,
+        ),
+        (
+            "list_threads",
+            "thread.list",
+            "The threads Po has, and where each stands: running, asking, failed, asleep. Yours \
+             and your project's; the others only when the user grants it.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "state": { "type": "string", "description": "List only threads in this state.", "enum": ["starting", "approval", "ready", "running", "asking", "failed", "asleep", "closed"] },
+                },
+            }),
+            Scope::Viewer,
+        ),
+        (
+            "get_thread",
+            "thread.get",
+            "One thread in full: its state, what it is doing, what waits in its queue, and what \
+             it asks, if anything. Yours unless the user granted reading others.",
+            json!({ "type": "object", "properties": { "thread": { "type": "integer", "description": "The thread; yours when left out." } } }),
+            Scope::Viewer,
+        ),
+        (
+            "thread_options",
+            "thread.options",
+            "A thread's settings, like its model, with the choices each takes.",
+            json!({ "type": "object", "properties": { "thread": { "type": "integer", "description": "The thread; yours when left out." } } }),
+            Scope::Viewer,
+        ),
+        (
+            "thread_messages",
+            "thread.messages",
+            "A thread's transcript, oldest first. Give the `next` cursor of an earlier reply to \
+             read on; a `reset` says the transcript started over.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "thread": { "type": "integer", "description": "The thread; yours when left out." },
+                    "cursor": string("Where to read from, as the last reply's `next` said."),
+                    "limit": { "type": "integer", "description": "At most this many messages (200 when left out)." },
+                    "full": { "type": "boolean", "description": "Include tool calls' arguments and results." },
+                },
+            }),
+            Scope::Viewer,
+        ),
+        (
+            "last_reply",
+            "thread.last_reply",
+            "What a thread's agent last said, in its own words. This is the quick way to hear \
+             what a thread of yours came back with.",
+            json!({ "type": "object", "properties": { "thread": { "type": "integer", "description": "The thread; yours when left out." } } }),
+            Scope::Viewer,
+        ),
+        (
+            "create_thread",
+            "thread.create",
+            "Start a thread of your own: it runs `agent` (yours by default) in the project, \
+             gets `prompt` as its first message, and answers you when it finishes or asks. It \
+             starts with the smallest grant, and it is never shown to the user unless you ask \
+             Po to offer it. Tell it how to answer you with `notify`: `done` (default), `all`, \
+             or `never` — you can also just wait for it.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "prompt": string("The thread's first message. A thread without one is refused."),
+                    "agent": string("The agent to run, as agent.list says; yours by default."),
+                    "notify": { "type": "string", "description": "How the thread reports to you: `done`, `all`, or `never`.", "enum": ["done", "all", "never"] },
+                    "options": {
+                        "type": "object",
+                        "description": "Settings for the session, as thread_options says them: an object of setting id to choice.",
+                        "additionalProperties": { "type": "string" },
+                    },
+                },
+                "required": ["prompt"],
+            }),
+            Scope::Orchestrate,
+        ),
+        (
+            "send_thread",
+            "thread.send",
+            "Send text to a thread you started: into the turn (steer) if its agent takes \
+             messages mid-turn, after the turn with `later`, or queued for when it is free.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "thread": { "type": "integer", "description": "The thread, as create_thread returned it." },
+                    "text": string("What to send."),
+                    "later": { "type": "boolean", "description": "Send after the turn instead of into it." },
+                },
+                "required": ["thread", "text"],
+            }),
+            Scope::Orchestrate,
+        ),
+        (
+            "cancel_thread",
+            "thread.cancel",
+            "Stop a thread you started mid-turn. Text of its own that was still queued comes \
+             back in the reply.",
+            json!({ "type": "object", "properties": { "thread": { "type": "integer", "description": "The thread." } }, "required": ["thread"] }),
+            Scope::Orchestrate,
+        ),
+        (
+            "close_thread",
+            "thread.close",
+            "End a thread you started, stopping its agent.",
+            json!({ "type": "object", "properties": { "thread": { "type": "integer", "description": "The thread." } }, "required": ["thread"] }),
+            Scope::Orchestrate,
+        ),
+        (
+            "set_option",
+            "thread.set_option",
+            "Ask a thread to change one of its settings (as thread_options says them). It \
+             applies between turns, and it is never remembered as the user's choice.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "thread": { "type": "integer", "description": "The thread; yours when left out." },
+                    "id": string("The setting's id."),
+                    "value": string("One of the setting's choices."),
+                },
+                "required": ["id", "value"],
+            }),
+            Scope::Viewer,
+        ),
+        (
+            "wait_thread",
+            "thread.wait",
+            "Wait for one of your threads (or all of them) to reach a state, at most 50 s. \
+             Better is to be told: create_thread answers you by default. Waits at most two at \
+             a time.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "threads": { "type": "array", "items": { "type": "integer" }, "description": "Which of your threads; all of them when left out." },
+                    "until": { "type": "string", "description": "The state to wait for, `done` by default (a turn ended, failed, asked, asleep or closed), or `any` change.", "enum": ["starting", "approval", "ready", "running", "asking", "failed", "asleep", "closed", "done", "any"] },
+                    "timeout": { "type": "integer", "description": "Give up after this many seconds; at most 50." },
+                },
+            }),
+            Scope::Orchestrate,
+        ),
+        (
+            "answer_thread",
+            "thread.answer",
+            "Answer a permission ask of a thread you started (get_thread shows what it asks and \
+             the options' ids). The user's own approvals of a command or a tool server are not \
+             reachable from here.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "thread": number("The thread."),
+                    "option": string("The id of one of the ask's options."),
+                },
+                "required": ["thread", "option"],
+            }),
+            Scope::Orchestrate,
+        ),
+        (
+            "find_thread",
+            "thread.find",
+            "The thread id for a saved session id, which outlives a restart of Po where thread \
+             ids do not.",
+            json!({ "type": "object", "properties": { "session": string("The session id.") }, "required": ["session"] }),
+            Scope::Viewer,
+        ),
+        (
+            "open_project",
+            "project.open",
+            "Open a folder, or a pull request for review, as a project in Po's window, in the \
+             background. A project that is already open is returned as it is; a new one is first \
+             asked of the user, and the reply says `asked`. It never switches what the user is \
+             looking at. Give `path` or `pr`.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "path": string("A directory; not the home directory or the root."),
+                    "pr": string("A PR number, branch or URL, as `gh pr view` takes it."),
+                },
+            }),
+            Scope::Global,
+        ),
+        (
+            "create_isolated_thread",
+            "thread.create_isolated",
+            "Like create_thread, in a git worktree of your project: a branch of its own that \
+             the user can review as a project. The worktree takes a moment: the reply says it \
+             is being made, and you are told with the thread and project ids when it exists, or \
+             why it could not be. Merge the work with merge_worktree.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "prompt": string("The thread's first message."),
+                    "agent": string("The agent to run, as agent.list says; yours by default."),
+                    "notify": { "type": "string", "description": "How the thread reports to you: `done`, `all`, or `never`.", "enum": ["done", "all", "never"] },
+                    "options": { "type": "object", "description": "Settings for the session: setting id to choice.", "additionalProperties": { "type": "string" } },
+                },
+                "required": ["prompt"],
+            }),
+            Scope::Global,
+        ),
+        (
+            "merge_worktree",
+            "worktree.merge",
+            "Ask the user to merge a worktree project into the checkout it came from. They \
+             decide with a click, and you are told how it went. Discarding is theirs alone.",
+            json!({ "type": "object", "properties": { "project": number("The worktree's project, as list_projects says.") }, "required": ["project"] }),
+            Scope::Global,
+        ),
+        (
+            "close_project",
+            "project.close",
+            "Close a project you opened, once the user has no thread of their own in it.",
+            json!({ "type": "object", "properties": { "project": number("The project, as list_projects says.") }, "required": ["project"] }),
+            Scope::Global,
+        ),
+        (
+            "offer_project",
+            "project.offer",
+            "Suggest a project to the user: a chip appears for them to click, and the screen \
+             stays where it is.",
+            json!({ "type": "object", "properties": { "project": number("The project, as list_projects says.") }, "required": ["project"] }),
+            Scope::Global,
         ),
     ]
 }
 
+/// A parseable request for `command`, without arguments: for looking a command's scope and
+/// grant up, which its shape decides, not its arguments.
+fn parse_command(command: &str) -> Option<Command> {
+    let mut request = json!({ "command": command });
+    match command {
+        "view.show" => {
+            request["title"] = json!("");
+            request["body"] = json!("");
+        }
+        "view.update" => {
+            request["id"] = json!("v");
+            request["body"] = json!("");
+        }
+        "view.close" => {
+            request["id"] = json!("v");
+        }
+        "file.open" => {
+            request["path"] = json!("a");
+        }
+        "thread.create" | "thread.create_isolated" => {
+            request["prompt"] = json!("");
+        }
+        "thread.send" => {
+            request["thread"] = json!(1);
+            request["text"] = json!("");
+        }
+        "thread.cancel" | "thread.close" => {
+            request["thread"] = json!(1);
+        }
+        "project.open" => {
+            request["path"] = json!("/");
+        }
+        "thread.find" => {
+            request["session"] = json!("s");
+        }
+        "thread.answer" => {
+            request["thread"] = json!(1);
+            request["option"] = json!("o");
+        }
+        "project.close" | "project.offer" | "worktree.merge" => {
+            request["project"] = json!(1);
+        }
+        "thread.set_option" => {
+            request["id"] = json!("s");
+            request["value"] = json!("v");
+        }
+        _ => {}
+    }
+    Command::parse(&request).ok()
+}
+
+/// The tools the grant allows, as MCP lists them.
+fn listed(grant: Option<&Grant>) -> Vec<Value> {
+    tools()
+        .into_iter()
+        .filter(|(_, command, ..)| parse_command(command).is_some_and(|parsed| grant.is_none_or(|grant| grant.allows(&parsed, Relation::Own))))
+        .map(|(name, _, description, schema, _)| json!({ "name": name, "description": description, "inputSchema": schema }))
+        .collect()
+}
+
 /// The answer to one JSON-RPC message, or none for a notification. `send` carries a command to
-/// the window and returns its reply.
-fn handle(message: &Value, send: &dyn Fn(Value) -> anyhow::Result<Value>) -> Option<Value> {
+/// the window and returns its reply; `grant` is this server's, and `initialize` refreshes it.
+fn handle(message: &Value, send: &dyn Fn(Value) -> anyhow::Result<Value>, grant: &mut Option<Grant>) -> Option<Value> {
     let id = message.get("id")?.clone();
     let params = &message["params"];
     let result = match message["method"].as_str().unwrap_or_default() {
         "initialize" => {
+            // Who this thread is and what it may do: the tool list is fixed for the agent's
+            // lifetime from this answer, so it is asked now, once.
+            *grant = crate::control::send(json!({ "command": "control.info" })).ok().and_then(|reply| grant_of(&reply));
             let asked = params["protocolVersion"].as_str().unwrap_or_default();
             let version = VERSIONS.iter().find(|version| **version == asked).unwrap_or(&VERSIONS[0]);
             Ok(json!({
                 "protocolVersion": version,
                 "capabilities": { "tools": {} },
                 "serverInfo": { "name": "po", "version": env!("CARGO_PKG_VERSION") },
-                "instructions": INSTRUCTIONS,
+                "instructions": instructions(grant.as_ref()),
             }))
         }
         "ping" => Ok(json!({})),
-        "tools/list" => {
-            let tools: Vec<Value> = tools()
-                .into_iter()
-                .map(|(name, _, description, schema)| json!({ "name": name, "description": description, "inputSchema": schema }))
-                .collect();
-            Ok(json!({ "tools": tools }))
-        }
-        "tools/call" => call(params, send),
+        "tools/list" => Ok(json!({ "tools": listed(grant.as_ref()) })),
+        "tools/call" => call(params, send, grant.as_ref()),
         method => Err((-32601, format!("no method `{method}`"))),
     };
     Some(match result {
@@ -118,9 +473,24 @@ fn handle(message: &Value, send: &dyn Fn(Value) -> anyhow::Result<Value>) -> Opt
     })
 }
 
+/// A grant, as `control.info` said it.
+fn grant_of(reply: &Value) -> Option<Grant> {
+    let grant = reply["grant"].as_object()?;
+    Some(Grant {
+        scope: match grant["scope"].as_str()? {
+            "viewer" => Scope::Viewer,
+            "orchestrate" => Scope::Orchestrate,
+            "global" => Scope::Global,
+            _ => return None,
+        },
+        read_project: grant["read_project"].as_bool()?,
+        approvals: grant["approvals"].as_bool()?,
+    })
+}
+
 /// Runs a tool. What the window refuses is the tool's error for the agent to read, not the
-/// protocol's.
-fn call(params: &Value, send: &dyn Fn(Value) -> anyhow::Result<Value>) -> Result<Value, (i64, String)> {
+/// protocol's; a tool the grant no longer allows is refused before the window hears of it.
+fn call(params: &Value, send: &dyn Fn(Value) -> anyhow::Result<Value>, grant: Option<&Grant>) -> Result<Value, (i64, String)> {
     let name = params["name"].as_str().unwrap_or_default();
     let command = tools().into_iter().find(|tool| tool.0 == name).map(|tool| tool.1).ok_or((-32602, format!("no tool `{name}`")))?;
     let mut request = match &params["arguments"] {
@@ -129,6 +499,12 @@ fn call(params: &Value, send: &dyn Fn(Value) -> anyhow::Result<Value>) -> Result
         _ => return Err((-32602, "arguments must be an object".into())),
     };
     request["command"] = command.into();
+    if let Some(grant) = grant {
+        let parsed = Command::parse(&request).map_err(|error| (-32602, error))?;
+        if !grant.allows(&parsed, Relation::Own) {
+            return Ok(json!({ "content": [{ "type": "text", "text": "the user has not granted this" }], "isError": true }));
+        }
+    }
     let (text, error) = match send(request) {
         Ok(reply) => (reply.to_string(), false),
         Err(error) => (format!("{error:#}"), true),
@@ -136,24 +512,57 @@ fn call(params: &Value, send: &dyn Fn(Value) -> anyhow::Result<Value>) -> Result
     Ok(json!({ "content": [{ "type": "text", "text": text }], "isError": error }))
 }
 
-/// Serves MCP on standard input and output until the agent closes it.
+/// Serves MCP on standard input and output until the agent closes it. Each request is answered
+/// on a thread of its own, so a slow one (a wait, say) doesn't hold the agent's next tool call,
+/// and replies go through a writer that owns standard output, so they never tear. Replies may
+/// arrive out of order, which JSON-RPC allows: every reply carries the id of its own request.
+/// Calls served at once.
+const MAX_CALLS: usize = 16;
+
 pub fn serve() -> anyhow::Result<()> {
     use std::io::{BufRead, Write};
-    let mut out = std::io::stdout().lock();
+    use std::sync::{Arc, Mutex};
+    let (send_line, receive_line) = std::sync::mpsc::channel::<String>();
+    let writer = std::thread::spawn(move || {
+        let mut out = std::io::stdout().lock();
+        for reply in receive_line {
+            if writeln!(out, "{reply}").and_then(|()| out.flush()).is_err() {
+                break;
+            }
+        }
+    });
+    let grant: Arc<Mutex<Option<Grant>>> = Arc::default();
+    let running = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     for line in std::io::stdin().lock().lines() {
         let line = line?;
         if line.trim().is_empty() {
             continue;
         }
-        let reply = match serde_json::from_str::<Value>(&line) {
-            Ok(message) => handle(&message, &crate::control::send),
-            Err(error) => Some(json!({ "jsonrpc": "2.0", "id": null, "error": { "code": -32700, "message": error.to_string() } })),
-        };
-        if let Some(reply) = reply {
-            writeln!(out, "{reply}")?;
-            out.flush()?;
+        // Calls that take a while (a wait) run beside the rest, but not without end.
+        if running.fetch_add(1, std::sync::atomic::Ordering::SeqCst) >= MAX_CALLS {
+            running.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+            let id = serde_json::from_str::<Value>(&line).ok().and_then(|message| message.get("id").cloned());
+            if let Some(id) = id {
+                send_line.send(json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32000, "message": "too many calls at once" } }).to_string()).ok();
+            }
+            continue;
         }
+        let (send_line, grant, running) = (send_line.clone(), grant.clone(), running.clone());
+        std::thread::spawn(move || {
+            let mut mine = *grant.lock().expect("grant lock");
+            let reply = match serde_json::from_str::<Value>(&line) {
+                Ok(message) => handle(&message, &crate::control::send, &mut mine),
+                Err(error) => Some(json!({ "jsonrpc": "2.0", "id": null, "error": { "code": -32700, "message": error.to_string() } })),
+            };
+            *grant.lock().expect("grant lock") = mine;
+            if let Some(reply) = reply {
+                send_line.send(reply.to_string()).ok();
+            }
+            running.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        });
     }
+    drop(send_line);
+    writer.join().map_err(|_| anyhow::anyhow!("the writer stopped"))?;
     Ok(())
 }
 
@@ -184,23 +593,27 @@ mod tests {
         panic!("must not reach the window")
     }
 
+    fn handle_(message: &Value) -> Option<Value> {
+        handle(message, &refuse, &mut None)
+    }
+
     #[test]
     fn it_introduces_itself_in_the_version_asked_for() {
-        let reply = handle(&json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": { "protocolVersion": "2025-03-26" } }), &refuse).unwrap();
+        let reply = handle_(&json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": { "protocolVersion": "2025-03-26" } })).unwrap();
         assert_eq!(reply["result"]["protocolVersion"], "2025-03-26");
         assert_eq!(reply["result"]["serverInfo"]["name"], "po");
-        let reply = handle(&json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": { "protocolVersion": "1999-01-01" } }), &refuse).unwrap();
+        let reply = handle_(&json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": { "protocolVersion": "1999-01-01" } })).unwrap();
         assert_eq!(reply["result"]["protocolVersion"], VERSIONS[0]);
     }
 
     #[test]
     fn notifications_get_no_answer() {
-        assert!(handle(&json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }), &refuse).is_none());
+        assert!(handle_(&json!({ "jsonrpc": "2.0", "method": "notifications/initialized" })).is_none());
     }
 
     #[test]
     fn every_tool_is_listed_with_a_schema_and_names_a_command_po_reads() {
-        let reply = handle(&json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }), &refuse).unwrap();
+        let reply = handle_(&json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" })).unwrap();
         let listed = reply["result"]["tools"].as_array().unwrap();
         assert_eq!(listed.len(), tools().len());
         assert!(listed.iter().all(|tool| tool["inputSchema"]["type"] == "object"));
@@ -211,6 +624,49 @@ mod tests {
         }
     }
 
+    // The tool table carries each tool's scope, and it is the scope of the command it sends: a
+    // tool must not promise what its command doesn't ask for.
+    #[test]
+    fn each_tool_s_scope_is_its_command_s() {
+        for (_, command, .., scope) in tools() {
+            assert_eq!(scope, parse_command(command).unwrap().scope(), "{command}");
+        }
+    }
+
+    // A grant lists only the tools it allows, and a call of one it no longer allows is refused
+    // before the window hears of it: a viewer lists its reads and views, an orchestrator also
+    // the tools that start and steer threads.
+    #[test]
+    fn a_grant_lists_and_allows_only_its_tools() {
+        let viewer = Grant::default();
+        let viewer_tools = listed(Some(&viewer));
+        assert!(!viewer_tools.iter().any(|tool| tool["name"] == "create_thread"));
+        assert!(viewer_tools.iter().any(|tool| tool["name"] == "get_thread"));
+        let orchestrate = Grant { scope: Scope::Orchestrate, ..Grant::default() };
+        // The project tools are Global's: an orchestrator lists all but those.
+        let orchestrate_tools = listed(Some(&orchestrate));
+        assert!(orchestrate_tools.iter().any(|tool| tool["name"] == "create_thread"));
+        assert!(!orchestrate_tools.iter().any(|tool| tool["name"] == "open_project"));
+        // Answering a permission ask takes `approvals` too, whatever the scope.
+        let global = Grant { scope: Scope::Global, ..orchestrate };
+        assert!(!listed(Some(&global)).iter().any(|tool| tool["name"] == "answer_thread"));
+        assert_eq!(listed(Some(&Grant { approvals: true, ..global })).len(), tools().len());
+        let sent = RefCell::new(false);
+        let send = |_: Value| {
+            *sent.borrow_mut() = true;
+            Ok(json!({}))
+        };
+        let mut grant = Some(viewer);
+        let reply = handle(&json!({ "jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": { "name": "create_thread", "arguments": { "prompt": "x" } } }), &send, &mut grant).unwrap();
+        assert_eq!(reply["result"]["isError"], true);
+        assert_eq!(reply["result"]["content"][0]["text"], "the user has not granted this");
+        assert!(!*sent.borrow());
+        let mut grant = Some(orchestrate);
+        let reply = handle(&json!({ "jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": { "name": "create_thread", "arguments": { "prompt": "x" } } }), &send, &mut grant).unwrap();
+        assert_eq!(reply["result"]["isError"], false);
+        assert!(*sent.borrow());
+    }
+
     #[test]
     fn a_call_becomes_one_request_and_a_refusal_is_the_tools_error() {
         let sent = RefCell::new(vec![]);
@@ -219,21 +675,38 @@ mod tests {
             if request["path"] == "nope.rs" { anyhow::bail!("no file `nope.rs` in the project") } else { Ok(json!({ "deferred": true })) }
         };
         let call = |arguments| json!({ "jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": { "name": "open_file", "arguments": arguments } });
-        let reply = handle(&call(json!({ "path": "src/main.rs", "line": 4, "command": "viewer.close" })), &send).unwrap();
+        let reply = handle(&call(json!({ "path": "src/main.rs", "line": 4, "command": "viewer.close" })), &send, &mut None).unwrap();
         assert_eq!(reply["result"]["isError"], false);
         assert_eq!(reply["result"]["content"][0]["text"], r#"{"deferred":true}"#);
         // The tool decides the command, whatever the arguments say.
         assert_eq!(sent.borrow()[0], json!({ "command": "file.open", "path": "src/main.rs", "line": 4 }));
-        let reply = handle(&call(json!({ "path": "nope.rs" })), &send).unwrap();
+        let reply = handle(&call(json!({ "path": "nope.rs" })), &send, &mut None).unwrap();
         assert_eq!(reply["result"]["isError"], true);
         assert_eq!(reply["result"]["content"][0]["text"], "no file `nope.rs` in the project");
     }
 
     #[test]
     fn unknown_methods_and_tools_are_protocol_errors() {
-        let reply = handle(&json!({ "jsonrpc": "2.0", "id": 4, "method": "resources/list" }), &refuse).unwrap();
+        let reply = handle_(&json!({ "jsonrpc": "2.0", "id": 4, "method": "resources/list" })).unwrap();
         assert_eq!(reply["error"]["code"], -32601);
-        let reply = handle(&json!({ "jsonrpc": "2.0", "id": 5, "method": "tools/call", "params": { "name": "rm" } }), &refuse).unwrap();
+        let mut none = None;
+        let reply = handle(&json!({ "jsonrpc": "2.0", "id": 5, "method": "tools/call", "params": { "name": "rm" } }), &refuse, &mut none).unwrap();
         assert_eq!(reply["error"]["code"], -32602);
+    }
+
+    #[test]
+    fn the_instructions_say_what_each_scope_may_do() {
+        let base = instructions(None);
+        assert!(base.contains("control_info") && base.contains("last_reply"));
+        assert_eq!(instructions(Some(&Grant::default())), base, "a viewer's instructions are the base");
+        let all = instructions(Some(&Grant::user()));
+        assert!(all.contains(ORCHESTRATE) && all.contains(GLOBAL));
+    }
+
+    #[test]
+    fn a_grant_is_read_out_of_control_info() {
+        let reply = json!({ "grant": { "scope": "orchestrate", "read_project": false, "approvals": false } });
+        assert_eq!(grant_of(&reply), Some(Grant { scope: Scope::Orchestrate, ..Grant::default() }));
+        assert_eq!(grant_of(&json!({ "grant": { "scope": "surprise" } })), None);
     }
 }
