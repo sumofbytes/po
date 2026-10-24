@@ -438,6 +438,12 @@ struct Project {
 }
 
 impl Project {
+    /// Whether the list shows the branch this project has checked out. A PR is a checkout of
+    /// its own and a thread's worktree already names its branch.
+    fn shows_branch(&self) -> bool {
+        self.pr.is_none() && self.worktree.is_none()
+    }
+
     /// What the project is called in the list.
     fn name(&self) -> String {
         match &self.pr {
@@ -1189,16 +1195,34 @@ impl Reader {
         cx.spawn(async move |this, cx| {
             loop {
                 let Ok(roots) = this.update(cx, |reader, _| {
-                    reader.views().iter().filter(|view| view.project.pr.is_none()).map(|view| view.project.root.clone()).collect::<Vec<_>>()
+                    reader.views().iter().filter(|view| view.project.shows_branch()).map(|view| view.project.root.clone()).collect::<Vec<_>>()
                 }) else {
                     break;
                 };
-                let heads = cx
-                    .background_executor()
-                    .spawn(async move { roots.into_iter().filter_map(|root| worktree::head_of(&root).map(|head| (root, head))).collect::<HashMap<_, _>>() })
-                    .await;
+                // Each in its own run, so one slow repository doesn't hold up the rest. One
+                // that takes too long keeps what it showed before.
+                let runs = roots.into_iter().map(|root| {
+                    let run = cx.background_executor().spawn({
+                        let root = root.clone();
+                        async move { worktree::head_of(&root) }
+                    });
+                    let limit = cx.background_executor().timer(Duration::from_secs(10));
+                    async move {
+                        match futures::future::select(run, limit).await {
+                            futures::future::Either::Left((head, _)) => (root, Some(head)),
+                            futures::future::Either::Right(_) => (root, None),
+                        }
+                    }
+                });
+                let found = futures::future::join_all(runs).await;
                 if this
                     .update(cx, |reader, cx| {
+                        let mut heads = HashMap::new();
+                        for (root, head) in found {
+                            if let Some(head) = head.unwrap_or_else(|| reader.heads.get(&root).cloned()) {
+                                heads.insert(root, head);
+                            }
+                        }
                         if reader.heads != heads {
                             reader.heads = heads;
                             cx.notify();
@@ -3831,7 +3855,7 @@ impl Reader {
                             .text_color(label)
                             .child(view.project.name()),
                     )
-                    .when_some(self.heads.get(&view.project.root).filter(|_| view.project.pr.is_none() && view.project.worktree.is_none()), |row, head| {
+                    .when_some(self.heads.get(&view.project.root).filter(|_| view.project.shows_branch()), |row, head| {
                         row.child(div().min_w_0().max_w(rems(7.)).flex().items_center().gap_1().text_xs().text_color(muted).child(
                             div().truncate().child(format!("⎇ {}", head.name)),
                         ).when(head.dirty, |tag| tag.child(div().flex_none().child("●"))))

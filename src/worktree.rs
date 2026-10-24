@@ -57,11 +57,29 @@ pub struct Head {
     pub dirty: bool,
 }
 
-/// The branch `dir` has checked out, or the short commit when detached. None outside a repository.
+/// The branch `dir` has checked out, or the short commit when detached, and whether tracked
+/// files have changed. None outside a repository. One git run that takes no locks, so asking
+/// every few seconds never makes the user's own `git add` or `git commit` fail; untracked
+/// files aren't counted, which keeps it cheap on a big tree.
 pub fn head_of(dir: &Path) -> Option<Head> {
-    let name = git(dir, &["rev-parse", "--abbrev-ref", "HEAD"]).ok()?;
-    let name = if name == "HEAD" { git(dir, &["rev-parse", "--short", "HEAD"]).ok()? } else { name };
-    let dirty = git(dir, &["status", "--porcelain"]).is_ok_and(|status| !status.is_empty());
+    let status = git(dir, &["--no-optional-locks", "status", "--porcelain=v2", "--branch", "-uno"]).ok()?;
+    let mut branch = None;
+    let mut oid = None;
+    let mut dirty = false;
+    for line in status.lines() {
+        if let Some(name) = line.strip_prefix("# branch.head ") {
+            branch = Some(name);
+        } else if let Some(id) = line.strip_prefix("# branch.oid ") {
+            oid = Some(id);
+        } else if !line.starts_with('#') {
+            dirty = true;
+        }
+    }
+    // A detached HEAD has no name; an unborn branch has a name and no commit.
+    let name = match branch? {
+        "(detached)" => oid?.chars().take(7).collect(),
+        name => name.to_string(),
+    };
     Some(Head { name, dirty })
 }
 
@@ -212,6 +230,38 @@ mod tests {
 
     fn branches(repo: &Path) -> String {
         sh(repo, &["branch", "--list", "po/*"])
+    }
+
+    #[test]
+    fn head_names_the_branch_and_notices_changes_to_tracked_files() {
+        let repo = repo("head");
+        assert_eq!(head_of(&repo), Some(Head { name: "main".into(), dirty: false }));
+        // Untracked files don't count; edits to tracked ones do.
+        std::fs::write(repo.join("new.txt"), "x\n").unwrap();
+        assert_eq!(head_of(&repo).map(|h| h.dirty), Some(false));
+        std::fs::write(repo.join("a.txt"), "two\n").unwrap();
+        assert_eq!(head_of(&repo).map(|h| h.dirty), Some(true));
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn head_is_the_short_commit_when_detached() {
+        let repo = repo("detached");
+        sh(&repo, &["checkout", "-q", "--detach"]);
+        let head = head_of(&repo).unwrap();
+        assert_eq!(head.name, sh(&repo, &["rev-parse", "--short=7", "HEAD"]));
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    #[test]
+    fn head_names_an_unborn_branch_and_is_none_outside_a_repository() {
+        let dir = std::env::temp_dir().join(format!("po-wt-unborn-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(head_of(&dir), None);
+        sh(&dir, &["init", "-q", "-b", "trunk"]);
+        assert_eq!(head_of(&dir), Some(Head { name: "trunk".into(), dirty: false }));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
