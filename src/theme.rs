@@ -6,10 +6,34 @@ use crate::schemes;
 
 use std::collections::HashMap;
 
-use gpui::{App, FontStyle, FontWeight, Global, HighlightStyle, Hsla, Pixels, Rgba, SharedString, hsla, px};
+use gpui::{App, BoxShadow, FontStyle, FontWeight, Global, HighlightStyle, Hsla, Pixels, Rgba, SharedString, hsla, point, px};
 use serde_json::Value;
 
 const DEFAULT_THEME: &str = "Rose Pine";
+
+/// Design tokens that don't vary by theme. Draw with these, not literals, so the UI stays uniform.
+pub mod tokens {
+    use gpui::{Pixels, Rems, px, rems};
+
+    /// Height of a list row (sidebar projects and threads).
+    pub const ROW_HEIGHT: Rems = rems(1.875);
+    /// Radius that turns a square element into a circle or pill.
+    pub const RADIUS_FULL: Pixels = px(999.);
+    /// Radius of tiny marks, like the dot beside a file.
+    pub const RADIUS_MARK: Pixels = px(2.);
+    /// Alpha of a status tint behind a row (an added or removed diff line).
+    pub const TINT: f32 = 0.16;
+    /// Alpha of the faintest tint (the empty side of a split diff).
+    pub const TINT_FAINT: f32 = 0.06;
+    /// Alpha of a neutral tint (a diff hunk header).
+    pub const TINT_SUBTLE: f32 = 0.12;
+    /// Alpha of a muted or de-emphasised foreground.
+    pub const MUTED: f32 = 0.6;
+    /// Alpha of an indent guide line over the border colour.
+    pub const GUIDE: f32 = 0.85;
+    /// Alpha of dimmed content, like a model's reasoning.
+    pub const DIM: f32 = 0.7;
+}
 
 /// Where themes are picked from: `<config>/themes/`.
 fn themes_dir(config_dir: &Path) -> PathBuf {
@@ -56,7 +80,11 @@ pub fn apply(cx: &mut App) {
         })
         .expect("default scheme");
     let fonts = fonts::resolve(&theme, &config, cx);
-    let palette = Palette::new(&theme, fonts);
+    let glass = std::env::var("PO_GLASS").map(|value| glass_env(&value)).unwrap_or_else(|_| config["glass"].clone());
+    let mut palette = Palette::new(&theme, fonts);
+    if let Some(opacity) = glass_opacity(&glass) {
+        palette.frost(opacity);
+    }
     cx.set_global(palette);
 }
 
@@ -347,6 +375,48 @@ pub fn watch(cx: &mut App) {
     .detach();
 }
 
+/// How opaque glass panes are by default: enough to keep text crisp over a busy desktop.
+const GLASS_OPACITY: f32 = 0.72;
+
+/// The `glass` setting: `true` for the default opacity, or a number from 0 to 1 for the panes'.
+/// `PO_GLASS` as the `glass` setting: off for empty, `0`, `false`, `off` or `no`, on for `1`,
+/// `true`, `on` or `yes`, a number as the panes' opacity, anything else on.
+fn glass_env(value: &str) -> Value {
+    match value.trim().to_lowercase().as_str() {
+        "" | "0" | "false" | "off" | "no" => Value::Bool(false),
+        "1" | "true" | "on" | "yes" => Value::Bool(true),
+        value => value.parse::<f64>().ok().and_then(serde_json::Number::from_f64).map_or(Value::Bool(true), Value::Number),
+    }
+}
+
+fn glass_opacity(value: &Value) -> Option<f32> {
+    match value {
+        Value::Bool(true) => Some(GLASS_OPACITY),
+        Value::Number(n) => n.as_f64().map(|n| (n as f32).clamp(0.2, 1.)),
+        _ => None,
+    }
+}
+
+/// The frosted look of macOS's Liquid Glass: the window blurs what's behind it, panes are
+/// translucent tints over that blur, and floating panes catch light along their rim.
+#[derive(Clone, Copy)]
+pub struct Glass {
+    /// The bright hairline around a floating pane.
+    pub rim: Hsla,
+    /// The light along a floating pane's top edge, drawn inside it.
+    pub sheen: Hsla,
+    /// The gap between neighbouring floating panes; each pane keeps half, so the window's edges get half.
+    pub inset: Pixels,
+}
+
+impl Glass {
+    /// A floating pane's sheen, inside its top edge. No drop shadow: gpui fills a shadow under
+    /// the whole pane, so it would show through the glass as a grey cast.
+    pub fn shadow(&self) -> Vec<BoxShadow> {
+        vec![BoxShadow { color: self.sheen, offset: point(px(0.), px(1.)), blur_radius: px(0.), spread_radius: px(0.), inset: true }]
+    }
+}
+
 /// The colors markdown is drawn with, for the agent's replies and for `.md` files alike. Each
 /// comes from the theme's `markdown` object (`heading`, `code`, `code_background`,
 /// `inline_code_background`, `quote`, `quote_border`, `rule`, `marker`, `strong`, `emphasis`)
@@ -371,6 +441,11 @@ pub struct MarkdownColors {
 /// apart from the kit's theme so those components don't depend on it.
 pub struct Palette {
     pub buttons: Buttons,
+    /// What the window itself is painted with, under every pane: the background, or with glass
+    /// a faint tint over the blurred desktop.
+    pub window: Hsla,
+    /// Set when the glass look is on.
+    pub glass: Option<Glass>,
     pub background: Hsla,
     pub foreground: Hsla,
     pub primary: Hsla,
@@ -411,6 +486,10 @@ pub struct Palette {
     pub editor_line_number: Hsla,
     /// The corner radius of small parts, like scrollbar thumbs.
     pub radius: Pixels,
+    /// The largest: chat bubbles and the composer, twice `radius`.
+    pub radius_xl: Pixels,
+    /// Green for added and unread. Themes may lack one (Rosé Pine's success is teal), so it is fixed.
+    pub added: Hsla,
     pub font_family: SharedString,
     pub font_size: Pixels,
     pub mono_font_family: SharedString,
@@ -429,6 +508,7 @@ impl Palette {
         let get = |key: &str, fallback: Hsla| colors.get(key).and_then(parse_color).unwrap_or(fallback);
         let clamp_alpha = |c: Hsla, max: f32| c.alpha(c.a.min(max));
 
+        let radius = px(theme["radius"].as_f64().unwrap_or(6.) as f32);
         let accent = base.accent;
         let list_head = get("list.head.background", get("list.background", base.background));
         let scrollbar_thumb = get("scrollbar.thumb.background", accent);
@@ -480,6 +560,8 @@ impl Palette {
 
         Self {
             buttons: Buttons::new(&base),
+            window: base.background,
+            glass: None,
             background: base.background,
             foreground: base.foreground,
             primary,
@@ -515,13 +597,45 @@ impl Palette {
             editor_foreground: editor("editor.foreground").unwrap_or(base.foreground),
             editor_active_line: editor("editor.active_line.background"),
             editor_line_number: editor("editor.line_number").unwrap_or(base.muted_foreground),
-            radius: px(theme["radius"].as_f64().unwrap_or(6.) as f32),
+            radius,
+            radius_xl: radius * 2.,
+            added: hsla(0.37, 0.5, 0.5, 1.0),
             font_family: fonts.ui,
             font_size: px(fonts.ui_size),
             mono_font_family: fonts.mono,
             mono_font_size: px(fonts.mono_size),
             syntax,
         }
+    }
+
+    /// Turns on the glass look: the panes become `opacity` tints over the blurred desktop, the
+    /// sidebar alike, and the lines between them fade so the panes read as
+    /// sheets of glass rather than boxes.
+    pub fn frost(&mut self, opacity: f32) {
+        let dark = self.background.l < 0.5;
+        let clear = hsla(0., 0., 0., 0.);
+        self.window = self.background.opacity(opacity * 0.35);
+        self.background = self.background.opacity(opacity);
+        // The editor draws inside a pane that's already tinted; another layer would thicken it.
+        self.editor_background = clear;
+        self.sidebar = self.sidebar.opacity(opacity);
+        // Menus float over text and nothing blurs it, so they stay nearly solid.
+        self.popover = self.popover.opacity(opacity.max(0.94));
+        self.secondary = self.secondary.opacity(opacity * 0.85);
+        self.scrollbar_track = clear;
+        self.border = self.border.opacity(0.6);
+        self.resize_handle = clear;
+        let (rim, sheen) = if dark { (0.14, 0.1) } else { (0.55, 0.7) };
+        let glass = Glass {
+            rim: hsla(0., 0., 1., rim),
+            sheen: hsla(0., 0., 1., sheen),
+            inset: px(4.),
+        };
+        // A white rim would vanish around a light menu; light themes keep their dark hairline.
+        if dark {
+            self.popover_ring = glass.rim;
+        }
+        self.glass = Some(glass);
     }
 
     /// The style for a tree-sitter capture: its own, else its first part's, as `keyword.modifier`
@@ -586,6 +700,23 @@ mod tests {
         assert_eq!(load_theme("catppuccin mocha.json", None).unwrap()["colors"], theme["colors"]);
         assert_eq!(load_theme("Catppuccin Latte", None).unwrap()["mode"], "light");
         assert!(load_theme("no-such-theme", None).is_none());
+    }
+
+    #[test]
+    fn glass_is_opt_in() {
+        use serde_json::json;
+        assert_eq!(glass_opacity(&Value::Null), None);
+        assert_eq!(glass_opacity(&json!(false)), None);
+        assert_eq!(glass_opacity(&json!(true)), Some(GLASS_OPACITY));
+        assert_eq!(glass_opacity(&json!(0.5)), Some(0.5));
+        // Too clear to read text on is held back.
+        assert_eq!(glass_opacity(&json!(0)), Some(0.2));
+        for off in ["", "0", "false", "OFF", "no"] {
+            assert_eq!(glass_opacity(&glass_env(off)), None, "{off:?}");
+        }
+        assert_eq!(glass_opacity(&glass_env("1")), Some(GLASS_OPACITY));
+        assert_eq!(glass_opacity(&glass_env("true")), Some(GLASS_OPACITY));
+        assert_eq!(glass_opacity(&glass_env("0.4")), Some(0.4));
     }
 
     #[test]

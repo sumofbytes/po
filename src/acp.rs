@@ -133,9 +133,23 @@ struct Shared {
     /// Start by listing sessions to resume instead of opening a new one.
     resume: bool,
     listed: Mutex<Vec<SessionInfo>>,
+    /// Po's own MCP server for this thread, if the window has a socket to give it.
+    po_mcp: Option<Value>,
 }
 
 impl Shared {
+    /// What a new or resumed session is handed: Po's own server, which is Po and needs no
+    /// approval, then the approved ones of the config.
+    fn mcp_servers(&self) -> Value {
+        let mut servers = vec![];
+        servers.extend(self.po_mcp.clone());
+        if let Value::Array(config) = crate::config::mcp_servers(&crate::config::load()) {
+            // A config server named `po` would hide Po's own from the agent.
+            servers.extend(config.into_iter().filter(|server| self.po_mcp.is_none() || server["name"] != "po"));
+        }
+        Value::Array(servers)
+    }
+
     fn write(&self, message: &Value) {
         log::debug!("acp -> {message}");
         let mut stdin = self.stdin.lock().expect("stdin lock");
@@ -244,7 +258,7 @@ impl Shared {
                     return;
                 }
                 let cwd = self.cwd.to_string_lossy().to_string();
-                self.request("session/new", json!({ "cwd": cwd, "mcpServers": [] }), Pending::Session);
+                self.request("session/new", json!({ "cwd": cwd, "mcpServers": self.mcp_servers() }), Pending::Session);
             }
             Pending::List(page) => {
                 let mut listed = self.listed.lock().expect("listed lock");
@@ -342,7 +356,8 @@ pub struct Client {
 impl Client {
     /// Starts `command` (program and arguments) in `cwd` and begins the handshake.
     /// With `resume`, lists the agent's sessions rather than opening a new one; `load` picks one.
-    pub fn spawn(command: &str, cwd: &Path, resume: bool) -> Result<(Self, UnboundedReceiver<Event>)> {
+    /// `control` is the environment Po's MCP server for this thread gets; the agent itself does not.
+    pub fn spawn(command: &str, cwd: &Path, resume: bool, control: &[(String, String)]) -> Result<(Self, UnboundedReceiver<Event>)> {
         let mut parts = command.split_whitespace();
         let program = parts.next().context("empty agent command")?;
         let mut child = Command::new(program)
@@ -366,6 +381,7 @@ impl Client {
             agent: Mutex::new(program.to_string()),
             resume,
             listed: Mutex::new(Vec::new()),
+            po_mcp: if control.is_empty() { None } else { crate::mcp::server(control) },
         });
         let child = Arc::new(Mutex::new(child));
         let (reader, reaper) = (shared.clone(), child.clone());
@@ -423,7 +439,7 @@ impl Client {
     pub fn load(&self, id: &str) -> bool {
         *self.shared.session.lock().expect("session lock") = Some(id.to_string());
         let cwd = self.shared.cwd.to_string_lossy().to_string();
-        self.shared.request("session/load", json!({ "sessionId": id, "cwd": cwd, "mcpServers": [] }), Pending::Load);
+        self.shared.request("session/load", json!({ "sessionId": id, "cwd": cwd, "mcpServers": self.shared.mcp_servers() }), Pending::Load);
         true
     }
 

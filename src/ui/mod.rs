@@ -1,5 +1,6 @@
 //! po's own components, drawn directly with gpui.
 pub mod button;
+pub mod file_tree;
 pub mod icon;
 pub mod input;
 pub mod list_item;

@@ -44,12 +44,7 @@ fn git(root: &Path, args: &[&str]) -> Option<String> {
 /// `base` is `HEAD` for local work, or a PR's merge-base when reviewing.
 pub fn changes(root: &Path, base: &str) -> Vec<Change> {
     let mut out = if base == "HEAD" { status(root) } else { against(root, base) };
-    // Folders before files at every level, as the explorer lists them.
-    out.sort_by_cached_key(|change| {
-        let parts: Vec<&str> = change.path.split('/').collect();
-        let last = parts.len() - 1;
-        parts.iter().enumerate().map(|(ix, part)| (ix == last, part.to_string())).collect::<Vec<_>>()
-    });
+    out.sort_by_cached_key(|change| crate::ui::file_tree::order(&change.path));
     out
 }
 

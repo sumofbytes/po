@@ -27,6 +27,7 @@ jobs:
       - run: cargo build --all-targets --locked
       - run: cargo test --locked
       - run: cargo clippy --all-targets --locked
+      - run: scripts/check-design.sh
 
   # Portability gate, same as dex: windows-latest has MSVC preinstalled.
   windows-check:

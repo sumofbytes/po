@@ -291,6 +291,20 @@ impl CodeViewState {
         this
     }
 
+    /// Puts the caret at the start of `line` (from 0), unfolding what hides it, and scrolls it
+    /// into view at the next layout.
+    pub fn go_to_line(&mut self, line: usize, cx: &mut Context<Self>) {
+        let line = line.min(self.text.lines().saturating_sub(1));
+        if self.fold_hiding(line).is_some() {
+            self.folded.retain(|&(start, end)| !(start < line && line < end));
+            self.apply_folds();
+        }
+        let offset = self.text.line_range(line).start;
+        self.selection = Selection { anchor: offset, head: offset };
+        self.reveal = Some(offset);
+        cx.notify();
+    }
+
     /// Replaces the text, keeping the scroll position and cursor where they still fit.
     pub fn set_text(&mut self, text: impl Into<Arc<str>>, cx: &mut Context<Self>) {
         self.anchor = Some(self.top());

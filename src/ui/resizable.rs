@@ -83,16 +83,23 @@ struct Sidebar {
 #[derive(IntoElement)]
 pub struct Sidebars {
     state: Entity<SidebarsState>,
+    /// Names the handles, so that layouts nested in one another keep theirs apart.
+    id: &'static str,
     left: Option<Sidebar>,
     center: Option<AnyElement>,
     right: Option<Sidebar>,
 }
 
 pub fn sidebars(state: &Entity<SidebarsState>) -> Sidebars {
-    Sidebars { state: state.clone(), left: None, center: None, right: None }
+    Sidebars { state: state.clone(), id: "sidebar", left: None, center: None, right: None }
 }
 
 impl Sidebars {
+    pub fn id(mut self, id: &'static str) -> Self {
+        self.id = id;
+        self
+    }
+
     pub fn left(mut self, visible: bool, range: Range<Pixels>, element: impl IntoElement) -> Self {
         self.left = Some(Sidebar { element: element.into_any_element(), range, visible });
         self
@@ -125,15 +132,12 @@ fn sidebar(width: Pixels, range: &Range<Pixels>) -> gpui::Div {
     div().flex_grow(0.).flex_shrink(1.).flex_basis(width).min_w(range.start).max_w(range.end).h_full().relative()
 }
 
-fn handle(state: &Entity<SidebarsState>, side: Side, active: bool, cx: &App) -> impl IntoElement {
+fn handle(state: &Entity<SidebarsState>, id: &'static str, side: Side, active: bool, cx: &App) -> impl IntoElement {
     let palette = cx.global::<Palette>();
     let color = if active { palette.resize_handle_active } else { palette.resize_handle };
     let state = state.clone();
     div()
-        .id(match side {
-            Side::Left => "sidebar-handle-left",
-            Side::Right => "sidebar-handle-right",
-        })
+        .id((id, if side == Side::Left { 0usize } else { 1 }))
         .occlude()
         .absolute()
         .top_0()
@@ -230,167 +234,173 @@ impl RenderOnce for Sidebars {
                     .h_full()
                     .relative()
                     .children(self.center)
-                    .when(left_shown, |this| this.child(handle(&self.state, Side::Left, dragging == Some(Side::Left), cx))),
+                    .when(left_shown, |this| this.child(handle(&self.state, self.id, Side::Left, dragging == Some(Side::Left), cx))),
             )
             .when_some(right, |this, right| {
                 this.child(
                     sidebar(right_width, &right.range)
                         .child(right.element)
-                        .child(handle(&self.state, Side::Right, dragging == Some(Side::Right), cx)),
+                        .child(handle(&self.state, self.id, Side::Right, dragging == Some(Side::Right), cx)),
                 )
             })
     }
 }
 
-/// The height of a folded [`VSplit`]'s bottom pane, in rems: that of a pane header.
-pub const COLLAPSED_REMS: f32 = 2.5;
+/// The height of a folded section, in rems: that of a pane header.
+pub const FOLDED_REMS: f32 = 2.75;
 
-/// The least height either pane of a [`VSplit`] gets.
-const MIN_TOP: Pixels = px(72.);
-const MIN_BOTTOM: Pixels = px(120.);
+/// The least height an open section of a [`Stack`] gets.
+const MIN_SECTION: Pixels = px(72.);
 
-/// Where the boundary of a [`VSplit`] is. Until it is dragged, the panes share the height.
-pub struct VSplitState {
-    top: Option<Pixels>,
-    /// The bottom pane is folded down to its header, which sits at the bottom, and the top pane
-    /// takes the rest. `top` is kept, so unfolding goes back to where the boundary was.
-    collapsed: bool,
-    dragging: bool,
-    /// The whole split's bounds, from the last frame.
+/// How a [`Stack`]'s sections are sized: each can be folded down to its header, and the open
+/// ones are separated by boundaries that are dragged. One section is always open.
+pub struct StackState {
+    /// The height each section was dragged (or restored) to; the last open section fills the
+    /// rest, so its own is only kept for when it is no longer the last.
+    sizes: Vec<Option<Pixels>>,
+    folded: Vec<bool>,
+    /// Where each section began, from the last frame.
+    tops: Vec<Pixels>,
+    /// The section whose height the held handle sets.
+    dragging: Option<usize>,
+    /// The whole stack's bounds, from the last frame.
     bounds: Bounds<Pixels>,
 }
 
-impl VSplitState {
-    pub fn new() -> Self {
-        Self { top: None, collapsed: false, dragging: false, bounds: Bounds::default() }
+impl StackState {
+    pub fn new(sizes: Vec<Option<Pixels>>) -> Self {
+        let count = sizes.len();
+        Self { sizes, folded: vec![false; count], tops: vec![Pixels::default(); count], dragging: None, bounds: Bounds::default() }
     }
 
-    pub fn collapsed(&self) -> bool {
-        self.collapsed
+    pub fn folded(&self, section: usize) -> bool {
+        self.folded[section]
     }
 
-    pub fn set_collapsed(&mut self, collapsed: bool) {
-        self.collapsed = collapsed;
+    /// Folds or unfolds `section`. The last open section stays open.
+    pub fn set_folded(&mut self, section: usize, folded: bool) {
+        let others_open = self.folded.iter().enumerate().any(|(ix, folded)| ix != section && !folded);
+        if !folded || others_open {
+            self.folded[section] = folded;
+        }
     }
 
-    /// The height of the top pane once it has been set by a drag (or [`Self::set_top`]).
-    pub fn top(&self) -> Option<Pixels> {
-        self.top
+    pub fn toggle(&mut self, section: usize) {
+        self.set_folded(section, !self.folded[section]);
     }
 
-    pub fn set_top(&mut self, top: Pixels) {
-        self.top = Some(top);
+    /// The height `section` was set to by a drag or [`Self::set_size`], if it was.
+    pub fn size(&self, section: usize) -> Option<Pixels> {
+        self.sizes[section]
     }
 
-    /// The handle is being dragged.
+    pub fn set_size(&mut self, section: usize, size: Pixels) {
+        self.sizes[section] = Some(size);
+    }
+
+    /// A handle is being dragged.
     pub fn dragging(&self) -> bool {
-        self.dragging
+        self.dragging.is_some()
     }
 }
 
-/// Two panes, one above the other, with the boundary between them dragged: the vertical
-/// counterpart of [`Sidebars`], drawn the same way.
+/// Sections one above the other, each with its header inside it, folded down to that header or
+/// open with the boundaries between open ones dragged: the vertical counterpart of
+/// [`Sidebars`], drawn the same way.
 #[derive(IntoElement)]
-pub struct VSplit {
-    state: Entity<VSplitState>,
-    top: Option<AnyElement>,
-    bottom: Option<AnyElement>,
+pub struct Stack {
+    state: Entity<StackState>,
+    sections: Vec<AnyElement>,
+    fixed: Option<(usize, gpui::Rems)>,
 }
 
-pub fn vsplit(state: &Entity<VSplitState>) -> VSplit {
-    VSplit { state: state.clone(), top: None, bottom: None }
+pub fn stack(state: &Entity<StackState>) -> Stack {
+    Stack { state: state.clone(), sections: Vec::new(), fixed: None }
 }
 
-impl VSplit {
-    pub fn top(mut self, element: impl IntoElement) -> Self {
-        self.top = Some(element.into_any_element());
+impl Stack {
+    pub fn section(mut self, element: impl IntoElement) -> Self {
+        self.sections.push(element.into_any_element());
         self
     }
 
-    pub fn bottom(mut self, element: impl IntoElement) -> Self {
-        self.bottom = Some(element.into_any_element());
+    /// Holds `section` at this height, with no handle under it, for as long as it is set. The
+    /// height it was dragged to is kept for when it is not.
+    pub fn fixed(mut self, section: usize, height: Option<gpui::Rems>) -> Self {
+        self.fixed = height.map(|height| (section, height));
         self
     }
 }
 
-/// The height a drag to `y` gives the top pane, leaving both panes their minimum.
-fn dragged_height(y: Pixels, bounds: Bounds<Pixels>) -> Pixels {
-    let most = (bounds.size.height - MIN_BOTTOM).max(MIN_TOP);
-    (y - bounds.top()).clamp(MIN_TOP, most)
+/// The room the sections after `section` need: their header when folded, else their minimum.
+fn room_below(folded: &[bool], section: usize, folded_height: Pixels) -> Pixels {
+    folded[section + 1..].iter().map(|folded| if *folded { folded_height } else { MIN_SECTION }).fold(Pixels::default(), |sum, height| sum + height)
 }
 
-impl RenderOnce for VSplit {
-    fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
-        let (top, dragging, collapsed) = {
+/// The height an open section gets for a saved `size`: the most that leaves `below` for the
+/// sections under it in a stack of `height`. A stack not yet measured keeps `size`.
+fn fitted_size(size: Pixels, height: Pixels, below: Pixels) -> Pixels {
+    if height <= px(0.) { size } else { size.min((height - below).max(MIN_SECTION)) }
+}
+
+/// The height a drag to `y` gives a section that begins at `top`, leaving `below` for the
+/// sections under it.
+fn dragged_height(y: Pixels, top: Pixels, bounds: Bounds<Pixels>, below: Pixels) -> Pixels {
+    let most = (bounds.bottom() - top - below).max(MIN_SECTION);
+    (y - top).clamp(MIN_SECTION, most)
+}
+
+impl RenderOnce for Stack {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let (sizes, folded, dragging, bounds_height) = {
             let state = self.state.read(cx);
-            (state.top, state.dragging, state.collapsed)
+            (state.sizes.clone(), state.folded.clone(), state.dragging, state.bounds.size.height)
         };
+        let folded_height = window.rem_size() * FOLDED_REMS;
         let palette = cx.global::<Palette>();
-        let color = if dragging { palette.resize_handle_active } else { palette.resize_handle };
+        // A plain border for the line at rest, not the sidebars' handle colour, which glass
+        // clears: these lines divide the sections of one pane.
+        let (border, active) = (palette.border, palette.resize_handle_active);
+        let last_open = folded.iter().rposition(|folded| !folded);
         let tracker = self.state.clone();
-        let grab = self.state.clone();
-        let handle = div()
-            .id("vsplit-handle")
-            .occlude()
-            .absolute()
-            .left_0()
-            .top(-HANDLE_PADDING)
-            .w_full()
-            .h(px(1.) + HANDLE_PADDING * 2.)
-            .py(HANDLE_PADDING)
-            .cursor_row_resize()
-            .child(div().flex_none().w_full().h(px(1.)).bg(color))
-            .on_mouse_down(MouseButton::Left, move |_, _, cx| {
-                grab.update(cx, |state, cx| {
-                    state.dragging = true;
-                    cx.notify();
-                });
-                cx.stop_propagation();
-            });
-        let pane = div().min_h(MIN_TOP).max_h(gpui::relative(1.)).flex_grow(0.).flex_shrink(1.);
-        let pane = match top {
-            Some(height) => pane.flex_basis(height),
-            None => pane.flex_basis(gpui::relative(0.5)),
-        };
-        // Folded, the top pane fills the space and the bottom shows only its header-high strip.
-        let (pane, bottom) = if collapsed {
-            (
-                div().flex_1().min_h(MIN_TOP),
-                div().flex_none().h(gpui::rems(COLLAPSED_REMS)).overflow_hidden().border_t_1().border_color(palette.border),
-            )
-        } else {
-            (pane, div().flex_1().min_h(MIN_BOTTOM))
-        };
-
-        div()
+        let mut above: Option<usize> = None;
+        let mut column = div()
             .size_full()
             .flex()
             .flex_col()
             .relative()
-            // Measures the split, and follows the pointer while the handle is held.
+            // Measures the stack, and follows the pointer while a handle is held.
             .child(
                 canvas(
                     move |bounds, _, cx| tracker.update(cx, |state, _| state.bounds = bounds),
                     {
                         let state = self.state.clone();
                         move |_, _, window, _| {
-                            if !dragging {
+                            if dragging.is_none() {
                                 return;
                             }
                             window.set_window_cursor_style(CursorStyle::ResizeUpDown);
                             let (moving, released) = (state.clone(), state.clone());
                             window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
-                                if phase.bubble() {
-                                    moving.update(cx, |state, cx| {
-                                        state.top = Some(dragged_height(event.position.y, state.bounds));
-                                        cx.notify();
-                                    });
+                                if !phase.bubble() {
+                                    return;
                                 }
+                                moving.update(cx, |state, cx| {
+                                    let Some(section) = state.dragging else { return };
+                                    // A section folded since the drag began has nothing to resize.
+                                    if state.folded[section] {
+                                        return;
+                                    }
+                                    let below = room_below(&state.folded, section, folded_height);
+                                    let height = dragged_height(event.position.y, state.tops[section], state.bounds, below);
+                                    state.sizes[section] = Some(height);
+                                    cx.notify();
+                                });
                             });
                             window.on_mouse_event(move |_: &MouseUpEvent, phase, _, cx| {
                                 if phase.bubble() {
                                     released.update(cx, |state, cx| {
-                                        state.dragging = false;
+                                        state.dragging = None;
                                         cx.notify();
                                     });
                                 }
@@ -400,15 +410,71 @@ impl RenderOnce for VSplit {
                 )
                 .absolute()
                 .size_full(),
-            )
-            .child(pane.relative().overflow_hidden().children(self.top))
-            .child(bottom.relative().children(self.bottom).when(!collapsed, |bottom| bottom.child(handle)))
+            );
+        for (ix, element) in self.sections.into_iter().enumerate() {
+            let measure = self.state.clone();
+            // The content clips, not the section, so that a handle can reach above its edge.
+            let mut section = div().relative().child(
+                canvas(move |bounds, _, cx| measure.update(cx, |state, _| state.tops[ix] = bounds.top()), |_, _, _, _| {})
+                    .absolute()
+                    .size_full(),
+            );
+            // The last open section fills the stack, so it is never held at a height.
+            let pinned = self.fixed.filter(|(pinned, _)| *pinned == ix && !folded[ix] && Some(ix) != last_open).map(|(_, height)| height);
+            if let Some(height) = pinned {
+                section = section.flex_none().h(height);
+            } else if folded[ix] {
+                // Folded, only the header shows.
+                section = section.flex_none().h(folded_height).when(ix > 0, |s| s.border_t_1().border_color(border));
+            } else if Some(ix) == last_open {
+                section = section.flex_1().min_h(MIN_SECTION);
+            } else {
+                section = section.flex_grow(0.).flex_shrink(1.).min_h(MIN_SECTION);
+                section = match sizes[ix] {
+                    Some(height) => section.flex_basis(fitted_size(height, bounds_height, room_below(&folded, ix, folded_height))),
+                    None => section.flex_basis(gpui::relative(0.5)),
+                };
+            }
+            section = section.child(div().size_full().overflow_hidden().child(element));
+            // The boundary with the open section above sets that section's height.
+            if let (false, Some(resized), None) = (folded[ix], above, pinned) {
+                let grab = self.state.clone();
+                let color = if dragging == Some(resized) { active } else { border };
+                section = section.child(
+                    div()
+                        .id(("stack-handle", ix))
+                        .occlude()
+                        .absolute()
+                        .left_0()
+                        .top(-HANDLE_PADDING)
+                        .w_full()
+                        .h(px(1.) + HANDLE_PADDING * 2.)
+                        .py(HANDLE_PADDING)
+                        .cursor_row_resize()
+                        .child(div().flex_none().w_full().h(px(1.)).bg(color))
+                        .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                            grab.update(cx, |state, cx| {
+                                state.dragging = Some(resized);
+                                cx.notify();
+                            });
+                            cx.stop_propagation();
+                        }),
+                );
+            }
+            if pinned.is_some() {
+                above = None;
+            } else if !folded[ix] {
+                above = Some(ix);
+            }
+            column = column.child(section);
+        }
+        column
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{MIN_BOTTOM, MIN_CENTER, MIN_TOP, Side, SidebarsState, dragged_height, dragged_width};
+    use super::{MIN_CENTER, MIN_SECTION, Side, SidebarsState, StackState, dragged_height, dragged_width, fitted_size, room_below};
     use gpui::{Bounds, point, px, size};
 
     #[test]
@@ -424,14 +490,51 @@ mod tests {
     }
 
     #[test]
-    fn the_split_keeps_both_panes_their_minimum() {
+    fn a_dragged_section_leaves_the_ones_below_their_room() {
         let bounds = Bounds::new(point(px(0.), px(50.)), size(px(300.), px(800.)));
-        assert_eq!(dragged_height(px(350.), bounds), px(300.));
-        assert_eq!(dragged_height(px(60.), bounds), MIN_TOP);
-        assert_eq!(dragged_height(px(2000.), bounds), px(800.) - MIN_BOTTOM);
-        // A split too short for both minimums doesn't panic; the top gets its minimum.
+        // The second section begins 150px down the stack, with 100px needed below it.
+        let top = px(200.);
+        assert_eq!(dragged_height(px(350.), top, bounds, px(100.)), px(150.));
+        assert_eq!(dragged_height(px(210.), top, bounds, px(100.)), MIN_SECTION);
+        assert_eq!(dragged_height(px(2000.), top, bounds, px(100.)), px(850.) - top - px(100.));
+        // A stack too short for everyone doesn't panic; the section gets its minimum.
         let short = Bounds::new(point(px(0.), px(0.)), size(px(300.), px(100.)));
-        assert_eq!(dragged_height(px(90.), short), MIN_TOP);
+        assert_eq!(dragged_height(px(90.), px(0.), short, px(100.)), MIN_SECTION);
+    }
+
+    #[test]
+    fn a_saved_height_is_fitted_to_the_stack() {
+        let below = MIN_SECTION * 2.;
+        assert_eq!(fitted_size(px(900.), px(800.), below), px(800.) - below);
+        assert_eq!(fitted_size(px(300.), px(800.), below), px(300.));
+        assert_eq!(fitted_size(px(900.), px(100.), below), MIN_SECTION);
+        assert_eq!(fitted_size(px(900.), px(0.), below), px(900.));
+    }
+
+    #[test]
+    fn folded_sections_below_need_only_their_header() {
+        let header = px(44.);
+        assert_eq!(room_below(&[false, false, false], 0, header), MIN_SECTION * 2.);
+        assert_eq!(room_below(&[false, false, true], 0, header), MIN_SECTION + header);
+        assert_eq!(room_below(&[false, false, true], 2, header), px(0.));
+    }
+
+    #[test]
+    fn the_last_open_section_cannot_be_folded() {
+        let mut state = StackState::new(vec![None; 3]);
+        state.toggle(0);
+        state.toggle(2);
+        assert!(state.folded(0) && state.folded(2) && !state.folded(1));
+        state.toggle(1);
+        assert!(!state.folded(1));
+        state.toggle(0);
+        assert!(!state.folded(0));
+        // A saved layout that folds everything still leaves one open.
+        let mut state = StackState::new(vec![None; 3]);
+        for section in 0..3 {
+            state.set_folded(section, true);
+        }
+        assert_eq!(state.folded, vec![true, true, false]);
     }
 
     #[test]

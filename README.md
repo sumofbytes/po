@@ -81,6 +81,57 @@ one replaces it, so you can change flags or the binary path. `command` is split
 on whitespace into program and arguments (no shell quoting). Choose the agent
 in the app, or pass `--agent` / `PO_AGENT`.
 
+The first time `po` is about to run a command that isn't one of the bundled ones as
+shipped, because it is new in `config.json` or changes a bundled entry, it shows the command
+and waits for you to choose **Run it**. Your answer is kept for that exact command in
+`approved-agents.json` in `po`'s data directory (next to the worktrees), and changing the
+command asks again. A command you pass with `--agent` / `PO_AGENT` is yours, so it is not asked
+about; a value that is an agent's `id` picks that agent, and its command is checked as above.
+
+#### MCP servers
+
+`mcp_servers` in `config.json` lists [MCP](https://modelcontextprotocol.io) servers that
+`po` hands to every ACP agent session it starts or resumes, so each agent gets the same
+extra tools:
+
+```json
+{ "mcp_servers": [
+  { "name": "fs", "command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "."], "env": { "KEY": "value" } }
+] }
+```
+
+Stdio servers only. `name` and `command` are required; `args` and `env` (an object) are
+optional, and `command` is not split further. An entry missing `name` or `command`, a repeated
+`name`, or an `args` or `env` value of the wrong type is logged and skipped. The list is read
+when a session starts, so a change applies to new and resumed threads, not to ones already
+running. This does not apply to a `daemon` agent.
+
+The agent starts the server, but it runs as you, so a server is treated like an agent command:
+the first time one is about to be handed to an agent, `po` shows its command line and waits for
+**Run it**. The answer is kept for that command, arguments and `env` (not the `name`), and
+changing any of them asks again. A server you decline is left out until `po` is restarted.
+
+#### Letting the agent show you things
+
+Every ACP agent `po` starts is also handed `po`'s own MCP server, named `po` (it is `po`
+itself, so it is not asked about). Its tools let the agent put what it is talking about in
+front of you:
+
+| Tool | What it does |
+|---|---|
+| `show_view` | Shows a markdown document as a tab in the viewer |
+| `update_view` | Changes one of its views |
+| `close_view` | Closes one of its views |
+| `open_file` | Opens a file of the project, at a line |
+| `show_diff` | Shows the changes, at one file's diff |
+| `close_viewer` | Closes the viewer |
+
+The server reaches the window through a socket, with a token for its thread that is passed in
+the server's environment, not the agent's, so programs the agent runs don't inherit it. Only the
+thread on screen can move the viewer, and only files inside the project can be opened. While you are
+typing or scrolling, a move waits until you have been still for a few seconds and is dropped if
+you change the viewer yourself first; a new view is offered as a button rather than shown.
+
 #### Steering and follow-ups (dex daemon)
 
 ACP has no way to add to a turn that is already running, so with an ACP agent a
@@ -220,6 +271,14 @@ on Linux), then a well-known one for the platform, then the bundled Fira Mono.
 `size` also scales the UI's spacing, since layout is measured in units of it.
 Edits to `config.json` and to theme files apply without a restart.
 
+Set `"glass": true` for a frosted look like macOS's Liquid Glass: the window
+shows the desktop through it, blurred, the panes become translucent tints of the
+theme's colours and float apart from each other with a bright rim. A number from
+`0.2` to `1` sets how opaque the panes are instead (`true` is `0.72`), and
+`PO_GLASS=1` turns it on for one run. The blur is the platform's: macOS, Windows,
+and Wayland compositors with KDE's blur protocol. Other Wayland compositors, and
+X11 with a compositor running, show the window see-through without blur.
+
 Markdown, in the agent's replies and in `.md` files (which open rendered; the
 **Source** button or Ctrl+Shift+M switches to the text), is coloured from the
 theme: headings from the `title` syntax colour, inline code from `string`,
@@ -231,8 +290,8 @@ bullets from `punctuation`, links from `colors.link`. An optional top-level
 ## License
 
 Dual-licensed under [MIT](LICENSE) or [Apache-2.0](LICENSE-APACHE), at your
-option. Bundled third-party material keeps its own license: `vendor/gpui-pre-wgpu`
-(Apache-2.0), `src/viewer/languages` queries (Apache-2.0), and the Lucide icons
-in `assets/icons` (ISC).
+option. Bundled third-party material keeps its own license: `vendor/gpui-pre-wgpu`,
+`vendor/gpui-pre-apple`, and `vendor/gpui-pre-windows` (Apache-2.0), `src/viewer/languages`
+queries (Apache-2.0), and the Lucide icons in `assets/icons` (ISC).
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md).
