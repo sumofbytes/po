@@ -3814,7 +3814,7 @@ impl Reader {
                                 .min_w_0()
                                 .truncate()
                                 .text_sm()
-                                .text_color(if (pid, tid) == (active_project, active_thread) { foreground } else { foreground.opacity(0.85) })
+                                .text_color(if (pid, tid) == (active_project, active_thread) { foreground } else { foreground.opacity(theme::tokens::GUIDE) })
                                 .child(thread.title()),
                         )
                         .child(show_on_hover(
@@ -3920,7 +3920,7 @@ impl Reader {
                             .flex()
                             .flex_col()
                             .child(div().truncate().text_sm().text_color(foreground).child(thread.title()))
-                            .child(div().truncate().text_xs().text_color(muted.opacity(0.9)).child(detail)),
+                            .child(div().truncate().text_xs().text_color(muted.opacity(theme::tokens::GUIDE)).child(detail)),
                     ),
             );
         }
@@ -5134,7 +5134,7 @@ fn count_badge(count: usize, muted: gpui::Hsla) -> gpui::Div {
     div()
         .px_1p5()
         .rounded(theme::tokens::RADIUS_FULL)
-        .bg(muted.opacity(0.15))
+        .bg(muted.opacity(theme::tokens::TINT))
         .text_color(muted)
         .font_weight(FontWeight::MEDIUM)
         .child(count.to_string())
