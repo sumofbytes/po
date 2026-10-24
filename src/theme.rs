@@ -13,10 +13,8 @@ const DEFAULT_THEME: &str = "Rose Pine";
 
 /// Design tokens that don't vary by theme. Draw with these, not literals, so the UI stays uniform.
 pub mod tokens {
-    use gpui::{Pixels, Rems, px, rems};
+    use gpui::{Pixels, px};
 
-    /// Height of a list row (sidebar projects and threads).
-    pub const ROW_HEIGHT: Rems = rems(1.875);
     /// Radius that turns a square element into a circle or pill.
     pub const RADIUS_FULL: Pixels = px(999.);
     /// Radius of tiny marks, like the dot beside a file.

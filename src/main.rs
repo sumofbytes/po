@@ -900,13 +900,65 @@ impl Activity {
     }
 }
 
+/// The sidebar's layout, one grid for every row and header in it:
+///
+/// ```text
+/// | gutter | inset | [LEAD | gap] | label ............ | TRAIL | inset | gutter |
+/// ```
+///
+/// Rows sit `SIDEBAR_GUTTER` in from the pane's edges so their highlight floats clear of them, and
+/// their content `ROW_INSET` further in. A row with an icon puts it in the lead column; a row
+/// without one has no lead column, so its text starts where an icon would, not after it. Headers
+/// use the same inset, so a title sits over the icons. The trail column holds a row's mark or
+/// hover action.
+const SIDEBAR_GUTTER: gpui::Rems = rems(0.5);
+const ROW_INSET: gpui::Rems = rems(0.625);
+const SIDE_COLUMN: gpui::Rems = rems(1.25);
+
+/// The sidebar's spacing, on a 4px grid and ordered by what belongs together: rows of one list sit
+/// close, a project's name sits close over its threads, and projects are set apart by more than
+/// anything inside one. Every row is the same height whatever its rank, which weight and colour
+/// carry instead, so the list scans as one column.
+const SIDE_ROW_HEIGHT: gpui::Rems = rems(2.0);
+/// Quiet rows, such as "3 more", that only reveal what is folded away.
+const SIDE_MORE_HEIGHT: gpui::Rems = rems(1.75);
+/// Between neighbouring rows of one list.
+const SIDE_ITEM_GAP: gpui::Rems = rems(0.125);
+/// Between one project and the next.
+const SIDE_GROUP_GAP: gpui::Rems = rems(1.0);
+/// Section titles (LIVE, PROJECTS) are small labels, shorter than the pane header above them.
+const SIDE_SECTION_HEIGHT: gpui::Rems = rems(2.0);
+
+/// A row of the sidebar, with its icon in the lead column if it has one, then whatever is added,
+/// which is the label and the trail column. Give it an `id` and a height as the row needs.
+fn side_row(radius: gpui::Pixels, icon: Option<Icon>) -> gpui::Div {
+    div().flex().items_center().gap_2().px(ROW_INSET).rounded(radius).children(icon.map(side_lead))
+}
+
+/// The lead column: its content hugs the left edge, where a header's title starts.
+fn side_lead(content: impl IntoElement) -> gpui::Div {
+    div().w(SIDE_COLUMN).flex_none().flex().items_center().justify_start().child(content)
+}
+
+/// The trail column: its content hugs the right edge.
+fn side_trail(content: impl IntoElement) -> gpui::Div {
+    div().w(SIDE_COLUMN).flex_none().flex().items_center().justify_end().child(content)
+}
+
+/// An icon for the lead column.
+fn side_icon(name: IconName, color: gpui::Hsla) -> Icon {
+    Icon::new(name).size(IconSize::Small).color(color)
+}
+
+/// A sidebar header, its title inset like the rows below it.
+fn side_header(header: gpui::Div) -> gpui::Div {
+    header.px(SIDEBAR_GUTTER + ROW_INSET)
+}
+
 /// The time now in milliseconds since the Unix epoch.
 fn now_ms() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
 }
-
-/// How many of a project's threads the project list shows before the rest fold under "more".
-const THREADS_SHOWN: usize = 3;
 
 /// The most threads one thread may start (§5). With `max_live` at its default of 8, an
 /// orchestrator and four children leave room for the user's own threads.
@@ -1265,8 +1317,10 @@ struct Reader {
     left_open: bool,
     /// The left side's sections: live agents and projects.
     sections: Entity<StackState>,
-    /// Projects whose thread list is shown in full rather than cut to [`THREADS_SHOWN`].
+    /// Projects whose thread list is shown in full rather than cut to the active ones.
     threads_expanded: HashSet<u64>,
+    /// Projects whose threads are folded away in the sidebar.
+    projects_collapsed: HashSet<u64>,
     /// Each project's checked-out branch, read off the UI thread now and then.
     heads: HashMap<PathBuf, worktree::Head>,
     /// The width of the file tree inside the viewer pane.
@@ -1459,6 +1513,7 @@ impl Reader {
             left_open: true,
             sections,
             threads_expanded: HashSet::new(),
+            projects_collapsed: HashSet::new(),
             heads: HashMap::new(),
             tree_cols,
             tree_hidden: false,
@@ -5316,40 +5371,37 @@ impl Reader {
         let many = project_count > 1;
         let add = cx.entity();
         // Groups are spaced apart by more than anything inside one, so the eye reads them as units.
-        let mut tree = div().id("agents-tree").size_full().overflow_y_scroll().flex().flex_col().gap_6().px_2().pt_1().pb_3();
+        let mut tree = div().id("agents-tree").size_full().overflow_y_scroll().flex().flex_col().gap(SIDE_GROUP_GAP).px(SIDEBAR_GUTTER).pt_1().pb_3();
         // Folded, only the header shows, so no project is built.
         let projects_folded = self.sections.read(cx).folded(PROJECTS);
         for view in views.iter().filter(|_| !projects_folded) {
             let pid = view.id;
             let (select, close, start) = (cx.entity(), cx.entity(), cx.entity());
+            let collapsed = self.projects_collapsed.contains(&pid);
             // A project and its threads are one group, set apart from the next by space, not a box.
             // The one on screen has its name at full strength, the rest are muted; the selected
             // thread is the only filled row. Names and thread titles share one left edge, after a column for the
             // folder or status mark.
             let label = if pid == active_project { foreground } else { muted };
-            let mut group = div().flex().flex_col().gap_px();
+            let mut group = div().flex().flex_col().gap(SIDE_ITEM_GAP);
             group = group.child(
-                div()
+                side_row(colors.radius, Some(side_icon(IconName::Folder, if pid == active_project { primary } else { label })))
                     .id(("agent-project", pid as usize))
                     .group(row_group("agent-project", pid))
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .px_1p5()
-                    .h(theme::tokens::ROW_HEIGHT)
+                    .h(SIDE_ROW_HEIGHT)
                     .mb_0p5()
-                    .rounded(colors.radius)
                     .cursor_pointer()
                     .hover(move |row| row.bg(hover))
-                    .on_click(move |_, window, cx| select.update(cx, |reader, cx| reader.show_project(pid, window, cx)))
-                    .child(
-                        div()
-                            .w(rems(1.))
-                            .flex_none()
-                            .flex()
-                            .justify_center()
-                            .child(Icon::new(IconName::Folder).size(IconSize::XSmall).color(if pid == active_project { primary } else { label })),
-                    )
+                    // Clicking the row opens the project and folds or unfolds its threads; the buttons on it are
+                    // their own targets.
+                    .on_click(move |_, window, cx| {
+                        select.update(cx, |reader, cx| {
+                            if !reader.projects_collapsed.insert(pid) {
+                                reader.projects_collapsed.remove(&pid);
+                            }
+                            reader.show_project(pid, window, cx);
+                        })
+                    })
                     // The name, then the branch right after it, on one baseline. They share what is
                     // left of the row, each cut with an ellipsis when it doesn't fit.
                     .child(
@@ -5396,25 +5448,25 @@ impl Reader {
                         ))
                     }),
             );
-            // Most recently active first. Past `THREADS_SHOWN` the rest fold away, except the
-            // thread on screen, which stays in sight.
+            // Most recently active first. Only the active ones show; the rest fold under "more".
             let mut recent: Vec<&Thread> = view.threads.iter().copied().filter(|t| !t.blank || t.id == view.shown).collect();
             recent.sort_by_key(|t| (std::cmp::Reverse(t.active_at), std::cmp::Reverse(t.id)));
             let expanded = self.threads_expanded.contains(&pid);
-            let foldable = recent.len() > THREADS_SHOWN;
+            // Active: asking, running, finished unseen, or an agent still alive; the one on screen too.
+            let active = |t: &Thread| t.id == view.shown || t.activity().live_rank().is_some() || t.client.is_some();
+            let shown_count = recent.iter().filter(|t| active(t)).count();
+            let foldable = recent.len() > shown_count.max(1);
             let hidden = if expanded || !foldable {
                 0
             } else {
-                let mut keep: Vec<&Thread> = recent[..THREADS_SHOWN].to_vec();
-                if !keep.iter().any(|t| t.id == view.shown) {
-                    if let Some(shown) = recent.iter().find(|t| t.id == view.shown) {
-                        keep[THREADS_SHOWN - 1] = shown;
-                    }
-                }
-                let hidden = recent.len() - THREADS_SHOWN;
-                recent = keep;
+                let keep: Vec<&Thread> = recent.iter().copied().filter(|t| active(t)).collect();
+                let hidden = recent.len() - keep.len().max(1);
+                recent = if keep.is_empty() { recent[..1].to_vec() } else { keep };
                 hidden
             };
+            if collapsed {
+                recent.clear();
+            }
             for thread in recent {
                 let tid = thread.id;
                 let (glyph, tint) = thread.activity().mark(colors);
@@ -5422,20 +5474,14 @@ impl Reader {
                 // What its agent may do through Po's API, when that is more than talk.
                 let controlled = self.grants.get(&tid).is_some_and(|grant| *grant != command::Grant::default());
                 group = group.child(
-                    div()
+                    side_row(colors.radius, None)
                         .id(("agent-thread", tid as usize))
                         .group(row_group("agent-thread", tid))
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .px_1p5()
-                        .h(theme::tokens::ROW_HEIGHT)
-                        .rounded(colors.radius)
+                        .h(SIDE_ROW_HEIGHT)
                         .cursor_pointer()
                         .when((pid, tid) == (active_project, active_thread), |row| row.bg(selected))
                         .when((pid, tid) != (active_project, active_thread), |row| row.hover(move |row| row.bg(hover)))
                         .on_click(move |_, window, cx| select.update(cx, |reader, cx| reader.open_thread(pid, tid, window, cx)))
-                        .child(div().w(rems(1.)).flex_none().flex().justify_center().text_xs().text_color(tint).child(glyph))
                         .children(controlled.then(|| {
                             Button::new(("grant-badge", tid as usize))
                                 .label("⌁")
@@ -5463,21 +5509,18 @@ impl Reader {
                                 .xsmall()
                                 .tooltip("Close thread")
                                 .on_click(move |_, window, cx| close.update(cx, |reader, cx| reader.close_any_thread(pid, tid, window, cx))),
-                        )),
+                        ))
+                        // An idle thread has nothing to report, so it has no mark.
+                        .children(thread.activity().live_rank().map(|_| side_trail(div().text_xs().text_color(tint).child(glyph)))),
                 );
             }
-            if foldable && (hidden > 0 || expanded) {
+            if foldable && !collapsed && (hidden > 0 || expanded) {
                 let toggle = cx.entity();
                 let label = if expanded { "Show less".to_string() } else { format!("{hidden} more") };
                 group = group.child(
-                    div()
+                    side_row(colors.radius, None)
                         .id(("agent-more", pid as usize))
-                        .flex()
-                        .items_center()
-                        .px_1p5()
-                        .h(theme::tokens::ROW_HEIGHT)
-                        .pl(rems(1.75))
-                        .rounded(colors.radius)
+                        .h(SIDE_MORE_HEIGHT)
                         .cursor_pointer()
                         .text_xs()
                         .text_color(muted)
@@ -5501,8 +5544,7 @@ impl Reader {
                 .flex()
                 .items_center()
                 .gap_2()
-                .child("PROJECTS")
-                .child(count_badge(project_count, muted)),
+                .child("PROJECTS"),
             cx,
         );
         let projects = div()
@@ -5510,7 +5552,7 @@ impl Reader {
             .flex()
             .flex_col()
             // The same kind of header as the explorer's below: a title, and what you can do here.
-            .child(header_row(
+            .child(side_header(header_row(
                 title,
                 Button::new("agents-add")
                     .icon(IconName::Plus)
@@ -5519,7 +5561,7 @@ impl Reader {
                     .small()
                     .on_click(move |_, window, cx| add.update(cx, |reader, cx| reader.pick_project(window, cx))),
                 cx,
-            ).border_b_0())
+            )).h(SIDE_SECTION_HEIGHT).border_b_0())
             .children(self.worktree_status.clone().filter(|_| !projects_folded).map(|text| {
                 div().px_3().py_1().text_xs().text_color(muted).max_h(rems(5.)).overflow_hidden().child(text)
             }))
@@ -5530,8 +5572,25 @@ impl Reader {
         // Live agents sit above everything, in a pane of their own whose height is dragged, so
         // that the projects below don't move when an agent starts or stops. With none, it is
         // only its header and a line.
-        let pane = div().size_full().bg(colors.sidebar).child(
-            stack(&self.sections).fixed(LIVE, (!any_live).then_some(rems(LIVE_EMPTY_REMS))).section(live).section(projects),
+        let new_thread = cx.entity();
+        let (hover, muted, foreground, radius) = (colors.list_hover, colors.muted_foreground, colors.foreground, colors.radius);
+        // A plain text action below the title bar, not a button: it lights up under the pointer.
+        let actions = div().flex_none().px(SIDEBAR_GUTTER).pt_2().pb_2().child(
+            side_row(radius, Some(side_icon(IconName::Plus, muted)))
+                .id("sidebar-new-thread")
+                .h(SIDE_ROW_HEIGHT)
+                .cursor_pointer()
+                .text_sm()
+                .text_color(muted)
+                .hover(move |this| this.bg(hover).text_color(foreground))
+                .tooltip(|_, cx| ui::button::tooltip("New thread (Ctrl+N)".into(), cx))
+                .on_click(move |_, window, cx| new_thread.update(cx, |reader, cx| reader.new_blank_thread(window, cx)))
+                .child("New"),
+        );
+        let pane = div().size_full().flex().flex_col().bg(colors.sidebar).child(side_header(pane_header("Po", div(), None, None, cx))).child(actions).child(
+            div().flex_1().min_h_0().child(
+                stack(&self.sections).fixed(LIVE, (!any_live).then_some(rems(LIVE_EMPTY_REMS))).section(live).section(projects),
+            ),
         );
         floating(pane, cx)
     }
@@ -5596,9 +5655,9 @@ impl Reader {
         // Folded, the most pressing thread's mark stays in view.
         let (glyph, tint) = if folded { live.first().map_or(("", muted), |(_, _, thread)| thread.activity().mark(colors)) } else { ("", muted) };
         let (active_project, active_thread) = (self.project_id, self.thread.id);
-        let mut rows = div().id("live-list").size_full().overflow_y_scroll().flex().flex_col().gap_0p5().px_2().pt_1().pb_2();
+        let mut rows = div().id("live-list").size_full().overflow_y_scroll().flex().flex_col().gap_0p5().px(SIDEBAR_GUTTER).pt_1().pb_2();
         if live.is_empty() && !folded {
-            rows = rows.child(div().px_2().py_1().text_xs().text_color(muted).child("No active agents"));
+            rows = rows.child(side_row(radius, None).py_1().text_xs().text_color(muted).child("No active agents"));
         }
         for (_, view, thread) in live.into_iter().filter(|_| !folded) {
             let (pid, tid) = (view.id, thread.id);
@@ -5608,19 +5667,14 @@ impl Reader {
             let detail = if preview.is_empty() { view.project.name() } else { format!("{} · {preview}", view.project.name()) };
             let current = (pid, tid) == (active_project, active_thread);
             rows = rows.child(
-                div()
+                side_row(radius, None)
                     .id(("live-thread", tid as usize))
-                    .flex()
                     .items_start()
-                    .gap_2()
-                    .px_2()
                     .py_1p5()
-                    .rounded(radius)
                     .cursor_pointer()
                     .when(current, |row| row.bg(selected))
                     .hover(move |row| row.bg(hover))
                     .on_click(move |_, window, cx| select.update(cx, |reader, cx| reader.open_thread(pid, tid, window, cx)))
-                    .child(div().w(rems(1.)).flex_none().flex().justify_center().text_sm().text_color(tint).child(glyph))
                     .child(
                         div()
                             .flex_1()
@@ -5629,23 +5683,25 @@ impl Reader {
                             .flex_col()
                             .child(div().truncate().text_sm().text_color(foreground).child(self.thread_label(thread)))
                             .child(div().truncate().text_xs().text_color(muted.opacity(theme::tokens::GUIDE)).child(detail)),
-                    ),
+                    )
+                    // An idle thread has nothing to report, so it has no mark.
+                    .children(thread.activity().live_rank().map(|_| side_trail(div().text_sm().text_color(tint).child(glyph)))),
             );
         }
         let title = self.fold_title(
             LIVE,
-            div().flex().items_center().gap_2().child("LIVE").child(count_badge(count, muted)),
+            div().flex().items_center().gap_2().child("LIVE"),
             cx,
         );
         let section = div()
             .size_full()
             .flex()
             .flex_col()
-            .child(header_row(
+            .child(side_header(header_row(
                 title,
                 div().text_sm().text_color(tint).child(glyph),
                 cx,
-            ).border_b_0())
+            )).h(SIDE_SECTION_HEIGHT).border_b_0())
             .child(div().flex_1().min_h_0().child(rows))
             .into_any_element();
         (section, count > 0)
@@ -5671,8 +5727,8 @@ impl Reader {
                     cx.notify();
                 })
             })
-            .child(Icon::new(if folded { IconName::ChevronRight } else { IconName::ChevronDown }).size(IconSize::XSmall).color(muted))
             .child(label)
+            .child(Icon::new(if folded { IconName::ChevronRight } else { IconName::ChevronDown }).size(IconSize::XSmall).color(muted))
             .into_any_element()
     }
 
@@ -6295,7 +6351,7 @@ impl Reader {
         // The session's settings, which can be changed before the thread starts and after.
         let settings = self.setting_menus(cx);
         let colors = cx.global::<Palette>();
-        let (send, stop, history, fresh) = (cx.entity(), cx.entity(), cx.entity(), cx.entity());
+        let (send, stop, history) = (cx.entity(), cx.entity(), cx.entity());
         let agents = self.agents.clone();
         let in_repo = worktree::in_repo(&self.project.root);
         let (pick, isolate) = (cx.entity(), cx.entity());
@@ -6447,14 +6503,6 @@ impl Reader {
                             .ghost()
                             .small()
                             .on_click(move |_, window, cx| history.update(cx, |reader, cx| reader.resume_thread(window, cx))),
-                    )
-                    .child(
-                        Button::new("new-thread")
-                            .label("New Thread")
-                            .tooltip("New thread (Ctrl+N)")
-                            .small()
-                            .outline()
-                            .on_click(move |_, window, cx| fresh.update(cx, |reader, cx| reader.new_blank_thread(window, cx))),
                     ),
                 lead,
                 trail,
@@ -6971,17 +7019,6 @@ fn status_text(text: String, cx: &App) -> impl IntoElement {
     div().flex_none().truncate().text_xs().text_color(cx.global::<Palette>().muted_foreground).child(text)
 }
 
-/// A section's count, in a small pill beside its title.
-fn count_badge(count: usize, muted: gpui::Hsla) -> gpui::Div {
-    div()
-        .px_1p5()
-        .rounded(theme::tokens::RADIUS_FULL)
-        .bg(muted.opacity(theme::tokens::TINT))
-        .text_color(muted)
-        .font_weight(FontWeight::MEDIUM)
-        .child(count.to_string())
-}
-
 /// The name that ties a row to the controls that appear only while it is hovered.
 fn row_group(kind: &str, id: u64) -> SharedString {
     format!("{kind}-row-{id}").into()
@@ -6989,7 +7026,8 @@ fn row_group(kind: &str, id: u64) -> SharedString {
 
 /// `control`, kept in the row's layout but drawn only while the row named `group` is hovered.
 fn show_on_hover(group: SharedString, control: impl IntoElement) -> gpui::Div {
-    div().invisible().group_hover(group, |style| style.visible()).child(control)
+    // A press on the control is its own; the row it sits on doesn't take it as a click.
+    div().invisible().group_hover(group, |style| style.visible()).on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation()).child(control)
 }
 
 /// A pane's header. The window's own controls sit in the headers of the panes at its edges:
