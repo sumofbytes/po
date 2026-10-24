@@ -697,6 +697,9 @@ impl Activity {
     }
 }
 
+/// How many of a project's threads the project list shows before the rest fold under "more".
+const THREADS_SHOWN: usize = 3;
+
 /// Where a running agent with nothing to show sorts in the live list: after all that need a look.
 const IDLE_RANK: u8 = 3;
 
@@ -958,6 +961,8 @@ struct Reader {
     left_open: bool,
     /// The left side's sections: live agents and projects.
     sections: Entity<StackState>,
+    /// Projects whose thread list is shown in full rather than cut to [`THREADS_SHOWN`].
+    threads_expanded: HashSet<u64>,
     /// The width of the file tree inside the viewer pane.
     tree_cols: Entity<SidebarsState>,
     /// The file tree in the viewer is hidden.
@@ -1122,6 +1127,7 @@ impl Reader {
             sidebars,
             left_open: true,
             sections,
+            threads_expanded: HashSet::new(),
             tree_cols,
             tree_hidden: false,
             viewer_narrow: Rc::default(),
@@ -3787,7 +3793,25 @@ impl Reader {
                         ))
                     }),
             );
-            for thread in view.threads.iter().filter(|t| !t.blank || t.id == view.shown) {
+            // Most recently active first. Past `THREADS_SHOWN` the rest fold away, except the
+            // thread on screen, which stays in sight.
+            let mut recent: Vec<&Thread> = view.threads.iter().copied().filter(|t| !t.blank || t.id == view.shown).collect();
+            recent.sort_by_key(|t| (std::cmp::Reverse(t.touched), std::cmp::Reverse(t.id)));
+            let expanded = self.threads_expanded.contains(&pid);
+            let hidden = if expanded || recent.len() <= THREADS_SHOWN {
+                0
+            } else {
+                let mut keep: Vec<&Thread> = recent[..THREADS_SHOWN].to_vec();
+                if !keep.iter().any(|t| t.id == view.shown) {
+                    if let Some(shown) = recent.iter().find(|t| t.id == view.shown) {
+                        keep[THREADS_SHOWN - 1] = shown;
+                    }
+                }
+                let hidden = recent.len() - THREADS_SHOWN;
+                recent = keep;
+                hidden
+            };
+            for thread in recent {
                 let tid = thread.id;
                 let (glyph, tint) = thread.activity().mark(colors);
                 let (select, close) = (cx.entity(), cx.entity());
@@ -3826,6 +3850,33 @@ impl Reader {
                                 .tooltip("Close thread")
                                 .on_click(move |_, window, cx| close.update(cx, |reader, cx| reader.close_any_thread(pid, tid, window, cx))),
                         )),
+                );
+            }
+            if hidden > 0 || expanded && view.threads.len() > THREADS_SHOWN {
+                let toggle = cx.entity();
+                let label = if expanded { "Show less".to_string() } else { format!("{hidden} more") };
+                group = group.child(
+                    div()
+                        .id(("agent-more", pid as usize))
+                        .flex()
+                        .items_center()
+                        .px_1p5()
+                        .h(theme::tokens::ROW_HEIGHT)
+                        .pl(rems(1.75))
+                        .rounded(colors.radius)
+                        .cursor_pointer()
+                        .text_xs()
+                        .text_color(muted)
+                        .hover(move |row| row.bg(hover))
+                        .on_click(move |_, _, cx| {
+                            toggle.update(cx, |reader, cx| {
+                                if !reader.threads_expanded.remove(&pid) {
+                                    reader.threads_expanded.insert(pid);
+                                }
+                                cx.notify();
+                            })
+                        })
+                        .child(label),
                 );
             }
             tree = tree.child(group);
