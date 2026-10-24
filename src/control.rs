@@ -38,7 +38,17 @@ type Agents = Arc<Mutex<HashSet<u32>>>;
 pub struct Control {
     tokens: Tokens,
     agents: Agents,
-    socket: std::path::PathBuf,
+    socket: Arc<SocketFile>,
+}
+
+/// The socket's file, removed when the last clone of [`Control`] goes: a clone that is dropped
+/// early (a closure that registered a thread) must not take the socket away from the server.
+struct SocketFile(std::path::PathBuf);
+
+impl Drop for SocketFile {
+    fn drop(&mut self) {
+        std::fs::remove_file(&self.0).ok();
+    }
 }
 
 impl Control {
@@ -53,13 +63,7 @@ impl Control {
         if let Some(pid) = agent {
             self.agents.lock().expect("agents lock").insert(pid);
         }
-        vec![("PO_SOCKET".into(), self.socket.to_string_lossy().into_owned()), ("PO_TOKEN".into(), token)]
-    }
-}
-
-impl Drop for Control {
-    fn drop(&mut self) {
-        std::fs::remove_file(&self.socket).ok();
+        vec![("PO_SOCKET".into(), self.socket.0.to_string_lossy().into_owned()), ("PO_TOKEN".into(), token)]
     }
 }
 
@@ -279,7 +283,7 @@ mod server {
                 });
             }
         });
-        Some((Control { tokens, agents, socket }, receiver))
+        Some((Control { tokens, agents, socket: Arc::new(SocketFile(socket)) }, receiver))
     }
 
     fn serve(stream: std::os::unix::net::UnixStream, tokens: &Tokens, agents: &Agents, requests: &UnboundedSender<Request>) {
@@ -591,6 +595,18 @@ mod tests {
         assert_eq!(answer(r#"{"token":"good","command":"view.close","id":"v1"}"#, none, &tokens, &agents, UID, &send), Ok(serde_json::json!({ "id": "v1" })));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn a_dropped_clone_leaves_the_socket_in_place() {
+        let (control, _requests) = start().expect("a socket");
+        let file = control.socket.0.clone();
+        let clone = control.clone();
+        drop(clone);
+        assert!(file.exists(), "dropping a clone removed the socket");
+        drop(control);
+        assert!(!file.exists(), "the last one should remove it");
+    }
+
     #[test]
     fn a_subscription_goes_on_after_its_first_answer() {
         let tokens = Tokens::default();
@@ -829,7 +845,7 @@ mod tests {
 
     #[test]
     fn registering_again_revokes_the_old_token() {
-        let control = Control { tokens: Tokens::default(), agents: Agents::default(), socket: std::path::PathBuf::from("/nonexistent/po.sock") };
+        let control = Control { tokens: Tokens::default(), agents: Agents::default(), socket: Arc::new(SocketFile(std::path::PathBuf::from("/nonexistent/po.sock"))) };
         let first = control.register(3, None)[1].1.clone();
         let second = control.register(3, None)[1].1.clone();
         let tokens = control.tokens.lock().unwrap();
@@ -839,7 +855,7 @@ mod tests {
 
     #[test]
     fn registering_an_agent_marks_its_process() {
-        let control = Control { tokens: Tokens::default(), agents: Agents::default(), socket: std::path::PathBuf::from("/nonexistent/po.sock") };
+        let control = Control { tokens: Tokens::default(), agents: Agents::default(), socket: Arc::new(SocketFile(std::path::PathBuf::from("/nonexistent/po.sock"))) };
         control.register(3, Some(4242));
         assert!(control.agents.lock().unwrap().contains(&4242));
     }

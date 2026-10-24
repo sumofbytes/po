@@ -248,6 +248,16 @@ enum Origin {
     Po,
 }
 
+/// How much longer a parent must wait before it may be told something, given how long ago it
+/// last was; `None` when it may be told now (never told, or long enough ago). A wait of nothing
+/// is not a wait: it would put the notice back for ever.
+fn notice_wait(since_last: Option<Duration>) -> Option<Duration> {
+    NOTICE_RATE.checked_sub(since_last?).filter(|left| !left.is_zero())
+}
+
+/// What starts a message of Po's in a transcript, so that it isn't taken for the user's.
+const PO_MARK: &str = "[Po] ";
+
 /// A message headed for an agent, with where it came from.
 struct Outgoing {
     text: String,
@@ -255,6 +265,14 @@ struct Outgoing {
 }
 
 impl Outgoing {
+    /// How the transcript shows it: Po's own messages say so, and never name the thread.
+    fn shown(&self) -> String {
+        match self.origin {
+            Origin::Po => format!("{PO_MARK}{}", self.text),
+            _ => self.text.clone(),
+        }
+    }
+
     fn user(text: String) -> Self {
         Self { text, origin: Origin::User }
     }
@@ -931,6 +949,8 @@ impl Thread {
     /// The first thing asked, or a placeholder while there is none.
     fn title(&self) -> String {
         let first = self.messages.iter().find_map(|msg| match msg {
+            // A thread is named for what it was asked, not for what Po told it.
+            Msg::User(text) if text.starts_with(PO_MARK) => None,
             Msg::User(text) => text.lines().find(|line| !line.trim().is_empty()),
             Msg::Agent(_) => None,
         });
@@ -1982,7 +2002,7 @@ impl Reader {
         self.confirm_discard = false;
         self.open_project(project, Mode::Diff, Some(agent), window, cx);
         if let Some((out, (pid, tid))) = first {
-            self.begin_turn(&out.text);
+            self.begin_turn(&out.shown());
             self.thread.pending = Some(out);
             // The thread it was typed in stays only if something has happened to it since.
             let blank = self.views().iter().any(|v| v.id == pid && v.threads.iter().any(|t| t.id == tid && t.blank));
@@ -2872,7 +2892,8 @@ impl Reader {
                 };
                 command::Answer::Later(command::Wait { threads: threads.unwrap_or_default(), until, deadline: wait_deadline })
             }
-            _ => command::Answer::Now(Err("not a thread command".into())),
+            // The reads of threads (list, get, messages…) are answered from the state as it is.
+            read => command::Answer::Now(self.run_read(caller, id, read)),
         }
     }
 
@@ -3011,7 +3032,7 @@ impl Reader {
             crate::state::ThreadState::Starting => "is starting",
             crate::state::ThreadState::Ready => "finished its turn",
         };
-        let line = format!("[Po] Thread #{id} {word}. Use last_reply or get_thread to read what it said.");
+        let line = format!("Thread #{id} {word}. Use last_reply or get_thread to read what it said.");
         let notice = self.notices.entry(parent).or_insert_with(|| Notice { text: String::new() });
         if !notice.text.is_empty() {
             notice.text.push('\n');
@@ -3035,7 +3056,7 @@ impl Reader {
             return;
         }
         // Every notice is a turn of the parent's: more frequent ones merge into the next.
-        if let Some(left) = NOTICE_RATE.checked_sub(self.notice_sent_at.get(&parent).map_or(NOTICE_RATE, |at| at.elapsed())) {
+        if let Some(left) = notice_wait(self.notice_sent_at.get(&parent).map(Instant::elapsed)) {
             let (handle, parent) = (self.window, parent);
             cx.spawn(async move |this, cx| {
                 cx.background_executor().timer(left).await;
@@ -3843,7 +3864,7 @@ impl Reader {
                 reader.connect(&key, false, window, cx);
                 if reader.thread.client.is_some() {
                     // Shown as sent, as a message typed while the agent starts is.
-                    reader.begin_turn(&out.text);
+                    reader.begin_turn(&out.shown());
                     reader.thread.pending = Some(out);
                 } else {
                     // The agent isn't approved or won't run yet; the message waits for it, the
@@ -3862,7 +3883,7 @@ impl Reader {
     /// still labelled by where it came from.
     fn return_pending(&mut self) {
         let Some(out) = self.thread.pending.take() else { return };
-        let prompt = out.text.clone();
+        let prompt = out.shown();
         let shown = matches!(self.thread.messages.as_slice(), [.., Msg::User(text), Msg::Agent(blocks)] if *text == prompt && blocks.is_empty());
         if shown {
             let keep = self.thread.messages.len() - 2;
@@ -4793,7 +4814,7 @@ impl Reader {
                 if from_user {
                     self.thread.draft.update(cx, |input, cx| input.set_value("", window, cx));
                 }
-                self.begin_turn(&out.text);
+                self.begin_turn(&out.shown());
                 self.thread.pending = Some(out);
                 cx.notify();
                 Where::Wait
@@ -4893,7 +4914,7 @@ impl Reader {
             cx.notify();
             return false;
         }
-        self.begin_turn(&out.text);
+        self.begin_turn(&out.shown());
         self.request_save(cx);
         cx.notify();
         true
@@ -7496,7 +7517,7 @@ mod tests {
         assert_eq!(toggle_all(&mut vec![Msg::User("x".into())], thought_flag), None);
     }
 
-    use super::{Activity, Block, Msg, PermissionOption, Step, ToolBlock, folded_runs, preview_of, language, run_folded, toggle_all, match_files, primary_option, syntax};
+    use super::{NOTICE_RATE, notice_wait, Activity, Block, Msg, PermissionOption, Step, ToolBlock, folded_runs, preview_of, language, run_folded, toggle_all, match_files, primary_option, syntax};
 
     #[test]
     fn file_matches_rank_names_before_paths() {
@@ -7572,6 +7593,16 @@ mod tests {
         assert!(!run_folded(&failed, false), "a failure doesn't hide");
         let running = vec![tool("a", Step::Done), tool("b", Step::Working), tool("c", Step::Waiting)];
         assert!(!run_folded(&running, false), "a call still going doesn't hide");
+    }
+
+    #[test]
+    fn a_parent_never_told_is_told_now_and_one_just_told_waits() {
+        use std::time::Duration;
+        assert_eq!(notice_wait(None), None);
+        assert_eq!(notice_wait(Some(NOTICE_RATE)), None);
+        assert_eq!(notice_wait(Some(NOTICE_RATE + Duration::from_secs(1))), None);
+        assert_eq!(notice_wait(Some(Duration::ZERO)), Some(NOTICE_RATE));
+        assert_eq!(notice_wait(Some(Duration::from_secs(4))), Some(NOTICE_RATE - Duration::from_secs(4)));
     }
 
     #[test]

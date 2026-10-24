@@ -685,3 +685,26 @@ A fresh review of the implementation (PR #79) found these, all fixed:
 | The audit log could be flushed by reads | Writes and refusals only, repeats counted (§ phase 5) |
 | Hung-up clients held connection slots; a request could be dripped in | Hang-ups are detected while waiting or streaming; a request is read within 10 s and a size limit; `po mcp` serves at most 16 calls at once |
 | Lowering `read_project` or `approvals` kept waits; Stop agent control left child notices; restored `parent_session` was trusted | Any lowering drops waits; children go quiet; relinking keeps depth 1 and `MAX_CHILDREN`. `thread.find` answers the same for a missing session and one out of reach |
+
+## 12. Found by running it
+
+The first run in a real window (a debug build on a scratch repository, driven by a fake ACP agent
+that calls the real `po mcp` tools, and by `po ctl`) found four faults the unit tests had missed,
+all fixed:
+
+| Fault | Fix |
+|---|---|
+| `Control` was `Clone` and its `Drop` removed the socket, so the first dropped clone (when an agent was started) deleted the socket file: nothing could reach the window | The file is removed when the last clone goes (`SocketFile`, tested) |
+| Thread reads (`thread.list`, `get`, `messages`, `last_reply`, `options`, `find`) were routed to the thread-write handler and refused as "not a thread command" | `run_thread` hands anything it does not write to `run_read` |
+| Notify-parent never sent: for a parent never told before, the rate limit computed a wait of zero, took it for a wait, and rescheduled itself for ever at 95% CPU | `notice_wait` treats no wait as none (tested) |
+| A thread was named from Po's own notice when the user had said nothing | Po's messages are shown with a `[Po]` mark and skipped for titles |
+
+Also seen working: grants and the tool list by scope; `thread.create` with notify; approvals
+(`answer_thread`, an unknown option refused); `thread.wait` timing out as `timed_out` and waking on
+a state; send, self-send refused, close; the `mode` option refused; `/` refused; the sidebar rows
+for a new folder and an offer; an isolated worktree thread started and its parent told; `po ctl`
+`windows`, `watch`, `wait`, `audit.list`, `thread.find`, and its refusal from inside an agent
+("Po refused: …"); a child relinked to its parent after a restart. Not tried (needs a click, which
+`wtype` can't send): answering a suggestion row, the Control menu's own items, `worktree.merge`'s
+button, and Stop agent control.
+

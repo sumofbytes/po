@@ -76,13 +76,15 @@ pub struct Found {
 /// The windows that answer, asking each its `window.info`. A socket that refuses the
 /// connection belongs to a window that is gone, and is removed; the pid is not trusted for that,
 /// since it can be reused.
-pub fn windows() -> Vec<Found> {
+pub fn windows() -> (Vec<Found>, Vec<String>) {
     let mut found = vec![];
+    let mut refused = vec![];
     for socket in crate::control::sockets() {
         let path = socket.to_string_lossy().into_owned();
         match crate::control::call_at(&path, &json!({ "command": "window.info" })) {
             Ok(mut reply) if reply["error"].is_null() => found.push(Found { socket, info: reply["ok"].take() }),
-            Ok(_) => {}
+            // A window that answered, and refused: it says why (from inside an agent, say).
+            Ok(reply) => refused.extend(reply["error"].as_str().map(String::from)),
             Err(error) => {
                 let refused = error.root_cause().downcast_ref::<std::io::Error>().is_some_and(|error| matches!(error.kind(), std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::NotFound));
                 if refused {
@@ -91,7 +93,7 @@ pub fn windows() -> Vec<Found> {
             }
         }
     }
-    found
+    (found, refused)
 }
 
 /// Which window to talk to: the one asked for, else the one with the working directory among
@@ -127,7 +129,10 @@ fn ask(found: &Found, request: &Value) -> Result<Value> {
 /// Runs `po ctl`; prints the reply as JSON. The exit code is the caller's to set from `Err`.
 pub fn run(args: &[String]) -> Result<()> {
     let task = parse(args)?;
-    let all = windows();
+    let (all, refused) = windows();
+    if all.is_empty() && !refused.is_empty() {
+        bail!("Po refused: {}", refused.join("; "));
+    }
     let cwd = std::env::current_dir().unwrap_or_default();
     match task {
         Task::Windows => {
