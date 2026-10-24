@@ -3858,7 +3858,7 @@ impl Reader {
                     .when_some(self.heads.get(&view.project.root).filter(|_| view.project.shows_branch()), |row, head| {
                         row.child(div().min_w_0().max_w(rems(7.)).flex().items_center().gap_1().text_xs().text_color(muted).child(
                             div().truncate().child(format!("⎇ {}", head.name)),
-                        ).when(head.dirty, |tag| tag.child(div().flex_none().child("●"))))
+                        ).when(head.dirty, |tag| tag.child(div().flex_none().child("*"))))
                     })
                     // Starting a thread is on the project's own row, shown when it is hovered.
                     .child(show_on_hover(
