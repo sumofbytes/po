@@ -6134,7 +6134,9 @@ impl Reader {
     /// The Control menu for thread `id`, next to the model in the settings row: its scopes,
     /// the two separate opt-ins, and the way out. The items are built when the menu opens,
     /// from what the grant was at the last render.
-    fn control_dropdown(&self, id: u64, this: Entity<Self>) -> AnyElement {
+    /// `place` names where it is drawn: the composer and the header each have one for the same
+    /// thread, and two with one id would share their menu's state and anchor.
+    fn control_dropdown(&self, id: u64, place: &'static str, this: Entity<Self>) -> AnyElement {
         let grant = self.grants.get(&id).copied().unwrap_or_default();
         let label = match grant.scope {
             command::Scope::Viewer if !grant.read_project && !grant.approvals => "Control".to_string(),
@@ -6144,8 +6146,8 @@ impl Reader {
         };
         let control = grant != command::Grant::default();
         dropdown(
-            ("control", id as usize),
-            Button::new(("control", id as usize))
+            (place, id as usize),
+            Button::new((place, id as usize))
                 .label(label)
                 .tooltip("What this thread's agent may do through Po")
                 .ghost()
@@ -6169,7 +6171,7 @@ impl Reader {
                     let (this, id) = (this.clone(), id);
                     let on = grant.read_project;
                     MenuItem::new(checked("May read other threads here", on), move |_, cx| {
-                        this.update(cx, |reader, cx| reader.set_grant(id, command::Scope::Viewer, !on, false, cx))
+                        this.update(cx, |reader, cx| reader.set_grant(id, grant.scope, !on, grant.approvals, cx))
                     })
                 };
                 items.push(read);
@@ -6178,7 +6180,7 @@ impl Reader {
                         let (this, id) = (this.clone(), id);
                         let on = grant.approvals;
                         MenuItem::new(checked("May answer its threads' permission asks", on), move |_, cx| {
-                            this.update(cx, |reader, cx| reader.set_grant(id, command::Scope::Viewer, false, !on, cx))
+                            this.update(cx, |reader, cx| reader.set_grant(id, grant.scope, grant.read_project, !on, cx))
                         })
                     };
                     items.push(approvals);
@@ -6414,7 +6416,7 @@ impl Reader {
                 .gap_1()
                 .child(div().pl_2().text_sm().text_color(muted).child(self.agent_label().unwrap_or("Agent").to_string()))
                 .children(settings)
-                .child(self.control_dropdown(self.thread.id, control.clone()))
+                .child(self.control_dropdown(self.thread.id, "control", control.clone()))
                 .into_any_element()
         };
         // A thread whose agent may do more than talk shows it, in the header as in the lists.
@@ -6430,7 +6432,7 @@ impl Reader {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .children(controlled.then(|| self.control_dropdown(self.thread.id, control.clone())))
+                    .children(controlled.then(|| self.control_dropdown(self.thread.id, "control-header", control.clone())))
                     .children(self.children_status(self.thread.id).map(|line| status_text(line, cx)))
                     .children((!self.thread.status.is_empty()).then(|| status_text(self.thread.status.clone(), cx)))
                     .child(

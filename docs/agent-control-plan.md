@@ -699,12 +699,23 @@ all fixed:
 | Notify-parent never sent: for a parent never told before, the rate limit computed a wait of zero, took it for a wait, and rescheduled itself for ever at 95% CPU | `notice_wait` treats no wait as none (tested) |
 | A thread was named from Po's own notice when the user had said nothing | Po's messages are shown with a `[Po]` mark and skipped for titles |
 
-Also seen working: grants and the tool list by scope; `thread.create` with notify; approvals
-(`answer_thread`, an unknown option refused); `thread.wait` timing out as `timed_out` and waking on
-a state; send, self-send refused, close; the `mode` option refused; `/` refused; the sidebar rows
-for a new folder and an offer; an isolated worktree thread started and its parent told; `po ctl`
-`windows`, `watch`, `wait`, `audit.list`, `thread.find`, and its refusal from inside an agent
-("Po refused: …"); a child relinked to its parent after a restart. Not tried (needs a click, which
-`wtype` can't send): answering a suggestion row, the Control menu's own items, `worktree.merge`'s
-button, and Stop agent control.
+Two more faults came out of clicking through the UI (a small Wayland virtual-pointer tool and
+`wtype` drove the real window), both fixed:
 
+| Fault | Fix |
+|---|---|
+| The Control menu's two opt-ins ("may read other threads here", "may answer its permission asks") called `set_grant` with the scope fixed at Viewer and the other flag off, so toggling one would have dropped a Global thread to Viewer | They keep the current scope and the other flag |
+| The header badge and the composer button built dropdowns with the same element id, so they shared one menu state and anchor, and clicks on the second after the first were swallowed | Each place has its own id |
+
+Seen working, by agent calls through the real `po mcp` and by clicks: grants and the tool list by
+scope; every Control menu item (scope, both opt-ins, each logged and visible to the agent through
+`control_info`) and Stop agent control; `thread.create` with notify; approvals (`answer_thread`,
+an unknown option refused); `thread.wait` timing out as `timed_out` and waking on a state; send,
+self-send refused, close; the `mode` option refused; `/` refused; the sidebar rows, with **Open**
+(the project is added in the background, the screen stays, the agent is told), **Not now**,
+**Go** (the screen switches only then) and **Merge** (the worktree and its project go, the agent
+is told "Merged into master"); an isolated worktree thread started and its parent told; `po ctl`
+`windows`, `watch`, `wait`, `audit.list`, `thread.find`, and its refusal from inside an agent
+("Po refused: …"); a child relinked to its parent after a restart. Not tried: answering a
+suggestion for a PR (needs `gh` and a remote), and a resumed (asleep) child being woken by
+`thread.send`.
