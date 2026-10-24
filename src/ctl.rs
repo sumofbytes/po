@@ -156,7 +156,15 @@ pub fn run(args: &[String]) -> Result<()> {
             let found = pick(&all, window, &cwd)?;
             let end = std::time::Instant::now() + std::time::Duration::from_secs(timeout);
             loop {
-                let info = ask(found, &json!({ "command": "thread.get", "thread": thread }))?;
+                let info = match ask(found, &json!({ "command": "thread.get", "thread": thread })) {
+                    Ok(info) => info,
+                    // A closed thread is gone, which is what waiting for it to close is for.
+                    Err(error) if error.to_string().contains("no such thread") && matches!(until.as_str(), "closed" | "done") => {
+                        println!("{}", json!({ "thread": thread, "state": "closed" }));
+                        return Ok(());
+                    }
+                    Err(error) => return Err(error),
+                };
                 if reached(info["state"].as_str().unwrap_or_default(), &until) {
                     println!("{}", serde_json::to_string_pretty(&info)?);
                     return Ok(());

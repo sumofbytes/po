@@ -80,14 +80,14 @@ pub struct Peer {
 }
 
 impl Peer {
-    /// The peer's ancestors, with the peer first, as far up as it goes. Capped, so a cyclic
-    /// process table can't spin here.
-    fn chain(self) -> Vec<u32> {
+    /// The peer's ancestors, with the peer first, as far up as `parent` (the process table)
+    /// goes. Capped, so a cyclic process table can't spin here.
+    fn chain_with(self, parent: &dyn Fn(u32) -> Option<u32>) -> Vec<u32> {
         let Some(start) = self.pid else { return vec![] };
         let mut chain = vec![start];
         let mut current = start;
         for _ in 0..64 {
-            match peer::parent(current) {
+            match parent(current) {
                 Some(parent) if parent > 0 && parent != current => {
                     chain.push(parent);
                     current = parent;
@@ -101,12 +101,18 @@ impl Peer {
 
 /// Who a connection is, judged by what it claims and by the process it comes from. Pure, so it
 /// is testable. `our_uid` is this process's.
-fn classify(
+fn classify(token: Option<&str>, peer: Peer, tokens: &HashMap<String, Registered>, agents: &HashSet<u32>, our_uid: u32) -> std::result::Result<Caller, String> {
+    classify_with(token, peer, tokens, agents, our_uid, &peer::parent)
+}
+
+/// [`classify`], with the process table (a process's parent) given.
+fn classify_with(
     token: Option<&str>,
     peer: Peer,
     tokens: &HashMap<String, Registered>,
     agents: &HashSet<u32>,
     our_uid: u32,
+    parent: &dyn Fn(u32) -> Option<u32>,
 ) -> std::result::Result<Caller, String> {
     match token {
         Some(token) => {
@@ -117,7 +123,7 @@ fn classify(
                 // Bound to an agent, and the platform can't read the peer: nothing to prove
                 // the chain with, so refuse rather than take the token at its word.
                 (Some(_), None) => Err("cannot tell who is asking".into()),
-                (Some(_), Some(_)) if peer.chain().contains(&registered.agent.unwrap()) => Ok(Caller::Thread(registered.thread)),
+                (Some(_), Some(_)) if peer.chain_with(parent).contains(&registered.agent.unwrap()) => Ok(Caller::Thread(registered.thread)),
                 (Some(_), Some(_)) => Err("this token works only inside its own thread's agent".into()),
             }
         }
@@ -130,8 +136,15 @@ fn classify(
             if peer.uid.is_some_and(|uid| uid != our_uid) {
                 return Err("not this user's connection".into());
             }
-            if peer.chain().iter().any(|pid| agents.contains(pid)) {
+            let chain = peer.chain_with(parent);
+            if chain.iter().any(|pid| agents.contains(pid)) {
                 return Err("no control from inside an agent's process".into());
+            }
+            // The user is whoever is *not* an agent's, so the chain has to be followed all the
+            // way up: one that breaks off (a peer that already exited, a process table that
+            // can't be read) proves nothing, and is not taken for the user's.
+            if peer::CAN_READ_PEER && !chain.contains(&1) {
+                return Err("cannot tell where this process comes from".into());
             }
             Ok(Caller::User)
         }
@@ -142,13 +155,13 @@ fn classify(
 /// process the kernel named.
 #[cfg(test)]
 fn answer(line: &str, from: Peer, tokens: &Tokens, agents: &Agents, our_uid: u32, send: &dyn Fn(Request) -> Result<(), String>) -> Reply {
-    answer_stream(line, from, tokens, agents, our_uid, send).0
+    answer_stream(line, from, tokens, agents, our_uid, send, &|| true).0
 }
 
 /// [`answer`], and for a command that goes on talking (`events.subscribe`) the channel the
 /// window sends the rest on, which ends when the window drops its end.
-fn answer_stream(line: &str, from: Peer, tokens: &Tokens, agents: &Agents, our_uid: u32, send: &dyn Fn(Request) -> Result<(), String>) -> (Reply, Option<std::sync::mpsc::Receiver<Reply>>) {
-    match ask(line, from, tokens, agents, our_uid, send) {
+fn answer_stream(line: &str, from: Peer, tokens: &Tokens, agents: &Agents, our_uid: u32, send: &dyn Fn(Request) -> Result<(), String>, alive: &dyn Fn() -> bool) -> (Reply, Option<std::sync::mpsc::Receiver<Reply>>) {
+    match ask(line, from, tokens, agents, our_uid, send, alive) {
         Ok((first, rest, streams)) => {
             let rest = (streams && first.is_ok()).then_some(rest);
             (first, rest)
@@ -159,7 +172,7 @@ fn answer_stream(line: &str, from: Peer, tokens: &Tokens, agents: &Agents, our_u
 
 /// Judges who is asking, hands the command to the window and waits for its first answer, with
 /// whether the command goes on streaming after it.
-fn ask(line: &str, from: Peer, tokens: &Tokens, agents: &Agents, our_uid: u32, send: &dyn Fn(Request) -> Result<(), String>) -> Result<(Reply, std::sync::mpsc::Receiver<Reply>, bool), String> {
+fn ask(line: &str, from: Peer, tokens: &Tokens, agents: &Agents, our_uid: u32, send: &dyn Fn(Request) -> Result<(), String>, alive: &dyn Fn() -> bool) -> Result<(Reply, std::sync::mpsc::Receiver<Reply>, bool), String> {
     let request: Value = serde_json::from_str(line).map_err(|error| format!("not JSON: {error}"))?;
     // Who is asking, before what they want: a refusal says nothing about the command.
     let caller = classify(
@@ -175,13 +188,29 @@ fn ask(line: &str, from: Peer, tokens: &Tokens, agents: &Agents, our_uid: u32, s
     let wait = command.timeout();
     send(Request { caller, command, reply })?;
     // Each command says how long it may take; the client's read timeout is a little longer.
-    let first = answer.recv_timeout(wait).map_err(|_| "Po did not answer".to_string())?;
+    // A margin past the command's own timeout, which the window starts counting a little later:
+    // a wait that runs out answers `timed_out`, instead of being given up on here first.
+    // `alive` is asked now and then, so a client that hangs up mid-wait stops holding its
+    // connection (and, once the window drops the waiter, its share of waits).
+    let end = std::time::Instant::now() + wait + std::time::Duration::from_secs(2);
+    let first = loop {
+        let slice = end.saturating_duration_since(std::time::Instant::now()).min(std::time::Duration::from_secs(1));
+        match answer.recv_timeout(slice) {
+            Ok(first) => break first,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) if std::time::Instant::now() < end => {
+                if !alive() {
+                    return Err("the client hung up".into());
+                }
+            }
+            Err(_) => return Err("Po did not answer".into()),
+        }
+    };
     Ok((first, answer, streams))
 }
 
 #[cfg(unix)]
 mod server {
-    use std::io::{BufRead, BufReader, Read, Write};
+    use std::io::{BufRead, BufReader, Write};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::os::unix::{fs::PermissionsExt, net::UnixListener};
 
@@ -256,14 +285,17 @@ mod server {
     fn serve(stream: std::os::unix::net::UnixStream, tokens: &Tokens, agents: &Agents, requests: &UnboundedSender<Request>) {
         stream.set_read_timeout(Some(std::time::Duration::from_secs(5))).ok();
         let from = peer::of(&stream);
-        let mut line = String::new();
-        // A little over the biggest body, which is JSON-escaped.
-        let read = BufReader::new((&stream).take(crate::command::MAX_BODY as u64 * 2 + 4096)).read_line(&mut line);
-        let (reply, rest) = match read {
-            Ok(_) => answer_stream(&line, from, tokens, agents, unsafe { libc::getuid() as u32 }, &|request| {
-                requests.unbounded_send(request).map_err(|_| "Po is closing".to_string())
-            }),
-            Err(error) => (Err(error.to_string()), None),
+        let (reply, rest) = match read_request(&stream) {
+            Ok(line) => answer_stream(
+                &line,
+                from,
+                tokens,
+                agents,
+                unsafe { libc::getuid() as u32 },
+                &|request| requests.unbounded_send(request).map_err(|_| "Po is closing".to_string()),
+                &|| !hung_up(&stream),
+            ),
+            Err(error) => (Err(error), None),
         };
         let line = |reply: Reply| match reply {
             Ok(value) => json!({ "ok": value }),
@@ -272,11 +304,62 @@ mod server {
         if (&stream).write_all(format!("{}\n", line(reply)).as_bytes()).is_err() {
             return;
         }
-        // A subscription goes on until the client hangs up, which a failed write finds out.
-        for next in rest.into_iter().flatten() {
-            if (&stream).write_all(format!("{}\n", line(next)).as_bytes()).is_err() {
+        // A subscription goes on until the client hangs up, which a failed write finds out, or
+        // the check between events does, so that a quiet window doesn't keep the slot.
+        let Some(rest) = rest else { return };
+        loop {
+            match rest.recv_timeout(std::time::Duration::from_secs(2)) {
+                Ok(next) => {
+                    if (&stream).write_all(format!("{}\n", line(next)).as_bytes()).is_err() {
+                        break;
+                    }
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) if !hung_up(&stream) => {}
+                Err(_) => break,
+            }
+        }
+    }
+
+    /// One line, the request. A little over the biggest body is read (it is JSON-escaped), and
+    /// all of it within a few seconds, so a client that drips bytes can't hold a slot.
+    pub(super) fn read_request(stream: &std::os::unix::net::UnixStream) -> Result<String, String> {
+        let limit = crate::command::MAX_BODY * 2 + 4096;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut reader = BufReader::new(stream);
+        let mut line = Vec::new();
+        loop {
+            let buf = reader.fill_buf().map_err(|error| error.to_string())?;
+            if buf.is_empty() {
                 break;
             }
+            let (take, done) = match buf.iter().position(|byte| *byte == b'\n') {
+                Some(at) => (at + 1, true),
+                None => (buf.len(), false),
+            };
+            line.extend_from_slice(&buf[..take]);
+            reader.consume(take);
+            if done {
+                break;
+            }
+            if line.len() > limit {
+                return Err("request too long".into());
+            }
+            if std::time::Instant::now() > deadline {
+                return Err("request too slow".into());
+            }
+        }
+        String::from_utf8(line).map_err(|_| "not UTF-8".to_string())
+    }
+
+    /// Whether the client has closed its end, found without reading anything.
+    pub(super) fn hung_up(stream: &std::os::unix::net::UnixStream) -> bool {
+        use std::os::unix::io::AsRawFd;
+        let mut byte = 0u8;
+        let got = unsafe { libc::recv(stream.as_raw_fd(), &mut byte as *mut u8 as *mut libc::c_void, 1, libc::MSG_PEEK | libc::MSG_DONTWAIT) };
+        match got {
+            0 => true,
+            n if n > 0 => false,
+            _ => std::io::Error::last_os_error().kind() != std::io::ErrorKind::WouldBlock,
         }
     }
 
@@ -520,7 +603,7 @@ mod tests {
             *kept.lock().unwrap() = Some(request.reply);
             Ok(())
         };
-        let (first, rest) = answer_stream(r#"{"command":"events.subscribe"}"#, me, &tokens, &agents, UID, &send);
+        let (first, rest) = answer_stream(r#"{"command":"events.subscribe"}"#, me, &tokens, &agents, UID, &send, &|| true);
         assert_eq!(first, Ok(serde_json::json!({ "subscribed": true })));
         let rest = rest.expect("a stream");
         kept.lock().unwrap().as_ref().unwrap().send(Ok(serde_json::json!({ "event": "thread.state" }))).unwrap();
@@ -530,13 +613,73 @@ mod tests {
             request.reply.send(Ok(serde_json::json!({}))).unwrap();
             Ok(())
         };
-        assert!(answer_stream(r#"{"command":"window.info"}"#, me, &tokens, &agents, UID, &once).1.is_none());
+        assert!(answer_stream(r#"{"command":"window.info"}"#, me, &tokens, &agents, UID, &once, &|| true).1.is_none());
         // Nor does a subscription the window refused.
         let refuse = |request: Request| -> Result<(), String> {
             request.reply.send(Err("no".into())).unwrap();
             Ok(())
         };
-        assert!(answer_stream(r#"{"command":"events.subscribe"}"#, me, &tokens, &agents, UID, &refuse).1.is_none());
+        assert!(answer_stream(r#"{"command":"events.subscribe"}"#, me, &tokens, &agents, UID, &refuse, &|| true).1.is_none());
+    }
+
+    #[test]
+    fn a_wait_that_runs_out_answers_instead_of_being_given_up_on() {
+        // A thread with no agent pid of its own, so its token alone says who it is.
+        let tokens: Tokens = Arc::new(Mutex::new(registered(None)));
+        let me = Peer { pid: Some(std::process::id()), uid: Some(UID) };
+        // The wait's own timeout is 0 s; the window answers a second later, past it but within
+        // the margin the server allows, since the window starts its timer a little after.
+        let late = |request: Request| -> Result<(), String> {
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(1000));
+                request.reply.send(Ok(serde_json::json!({ "timed_out": true }))).ok();
+            });
+            Ok(())
+        };
+        let reply = answer(r#"{"command":"thread.wait","timeout":0,"token":"good"}"#, me, &tokens, &Agents::default(), UID, &late);
+        assert_eq!(reply, Ok(serde_json::json!({ "timed_out": true })));
+    }
+
+    #[test]
+    fn a_client_that_hangs_up_mid_wait_is_noticed() {
+        let tokens = Tokens::default();
+        let agents = Agents::default();
+        let me = Peer { pid: Some(std::process::id()), uid: Some(UID) };
+        // The window takes the request and never answers; the client is gone.
+        let keep = std::sync::Mutex::new(vec![]);
+        let hold = |request: Request| -> Result<(), String> {
+            keep.lock().unwrap().push(request.reply);
+            Ok(())
+        };
+        let started = std::time::Instant::now();
+        let (reply, rest) = answer_stream(r#"{"command":"events.subscribe"}"#, me, &tokens, &agents, UID, &hold, &|| false);
+        assert_eq!(reply, Err("the client hung up".into()));
+        assert!(rest.is_none() && started.elapsed() < std::time::Duration::from_secs(5));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_closed_socket_is_seen_and_a_dripping_client_is_not_waited_for() {
+        use std::io::Write;
+        let (server, mut client) = std::os::unix::net::UnixStream::pair().unwrap();
+        assert!(!server::hung_up(&server));
+        client.write_all(b"{\"command\":\"window.info\"}\n").unwrap();
+        assert_eq!(server::read_request(&server).unwrap().trim(), "{\"command\":\"window.info\"}");
+        drop(client);
+        assert!(server::hung_up(&server));
+        // A request longer than any body is refused rather than read to the end.
+        let (server, mut client) = std::os::unix::net::UnixStream::pair().unwrap();
+        let writer = std::thread::spawn(move || {
+            let chunk = vec![b'x'; 64 * 1024];
+            for _ in 0..16 {
+                if client.write_all(&chunk).is_err() {
+                    break;
+                }
+            }
+        });
+        assert_eq!(server::read_request(&server), Err("request too long".into()));
+        drop(server);
+        writer.join().unwrap();
     }
 
     #[test]
@@ -562,12 +705,32 @@ mod tests {
         // The peer itself counts as its own chain's start, so an agent pid of the peer's own
         // is refused; 0 is in no chain, so it stands for "no agent here".
         let no_agent = agents(&[0]);
+        // 500 is a shell under init; 600 sits under the agent at 100, which is under init too.
+        let table = tree(&[(500, 1), (600, 100), (100, 1)]);
         // A process of this user's, none of whose chain is an agent's: the user.
-        assert_eq!(classify(None, peer(Some(500), Some(UID)), &tokens, &no_agent, UID), Ok(Caller::User));
+        assert_eq!(classify_with(None, peer(Some(500), Some(UID)), &tokens, &no_agent, UID, &table), Ok(Caller::User));
         // A process under an agent's is refused, whatever it claims.
-        assert_eq!(classify(None, peer(Some(100), Some(UID)), &tokens, &agents(&[100]), UID), Err("no control from inside an agent's process".into()));
+        assert_eq!(classify_with(None, peer(Some(600), Some(UID)), &tokens, &agents(&[100]), UID, &table), Err("no control from inside an agent's process".into()));
+        assert_eq!(classify_with(None, peer(Some(100), Some(UID)), &tokens, &agents(&[100]), UID, &table), Err("no control from inside an agent's process".into()));
         // Another user's connection is refused out of hand.
-        assert!(classify(None, peer(Some(500), Some(UID + 1)), &tokens, &no_agent, UID).is_err());
+        assert!(classify_with(None, peer(Some(500), Some(UID + 1)), &tokens, &no_agent, UID, &table).is_err());
+    }
+
+    // A chain that can't be followed to init proves nothing about the peer: a client that wrote
+    // its request and exited before its process was read, or one whose entry can't be read,
+    // is not the user's by default.
+    #[test]
+    fn a_chain_that_breaks_off_is_not_taken_for_the_users() {
+        let tokens = registered(Some(100));
+        let none = agents(&[100]);
+        let gone = tree(&[]);
+        assert!(classify_with(None, peer(Some(500), Some(UID)), &tokens, &none, UID, &gone).is_err());
+        // Broken halfway: 500's parent is 700, which is not in the table.
+        let halfway = tree(&[(500, 700)]);
+        assert!(classify_with(None, peer(Some(500), Some(UID)), &tokens, &none, UID, &halfway).is_err());
+        // A peer that is init's own child reaches 1 and is judged by its chain as usual.
+        let whole = tree(&[(500, 1)]);
+        assert_eq!(classify_with(None, peer(Some(500), Some(UID)), &tokens, &none, UID, &whole), Ok(Caller::User));
     }
 
     #[test]
@@ -584,9 +747,14 @@ mod tests {
         assert!(classify(Some("good"), unreadable, &tokens, &agents, UID).is_err());
     }
 
+    fn tree(pairs: &[(u32, u32)]) -> impl Fn(u32) -> Option<u32> + use<> {
+        let pairs = pairs.to_vec();
+        move |pid| pairs.iter().find(|(child, _)| *child == pid).map(|(_, parent)| *parent)
+    }
+
     #[test]
     fn an_ancestor_chain_is_capped() {
-        assert!(peer(Some(1), None).chain().len() <= 65);
+        assert!(peer(Some(1), None).chain_with(&|pid| Some(pid + 1)).len() <= 65);
     }
 
     #[cfg(unix)]

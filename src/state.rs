@@ -150,6 +150,11 @@ pub struct ThreadInfo {
     pub usage: Option<Usage>,
 }
 
+/// Whether `a` and `b` are threads of one project, given each project's thread ids.
+pub fn share_project(projects: &[Vec<u64>], a: u64, b: u64) -> bool {
+    projects.iter().any(|threads| threads.contains(&a) && threads.contains(&b))
+}
+
 /// A session's context use, as an agent's `usage_update` reports it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Usage {
@@ -358,6 +363,15 @@ mod tests {
         assert_eq!(state(&Facts { asleep: true, ..idle }), ThreadState::Asleep);
         // A busy turn with a question open is asking, not running.
         assert_eq!(state(&Facts { asking: true, busy: true, ..idle }), ThreadState::Asking);
+    }
+
+    #[test]
+    fn siblings_share_a_project_not_just_existence() {
+        let projects = vec![vec![1, 2], vec![3]];
+        assert!(share_project(&projects, 1, 2));
+        // Both exist, in different projects: not siblings, whatever else is true of them.
+        assert!(!share_project(&projects, 1, 3));
+        assert!(!share_project(&projects, 1, 9));
     }
 
     #[test]

@@ -45,9 +45,11 @@ speaks as `Caller::User`, so it reads, answers, stops, closes and sets options o
 act as a parent, and the user's connection has none. `po ctl wait thread=N [until=…]` polls
 `thread.get` instead, with no 50 s cap. Windows are found by their sockets; one that refuses the
 connection is removed. Not tested: a child relinked in a live window (needs one), and the
-refusal from inside an agent's tree beyond the existing `classify` test. Phase 5 is in except two items. The audit log keeps every control command in memory (the last
-500, `Reader.audit`) with its caller, name and outcome, and `audit.list` (user only, so `po ctl
-audit.list limit=20`) reads it; reading it is not itself logged. There is no UI view yet.
+refusal from inside an agent's tree beyond the existing `classify` test. Phase 5 is in except two items. The audit log keeps the control commands that change something,
+and any that were refused, in memory (the last 500, `Reader.audit`) with caller, name, outcome and
+a count of identical repeats; answered reads are not kept, so a caller can't push the rest out.
+`audit.list` (user only, so `po ctl audit.list limit=20`) reads it, and `events.subscribe` is
+audited too. There is no UI view yet.
 `events.subscribe` (user only) turns the connection into a stream: the first reply says
 `subscribed`, then every `changed` publishes a `thread.state` line (`thread`, `state`, `title`,
 `project`, `at`); `po ctl watch` prints them, and a subscriber that hung up is dropped at the next
@@ -667,3 +669,19 @@ Each phase ships on its own and leaves Po working.
 | `thread.show` and `project.open` took over the screen | `project.offer` chip; confirmation for new paths (§5) |
 | Origin and grants in `ThreadState` | `parent_session` saved, grants never saved; JSON is hand-written, not serde (§4.9) |
 | Gaps | `last_reply`, `project.changes`, `thread.find` added; usage deferred (§5, §8) |
+
+## 11. Changes after review of the implementation
+
+A fresh review of the implementation (PR #79) found these, all fixed:
+
+| Finding | Change |
+|---|---|
+| `relation_to` took any two live threads for siblings | A sibling shares a project (`state::share_project`, tested) |
+| A tokenless peer whose process chain could not be read was taken for the user | `classify` refuses a chain that does not reach init; the process table is injectable for tests. An agent that deliberately re-parents itself (double fork) is still outside the threat model of §1.1 |
+| A `thread.wait` that ran out answered "Po did not answer" | The server waits 2 s past the command's timeout, so the window answers `timed_out` |
+| `Closed` was announced after the thread was removed, so parent and waiters never heard | It is announced first; `po ctl wait until=closed` treats a gone thread as closed |
+| `start_isolated` ignored a parent that had gone and the child limit | `start_child` checks both when the worktree is ready |
+| A thread could set its own `mode` (permissions) through `thread.set_option` or `options` | The API never sets a `mode` option |
+| The audit log could be flushed by reads | Writes and refusals only, repeats counted (§ phase 5) |
+| Hung-up clients held connection slots; a request could be dripped in | Hang-ups are detected while waiting or streaming; a request is read within 10 s and a size limit; `po mcp` serves at most 16 calls at once |
+| Lowering `read_project` or `approvals` kept waits; Stop agent control left child notices; restored `parent_session` was trusted | Any lowering drops waits; children go quiet; relinking keeps depth 1 and `MAX_CHILDREN`. `thread.find` answers the same for a missing session and one out of reach |

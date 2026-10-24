@@ -516,6 +516,9 @@ fn call(params: &Value, send: &dyn Fn(Value) -> anyhow::Result<Value>, grant: Op
 /// on a thread of its own, so a slow one (a wait, say) doesn't hold the agent's next tool call,
 /// and replies go through a writer that owns standard output, so they never tear. Replies may
 /// arrive out of order, which JSON-RPC allows: every reply carries the id of its own request.
+/// Calls served at once.
+const MAX_CALLS: usize = 16;
+
 pub fn serve() -> anyhow::Result<()> {
     use std::io::{BufRead, Write};
     use std::sync::{Arc, Mutex};
@@ -529,12 +532,22 @@ pub fn serve() -> anyhow::Result<()> {
         }
     });
     let grant: Arc<Mutex<Option<Grant>>> = Arc::default();
+    let running = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     for line in std::io::stdin().lock().lines() {
         let line = line?;
         if line.trim().is_empty() {
             continue;
         }
-        let (send_line, grant) = (send_line.clone(), grant.clone());
+        // Calls that take a while (a wait) run beside the rest, but not without end.
+        if running.fetch_add(1, std::sync::atomic::Ordering::SeqCst) >= MAX_CALLS {
+            running.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+            let id = serde_json::from_str::<Value>(&line).ok().and_then(|message| message.get("id").cloned());
+            if let Some(id) = id {
+                send_line.send(json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32000, "message": "too many calls at once" } }).to_string()).ok();
+            }
+            continue;
+        }
+        let (send_line, grant, running) = (send_line.clone(), grant.clone(), running.clone());
         std::thread::spawn(move || {
             let mut mine = *grant.lock().expect("grant lock");
             let reply = match serde_json::from_str::<Value>(&line) {
@@ -545,6 +558,7 @@ pub fn serve() -> anyhow::Result<()> {
             if let Some(reply) = reply {
                 send_line.send(reply.to_string()).ok();
             }
+            running.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
         });
     }
     drop(send_line);

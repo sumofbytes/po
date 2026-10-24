@@ -1078,6 +1078,8 @@ struct Audit {
     caller: command::Caller,
     command: &'static str,
     outcome: String,
+    /// How many times in a row it was this, for the same caller.
+    count: u32,
 }
 
 /// How many commands the audit log keeps, newest last.
@@ -1461,7 +1463,9 @@ impl Reader {
                     let answered = handle.update(cx, |_, window, cx| {
                         this.update(cx, |reader, cx| {
                             if matches!(request.command, command::Command::EventsSubscribe) {
-                                match reader.authorize(request.caller, &request.command) {
+                                let authorized = reader.authorize(request.caller, &request.command);
+                                reader.record(request.caller, "events.subscribe", authorized.as_ref().map_or_else(|why| format!("refused: {why}"), |()| "ok".into()), true);
+                                match authorized {
                                     Ok(()) => {
                                         request.reply.send(Ok(serde_json::json!({ "subscribed": true }))).ok();
                                         reader.subscribers.push(request.reply);
@@ -2177,21 +2181,14 @@ impl Reader {
     /// The one way a request from outside the window changes it. Views are the caller's own; the
     /// viewer is the user's, so only the thread on screen may move it, and not while they are busy.
     fn run_command(&mut self, caller: command::Caller, command: command::Command, window: &mut Window, cx: &mut Context<Self>) -> command::Answer {
-        let name = command.name();
-        // Reading the log is not logged, so that a script watching it doesn't fill it.
-        let logged = !matches!(command, command::Command::AuditList { .. });
+        let (name, writes) = (command.name(), command.writes());
         let answer = self.run_command_inner(caller, command, window, cx);
-        if logged {
-            let outcome = match &answer {
-                command::Answer::Now(Ok(_)) => "ok".to_string(),
-                command::Answer::Now(Err(why)) => format!("refused: {why}"),
-                command::Answer::Later(_) => "waiting".to_string(),
-            };
-            if self.audit.len() >= MAX_AUDIT {
-                self.audit.pop_front();
-            }
-            self.audit.push_back(Audit { at: now_ms(), caller, command: name, outcome });
-        }
+        let outcome = match &answer {
+            command::Answer::Now(Ok(_)) => "ok".to_string(),
+            command::Answer::Now(Err(why)) => format!("refused: {why}"),
+            command::Answer::Later(_) => "waiting".to_string(),
+        };
+        self.record(caller, name, outcome, writes);
         answer
     }
 
@@ -2248,9 +2245,9 @@ impl Reader {
         if self.threads_all().any(|thread| thread.id == target && thread.parent == Some(caller)) {
             return Relation::Child;
         }
-        let projects = self.views();
-        let same = |id: u64| projects.iter().any(|view| view.threads.iter().any(|thread| thread.id == id));
-        if same(caller) && same(target) {
+        // A sibling stands in the same project; a view holding both says so.
+        let projects: Vec<Vec<u64>> = self.views().iter().map(|view| view.threads.iter().map(|thread| thread.id).collect()).collect();
+        if state::share_project(&projects, caller, target) {
             Relation::Sibling
         } else {
             Relation::Elsewhere
@@ -2339,7 +2336,7 @@ impl Reader {
                             command::Caller::User => json!("user"),
                             command::Caller::Thread(id) => json!({ "thread": id }),
                         };
-                        json!({ "at": entry.at, "caller": who, "command": entry.command, "outcome": entry.outcome })
+                        json!({ "at": entry.at, "caller": who, "command": entry.command, "outcome": entry.outcome, "count": entry.count })
                     })
                     .collect();
                 Ok(json!({ "entries": entries }))
@@ -2352,9 +2349,10 @@ impl Reader {
                 let views = self.views();
                 let found = views.iter().flat_map(|view| view.threads.iter().map(move |thread| (view, *thread))).find(|(_, thread)| thread.session.as_deref() == Some(session.as_str()));
                 let (_, thread) = found.ok_or("no thread has that session")?;
-                // The same reach as reading it by id.
+                // The same reach as reading it by id, and the same answer when it is out of
+                // reach as when there is none, so that this doesn't say which sessions exist.
                 if !grant.allows(&Command::ThreadGet { thread: Some(thread.id) }, self.relation_to(id, thread.id)) {
-                    return Err("the user has not granted this".into());
+                    return Err("no thread has that session".into());
                 }
                 Ok(json!({ "thread": thread.id }))
             }
@@ -2811,6 +2809,11 @@ impl Reader {
                     if !option.choices.iter().any(|(choice, _)| *choice == value) {
                         return Err(format!("`{value}` is not one of `{setting}`'s choices"));
                     }
+                    // A mode may be the agent's permissions (one that skips asking, say): what
+                    // an agent may do without the user's click is the user's to change.
+                    if option.category == "mode" {
+                        return Err("a thread's mode is the user's to change".into());
+                    }
                     thread.overrides.insert(setting.clone(), value.clone());
                     thread.api_options.insert(setting.clone());
                     Ok(())
@@ -2884,6 +2887,28 @@ impl Reader {
             let _ = handle.update(cx, |_, window, cx| this.update(cx, |reader, cx| reader.time_out(token, window, cx)));
         })
         .detach();
+    }
+
+    /// Keeps a control command in the audit log: what changes something, and anything refused;
+    /// plain reads that were answered are not what the log is for, and would let a caller
+    /// push the rest out. The same thing twice in a row is counted, not repeated.
+    fn record(&mut self, caller: command::Caller, command: &'static str, outcome: String, writes: bool) {
+        if !writes && outcome == "ok" {
+            return;
+        }
+        if let Some(last) = self.audit.back_mut()
+            && last.caller == caller
+            && last.command == command
+            && last.outcome == outcome
+        {
+            last.count += 1;
+            last.at = now_ms();
+            return;
+        }
+        if self.audit.len() >= MAX_AUDIT {
+            self.audit.pop_front();
+        }
+        self.audit.push_back(Audit { at: now_ms(), caller, command, outcome, count: 1 });
     }
 
     /// Replies to a wait that ran out, unless it was already answered.
@@ -3616,11 +3641,9 @@ impl Reader {
             applying.settled.insert(option.id.clone());
             // What the API asked for beats what was carried over; when this session was woken
             // only for the API's settings, carried choices don't come in at all.
-            let want = if applying.carrying {
-                thread.overrides.get(&option.id).or(chosen.and_then(|chosen| chosen.get(&option.id)))
-            } else {
-                thread.overrides.get(&option.id)
-            };
+            // Never a mode, though: see `thread.set_option`.
+            let asked = thread.overrides.get(&option.id).filter(|_| option.category != "mode");
+            let want = if applying.carrying { asked.or(chosen.and_then(|chosen| chosen.get(&option.id))) } else { asked };
             let Some(value) = want.cloned() else { continue };
             if value != option.current && option.choices.iter().any(|(choice, _)| *choice == value) && client.set_option(&option.id, &value) {
                 applying.asked = Some(option.id.clone());
@@ -3791,8 +3814,13 @@ impl Reader {
     /// first message.
     #[allow(clippy::too_many_arguments)]
     fn start_child(&mut self, id: u64, project: u64, key: String, prompt: String, options: Vec<(String, String)>, notify: Option<String>, window: &mut Window, cx: &mut Context<Self>) -> command::Reply {
+        // The parent may have gone, or started others, since the request was made: a worktree
+        // takes a while, and this is where it comes to a thread.
+        let Some(title) = self.title_of(id) else { return Err("that thread is gone".into()) };
+        if self.threads_all().filter(|thread| thread.parent == Some(id)).count() >= MAX_CHILDREN {
+            return Err(format!("a thread starts at most {MAX_CHILDREN} others; close one first"));
+        }
         let level = notify.as_deref().and_then(Notify::from_name).unwrap_or_default();
-        let title = self.title_of(id).unwrap_or_default();
         let out = Outgoing { text: prompt, origin: Origin::Thread { id, title } };
         let mut fresh = self.blank_thread(window, cx);
         fresh.blank = false;
@@ -4097,7 +4125,22 @@ impl Reader {
     /// A parent that is not here leaves its child an ordinary thread.
     fn relink_children(&mut self, linked: Vec<(u64, String)>) {
         let parents: HashMap<String, u64> = self.threads_all().filter_map(|thread| Some((thread.session.clone()?, thread.id))).collect();
-        let wanted: HashMap<u64, u64> = linked.into_iter().filter_map(|(child, session)| Some((child, *parents.get(&session)?))).filter(|(child, parent)| child != parent).collect();
+        let mut wanted: HashMap<u64, u64> = linked.into_iter().filter_map(|(child, session)| Some((child, *parents.get(&session)?))).filter(|(child, parent)| child != parent).collect();
+        // The file can be written by an agent, so it is not trusted to keep the plan's shape:
+        // depth stays at 1 (a child of a child is left ordinary, which also rules out cycles),
+        // and a parent keeps at most MAX_CHILDREN.
+        let children: HashSet<u64> = wanted.keys().copied().collect();
+        wanted.retain(|_, parent| !children.contains(parent));
+        let mut count: HashMap<u64, usize> = HashMap::new();
+        let mut order: Vec<u64> = wanted.keys().copied().collect();
+        order.sort_unstable();
+        for child in order {
+            let n = count.entry(wanted[&child]).or_default();
+            *n += 1;
+            if *n > MAX_CHILDREN {
+                wanted.remove(&child);
+            }
+        }
         if wanted.is_empty() {
             return;
         }
@@ -4229,9 +4272,12 @@ impl Reader {
 
     /// Ends thread `tid` of project `pid`, whichever is on screen.
     fn close_any_thread(&mut self, pid: u64, tid: u64, window: &mut Window, cx: &mut Context<Self>) {
-        let before = self.threads_all().find(|thread| thread.id == tid).map(|thread| crate::state::state(&thread.facts()));
         if pid == self.project_id {
             return self.close_thread(tid, window, cx);
+        }
+        let before = self.threads_all().find(|thread| thread.id == tid).map(|thread| crate::state::state(&thread.facts()));
+        if before.is_some() && before != Some(crate::state::ThreadState::Closed) {
+            self.changed(tid, crate::state::ThreadState::Closed, window, cx);
         }
         let last = self.slots.iter().find(|slot| slot.id == pid).is_some_and(|slot| slot.thread.id == tid && slot.parked.is_empty());
         let blank = last.then(|| self.blank_thread(window, cx));
@@ -4242,9 +4288,6 @@ impl Reader {
             && let Some(next) = slot.parked.pop().or(blank)
         {
             slot.thread = next;
-        }
-        if before.is_some() && before != Some(crate::state::ThreadState::Closed) {
-            self.changed(tid, crate::state::ThreadState::Closed, window, cx);
         }
         self.request_save(cx);
         cx.notify();
@@ -4260,7 +4303,12 @@ impl Reader {
 
     /// Ends thread `id`, stopping its agent. Closing the one on screen brings up another.
     fn close_thread(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
+        // Whoever waited on it hears, as does its parent: while it is still here to be looked
+        // up, since they find its parent by it.
         let before = self.threads_all().find(|thread| thread.id == id).map(|thread| crate::state::state(&thread.facts()));
+        if before.is_some() && before != Some(crate::state::ThreadState::Closed) {
+            self.changed(id, crate::state::ThreadState::Closed, window, cx);
+        }
         if let Some(at) = self.parked.iter().position(|thread| thread.id == id) {
             self.parked.remove(at);
         } else if self.thread.id == id {
@@ -4271,10 +4319,6 @@ impl Reader {
             self.thread = next;
             self.thread.unread = false;
             self.wake_thread(window, cx);
-        }
-        // Whoever waited on it hears, as does its parent.
-        if before.is_some() && before != Some(crate::state::ThreadState::Closed) {
-            self.changed(id, crate::state::ThreadState::Closed, window, cx);
         }
         self.request_save(cx);
         cx.notify();
@@ -6037,7 +6081,9 @@ impl Reader {
     /// (its tool list is fixed then); a lowering, on its next request.
     fn set_grant(&mut self, id: u64, scope: command::Scope, read_project: bool, approvals: bool, cx: &mut Context<Self>) {
         let grant = command::Grant { scope, read_project, approvals };
-        let lowered = self.grants.get(&id).is_some_and(|before| before.scope > grant.scope);
+        // Any reach taken away, not only the scope: the waits asked under it would answer what
+        // the thread can no longer ask.
+        let lowered = self.grants.get(&id).is_some_and(|before| before.scope > grant.scope || (before.read_project && !grant.read_project) || (before.approvals && !grant.approvals));
         if self.grants.get(&id) == Some(&grant) {
             return;
         }
@@ -6054,6 +6100,14 @@ impl Reader {
     /// phase 2), and its children left running as ordinary threads.
     fn stop_agent_control(&mut self, id: u64, cx: &mut Context<Self>) {
         self.set_grant(id, command::Scope::Viewer, false, false, cx);
+        // Its children go on as ordinary threads, and no longer start turns of its.
+        let quiet = |thread: &mut Thread| {
+            if thread.parent == Some(id) {
+                thread.notify = Notify::Never;
+            }
+        };
+        quiet(&mut self.thread);
+        self.background_threads().for_each(quiet);
     }
 
     /// The Control menu for thread `id`, next to the model in the settings row: its scopes,
