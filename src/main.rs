@@ -971,6 +971,8 @@ struct Reader {
     sections: Entity<StackState>,
     /// Projects whose thread list is shown in full rather than cut to [`THREADS_SHOWN`].
     threads_expanded: HashSet<u64>,
+    /// Each project's checked-out branch, read off the UI thread now and then.
+    heads: HashMap<PathBuf, worktree::Head>,
     /// The width of the file tree inside the viewer pane.
     tree_cols: Entity<SidebarsState>,
     /// The file tree in the viewer is hidden.
@@ -1137,6 +1139,7 @@ impl Reader {
             left_open: true,
             sections,
             threads_expanded: HashSet::new(),
+            heads: HashMap::new(),
             tree_cols,
             tree_hidden: false,
             viewer_narrow: Rc::default(),
@@ -1182,6 +1185,33 @@ impl Reader {
         trace::mark("connect");
         reader.watch(watch, window, cx);
         trace::mark("watch");
+        // The branch beside each project's name follows checkouts made outside po too.
+        cx.spawn(async move |this, cx| {
+            loop {
+                let Ok(roots) = this.update(cx, |reader, _| {
+                    reader.views().iter().filter(|view| view.project.pr.is_none()).map(|view| view.project.root.clone()).collect::<Vec<_>>()
+                }) else {
+                    break;
+                };
+                let heads = cx
+                    .background_executor()
+                    .spawn(async move { roots.into_iter().filter_map(|root| worktree::head_of(&root).map(|head| (root, head))).collect::<HashMap<_, _>>() })
+                    .await;
+                if this
+                    .update(cx, |reader, cx| {
+                        if reader.heads != heads {
+                            reader.heads = heads;
+                            cx.notify();
+                        }
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+                cx.background_executor().timer(Duration::from_secs(5)).await;
+            }
+        })
+        .detach();
         // Agents nobody is talking to are stopped now and then; their threads wake on demand.
         cx.spawn(async move |this, cx| {
             loop {
@@ -3794,13 +3824,18 @@ impl Reader {
                     .child(
                         div()
                             .flex_1()
-                            .min_w_0()
+                            .min_w(rems(4.))
                             .truncate()
                             .text_sm()
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(label)
                             .child(view.project.name()),
                     )
+                    .when_some(self.heads.get(&view.project.root).filter(|_| view.project.pr.is_none() && view.project.worktree.is_none()), |row, head| {
+                        row.child(div().min_w_0().max_w(rems(7.)).flex().items_center().gap_1().text_xs().text_color(muted).child(
+                            div().truncate().child(format!("⎇ {}", head.name)),
+                        ).when(head.dirty, |tag| tag.child(div().flex_none().child("●"))))
+                    })
                     // Starting a thread is on the project's own row, shown when it is hovered.
                     .child(show_on_hover(
                         row_group("agent-project", pid),

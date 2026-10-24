@@ -49,6 +49,22 @@ pub fn repo_of(dir: &Path) -> Option<PathBuf> {
     git(dir, &["rev-parse", "--show-toplevel"]).ok().map(PathBuf::from)
 }
 
+/// Where a checkout's HEAD is: a branch, or a commit when detached, and whether it has
+/// uncommitted changes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Head {
+    pub name: String,
+    pub dirty: bool,
+}
+
+/// The branch `dir` has checked out, or the short commit when detached. None outside a repository.
+pub fn head_of(dir: &Path) -> Option<Head> {
+    let name = git(dir, &["rev-parse", "--abbrev-ref", "HEAD"]).ok()?;
+    let name = if name == "HEAD" { git(dir, &["rev-parse", "--short", "HEAD"]).ok()? } else { name };
+    let dirty = git(dir, &["status", "--porcelain"]).is_ok_and(|status| !status.is_empty());
+    Some(Head { name, dirty })
+}
+
 /// Whether `dir` is inside a git repository. Looks for `.git` rather than asking git, so it is
 /// cheap enough to ask while drawing.
 pub fn in_repo(dir: &Path) -> bool {
