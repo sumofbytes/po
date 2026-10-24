@@ -696,6 +696,9 @@ impl Activity {
     }
 }
 
+/// Where a running agent with nothing to show sorts in the live list: after all that need a look.
+const IDLE_RANK: u8 = 3;
+
 impl Thread {
     /// What it is doing, in a line for the live list.
     fn preview(&self) -> String {
@@ -3717,7 +3720,7 @@ impl Reader {
         let many = project_count > 1;
         let add = cx.entity();
         // Groups are spaced apart by more than anything inside one, so the eye reads them as units.
-        let mut tree = div().id("agents-tree").size_full().overflow_y_scroll().flex().flex_col().gap_3().p_1p5();
+        let mut tree = div().id("agents-tree").size_full().overflow_y_scroll().flex().flex_col().gap_6().px_2().pt_1().pb_3();
         // Folded, only the header shows, so no project is built.
         let projects_folded = self.sections.read(cx).folded(PROJECTS);
         for view in views.iter().filter(|_| !projects_folded) {
@@ -3738,7 +3741,6 @@ impl Reader {
                     .gap_2()
                     .px_1p5()
                     .h(theme::tokens::ROW_HEIGHT)
-                    // A hair of air between the project and its threads.
                     .mb_0p5()
                     .rounded(colors.radius)
                     .cursor_pointer()
@@ -3757,8 +3759,8 @@ impl Reader {
                             .flex_1()
                             .min_w_0()
                             .truncate()
-                            .text_xs()
-                            .font_weight(FontWeight::MEDIUM)
+                            .text_sm()
+                            .font_weight(FontWeight::SEMIBOLD)
                             .text_color(label)
                             .child(view.project.name()),
                     )
@@ -3802,7 +3804,7 @@ impl Reader {
                         .when((pid, tid) == (active_project, active_thread), |row| row.bg(selected))
                         .when((pid, tid) != (active_project, active_thread), |row| row.hover(move |row| row.bg(hover)))
                         .on_click(move |_, window, cx| select.update(cx, |reader, cx| reader.open_thread(pid, tid, window, cx)))
-                        .child(div().w(rems(1.)).flex_none().flex().justify_center().text_sm().text_color(tint).child(glyph))
+                        .child(div().w(rems(1.)).flex_none().flex().justify_center().text_xs().text_color(tint).child(glyph))
                         .child(
                             // The project is a quiet label; the threads are what you pick, so they
                             // carry the weight.
@@ -3811,7 +3813,7 @@ impl Reader {
                                 .min_w_0()
                                 .truncate()
                                 .text_sm()
-                                .text_color(foreground)
+                                .text_color(if (pid, tid) == (active_project, active_thread) { foreground } else { foreground.opacity(0.85) })
                                 .child(thread.title()),
                         )
                         .child(show_on_hover(
@@ -3833,8 +3835,8 @@ impl Reader {
                 .flex()
                 .items_center()
                 .gap_2()
-                .child("Projects")
-                .child(div().text_xs().text_color(muted).child(project_count.to_string())),
+                .child("PROJECTS")
+                .child(count_badge(project_count, muted)),
             cx,
         );
         let projects = div()
@@ -3851,7 +3853,7 @@ impl Reader {
                     .small()
                     .on_click(move |_, window, cx| add.update(cx, |reader, cx| reader.pick_project(window, cx))),
                 cx,
-            ))
+            ).border_b_0())
             .children(self.worktree_status.clone().filter(|_| !projects_folded).map(|text| {
                 div().px_3().py_1().text_xs().text_color(muted).max_h(rems(5.)).overflow_hidden().child(text)
             }))
@@ -3867,8 +3869,8 @@ impl Reader {
         floating(pane, cx)
     }
 
-    /// The threads that are asking, finished unseen or running, across every project, with a
-    /// line of what each is doing. Jumping to one is a click.
+    /// The threads that are asking, finished unseen or running, plus any agent still alive and
+    /// waiting, across every project, with a line of what each is doing. Jumping to one is a click.
     /// Also whether there are any, since the pane folds to its header when there are none.
     fn live_section(&self, views: &[View<'_>], cx: &mut Context<Self>) -> (AnyElement, bool) {
         let colors = cx.global::<Palette>();
@@ -3877,7 +3879,7 @@ impl Reader {
         let mut live: Vec<(u8, &View<'_>, &Thread)> = views
             .iter()
             .flat_map(|view| view.threads.iter().map(move |thread| (view, *thread)))
-            .filter_map(|(view, thread)| Some((thread.activity().live_rank()?, view, thread)))
+            .filter_map(|(view, thread)| Some((thread.activity().live_rank().or(thread.client.is_some().then_some(IDLE_RANK))?, view, thread)))
             .collect();
         live.sort_by_key(|(rank, _, thread)| (*rank, thread.id));
         let count = live.len();
@@ -3885,9 +3887,9 @@ impl Reader {
         // Folded, the most pressing thread's mark stays in view.
         let (glyph, tint) = if folded { live.first().map_or(("", muted), |(_, _, thread)| thread.activity().mark(colors)) } else { ("", muted) };
         let (active_project, active_thread) = (self.project_id, self.thread.id);
-        let mut rows = div().id("live-list").size_full().overflow_y_scroll().flex().flex_col().gap_px().p_1p5();
+        let mut rows = div().id("live-list").size_full().overflow_y_scroll().flex().flex_col().gap_0p5().px_2().pt_1().pb_2();
         if live.is_empty() && !folded {
-            rows = rows.child(div().px_1p5().py_1().text_xs().text_color(muted).child("No active agents"));
+            rows = rows.child(div().px_2().py_1().text_xs().text_color(muted).child("No active agents"));
         }
         for (_, view, thread) in live.into_iter().filter(|_| !folded) {
             let (pid, tid) = (view.id, thread.id);
@@ -3902,8 +3904,8 @@ impl Reader {
                     .flex()
                     .items_start()
                     .gap_2()
-                    .px_1p5()
-                    .py_1()
+                    .px_2()
+                    .py_1p5()
                     .rounded(radius)
                     .cursor_pointer()
                     .when(current, |row| row.bg(selected))
@@ -3917,13 +3919,13 @@ impl Reader {
                             .flex()
                             .flex_col()
                             .child(div().truncate().text_sm().text_color(foreground).child(thread.title()))
-                            .child(div().truncate().text_xs().text_color(muted).child(detail)),
+                            .child(div().truncate().text_xs().text_color(muted.opacity(0.9)).child(detail)),
                     ),
             );
         }
         let title = self.fold_title(
             LIVE,
-            div().flex().items_center().gap_2().child("Live").child(div().text_xs().text_color(muted).child(count.to_string())),
+            div().flex().items_center().gap_2().child("LIVE").child(count_badge(count, muted)),
             cx,
         );
         let section = div()
@@ -3934,7 +3936,7 @@ impl Reader {
                 title,
                 div().text_sm().text_color(tint).child(glyph),
                 cx,
-            ))
+            ).border_b_0())
             .child(div().flex_1().min_h_0().child(rows))
             .into_any_element();
         (section, count > 0)
@@ -3951,8 +3953,9 @@ impl Reader {
             .gap_1()
             .min_w_0()
             .cursor_pointer()
-            .text_sm()
-            .font_weight(FontWeight::MEDIUM)
+            .text_xs()
+            .font_weight(FontWeight::SEMIBOLD)
+            .text_color(muted)
             .on_click(move |_, _, cx| {
                 sections.update(cx, |sections, cx| {
                     sections.toggle(section);
@@ -4750,7 +4753,7 @@ fn render_msg(
         let len = if matches!(blocks[n], Block::Tool(_)) && !run { blocks[n..].iter().take_while(|b| matches!(b, Block::Tool(_))).count() } else { 0 };
         let titled = len >= 3;
         if titled {
-            let folded = run_folded(&blocks[n..n + len], last);
+            let folded = run_folded(&blocks[n..n + len], last && n + len == blocks.len());
             column = column.child(div().when(n > 0, |this| this.mt_4()).child(tool_run(ix, n, &blocks[n..n + len], folded, this, text_inset, cx)));
             if folded {
                 n += len;
@@ -4772,11 +4775,12 @@ fn render_msg(
     column.into_any_element()
 }
 
-/// Whether a run of tool calls shows as one line. A run the user hasn't clicked folds once it is
-/// behind the latest message and everything in it went well, so nothing running or failed hides.
-fn run_folded(run: &[Block], last: bool) -> bool {
+/// Whether a run of tool calls shows as one line. A run the user hasn't clicked folds once the
+/// agent has moved on from it (`live` is false) and everything in it went well, so nothing running
+/// or failed hides. `live` is a run still at the end of the latest message.
+fn run_folded(run: &[Block], live: bool) -> bool {
     let Some(Block::Tool(first)) = run.first() else { return false };
-    first.fold.unwrap_or(!last && run.iter().all(|b| matches!(b, Block::Tool(t) if t.status == Step::Done)))
+    first.fold.unwrap_or(!live && run.iter().all(|b| matches!(b, Block::Tool(t) if t.status == Step::Done)))
 }
 
 /// Where each run of tool calls shown folded starts in `blocks`.
@@ -4789,7 +4793,7 @@ fn folded_runs(blocks: &[Block], last: bool) -> Vec<usize> {
             continue;
         }
         let len = blocks[n..].iter().take_while(|b| matches!(b, Block::Tool(_))).count();
-        if len >= 3 && run_folded(&blocks[n..n + len], last) {
+        if len >= 3 && run_folded(&blocks[n..n + len], last && n + len == blocks.len()) {
             starts.push(n);
         }
         n += len;
@@ -5122,6 +5126,17 @@ fn approval(ix: usize, n: usize, agent: &config::Agent, new_agent: bool, mcp: &[
 
 fn status_text(text: String, cx: &App) -> impl IntoElement {
     div().flex_none().truncate().text_xs().text_color(cx.global::<Palette>().muted_foreground).child(text)
+}
+
+/// A section's count, in a small pill beside its title.
+fn count_badge(count: usize, muted: gpui::Hsla) -> gpui::Div {
+    div()
+        .px_1p5()
+        .rounded(theme::tokens::RADIUS_FULL)
+        .bg(muted.opacity(0.15))
+        .text_color(muted)
+        .font_weight(FontWeight::MEDIUM)
+        .child(count.to_string())
 }
 
 /// The name that ties a row to the controls that appear only while it is hovered.
