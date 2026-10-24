@@ -439,10 +439,11 @@ impl RenderOnce for Stack {
             // The boundary with the open section above sets that section's height.
             if let (false, Some(resized), None) = (folded[ix], above, pinned) {
                 let grab = self.state.clone();
-                let color = if dragging == Some(resized) { active } else { border };
+                let (color, hover) = if dragging == Some(resized) { (active, active) } else { (border.opacity(0.5), border) };
                 section = section.child(
                     div()
                         .id(("stack-handle", ix))
+                        .group("stack-handle")
                         .occlude()
                         .absolute()
                         .left_0()
@@ -451,7 +452,7 @@ impl RenderOnce for Stack {
                         .h(px(1.) + HANDLE_PADDING * 2.)
                         .py(HANDLE_PADDING)
                         .cursor_row_resize()
-                        .child(div().flex_none().w_full().h(px(1.)).bg(color))
+                        .child(div().flex_none().w_full().h(px(1.)).bg(color).group_hover("stack-handle", move |line| line.bg(hover)))
                         .on_mouse_down(MouseButton::Left, move |_, _, cx| {
                             grab.update(cx, |state, cx| {
                                 state.dragging = Some(resized);

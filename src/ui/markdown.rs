@@ -127,6 +127,9 @@ fn inline(nodes: &[Node]) -> Inline {
     out
 }
 
+/// Set inside each end of inline code, so its box has room around the text; copying drops it.
+const CODE_PAD: char = '\u{2009}';
+
 fn push_inline(node: &Node, mark: Mark, link: Option<&str>, out: &mut Inline) {
     let start = out.text.len();
     let leaf = |text: &str, mark: Mark, out: &mut Inline| {
@@ -140,7 +143,8 @@ fn push_inline(node: &Node, mark: Mark, link: Option<&str>, out: &mut Inline) {
         // A soft break inside a paragraph reflows like a space, as the kit's does.
         Node::Text(t) => leaf(&t.value.replace("\r\n", " ").replace(['\n', '\r'], " "), mark, out),
         Node::Break(_) => leaf("\n", mark, out),
-        Node::InlineCode(c) => leaf(&c.value, Mark { code: true, ..mark }, out),
+        // Thin spaces inside the span are the padding its box is drawn around.
+        Node::InlineCode(c) => leaf(&format!("{CODE_PAD}{}{CODE_PAD}", c.value), Mark { code: true, ..mark }, out),
         Node::Html(h) => leaf(&h.value, mark, out),
         Node::InlineMath(m) => leaf(&format!("${}$", m.value), mark, out),
         Node::Image(image) => leaf(&image.alt, mark, out),
@@ -249,7 +253,7 @@ pub fn all_text_of<'a>(sources: impl IntoIterator<Item = (&'a str, bool)>) -> St
             None => parts.push(source),
         }
     }
-    parts.join("\n").trim().to_string()
+    parts.join("\n").replace(CODE_PAD, "").trim().to_string()
 }
 
 /// `source` cut into pieces at its top-level blocks, so a long document can be laid out a
@@ -436,7 +440,7 @@ impl Selection {
             None => self.dragged_spans(),
         };
         let parts: Vec<&str> = spans.iter().filter_map(|s| s.text.get(s.range.clone())).collect();
-        parts.join("\n").trim().to_string()
+        parts.join("\n").replace(CODE_PAD, "").trim().to_string()
     }
 }
 
@@ -693,7 +697,7 @@ impl Render {
         let (border, head_bg, head_fg, surface) = (palette.border, palette.table_head, palette.table_head_foreground, palette.popover);
         let columns = rows.iter().map(|r| r.len()).max().unwrap_or(0);
         let lens: Vec<usize> = (0..columns)
-            .map(|c| rows.iter().filter_map(|r| r.get(c)).map(|cell| cell.text.chars().count()).max().unwrap_or(0).min(MAX_COLUMN))
+            .map(|c| rows.iter().filter_map(|r| r.get(c)).map(|cell| cell.text.chars().filter(|&c| c != CODE_PAD).count()).max().unwrap_or(0).min(MAX_COLUMN))
             .collect();
         let count = rows.len();
         let rendered: Vec<AnyElement> = rows
@@ -770,7 +774,6 @@ impl Render {
                 style.strikethrough = Some(StrikethroughStyle { thickness: px(1.), ..Default::default() });
             }
             if mark.code {
-                style.background_color = Some(palette.markdown.inline_code_background);
                 style.color = Some(palette.markdown.code);
             }
             styles.push((range.clone(), style, mark.code));
@@ -792,9 +795,19 @@ impl Render {
 
         let styled = StyledText::new(text.clone()).with_runs(runs);
         let layout = styled.layout().clone();
+        let spans: Vec<Range<usize>> = inline.marks.iter().filter(|(_, mark)| mark.code).map(|(range, _)| range.clone()).collect();
+        let (code_bg, code_radius, backdrop, plain) = (palette.markdown.inline_code_background, palette.radius, layout.clone(), text.clone());
         let selection = self.selection.clone();
         div()
             .relative()
+            // Inline code sits on rounded boxes, painted before the text.
+            .when(!spans.is_empty(), |this| {
+                this.child(
+                    canvas(|_, _, _| {}, move |_: Bounds<Pixels>, _, window, _| code_boxes(window, &backdrop, &plain, &spans, code_bg, code_radius))
+                        .absolute()
+                        .size_0(),
+                )
+            })
             .child(styled)
             // After the text is laid out, record where it went for selection next frame.
             .child(
@@ -806,6 +819,42 @@ impl Render {
                 .size_0(),
             )
             .into_any_element()
+    }
+}
+
+/// Paints a rounded box behind each span of inline code, thin spaces included. A span that
+/// wraps gets one box per line.
+fn code_boxes(window: &mut Window, layout: &TextLayout, text: &str, spans: &[Range<usize>], color: gpui::Hsla, radius: Pixels) {
+    let line = layout.line_height();
+    let height = line * 0.86;
+    let radius = radius.min(px(4.));
+    for span in spans {
+        let chars: Vec<usize> = text[span.clone()].char_indices().map(|(i, _)| span.start + i).chain([span.end]).collect();
+        let at = |ix: usize| layout.position_for_index(ix);
+        // A character's width where the next one follows on the same line; the first code
+        // character's advance (past the pad) stands in for the one that ends a line, as code is
+        // monospaced.
+        let Some(first) = at(span.start) else { continue };
+        let fallback = match (chars.get(1).and_then(|&ix| at(ix)), chars.get(2).and_then(|&ix| at(ix))) {
+            (Some(a), Some(b)) if a.y == b.y => b.x - a.x,
+            _ => line * 0.5,
+        };
+        let mut start = first;
+        for pair in chars.windows(2) {
+            let (this, next) = (at(pair[0]), at(pair[1]));
+            let (Some(this), Some(next)) = (this, next) else { continue };
+            let wraps = next.y != this.y;
+            if !wraps && pair[1] != span.end {
+                continue;
+            }
+            let end = if wraps { this.x + fallback } else { next.x };
+            let top = start.y + (line - height) / 2.;
+            let bounds = Bounds::new(gpui::point(start.x, top), gpui::size(end - start.x, height));
+            window.paint_quad(gpui::fill(bounds, color).corner_radii(radius));
+            if let Some(resume) = at(pair[1]) {
+                start = resume;
+            }
+        }
     }
 }
 
@@ -866,9 +915,9 @@ mod tests {
     fn soft_breaks_reflow_and_marks_land_on_text() {
         let blocks = parse("Some *emphasis* and `code`\nnext line.");
         let [Block::Paragraph(p)] = blocks.as_slice() else { panic!("one paragraph") };
-        assert_eq!(p.text, "Some emphasis and code next line.");
+        assert_eq!(p.text, "Some emphasis and \u{2009}code\u{2009} next line.");
         assert_eq!(p.marks.len(), 2);
-        assert_eq!(&p.text[p.marks[1].0.clone()], "code");
+        assert_eq!(&p.text[p.marks[1].0.clone()], "\u{2009}code\u{2009}");
     }
 
     #[test]
