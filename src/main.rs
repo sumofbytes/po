@@ -2658,7 +2658,18 @@ impl Reader {
             if !start && (!state.root.is_dir() || !seen.insert(state.root.clone()) || state.root == self.project.root) {
                 continue;
             }
-            let mut threads: Vec<Thread> = state.threads.into_iter().map(|t| self.sleeping_thread(t, window, cx)).collect();
+            // Files saved before the time was kept list the threads oldest first.
+            let mut threads: Vec<Thread> = state
+                .threads
+                .into_iter()
+                .enumerate()
+                .map(|(ix, mut t)| {
+                    if t.active_at == 0 {
+                        t.active_at = ix as u64 + 1;
+                    }
+                    self.sleeping_thread(t, window, cx)
+                })
+                .collect();
             let shown = (!threads.is_empty()).then(|| threads.remove(state.active.min(threads.len() - 1)));
             if start {
                 if let Some(shown) = shown {
@@ -2880,8 +2891,9 @@ impl Reader {
         // Most events change the last message; a tool call update may change an earlier one.
         let mut changed = self.thread.messages.len().saturating_sub(1);
         self.thread.touched = Instant::now();
-        // A resumed session replaying its history isn't the thread doing anything.
-        if !self.thread.loading {
+        // Only the agent's work counts as activity, not a session opening or its settings, and
+        // not a resumed session replaying its history.
+        if !self.thread.loading && matches!(event, Event::Update(_) | Event::Permission { .. } | Event::Stopped(_) | Event::Accepted { .. }) {
             self.thread.active_at = now_ms();
         }
         match event {
@@ -2954,6 +2966,8 @@ impl Reader {
                     item.kind = None;
                 }
                 self.send_next(window, cx);
+                // The order of the thread list is saved with the time the turn ended.
+                self.request_save(cx);
             }
             Event::Accepted { content, queue } => {
                 if let Some(at) = self.thread.queue.iter().position(|q| q.kind == Some(queue) && q.content == content) {
@@ -3814,7 +3828,8 @@ impl Reader {
             let mut recent: Vec<&Thread> = view.threads.iter().copied().filter(|t| !t.blank || t.id == view.shown).collect();
             recent.sort_by_key(|t| (std::cmp::Reverse(t.active_at), std::cmp::Reverse(t.id)));
             let expanded = self.threads_expanded.contains(&pid);
-            let hidden = if expanded || recent.len() <= THREADS_SHOWN {
+            let foldable = recent.len() > THREADS_SHOWN;
+            let hidden = if expanded || !foldable {
                 0
             } else {
                 let mut keep: Vec<&Thread> = recent[..THREADS_SHOWN].to_vec();
@@ -3868,7 +3883,7 @@ impl Reader {
                         )),
                 );
             }
-            if hidden > 0 || expanded && view.threads.len() > THREADS_SHOWN {
+            if foldable && (hidden > 0 || expanded) {
                 let toggle = cx.entity();
                 let label = if expanded { "Show less".to_string() } else { format!("{hidden} more") };
                 group = group.child(
@@ -3886,8 +3901,8 @@ impl Reader {
                         .hover(move |row| row.bg(hover))
                         .on_click(move |_, _, cx| {
                             toggle.update(cx, |reader, cx| {
-                                if !reader.threads_expanded.remove(&pid) {
-                                    reader.threads_expanded.insert(pid);
+                                if !reader.threads_expanded.insert(pid) {
+                                    reader.threads_expanded.remove(&pid);
                                 }
                                 cx.notify();
                             })
