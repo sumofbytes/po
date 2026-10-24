@@ -5575,7 +5575,7 @@ impl Reader {
         let new_thread = cx.entity();
         let (hover, muted, foreground, radius) = (colors.list_hover, colors.muted_foreground, colors.foreground, colors.radius);
         // A plain text action below the title bar, not a button: it lights up under the pointer.
-        let actions = div().flex_none().px(SIDEBAR_GUTTER).pt_2().pb_2().child(
+        let actions = div().flex_none().px(SIDEBAR_GUTTER).pt_2().pb_3().child(
             side_row(radius, Some(side_icon(IconName::Plus, muted)))
                 .id("sidebar-new-thread")
                 .h(SIDE_ROW_HEIGHT)
