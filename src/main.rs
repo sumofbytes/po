@@ -438,6 +438,12 @@ struct Project {
 }
 
 impl Project {
+    /// Whether the list shows the branch this project has checked out. A PR is a checkout of
+    /// its own and a thread's worktree already names its branch.
+    fn shows_branch(&self) -> bool {
+        self.pr.is_none() && self.worktree.is_none()
+    }
+
     /// What the project is called in the list.
     fn name(&self) -> String {
         match &self.pr {
@@ -971,6 +977,8 @@ struct Reader {
     sections: Entity<StackState>,
     /// Projects whose thread list is shown in full rather than cut to [`THREADS_SHOWN`].
     threads_expanded: HashSet<u64>,
+    /// Each project's checked-out branch, read off the UI thread now and then.
+    heads: HashMap<PathBuf, worktree::Head>,
     /// The width of the file tree inside the viewer pane.
     tree_cols: Entity<SidebarsState>,
     /// The file tree in the viewer is hidden.
@@ -1137,6 +1145,7 @@ impl Reader {
             left_open: true,
             sections,
             threads_expanded: HashSet::new(),
+            heads: HashMap::new(),
             tree_cols,
             tree_hidden: false,
             viewer_narrow: Rc::default(),
@@ -1182,6 +1191,51 @@ impl Reader {
         trace::mark("connect");
         reader.watch(watch, window, cx);
         trace::mark("watch");
+        // The branch beside each project's name follows checkouts made outside po too.
+        cx.spawn(async move |this, cx| {
+            loop {
+                let Ok(roots) = this.update(cx, |reader, _| {
+                    reader.views().iter().filter(|view| view.project.shows_branch()).map(|view| view.project.root.clone()).collect::<Vec<_>>()
+                }) else {
+                    break;
+                };
+                // Each in its own run, so one slow repository doesn't hold up the rest. One
+                // that takes too long keeps what it showed before.
+                let runs = roots.into_iter().map(|root| {
+                    let run = cx.background_executor().spawn({
+                        let root = root.clone();
+                        async move { worktree::head_of(&root) }
+                    });
+                    let limit = cx.background_executor().timer(Duration::from_secs(10));
+                    async move {
+                        match futures::future::select(run, limit).await {
+                            futures::future::Either::Left((head, _)) => (root, Some(head)),
+                            futures::future::Either::Right(_) => (root, None),
+                        }
+                    }
+                });
+                let found = futures::future::join_all(runs).await;
+                if this
+                    .update(cx, |reader, cx| {
+                        let mut heads = HashMap::new();
+                        for (root, head) in found {
+                            if let Some(head) = head.unwrap_or_else(|| reader.heads.get(&root).cloned()) {
+                                heads.insert(root, head);
+                            }
+                        }
+                        if reader.heads != heads {
+                            reader.heads = heads;
+                            cx.notify();
+                        }
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+                cx.background_executor().timer(Duration::from_secs(5)).await;
+            }
+        })
+        .detach();
         // Agents nobody is talking to are stopped now and then; their threads wake on demand.
         cx.spawn(async move |this, cx| {
             loop {
@@ -3791,15 +3845,29 @@ impl Reader {
                             .justify_center()
                             .child(Icon::new(IconName::Folder).size(IconSize::XSmall).color(label)),
                     )
+                    // The name, then the branch right after it, on one baseline. They share what is
+                    // left of the row, each cut with an ellipsis when it doesn't fit.
                     .child(
                         div()
                             .flex_1()
                             .min_w_0()
-                            .truncate()
-                            .text_sm()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(label)
-                            .child(view.project.name()),
+                            .flex()
+                            .items_baseline()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_sm()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(label)
+                                    .child(view.project.name()),
+                            )
+                            .when_some(self.heads.get(&view.project.root).filter(|_| view.project.shows_branch()), |name, head| {
+                                name.child(div().min_w_0().flex().items_baseline().gap_1().text_xs().text_color(muted).child(
+                                    div().truncate().child(format!("⎇ {}", head.name)),
+                                ).when(head.dirty, |tag| tag.child(div().flex_none().child("*"))))
+                            }),
                     )
                     // Starting a thread is on the project's own row, shown when it is hovered.
                     .child(show_on_hover(
