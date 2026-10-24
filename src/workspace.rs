@@ -192,8 +192,8 @@ mod tests {
                     worktree: None,
                     active: 1,
                     threads: vec![
-                        ThreadState { agent: "dex".into(), session: "s1".into(), title: "fix the retry".into() },
-                        ThreadState { agent: "opencode".into(), session: "s2".into(), title: "quote \"this\"".into() },
+                        ThreadState { agent: "dex".into(), session: "s1".into(), title: "fix the retry".into(), active_at: 1_700_000_000_000 },
+                        ThreadState { agent: "opencode".into(), session: "s2".into(), title: "quote \"this\"".into(), active_at: 0 },
                     ],
                 },
                 ProjectState {
