@@ -3804,7 +3804,7 @@ impl Reader {
     /// The left side: the live agents, and every project with its threads.
     fn left_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.global::<Palette>();
-        let (hover, selected, muted, foreground) = (colors.list_hover, colors.list_selected, colors.muted_foreground, colors.foreground);
+        let (hover, selected, muted, foreground, primary, warning) = (colors.list_hover, colors.list_selected, colors.muted_foreground, colors.foreground, colors.primary, colors.warning);
         let views = self.views();
         let (active_project, active_thread) = (self.project_id, self.thread.id);
         let project_count = views.len();
@@ -3843,7 +3843,7 @@ impl Reader {
                             .flex_none()
                             .flex()
                             .justify_center()
-                            .child(Icon::new(IconName::Folder).size(IconSize::XSmall).color(label)),
+                            .child(Icon::new(IconName::Folder).size(IconSize::XSmall).color(if pid == active_project { primary } else { label })),
                     )
                     // The name, then the branch right after it, on one baseline. They share what is
                     // left of the row, each cut with an ellipsis when it doesn't fit.
@@ -3860,13 +3860,13 @@ impl Reader {
                                     .truncate()
                                     .text_sm()
                                     .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(label)
+                                    .text_color(if pid == active_project { primary } else { label })
                                     .child(view.project.name()),
                             )
                             .when_some(self.heads.get(&view.project.root).filter(|_| view.project.shows_branch()), |name, head| {
                                 name.child(div().min_w_0().flex().items_baseline().gap_1().text_xs().text_color(muted).child(
                                     div().truncate().child(format!("⎇ {}", head.name)),
-                                ).when(head.dirty, |tag| tag.child(div().flex_none().child("*"))))
+                                ).when(head.dirty, |tag| tag.child(div().flex_none().text_color(warning).child("*"))))
                             }),
                     )
                     // Starting a thread is on the project's own row, shown when it is hovered.
