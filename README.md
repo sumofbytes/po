@@ -234,10 +234,10 @@ aren't in it.
 
 #### Coming back, and background agents
 
-`po` remembers the projects and threads of each window, by the directory it was
-started in (in `~/.local/share/po/workspaces/`). Starting `po` there again brings
-them back: the project you started on is shown, the others wait in the
-background, and every thread resumes its agent session when you first show it.
+`po` remembers your projects and threads (in `~/.local/share/po/workspace.json`),
+wherever it is started. Starting `po` again brings them back: the project you
+started in is shown, the others wait in the background (windows open at the same
+time each keep the other's projects when they save), and every thread resumes its agent session when you first show it.
 A resumed agent has to support listing and loading sessions. PR reviews aren't
 remembered, and worktrees stay on disk until you merge, discard or close them.
 

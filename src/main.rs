@@ -1007,6 +1007,8 @@ struct Reader {
     focus: gpui::FocusHandle,
     /// The workspace is about to be saved, so asking again changes nothing.
     save_pending: bool,
+    /// Every project this window has had open or found saved, for saving beside other windows.
+    known_projects: HashSet<PathBuf>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -1159,6 +1161,7 @@ impl Reader {
             rendered: true,
             focus: cx.focus_handle(),
             save_pending: false,
+            known_projects: HashSet::new(),
             _subscriptions: subscriptions,
         };
         if let Some(mut requests) = requests {
@@ -1182,7 +1185,10 @@ impl Reader {
         trace::mark("reader built");
         reader.refresh_tree(cx);
         trace::mark("tree");
-        let resumed = workspace::Workspace::load(&reader.home).is_some_and(|saved| reader.restore(saved, window, cx));
+        let resumed = workspace::Workspace::load(&reader.home).is_some_and(|saved| {
+            reader.known_projects.extend(saved.projects.iter().map(|project| project.root.clone()));
+            reader.restore(saved, window, cx)
+        });
         trace::mark("restore");
         match command.filter(|_| !resumed) {
             Some(command) => reader.connect(&command, false, window, cx),
@@ -2813,7 +2819,7 @@ impl Reader {
         cx.defer(move |cx| {
             this.update(cx, |reader, cx| {
                 reader.save_pending = false;
-                reader.workspace(cx).save(&reader.home);
+                reader.workspace(cx).save(&mut reader.known_projects);
             })
         });
     }

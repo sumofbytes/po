@@ -1,6 +1,7 @@
-//! The projects and threads of a window, kept so that the next `po` started in the same
-//! directory picks up where this one left off. A window is identified by the directory it was
-//! started in, so windows for different directories don't overwrite each other.
+//! The projects and threads of a window, kept so that the next `po` picks up where this one
+//! left off, wherever it is started. There is one set for all of them; the directory `po` is
+//! started in only decides which project is shown.
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
@@ -56,7 +57,12 @@ pub struct Workspace {
 }
 
 /// The file for the window started in `start`.
-fn file(start: &Path) -> PathBuf {
+fn file() -> PathBuf {
+    crate::config::data_dir().join("workspace.json")
+}
+
+/// Where the window started in `start` was kept before there was one set for all of them.
+fn legacy_file(start: &Path) -> PathBuf {
     // FNV-1a: unlike the standard hasher it is the same in every build.
     let hash = start.to_string_lossy().bytes().fold(0xcbf29ce484222325u64, |h, b| (h ^ u64::from(b)).wrapping_mul(0x100000001b3));
     let name = start.file_name().map_or_else(|| "root".to_string(), |n| n.to_string_lossy().to_string());
@@ -148,17 +154,26 @@ impl Workspace {
 
     /// What the window started in `start` saved last, if anything.
     pub fn load(start: &Path) -> Option<Self> {
-        Self::from_json(&crate::config::read_json(&file(start))?)
+        let value = crate::config::read_json(&file()).or_else(|| crate::config::read_json(&legacy_file(start)))?;
+        Self::from_json(&value)
     }
 
-    /// Saves it as the window started in `start`'s, replacing the file in one step so that a
-    /// crash can't leave half of one.
-    pub fn save(&self, start: &Path) {
-        let target = file(start);
+    /// Saves it, replacing the file in one step so that a crash can't leave half of one.
+    /// Projects other windows saved are kept: `known` holds every project this window has had,
+    /// so one in the file that isn't in it belongs to another window, and one that is but is no
+    /// longer open was closed here.
+    pub fn save(&self, known: &mut HashSet<PathBuf>) {
+        let target = file();
         let Some(dir) = target.parent() else { return };
+        known.extend(self.projects.iter().map(|project| project.root.clone()));
+        let mut value = self.to_json();
+        let others = crate::config::read_json(&target).and_then(|saved| saved["projects"].as_array().cloned()).unwrap_or_default();
+        if let Some(projects) = value["projects"].as_array_mut() {
+            projects.extend(others.into_iter().filter(|entry| path(&entry["root"]).is_some_and(|root| !known.contains(&root))));
+        }
         let temp = target.with_extension("json.tmp");
         let written = std::fs::create_dir_all(dir)
-            .and_then(|()| std::fs::write(&temp, serde_json::to_vec_pretty(&self.to_json()).unwrap_or_default()))
+            .and_then(|()| std::fs::write(&temp, serde_json::to_vec_pretty(&value).unwrap_or_default()))
             .and_then(|()| std::fs::rename(&temp, &target));
         if let Err(error) = written {
             log::warn!("saving {}: {error}", target.display());
@@ -259,8 +274,26 @@ mod tests {
     }
 
     #[test]
+    fn projects_of_other_windows_are_kept_when_saving() {
+        let dir = std::env::temp_dir().join(format!("po-ws-{}", std::process::id()));
+        // SAFETY: no other test reads this variable.
+        unsafe { std::env::set_var("XDG_DATA_HOME", &dir) };
+        let project = |root: &str| ProjectState { root: root.into(), review: false, worktree: None, active: 0, threads: vec![] };
+        let window = |roots: &[&str]| Workspace { projects: roots.iter().map(|r| project(r)).collect(), ..Default::default() };
+        let (mut a, mut b) = (HashSet::new(), HashSet::new());
+        window(&["/x", "/y"]).save(&mut a);
+        window(&["/z"]).save(&mut b);
+        let roots = |ws: Workspace| ws.projects.iter().map(|p| p.root.to_string_lossy().to_string()).collect::<Vec<_>>();
+        assert_eq!(roots(Workspace::load(Path::new("/")).expect("saved")), ["/z", "/x", "/y"]);
+        // A closes /y; B's /z and A's remaining /x stay.
+        window(&["/x"]).save(&mut a);
+        assert_eq!(roots(Workspace::load(Path::new("/")).expect("saved")), ["/x", "/z"]);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
     fn windows_for_different_directories_have_different_files() {
-        assert_ne!(file(Path::new("/a/po")), file(Path::new("/b/po")));
-        assert_eq!(file(Path::new("/a/po")), file(Path::new("/a/po")));
+        assert_ne!(legacy_file(Path::new("/a/po")), legacy_file(Path::new("/b/po")));
+        assert_eq!(legacy_file(Path::new("/a/po")), legacy_file(Path::new("/a/po")));
     }
 }
