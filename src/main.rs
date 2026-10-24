@@ -684,7 +684,8 @@ impl Activity {
         }
     }
 
-    /// Something the user may want to look at: not idle. Lower ranks come first in the live list,
+    /// Something the user may want to look at: not idle (an idle thread with a live agent still
+    /// shows, last, at `IDLE_RANK`). Lower ranks come first in the live list,
     /// so a question comes before a finished turn, and both before work still going.
     fn live_rank(self) -> Option<u8> {
         match self {
@@ -5758,6 +5759,13 @@ mod tests {
         ];
         assert_eq!(folded_runs(&blocks, false), vec![3]);
         assert!(folded_runs(&blocks, true).is_empty());
+    }
+
+    #[test]
+    fn a_run_followed_by_text_folds_in_the_latest_message() {
+        let blocks = vec![tool("a", Step::Done), tool("b", Step::Done), tool("c", Step::Done), Block::Text("x".into())];
+        assert_eq!(folded_runs(&blocks, true), vec![0]);
+        assert!(folded_runs(&blocks[..3], true).is_empty());
     }
 
     #[test]

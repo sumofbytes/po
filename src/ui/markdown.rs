@@ -253,7 +253,7 @@ pub fn all_text_of<'a>(sources: impl IntoIterator<Item = (&'a str, bool)>) -> St
             None => parts.push(source),
         }
     }
-    parts.join("\n").trim().to_string()
+    parts.join("\n").replace(CODE_PAD, "").trim().to_string()
 }
 
 /// `source` cut into pieces at its top-level blocks, so a long document can be laid out a
@@ -697,7 +697,7 @@ impl Render {
         let (border, head_bg, head_fg, surface) = (palette.border, palette.table_head, palette.table_head_foreground, palette.popover);
         let columns = rows.iter().map(|r| r.len()).max().unwrap_or(0);
         let lens: Vec<usize> = (0..columns)
-            .map(|c| rows.iter().filter_map(|r| r.get(c)).map(|cell| cell.text.chars().count()).max().unwrap_or(0).min(MAX_COLUMN))
+            .map(|c| rows.iter().filter_map(|r| r.get(c)).map(|cell| cell.text.chars().filter(|&c| c != CODE_PAD).count()).max().unwrap_or(0).min(MAX_COLUMN))
             .collect();
         let count = rows.len();
         let rendered: Vec<AnyElement> = rows
@@ -831,10 +831,14 @@ fn code_boxes(window: &mut Window, layout: &TextLayout, text: &str, spans: &[Ran
     for span in spans {
         let chars: Vec<usize> = text[span.clone()].char_indices().map(|(i, _)| span.start + i).chain([span.end]).collect();
         let at = |ix: usize| layout.position_for_index(ix);
-        // A character's width where the next one follows on the same line; the span's first
-        // advance stands in for the one that ends a line, as code is monospaced.
+        // A character's width where the next one follows on the same line; the first code
+        // character's advance (past the pad) stands in for the one that ends a line, as code is
+        // monospaced.
         let Some(first) = at(span.start) else { continue };
-        let fallback = chars.get(1).and_then(|&ix| at(ix)).filter(|p| p.y == first.y).map_or(line * 0.5, |p| p.x - first.x);
+        let fallback = match (chars.get(1).and_then(|&ix| at(ix)), chars.get(2).and_then(|&ix| at(ix))) {
+            (Some(a), Some(b)) if a.y == b.y => b.x - a.x,
+            _ => line * 0.5,
+        };
         let mut start = first;
         for pair in chars.windows(2) {
             let (this, next) = (at(pair[0]), at(pair[1]));
