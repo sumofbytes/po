@@ -707,6 +707,13 @@ Two more faults came out of clicking through the UI (a small Wayland virtual-poi
 | The Control menu's two opt-ins ("may read other threads here", "may answer its permission asks") called `set_grant` with the scope fixed at Viewer and the other flag off, so toggling one would have dropped a Global thread to Viewer | They keep the current scope and the other flag |
 | The header badge and the composer button built dropdowns with the same element id, so they shared one menu state and anchor, and clicks on the second after the first were swallowed | Each place has its own id |
 
+Opening a PR, with `gh` signed in, turned up a last one, also fixed: `project.changes` (and
+`dirty` in `project.list`) read the cached list of changes, which is only filled for a project
+that has been on screen. For a PR opened in the background, and for an agent's isolated worktree,
+which is never shown, it said "no changes" however much had been done, which would have defeated
+"then summarize their diffs". They are now read from the repository when asked (the project on
+screen keeps its watched cache for `dirty`).
+
 Seen working, by agent calls through the real `po mcp` and by clicks: grants and the tool list by
 scope; every Control menu item (scope, both opt-ins, each logged and visible to the agent through
 `control_info`) and Stop agent control; `thread.create` with notify; approvals (`answer_thread`,
@@ -716,6 +723,6 @@ self-send refused, close; the `mode` option refused; `/` refused; the sidebar ro
 **Go** (the screen switches only then) and **Merge** (the worktree and its project go, the agent
 is told "Merged into master"); an isolated worktree thread started and its parent told; `po ctl`
 `windows`, `watch`, `wait`, `audit.list`, `thread.find`, and its refusal from inside an agent
-("Po refused: …"); a child relinked to its parent after a restart. Not tried: answering a
-suggestion for a PR (needs `gh` and a remote), and a resumed (asleep) child being woken by
-`thread.send`.
+("Po refused: …"); a child relinked to its parent after a restart. A PR checkout (`project.open` with `pr`, answered **Check out**) opened as a background project
+with its 11 changed files readable, and `close_project` removed it and its temporary checkout.
+Not tried: a resumed (asleep) child being woken by `thread.send`.

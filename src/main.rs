@@ -2402,9 +2402,12 @@ impl Reader {
                 if own != Some(at) && !everywhere {
                     return Err("another project's changes are read at Global".into());
                 }
+                // Read from the repository now: a project that was never on screen has not had
+                // its changes listed, and an agent's isolated worktree is just that.
+                let changes = diff::changes(&view.project.root, &view.project.base);
                 match path {
                     Some(path) => {
-                        let change = view.project.changes.iter().find(|change| change.path == path).ok_or(format!("`{path}` has no changes"))?;
+                        let change = changes.iter().find(|change| change.path == path).ok_or(format!("`{path}` has no changes"))?;
                         let rows = diff::file_diff(&view.project.root, &view.project.base, change);
                         let mut text = String::new();
                         for row in rows {
@@ -2423,7 +2426,7 @@ impl Reader {
                         Ok(json!({ "path": path, "diff": text }))
                     }
                     None => Ok(json!({
-                        "files": view.project.changes.iter().map(|change| json!({ "path": change.path, "status": change.status })).collect::<Vec<_>>(),
+                        "files": changes.iter().map(|change| json!({ "path": change.path, "status": change.status })).collect::<Vec<_>>(),
                     })),
                 }
             }
@@ -3136,7 +3139,9 @@ impl Reader {
                 Some(wt) => Some(wt.spec.branch.clone()),
                 None => self.heads.get(&view.project.root).map(|head| head.name.clone()).or(view.project.pr.as_ref().map(|_| String::new())),
             },
-            dirty: !view.project.changes.is_empty(),
+            // The project on screen is watched, so its list is current; another has not had its
+            // changes listed (an agent's worktree never has), so it is asked of the repository.
+            dirty: if view.id == self.project_id { !view.project.changes.is_empty() } else { !diff::changes(&view.project.root, &view.project.base).is_empty() },
             pr: view.project.pr.as_ref().map(|pr| pr.number),
             worktree_of: view.project.worktree.as_ref().map(|wt| {
                 self.views().iter().find(|other| other.project.root == wt.spec.repo).map(|other| other.id).unwrap_or(0)
