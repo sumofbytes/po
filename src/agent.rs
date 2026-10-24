@@ -17,17 +17,18 @@ pub enum Client {
 }
 
 impl Client {
-    /// Starts `agent` in `cwd`, handing it Po's MCP server with `control` as its environment (a
-    /// dex daemon gets no MCP servers).
+    /// Starts `agent` in `cwd`. The child's pid is known once it is started, and `control` is
+    /// then asked for the environment Po's MCP server for this thread gets (a dex daemon gets
+    /// no MCP servers, and is shared by every thread that uses it, so it names no one's agent).
     /// With `resume`, lists its sessions rather than opening a new one.
-    pub fn spawn(agent: &config::Agent, cwd: &Path, resume: bool, control: &[(String, String)]) -> Result<(Self, UnboundedReceiver<Event>)> {
+    pub fn spawn(agent: &config::Agent, cwd: &Path, resume: bool, control: impl FnOnce(Option<u32>) -> Vec<(String, String)>) -> Result<(Self, UnboundedReceiver<Event>)> {
         match &agent.daemon {
             Some(url) => {
                 let (client, events) = dex::Client::spawn(url, &agent.command, cwd, resume)?;
                 Ok((Self::Dex(client), events))
             }
             None => {
-                let (client, events) = acp::Client::spawn(&agent.command, cwd, resume, control)?;
+                let (client, events) = acp::Client::spawn(&agent.command, cwd, resume, |pid| control(Some(pid)))?;
                 Ok((Self::Acp(client), events))
             }
         }
