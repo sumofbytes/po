@@ -544,6 +544,8 @@ mod peer {
 
     pub const CAN_READ_PEER: bool = false;
 
+    // Only where there are unix sockets to ask about; Windows has no server to call it.
+    #[cfg(unix)]
     pub fn of(_: &std::os::unix::net::UnixStream) -> Peer {
         Peer { pid: None, uid: None }
     }
