@@ -725,4 +725,9 @@ is told "Merged into master"); an isolated worktree thread started and its paren
 `windows`, `watch`, `wait`, `audit.list`, `thread.find`, and its refusal from inside an agent
 ("Po refused: …"); a child relinked to its parent after a restart. A PR checkout (`project.open` with `pr`, answered **Check out**) opened as a background project
 with its 11 changed files readable, and `close_project` removed it and its temporary checkout.
-Not tried: a resumed (asleep) child being woken by `thread.send`.
+A child that was asleep after a restart was woken by its parent's `send_thread` (reply
+`pending`), resumed its session, received the text labelled `[From thread "…" (#id), sent through
+Po.]` and answered. Everything in the plan's phases has now been run at least once in a window,
+apart from what the tests could not reach: a PR checked out from the repository the window is in
+(rather than a fresh clone), a grant lowered while a wait is held, and an agent that takes
+messages mid-turn (dex).
