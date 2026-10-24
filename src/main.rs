@@ -5,6 +5,7 @@ mod alert;
 mod command;
 mod config;
 mod control;
+mod ctl;
 mod dex;
 mod diff;
 mod fonts;
@@ -12,6 +13,7 @@ mod mcp;
 mod pr;
 mod schemes;
 mod theme;
+mod state;
 mod trace;
 mod ui;
 mod update;
@@ -232,9 +234,58 @@ enum Block {
     Plan(Vec<(String, Step)>),
 }
 
+/// Where text headed for an agent came from, so that it is labelled as coming from there at
+/// every step: sent at once, waiting for the agent, queued, or taken back. It never ends up in
+/// the user's draft, and it never claims "the user has `x` open" when the user didn't send it.
+/// The thread and Po origins are produced from phase 2 on (`thread.send`, notify-parent).
+#[allow(dead_code)]
+enum Origin {
+    /// The user's draft.
+    User,
+    /// Another thread of this window, sending through the API (phase 2's `thread.send`).
+    Thread { id: u64, title: String },
+    /// Po itself, telling an orchestrator what its child did (phase 2's notify-parent).
+    Po,
+}
+
+/// A message headed for an agent, with where it came from.
+struct Outgoing {
+    text: String,
+    origin: Origin,
+}
+
+impl Outgoing {
+    fn user(text: String) -> Self {
+        Self { text, origin: Origin::User }
+    }
+}
+
+/// How a thread reports to the thread that started it, when one did. Every report is a turn of
+/// the parent's, so they are coalesced and rate limited (see [`Reader::flush_notice`]).
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+enum Notify {
+    /// A turn's end, a failure, an ask, a sleep or a close.
+    #[default]
+    Done,
+    /// Also that a turn started.
+    All,
+    Never,
+}
+
+impl Notify {
+    fn from_name(name: &str) -> Option<Self> {
+        Some(match name {
+            "done" => Self::Done,
+            "all" => Self::All,
+            "never" => Self::Never,
+            _ => return None,
+        })
+    }
+}
+
 /// A message typed while the agent was working.
 struct Queued {
-    content: String,
+    out: Outgoing,
     /// Where the daemon holds it; `None` when it waits here for the turn to end.
     kind: Option<Queue>,
 }
@@ -271,6 +322,91 @@ fn pretty(value: &Value) -> String {
         Value::String(text) => text.clone(),
         other => serde_json::to_string_pretty(other).unwrap_or_default(),
     }
+}
+
+/// Where a message for the agent goes, judged by where its thread is: the decision
+/// [`Reader::submit`] carries out, pure, so every path is testable without a window.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Where {
+    /// The thread has no session of its own yet: it starts with this message.
+    Start,
+    /// The agent is starting, taking its settings, or asleep: the message waits for it, shown
+    /// as sent.
+    Wait,
+    /// The agent is ready and idle: dispatch now.
+    Dispatch,
+    /// The agent takes messages mid-turn: steer now, or a follow-up after the turn (`later`).
+    Take(Queue),
+    /// The agent can't take messages mid-turn: the thread queues it for the turn's end.
+    Queue,
+}
+
+fn route(blank: bool, unstarted: bool, asleep: bool, starting: bool, busy: bool, takes_messages: bool, later: bool) -> Where {
+    if blank || unstarted {
+        Where::Start
+    } else if !busy && (starting || asleep) {
+        Where::Wait
+    } else if !busy {
+        Where::Dispatch
+    } else if takes_messages {
+        Where::Take(if later { Queue::Followup } else { Queue::Steer })
+    } else {
+        Where::Queue
+    }
+}
+
+/// A thread out of a list of views, by its id: for reading, which never swaps one in.
+fn find_thread<'a>(views: &'a [View<'a>], id: u64) -> Option<(&'a View<'a>, &'a Thread)> {
+    views.iter().find_map(|view| view.threads.iter().find(|thread| thread.id == id).map(|thread| (view, *thread)))
+}
+
+/// The status of a thing that runs, as the read model says it.
+fn step_name(status: Step) -> &'static str {
+    match status {
+        Step::Waiting => "waiting",
+        Step::Working => "working",
+        Step::Done => "done",
+        Step::Failed => "failed",
+    }
+}
+
+/// A thread's transcript as entries: the user's text, and the agent's text, thoughts, tool
+/// calls and plan. Permission asks show as a call that is waiting or done; approval cards are
+/// the user's to answer and are not in the transcript.
+fn transcript(thread: &Thread, full: bool) -> Vec<state::Entry> {
+    let mut out = Vec::new();
+    for msg in &thread.messages {
+        match msg {
+            Msg::User(text) => out.push(state::Entry { index: out.len(), role: "user", text: text.clone(), tools: vec![], plan: None }),
+            Msg::Agent(blocks) => {
+                let mut said = Vec::new();
+                let mut tools = Vec::new();
+                let mut plan = None;
+                for block in blocks {
+                    match block {
+                        Block::Text(text) | Block::Thought(text, _) => said.push(text.clone()),
+                        Block::Tool(tool) => tools.push(state::ToolCall {
+                            title: tool.title.clone(),
+                            status: step_name(tool.status).into(),
+                            arguments: full.then(|| tool.arguments.clone()),
+                            result: full.then(|| tool.result.clone()),
+                        }),
+                        Block::Plan(items) => plan = Some(items.iter().map(|(text, step)| (text.clone(), step_name(*step).into())).collect()),
+                        Block::Permission(ask) => tools.push(state::ToolCall {
+                            title: ask.title.clone(),
+                            status: if ask.answered.is_none() { "waiting" } else { "done" }.into(),
+                            arguments: None,
+                            result: None,
+                        }),
+                        // The user's click answers this; it is told of by the state.
+                        Block::Approve { .. } => {}
+                    }
+                }
+                out.push(state::Entry { index: out.len(), role: "agent", text: said.join("\n\n"), tools, plan });
+            }
+        }
+    }
+    out
 }
 
 /// A diff content block as `-`/`+` lines, without the lines the edit leaves alone.
@@ -472,6 +608,27 @@ struct Thread {
     offered: Option<String>,
     /// Names the thread to the events of its agent while it isn't the one on screen.
     id: u64,
+    /// The thread that started this one through the API, if any. Only its parent may write to
+    /// it, and it is never written to by a grandparent: a child starts at Viewer, so a
+    /// grandchild can't exist. Saved as the parent's *session* (phase 4), never as its id.
+    parent: Option<u64>,
+    /// Its last turn ended in an error, or its agent stopped or exited mid-turn. Cleared when
+    /// anything starts again, so the state reads Failed only while nothing newer has happened.
+    failed: bool,
+    /// Why it failed, the last time it did.
+    last_error: Option<String>,
+    /// Text sent through the API that a stopped turn dropped, for `thread.get` to report.
+    dropped: Vec<String>,
+    /// How much of its context the agent says the session uses.
+    usage: Option<state::Usage>,
+    /// How it tells the thread that started it (its parent) what happened to it. `Done`: when
+    /// its turn ends, it fails, it asks, or it is closed or put to sleep.
+    notify: Notify,
+    /// Settings the API asked for, applied between turns and never remembered as the user's
+    /// choice: they are read before the carried-over choices, and nothing here writes to them.
+    overrides: HashMap<String, String>,
+    /// The ids of settings set through the API, so their answers are not saved as choices.
+    api_options: HashSet<String>,
     /// It finished a turn while another thread was on screen.
     unread: bool,
     /// The agent's session, once it has one; what a thread without a running agent is resumed from.
@@ -486,7 +643,7 @@ struct Thread {
     /// `touched` it is saved, so the thread list keeps its order across restarts.
     active_at: u64,
     /// A first message waiting for the agent to be ready, already shown in the thread.
-    pending: Option<String>,
+    pending: Option<Outgoing>,
     /// Start the thread in a git worktree of its own. Only asked before it has started.
     isolate: bool,
     /// Nothing has been sent in it and no session was picked for it. Its agent runs only to
@@ -550,8 +707,27 @@ impl Thread {
 
     fn fail(&mut self, text: String) {
         self.busy = false;
+        self.failed = true;
+        self.last_error = Some(text.clone());
         self.messages.push(Msg::Agent(vec![Block::Text(format!("**Error:** {text}"))]));
         self.relist(self.messages.len() - 1);
+    }
+
+    /// The bare facts the control API's read model is derived from.
+    fn facts(&self) -> crate::state::Facts {
+        let mut approval = false;
+        let mut asking = false;
+        for msg in &self.messages {
+            let Msg::Agent(blocks) = msg else { continue };
+            for block in blocks {
+                match block {
+                    Block::Approve { answered: None, .. } => approval = true,
+                    Block::Permission(Ask { answered: None, .. }) => asking = true,
+                    _ => {}
+                }
+            }
+        }
+        crate::state::Facts { approval, asking, failed: self.failed, asleep: self.asleep(), started: self.client.is_some(), ready: self.ready, busy: self.busy }
     }
 
     /// Tells the thread's list that messages from `from` on were added or changed, so it lays
@@ -714,6 +890,17 @@ fn now_ms() -> u64 {
 /// How many of a project's threads the project list shows before the rest fold under "more".
 const THREADS_SHOWN: usize = 3;
 
+/// The most threads one thread may start (§5). With `max_live` at its default of 8, an
+/// orchestrator and four children leave room for the user's own threads.
+const MAX_CHILDREN: usize = 4;
+/// The most `thread.wait`s the window holds, beside the socket's connections, so waits can't
+/// push the viewer tools out.
+const MAX_WAITS: usize = 8;
+/// How long a child's changes may pile up before its parent is told.
+const NOTICE_COALESCE: Duration = Duration::from_secs(2);
+/// How often a parent may be told: every notice is a turn of the parent's, which costs tokens.
+const NOTICE_RATE: Duration = Duration::from_secs(10);
+
 /// Where a running agent with nothing to show sorts in the live list: after all that need a look.
 const IDLE_RANK: u8 = 3;
 
@@ -815,6 +1002,21 @@ impl Thread {
     }
 }
 
+/// One `thread.wait`: who is waiting, on which threads (empty: its children), until a state in
+/// `until` (empty: any change), and where the answer goes.
+struct Waiter {
+    token: u64,
+    caller: command::Caller,
+    threads: Vec<u64>,
+    until: Vec<&'static str>,
+    reply: std::sync::mpsc::Sender<command::Reply>,
+}
+
+/// What a parent hasn't heard about its children yet.
+struct Notice {
+    text: String,
+}
+
 /// How far a new session has got in taking the settings last chosen for its agent.
 #[derive(Default)]
 struct Applying {
@@ -824,6 +1026,9 @@ struct Applying {
     asked: Option<String>,
     /// Counts the questions put to the agent, so a timer can tell whether its own is still the one waiting.
     asks: u64,
+    /// Whether the session is also taking the choices of earlier threads. False when it was
+    /// woken only to apply what the API asked for.
+    carrying: bool,
 }
 
 /// A project and its threads, wherever they are kept.
@@ -845,6 +1050,41 @@ struct Slot {
     thread: Thread,
     parked: Vec<Thread>,
 }
+
+/// What a thread with the Global grant put to the user, to click or turn away: nothing it asks
+/// for happens until they do.
+struct Suggestion {
+    id: u64,
+    /// The thread that suggested it, and its title as it was.
+    from: u64,
+    by: String,
+    what: Proposal,
+}
+
+enum Proposal {
+    /// Go to a project that is open.
+    Go(u64),
+    /// Open a folder that is not a project yet.
+    Open(PathBuf),
+    /// Check a PR out for review, from the checkout at `from`.
+    Pr { spec: String, from: PathBuf },
+    /// Merge a worktree project into the checkout it came from.
+    Merge(u64),
+}
+
+/// One control command, as the audit log keeps it.
+struct Audit {
+    at: u64,
+    caller: command::Caller,
+    command: &'static str,
+    outcome: String,
+}
+
+/// How many commands the audit log keeps, newest last.
+const MAX_AUDIT: usize = 500;
+
+/// How many suggestions may wait at once, so a loop can't fill the sidebar.
+const MAX_SUGGESTIONS: usize = 8;
 
 /// How long the user must have been still before an agent may put a view in front of them.
 const QUIET: Duration = Duration::from_secs(4);
@@ -921,6 +1161,34 @@ struct Screen {
 struct Reader {
     /// How agents started from this window reach it; none where there is no socket.
     control: Option<control::Control>,
+    /// What each thread's agent may do, held in memory only: it is lost on restart and is not
+    /// shared between windows, so nothing an agent can read or write raises its own reach.
+    /// A thread without an entry has [`command::Grant::default`], and the grants can only be
+    /// changed from the UI, never from anything an agent could write to (phase 1 adds the menu).
+    grants: HashMap<u64, command::Grant>,
+    /// Projects the API opened, which it alone may close again (and only if the user has no
+    /// thread of their own in them), and what it has put to the user to click.
+    api_projects: HashSet<u64>,
+    suggestions: Vec<Suggestion>,
+    next_suggestion: u64,
+    audit: std::collections::VecDeque<Audit>,
+    /// `po ctl watch` connections, each told of every change of a thread's state.
+    subscribers: Vec<std::sync::mpsc::Sender<command::Reply>>,
+    /// A worktree for `thread.create_isolated` is being made, and the numbers its replies carry.
+    isolating: bool,
+    next_request: u64,
+    /// `thread.wait`s held until a thread reaches a state or the wait times out. At most two
+    /// per caller, [`MAX_WAITS`] in all, so waits can't push the viewer tools out.
+    waiters: Vec<Waiter>,
+    next_waiter: u64,
+    /// What a parent hasn't been told about its children yet, one notice per parent: lines
+    /// coalesce into it for [`NOTICE_COALESCE`], and the rate limit holds the flush back.
+    notices: HashMap<u64, Notice>,
+    notice_scheduled: HashSet<u64>,
+    notice_sent_at: HashMap<u64, Instant>,
+    /// This window's own handle, for telling a parent about a child from where there is no
+    /// `window` in hand (the idle sweep).
+    window: gpui::AnyWindowHandle,
     /// When the user last pressed a key or scrolled; an agent waits for a pause to show something.
     last_input: Instant,
     /// A viewer move the thread on screen asked for while the user was busy, waiting for a pause.
@@ -1081,6 +1349,14 @@ impl Reader {
             shown: None,
             offered: None,
             id: 0,
+            parent: None,
+            failed: false,
+            last_error: None,
+            dropped: vec![],
+            usage: None,
+            notify: Notify::default(),
+            overrides: HashMap::new(),
+            api_options: HashSet::new(),
             unread: false,
             session: None,
             restore: None,
@@ -1113,6 +1389,20 @@ impl Reader {
         let (control, requests) = control::start().unzip();
         let mut reader = Self {
             control,
+            grants: HashMap::new(),
+            api_projects: HashSet::new(),
+            suggestions: vec![],
+            next_suggestion: 1,
+            audit: std::collections::VecDeque::new(),
+            subscribers: vec![],
+            isolating: false,
+            next_request: 1,
+            waiters: vec![],
+            next_waiter: 1,
+            notices: HashMap::new(),
+            notice_scheduled: HashSet::new(),
+            notice_sent_at: HashMap::new(),
+            window: window.window_handle(),
             last_input: Instant::now().checked_sub(QUIET).unwrap_or_else(Instant::now),
             pending_move: None,
             agent_panes: None,
@@ -1170,8 +1460,26 @@ impl Reader {
                 while let Some(request) = requests.next().await {
                     let answered = handle.update(cx, |_, window, cx| {
                         this.update(cx, |reader, cx| {
-                            let reply = reader.run_command(request.caller, request.command, window, cx);
-                            request.reply.send(reply).ok();
+                            if matches!(request.command, command::Command::EventsSubscribe) {
+                                match reader.authorize(request.caller, &request.command) {
+                                    Ok(()) => {
+                                        request.reply.send(Ok(serde_json::json!({ "subscribed": true }))).ok();
+                                        reader.subscribers.push(request.reply);
+                                    }
+                                    Err(why) => {
+                                        request.reply.send(Err(why)).ok();
+                                    }
+                                }
+                                return;
+                            }
+                            match reader.run_command(request.caller, request.command, window, cx) {
+                                command::Answer::Now(reply) => {
+                                    request.reply.send(reply).ok();
+                                }
+                                command::Answer::Later(wait) => {
+                                    reader.add_waiter(request.caller, wait, request.reply, window, cx);
+                                }
+                            };
                         })
                     });
                     if answered.is_err() {
@@ -1241,10 +1549,12 @@ impl Reader {
         })
         .detach();
         // Agents nobody is talking to are stopped now and then; their threads wake on demand.
+        let sweep = reader.window;
         cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor().timer(Duration::from_secs(60)).await;
-                if this.update(cx, |reader, cx| reader.sleep_idle(cx)).is_err() {
+                let alive = sweep.update(cx, |_, window, cx| this.update(cx, |reader, cx| reader.sleep_idle(window, cx)));
+                if alive.is_err() {
                     break;
                 }
             }
@@ -1620,7 +1930,7 @@ impl Reader {
     /// a branch whose changes can be reviewed here, then merged or discarded.
     /// With `first`, the message to start it with and the blank thread it was typed in, which
     /// goes away once the worktree is up.
-    fn new_worktree_thread(&mut self, key: &str, first: Option<(String, (u64, u64))>, window: &mut Window, cx: &mut Context<Self>) {
+    fn new_worktree_thread(&mut self, key: &str, first: Option<(Outgoing, (u64, u64))>, window: &mut Window, cx: &mut Context<Self>) {
         if self.finishing {
             return;
         }
@@ -1660,16 +1970,16 @@ impl Reader {
         .detach();
     }
 
-    fn open_worktree(&mut self, wt: worktree::Worktree, agent: String, first: Option<(String, (u64, u64))>, window: &mut Window, cx: &mut Context<Self>) {
+    fn open_worktree(&mut self, wt: worktree::Worktree, agent: String, first: Option<(Outgoing, (u64, u64))>, window: &mut Window, cx: &mut Context<Self>) {
         log::info!("worktree: {} for {agent}", wt.spec.branch);
         let mut project = Self::build_project(wt.spec.path.clone(), None, vec![], window, cx);
         project.base = wt.spec.base.clone();
         project.worktree = Some(wt);
         self.confirm_discard = false;
         self.open_project(project, Mode::Diff, Some(agent), window, cx);
-        if let Some((prompt, (pid, tid))) = first {
-            self.begin_turn(&prompt);
-            self.thread.pending = Some(prompt);
+        if let Some((out, (pid, tid))) = first {
+            self.begin_turn(&out.text);
+            self.thread.pending = Some(out);
             // The thread it was typed in stays only if something has happened to it since.
             let blank = self.views().iter().any(|v| v.id == pid && v.threads.iter().any(|t| t.id == tid && t.blank));
             if blank {
@@ -1680,8 +1990,7 @@ impl Reader {
 
     /// Merges the worktree on screen into the checkout it came from, or throws it away.
     fn finish_worktree(&mut self, merge: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(spec) = self.project.worktree.as_ref().map(|wt| wt.spec.clone()) else { return };
-        if self.finishing {
+        if self.project.worktree.is_none() || self.finishing {
             return;
         }
         if !merge && !self.confirm_discard {
@@ -1690,10 +1999,29 @@ impl Reader {
             return;
         }
         self.confirm_discard = false;
+        self.finish_worktree_of(self.project_id, merge, None, window, cx);
+    }
+
+    /// [`Self::finish_worktree`] for project `id`, on screen or not, once it is decided. With
+    /// `tell`, that thread hears how it went.
+    fn finish_worktree_of(&mut self, id: u64, merge: bool, tell: Option<u64>, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(spec) = self.project_by_id(id).and_then(|project| project.worktree.as_ref()).map(|wt| wt.spec.clone()) else {
+            if let Some(thread) = tell {
+                self.tell(thread, format!("Project {id} is not a worktree any more."), window, cx);
+            }
+            return;
+        };
+        if self.finishing {
+            if let Some(thread) = tell {
+                self.tell(thread, "The user agreed to merge, but another worktree was being made or merged; ask again.".into(), window, cx);
+            }
+            return;
+        }
         self.finishing = true;
         self.worktree_status = Some(if merge { "Merging…" } else { "Discarding…" }.into());
-        let (id, handle) = (self.project_id, window.window_handle());
-        let message = format!("po: {}", self.thread.title());
+        let handle = window.window_handle();
+        let title = self.views().iter().find(|view| view.id == id).and_then(|view| view.threads.iter().find(|thread| thread.id == view.shown)).map(|thread| thread.title()).unwrap_or_default();
+        let message = format!("po: {title}");
         cx.notify();
         cx.spawn(async move |this, cx| {
             let result = cx
@@ -1711,18 +2039,25 @@ impl Reader {
                 .update(cx, |_, window, cx| {
                     this.update(cx, |reader, cx| {
                         reader.finishing = false;
-                        match result {
+                        let told = match result {
                             Ok(into) => {
                                 reader.close_worktree_project(id, window, cx);
-                                reader.worktree_status = Some(match into {
+                                reader.api_projects.remove(&id);
+                                let status = match into {
                                     Some(into) => format!("Merged into {into}"),
                                     None => "Discarded".into(),
-                                });
+                                };
+                                reader.worktree_status = Some(status.clone());
+                                status
                             }
                             Err(error) => {
                                 log::warn!("worktree: {error}");
-                                reader.worktree_status = Some(error);
+                                reader.worktree_status = Some(error.clone());
+                                format!("Not merged: {error}")
                             }
+                        };
+                        if let Some(thread) = tell {
+                            reader.tell(thread, told, window, cx);
                         }
                         cx.notify();
                     })
@@ -1841,9 +2176,96 @@ impl Reader {
 
     /// The one way a request from outside the window changes it. Views are the caller's own; the
     /// viewer is the user's, so only the thread on screen may move it, and not while they are busy.
-    fn run_command(&mut self, caller: command::Caller, command: command::Command, window: &mut Window, cx: &mut Context<Self>) -> command::Reply {
+    fn run_command(&mut self, caller: command::Caller, command: command::Command, window: &mut Window, cx: &mut Context<Self>) -> command::Answer {
+        let name = command.name();
+        // Reading the log is not logged, so that a script watching it doesn't fill it.
+        let logged = !matches!(command, command::Command::AuditList { .. });
+        let answer = self.run_command_inner(caller, command, window, cx);
+        if logged {
+            let outcome = match &answer {
+                command::Answer::Now(Ok(_)) => "ok".to_string(),
+                command::Answer::Now(Err(why)) => format!("refused: {why}"),
+                command::Answer::Later(_) => "waiting".to_string(),
+            };
+            if self.audit.len() >= MAX_AUDIT {
+                self.audit.pop_front();
+            }
+            self.audit.push_back(Audit { at: now_ms(), caller, command: name, outcome });
+        }
+        answer
+    }
+
+    fn run_command_inner(&mut self, caller: command::Caller, command: command::Command, window: &mut Window, cx: &mut Context<Self>) -> command::Answer {
+        log::info!("control: {caller:?} {}", command.name());
+        if let Err(why) = self.authorize(caller, &command) {
+            log::warn!("control: {caller:?} {} refused: {why}", command.name());
+            return command::Answer::Now(Err(why));
+        }
+        // The user's connection has no thread of its own; its commands act on the one on screen.
+        let id = match caller {
+            command::Caller::Thread(id) => id,
+            command::Caller::User => self.thread.id,
+        };
+        match command.family() {
+            command::Family::View => command::Answer::Now(self.run_view(id, command, window, cx)),
+            command::Family::Project if command.writes() => command::Answer::Now(self.run_project(id, command, window, cx)),
+            command::Family::Control | command::Family::Agent | command::Family::Project | command::Family::Window => command::Answer::Now(self.run_read(caller, id, command)),
+            command::Family::Thread => self.run_thread(caller, id, command, window, cx),
+        }
+    }
+
+    /// Whether `caller` may run `command` at all: what it has been granted, and how the thread
+    /// the command names stands to the caller's own.
+    fn authorize(&self, caller: command::Caller, command: &command::Command) -> Result<(), String> {
+        let (grant, id) = match caller {
+            command::Caller::User => (command::Grant::user(), None),
+            command::Caller::Thread(id) => (self.grants.get(&id).copied().unwrap_or_default(), Some(id)),
+        };
+        if command.user_only() && id.is_some() {
+            return Err("only the user, from `po ctl`, may ask this".into());
+        }
+        if command.needs_parent() && id.is_none() {
+            return Err("starting, steering and waiting on threads is an agent's; `po ctl` can read, answer, stop and close".into());
+        }
+        // The user has no thread of their own, so nothing stands between them and a target.
+        let relation = match command.target() {
+            Some(target) => match id {
+                Some(id) => self.relation_to(id, target),
+                None => command::Relation::Own,
+            },
+            None => command::Relation::Own,
+        };
+        grant.allows(command, relation).then_some(()).ok_or_else(|| "the user has not granted this".to_string())
+    }
+
+    /// How `target` stands to thread `caller`: itself, its child (phase 2 starts children), a
+    /// sibling thread of its project, or a thread elsewhere.
+    fn relation_to(&self, caller: u64, target: u64) -> command::Relation {
+        use command::Relation;
+        if target == caller {
+            return Relation::Own;
+        }
+        if self.threads_all().any(|thread| thread.id == target && thread.parent == Some(caller)) {
+            return Relation::Child;
+        }
+        let projects = self.views();
+        let same = |id: u64| projects.iter().any(|view| view.threads.iter().any(|thread| thread.id == id));
+        if same(caller) && same(target) {
+            Relation::Sibling
+        } else {
+            Relation::Elsewhere
+        }
+    }
+
+    /// Every thread of every project this window has.
+    fn threads_all(&self) -> impl Iterator<Item = &Thread> {
+        std::iter::once(&self.thread).chain(self.parked.iter()).chain(self.slots.iter().flat_map(|slot| std::iter::once(&slot.thread).chain(slot.parked.iter())))
+    }
+
+    /// The view family: what the caller's thread puts on screen, and the viewer it may move
+    /// while its thread is the one being looked at.
+    fn run_view(&mut self, id: u64, command: command::Command, window: &mut Window, cx: &mut Context<Self>) -> command::Reply {
         use command::Command;
-        let command::Caller::Thread(id) = caller;
         let reply = if command.moves_viewer() {
             self.with_thread(id, |reader, visible| {
                 if !visible {
@@ -1882,6 +2304,800 @@ impl Reader {
         };
         cx.notify();
         reply
+    }
+
+    /// The read families: snapshots of this window's threads, agents and projects. They look
+    /// and never swap a thread in to change it — every write is a phase-2 command, and the
+    /// reads answer from the state as it is.
+    fn run_read(&self, caller: command::Caller, id: u64, command: command::Command) -> command::Reply {
+        use command::{Command, Scope};
+        use serde_json::json;
+        let grant = self.grant_of(caller);
+        // Everything, for the user's connection; otherwise what it was granted.
+        let everywhere = matches!(caller, command::Caller::User) || grant.scope == Scope::Global;
+        match command {
+            Command::ControlInfo => {
+                let scope = match grant.scope {
+                    Scope::Viewer => "viewer",
+                    Scope::Orchestrate => "orchestrate",
+                    Scope::Global => "global",
+                };
+                Ok(json!({
+                    "grant": { "scope": scope, "read_project": grant.read_project, "approvals": grant.approvals },
+                    "thread": id,
+                    "window": std::process::id(),
+                }))
+            }
+            Command::AuditList { limit } => {
+                let skip = self.audit.len().saturating_sub(limit.unwrap_or(50).clamp(1, MAX_AUDIT));
+                let entries: Vec<Value> = self
+                    .audit
+                    .iter()
+                    .skip(skip)
+                    .map(|entry| {
+                        let who = match entry.caller {
+                            command::Caller::User => json!("user"),
+                            command::Caller::Thread(id) => json!({ "thread": id }),
+                        };
+                        json!({ "at": entry.at, "caller": who, "command": entry.command, "outcome": entry.outcome })
+                    })
+                    .collect();
+                Ok(json!({ "entries": entries }))
+            }
+            Command::WindowInfo => {
+                let projects: Vec<Value> = self.views().iter().map(|view| self.project_info(view).json()).collect();
+                Ok(json!({ "pid": std::process::id(), "projects": projects, "on_screen": self.project_id }))
+            }
+            Command::ThreadFind { session } => {
+                let views = self.views();
+                let found = views.iter().flat_map(|view| view.threads.iter().map(move |thread| (view, *thread))).find(|(_, thread)| thread.session.as_deref() == Some(session.as_str()));
+                let (_, thread) = found.ok_or("no thread has that session")?;
+                // The same reach as reading it by id.
+                if !grant.allows(&Command::ThreadGet { thread: Some(thread.id) }, self.relation_to(id, thread.id)) {
+                    return Err("the user has not granted this".into());
+                }
+                Ok(json!({ "thread": thread.id }))
+            }
+            Command::AgentList => {
+                let agents: Vec<Value> = self
+                    .agents
+                    .iter()
+                    .map(|agent| state::AgentInfo { id: agent.id.clone(), name: agent.name.clone(), trusted: config::trusted(agent), daemon: agent.daemon.is_some() }.json())
+                    .collect();
+                Ok(json!({ "agents": agents, "default": self.chosen_agent }))
+            }
+            Command::ProjectList => {
+                let own = self.own_project(id);
+                let projects: Vec<Value> = self
+                    .views()
+                    .iter()
+                    .filter(|view| everywhere || own == Some(view.id))
+                    .map(|view| self.project_info(view).json())
+                    .collect();
+                Ok(json!({ "projects": projects }))
+            }
+            Command::ProjectChanges { project, path } => {
+                let own = self.own_project(id);
+                let at = project.or(own).ok_or("that thread is gone")?;
+                let views = self.views();
+                let view = views.iter().find(|view| view.id == at).ok_or("no such project")?;
+                if own != Some(at) && !everywhere {
+                    return Err("another project's changes are read at Global".into());
+                }
+                match path {
+                    Some(path) => {
+                        let change = view.project.changes.iter().find(|change| change.path == path).ok_or(format!("`{path}` has no changes"))?;
+                        let rows = diff::file_diff(&view.project.root, &view.project.base, change);
+                        let mut text = String::new();
+                        for row in rows {
+                            if text.len() > state::MAX_DIFF {
+                                text.truncate(state::MAX_DIFF);
+                                text.push_str("\n…");
+                                break;
+                            }
+                            text.push_str(&match row.kind {
+                                diff::Kind::Hunk => format!("{}\n", row.text),
+                                diff::Kind::Added => format!("+{}\n", row.text),
+                                diff::Kind::Removed => format!("-{}\n", row.text),
+                                diff::Kind::Context => format!(" {}\n", row.text),
+                            });
+                        }
+                        Ok(json!({ "path": path, "diff": text }))
+                    }
+                    None => Ok(json!({
+                        "files": view.project.changes.iter().map(|change| json!({ "path": change.path, "status": change.status })).collect::<Vec<_>>(),
+                    })),
+                }
+            }
+            Command::ThreadList { project, state } => {
+                let own = self.own_project(id);
+                let want = state.as_deref().and_then(crate::state::ThreadState::from_name);
+                let mut threads = Vec::new();
+                for view in self.views() {
+                    if !(everywhere || own == Some(view.id)) || project.is_some_and(|want| want != view.id) {
+                        continue;
+                    }
+                    for thread in &view.threads {
+                        // The same reach table as every other read: itself, its children, and
+                        // its project's other threads only with `read_project`.
+                        if !grant.allows(&Command::ThreadGet { thread: Some(thread.id) }, self.relation_to(id, thread.id)) {
+                            continue;
+                        }
+                        let info = self.thread_info(&view, thread);
+                        if want.is_some_and(|want| want != info.state) {
+                            continue;
+                        }
+                        threads.push(info.json());
+                    }
+                }
+                Ok(json!({ "threads": threads }))
+            }
+            Command::ThreadGet { thread } => {
+                let want = thread.unwrap_or(id);
+                let views = self.views();
+                let (view, thread) = find_thread(&views, want).ok_or("no such thread")?;
+                Ok(self.thread_info(view, thread).json())
+            }
+            Command::ThreadOptions { thread } => {
+                let want = thread.unwrap_or(id);
+                let views = self.views();
+                let (_, thread) = find_thread(&views, want).ok_or("no such thread")?;
+                let options: Vec<Value> = thread
+                    .options
+                    .iter()
+                    .map(|option| state::OptionInfo { id: option.id.clone(), name: option.name.clone(), category: option.category.clone(), current: option.current.clone(), choices: option.choices.clone() }.json())
+                    .collect();
+                Ok(json!({ "options": options }))
+            }
+            Command::ThreadMessages { thread, cursor, limit, full } => {
+                let want = thread.unwrap_or(id);
+                let views = self.views();
+                let (_, thread) = find_thread(&views, want).ok_or("no such thread")?;
+                let all = transcript(thread, full.is_some_and(|full| full));
+                let (reset, start) = match cursor.as_deref().and_then(|cursor| cursor.split_once(':')) {
+                    Some((generation, index)) if generation.parse::<u64>() == Ok(thread.generation) => (false, index.parse::<usize>().unwrap_or(0)),
+                    Some(_) => (true, 0), // the transcript was cleared or replaced since
+                    None => (false, 0),
+                };
+                let limit = limit.unwrap_or(state::DEFAULT_MESSAGES).max(1);
+                let entries: Vec<Value> = all.iter().skip(start).take(limit).map(|entry| entry.json()).collect();
+                let more = start + entries.len() < all.len();
+                Ok(json!({
+                    "entries": entries,
+                    "next": more.then(|| format!("{}:{}", thread.generation, start + entries.len())),
+                    "reset": reset,
+                }))
+            }
+            Command::ThreadLastReply { thread } => {
+                let want = thread.unwrap_or(id);
+                let views = self.views();
+                let (_, thread) = find_thread(&views, want).ok_or("no such thread")?;
+                let text = thread
+                    .messages
+                    .iter()
+                    .rev()
+                    .find_map(|msg| match msg {
+                        Msg::Agent(blocks) => {
+                            let said: Vec<&str> = blocks.iter().filter_map(|block| match block {
+                                Block::Text(text) => Some(text.as_str()),
+                                _ => None,
+                            }).collect();
+                            (!said.is_empty()).then(|| said.join("\n\n"))
+                        }
+                        _ => None,
+                    })
+                    .unwrap_or_default();
+                let mut text = text;
+                if text.len() > command::MAX_BODY {
+                    text.truncate(command::MAX_BODY);
+                    text.push_str("\n…");
+                }
+                Ok(json!({ "text": text, "state": state::state(&thread.facts()).name() }))
+            }
+            _ => Err("not a read".into()),
+        }
+    }
+
+    fn grant_of(&self, caller: command::Caller) -> command::Grant {
+        match caller {
+            command::Caller::User => command::Grant::user(),
+            command::Caller::Thread(id) => self.grants.get(&id).copied().unwrap_or_default(),
+        }
+    }
+
+    /// The project writes: opening, closing and offering projects. None of it switches the
+    /// screen; a folder that is not a project yet waits for the user's click.
+    fn run_project(&mut self, id: u64, command: command::Command, window: &mut Window, cx: &mut Context<Self>) -> command::Reply {
+        use command::Command;
+        use serde_json::json;
+        match command {
+            Command::ProjectOpen { path: None, pr: Some(spec) } => {
+                // Reviewed from the checkout the caller is in, as the PR strip does.
+                let from = self.project_of(id).and_then(|project| self.project_by_id(project).map(|project| project.root.clone())).unwrap_or_else(|| self.home.clone());
+                self.suggest(id, Proposal::Pr { spec, from }, cx)?;
+                Ok(json!({ "confirm": "asked" }))
+            }
+            Command::WorktreeMerge { project } => {
+                if self.project_by_id(project).and_then(|project| project.worktree.as_ref()).is_none() {
+                    return Err("that project is not a worktree".into());
+                }
+                self.suggest(id, Proposal::Merge(project), cx)?;
+                Ok(json!({ "confirm": "asked" }))
+            }
+            Command::ProjectOpen { path: Some(path), .. } => {
+                let root = std::path::Path::new(&path).canonicalize().map_err(|_| format!("`{path}` is not a folder"))?;
+                if !root.is_dir() {
+                    return Err(format!("`{path}` is not a folder"));
+                }
+                if root.parent().is_none() || config::home().is_some_and(|home| home.canonicalize().is_ok_and(|home| home == root)) {
+                    return Err("not the root or the home directory".into());
+                }
+                if let Some(view) = self.views().iter().find(|view| view.project.pr.is_none() && view.project.root == root) {
+                    return Ok(json!({ "project": view.id, "opened": false }));
+                }
+                self.suggest(id, Proposal::Open(root), cx)?;
+                Ok(json!({ "confirm": "asked" }))
+            }
+            Command::ProjectOffer { project } => {
+                if !self.views().iter().any(|view| view.id == project) {
+                    return Err("no such project".into());
+                }
+                self.suggest(id, Proposal::Go(project), cx)?;
+                Ok(json!({}))
+            }
+            Command::ProjectClose { project } => {
+                if !self.api_projects.contains(&project) {
+                    return Err("only a project the API opened can be closed by it".into());
+                }
+                // The user's own threads (any that nobody started and that were used) keep it.
+                let views = self.views();
+                let view = views.iter().find(|view| view.id == project).ok_or("no such project")?;
+                if view.threads.iter().any(|thread| thread.parent.is_none() && !thread.blank) {
+                    return Err("the user has threads in it".into());
+                }
+                self.api_projects.remove(&project);
+                self.suggestions.retain(|suggestion| !matches!(suggestion.what, Proposal::Go(p) if p == project));
+                self.close_project(project, window, cx);
+                Ok(json!({}))
+            }
+            _ => Err("not a project command".into()),
+        }
+    }
+
+    /// `thread.create_isolated`: the worktree is made off the UI thread, then the thread starts
+    /// in a project of its own, and the caller is told how it went.
+    fn create_isolated(&mut self, id: u64, command: command::Command, window: &mut Window, cx: &mut Context<Self>) -> command::Reply {
+        let command::Command::ThreadCreateIsolated { prompt, agent, options, notify } = command else {
+            return Err("not a thread.create_isolated".into());
+        };
+        let key = self.child_agent(id, agent)?;
+        let project = self.project_of(id).ok_or("that thread is gone")?;
+        if self.finishing || self.isolating {
+            return Err("a worktree is being made or merged; try again in a moment".into());
+        }
+        // A worktree is made from the repository, not from another worktree.
+        let from = {
+            let project = self.project_by_id(project).ok_or("that thread is gone")?;
+            match &project.worktree {
+                Some(wt) => wt.spec.repo.clone(),
+                None => project.root.clone(),
+            }
+        };
+        self.isolating = true;
+        let request = self.next_request;
+        self.next_request += 1;
+        let handle = window.window_handle();
+        cx.spawn(async move |this, cx| {
+            let made = cx.background_executor().spawn(async move { worktree::Worktree::create(&from) }).await;
+            handle
+                .update(cx, |_, window, cx| {
+                    this.update(cx, |reader, cx| {
+                        reader.isolating = false;
+                        let told = match made {
+                            Ok(wt) => reader.start_isolated(id, wt, key, prompt, options, notify, window, cx),
+                            Err(error) => Err(error),
+                        };
+                        let text = match told {
+                            Ok((thread, project)) => format!("Isolated thread #{thread} is up in project {project} (request {request})."),
+                            Err(error) => format!("Isolated thread (request {request}) could not start: {error}"),
+                        };
+                        reader.tell(id, text, window, cx);
+                    })
+                })
+                .ok();
+        })
+        .detach();
+        Ok(serde_json::json!({ "creating": true, "request": request }))
+    }
+
+    /// Puts a made worktree up as a project and starts the child in it; returns the thread and
+    /// project. If the parent went away meanwhile the project goes too, keeping its branch.
+    #[allow(clippy::too_many_arguments)]
+    fn start_isolated(&mut self, parent: u64, wt: worktree::Worktree, key: String, prompt: String, options: Vec<(String, String)>, notify: Option<String>, window: &mut Window, cx: &mut Context<Self>) -> Result<(u64, u64), String> {
+        let mut project = Self::build_project(wt.spec.path.clone(), None, vec![], window, cx);
+        project.base = wt.spec.base.clone();
+        project.worktree = Some(wt);
+        let pid = self.add_slot(project, Mode::Diff, window, cx);
+        match self.start_child(parent, pid, key, prompt, options, notify, window, cx) {
+            Ok(reply) => Ok((reply["thread"].as_u64().unwrap_or_default(), pid)),
+            Err(error) => {
+                self.api_projects.remove(&pid);
+                self.close_project(pid, window, cx);
+                Err(error)
+            }
+        }
+    }
+
+    /// Says `text` to thread `id` as Po, wherever that thread is.
+    fn tell(&mut self, id: u64, text: String, window: &mut Window, cx: &mut Context<Self>) {
+        let out = Outgoing { text, origin: Origin::Po };
+        self.with_thread(id, |reader, _| reader.submit(out, false, window, cx));
+    }
+
+    /// Puts `what` to the user from thread `from`, once: asking again for the same thing only
+    /// makes it the newest.
+    fn suggest(&mut self, from: u64, what: Proposal, cx: &mut Context<Self>) -> Result<(), String> {
+        let same = |a: &Proposal, b: &Proposal| match (a, b) {
+            (Proposal::Go(a), Proposal::Go(b)) => a == b,
+            (Proposal::Open(a), Proposal::Open(b)) => a == b,
+            (Proposal::Pr { spec: a, .. }, Proposal::Pr { spec: b, .. }) => a == b,
+            (Proposal::Merge(a), Proposal::Merge(b)) => a == b,
+            _ => false,
+        };
+        self.suggestions.retain(|suggestion| !(suggestion.from == from && same(&suggestion.what, &what)));
+        if self.suggestions.len() >= MAX_SUGGESTIONS {
+            return Err("the user has enough waiting; try again after they answer".into());
+        }
+        let by = self.title_of(from).unwrap_or_else(|| "A thread".into());
+        let id = self.next_suggestion;
+        self.next_suggestion += 1;
+        self.suggestions.push(Suggestion { id, from, by, what });
+        cx.notify();
+        Ok(())
+    }
+
+    /// The user's answer to a suggestion. Accepting a folder opens it in the background and the
+    /// thread that asked is told either way; accepting a project goes to it.
+    fn answer_suggestion(&mut self, id: u64, yes: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(at) = self.suggestions.iter().position(|suggestion| suggestion.id == id) else { return };
+        let Suggestion { from, what, .. } = self.suggestions.remove(at);
+        let from_thread = from;
+        let told = match (what, yes) {
+            (Proposal::Go(project), true) => {
+                self.show_project(project, window, cx);
+                None
+            }
+            (Proposal::Go(_), false) => None,
+            (Proposal::Open(root), true) => {
+                let project = self.open_in_background(root.clone(), window, cx);
+                Some(format!("The user opened {}: project {project}.", root.display()))
+            }
+            (Proposal::Open(root), false) => Some(format!("The user declined to open {}.", root.display())),
+            (Proposal::Pr { spec, from }, true) => {
+                let handle = window.window_handle();
+                cx.spawn(async move |this, cx| {
+                    let result = cx.background_executor().spawn({
+                        let spec = spec.clone();
+                        async move { pr::Pr::open(&from, &spec) }
+                    }).await;
+                    handle
+                        .update(cx, |_, window, cx| {
+                            this.update(cx, |reader, cx| {
+                                let text = match result {
+                                    Ok(pr) => {
+                                        let root = pr.worktree.clone();
+                                        let project = Self::build_project(root, Some(pr), vec![], window, cx);
+                                        let id = reader.add_slot(project, Mode::Diff, window, cx);
+                                        format!("The user opened PR {spec}: project {id}.")
+                                    }
+                                    Err(error) => format!("PR {spec} could not be checked out: {error}"),
+                                };
+                                reader.tell(from_thread, text, window, cx);
+                            })
+                        })
+                        .ok();
+                })
+                .detach();
+                None
+            }
+            (Proposal::Pr { spec, .. }, false) => Some(format!("The user declined to open PR {spec}.")),
+            (Proposal::Merge(project), true) => {
+                self.finish_worktree_of(project, true, Some(from), window, cx);
+                None
+            }
+            (Proposal::Merge(project), false) => Some(format!("The user declined to merge project {project}.")),
+        };
+        if let Some(text) = told {
+            self.tell(from, text, window, cx);
+        }
+        cx.notify();
+    }
+
+    /// Adds a project over `root` as a slot, with a blank thread, leaving the screen where it is.
+    /// If it is already open, that one is returned.
+    fn open_in_background(&mut self, root: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> u64 {
+        if let Some(view) = self.views().iter().find(|view| view.project.pr.is_none() && view.project.root == root) {
+            return view.id;
+        }
+        let project = Self::build_project(root, None, vec![], window, cx);
+        self.add_slot(project, Mode::Source, window, cx)
+    }
+
+    /// Adds `project` as a slot with a blank thread, leaving the screen where it is, and marks
+    /// it as the API's.
+    fn add_slot(&mut self, project: Project, mode: Mode, window: &mut Window, cx: &mut Context<Self>) -> u64 {
+        let thread = self.blank_thread(window, cx);
+        let id = self.next_project;
+        self.next_project += 1;
+        self.slots.push(Slot { id, mode, project, thread, parked: vec![] });
+        self.api_projects.insert(id);
+        self.request_save(cx);
+        cx.notify();
+        id
+    }
+
+    /// The thread family: what an orchestrator does with the threads it started. Every write
+    /// runs on the UI thread through the swap, and nothing here switches the screen.
+    fn run_thread(&mut self, caller: command::Caller, id: u64, command: command::Command, window: &mut Window, cx: &mut Context<Self>) -> command::Answer {
+        use command::Command;
+        // A wait's deadline is capped with the command's own timeout, judged before the
+        // command is taken apart.
+        let wait_deadline = std::time::Instant::now() + command.timeout();
+        match command {
+            Command::ThreadCreate { .. } => command::Answer::Now(self.create_thread(id, command, window, cx)),
+            Command::ThreadCreateIsolated { .. } => command::Answer::Now(self.create_isolated(id, command, window, cx)),
+            Command::ThreadSend { thread: target, text, later } => {
+                if target == id {
+                    return command::Answer::Now(Err("send to a thread you started, not to yourself".into()));
+                }
+                let Some(title) = self.title_of(id) else { return command::Answer::Now(Err("that thread is gone".into())) };
+                let out = Outgoing { text, origin: Origin::Thread { id, title } };
+                let sent = self.with_thread(target, |reader, _| {
+                    // The waiters and the parent hear when this starts or ends the child's turn.
+                    Some(reader.observed(window, cx, |reader, window, cx| reader.submit(out, later.unwrap_or(false), window, cx)))
+                });
+                match sent.flatten() {
+                    Some(Where::Dispatch) => command::Answer::Now(Ok(serde_json::json!({ "state": "sent" }))),
+                    Some(Where::Wait | Where::Start) => command::Answer::Now(Ok(serde_json::json!({ "state": "pending" }))),
+                    Some(_) => command::Answer::Now(Ok(serde_json::json!({ "state": "queued" }))),
+                    None => command::Answer::Now(Err("no such thread".into())),
+                }
+            }
+            Command::ThreadAnswer { thread: target, option } => {
+                if matches!(caller, command::Caller::Thread(_)) && target == id {
+                    return command::Answer::Now(Err("answer a thread you started, not yourself".into()));
+                }
+                let answered = self.with_thread(target, |reader, _| {
+                    reader.observed(window, cx, |reader, _, cx| {
+                        // Only a permission ask: the user's approval of a command or an MCP
+                        // server is a different block, and not reachable from here.
+                        let found = reader.thread.messages.iter().enumerate().rev().find_map(|(msg, entry)| {
+                            let Msg::Agent(blocks) = entry else { return None };
+                            blocks.iter().enumerate().find_map(|(block, b)| match b {
+                                Block::Permission(ask) if ask.answered.is_none() => Some((msg, block, ask.options.iter().position(|o| o.id == option))),
+                                _ => None,
+                            })
+                        });
+                        match found {
+                            None => Err("that thread is not asking".to_string()),
+                            Some((_, _, None)) => Err(format!("`{option}` is not one of its options; thread.get lists them")),
+                            Some((msg, block, Some(at))) => {
+                                reader.answer(msg, block, at, cx);
+                                Ok(serde_json::json!({}))
+                            }
+                        }
+                    })
+                });
+                command::Answer::Now(answered.unwrap_or_else(|| Err("no such thread".into())))
+            }
+            Command::ThreadCancel { thread: target } => {
+                if matches!(caller, command::Caller::Thread(_)) && target == id {
+                    return command::Answer::Now(Err("cancel a thread you started, not yourself".into()));
+                }
+                let stopped = self.with_thread(target, |reader, _| {
+                    reader.stop(window, cx);
+                    let dropped: Vec<Value> = reader.thread.dropped.drain(..).map(serde_json::Value::String).collect();
+                    Ok(serde_json::json!({ "dropped": dropped }))
+                });
+                command::Answer::Now(stopped.unwrap_or_else(|| Err("no such thread".into())))
+            }
+            Command::ThreadSetOption { thread, id: setting, value } => {
+                let target = thread.unwrap_or(id);
+                let stored = self.with_thread(target, |reader, _| {
+                    let thread = &mut reader.thread;
+                    let Some(option) = thread.options.iter().find(|option| option.id == setting) else {
+                        return Err(format!("no option `{setting}` here; thread.options lists them"));
+                    };
+                    if !option.choices.iter().any(|(choice, _)| *choice == value) {
+                        return Err(format!("`{value}` is not one of `{setting}`'s choices"));
+                    }
+                    thread.overrides.insert(setting.clone(), value.clone());
+                    thread.api_options.insert(setting.clone());
+                    Ok(())
+                });
+                let stored = match stored {
+                    Some(Ok(())) => {
+                        // A thread that is ready and idle takes it now; one that is busy
+                        // applies what it owes between turns.
+                        self.with_thread(target, |reader, _| {
+                            if reader.thread.ready && !reader.thread.busy && reader.thread.client.is_some() {
+                                reader.apply_overrides(window, cx);
+                            }
+                            Ok(serde_json::json!({ "pending": true }))
+                        })
+                        .unwrap_or_else(|| Err("no such thread".into()))
+                    }
+                    Some(Err(why)) => Err(why),
+                    None => Err("no such thread".into()),
+                };
+                command::Answer::Now(stored)
+            }
+            Command::ThreadClose { thread: target } => {
+                if matches!(caller, command::Caller::Thread(_)) && target == id {
+                    return command::Answer::Now(Err("close a thread you started, not yourself".into()));
+                }
+                match self.project_of(target) {
+                    Some(project) => {
+                        self.close_any_thread(project, target, window, cx);
+                        command::Answer::Now(Ok(serde_json::json!({})))
+                    }
+                    None => command::Answer::Now(Err("no such thread".into())),
+                }
+            }
+            Command::ThreadWait { threads, until, timeout: _ } => {
+                let waiters_of_caller = self.waiters.iter().filter(|waiter| waiter.caller == caller).count();
+                if waiters_of_caller >= 2 {
+                    return command::Answer::Now(Err("at most 2 waits at a time".into()));
+                }
+                if self.waiters.len() >= MAX_WAITS {
+                    return command::Answer::Now(Err("Po is already holding its share of waits".into()));
+                }
+                // Waits target children only; a wait on the caller itself never ends well.
+                for target in threads.iter().flatten() {
+                    if *target == id {
+                        return command::Answer::Now(Err("waiting on yourself would never end".into()));
+                    }
+                    if !self.threads_all().any(|thread| thread.id == *target && thread.parent == Some(id)) {
+                        return command::Answer::Now(Err(format!("thread {target} is not one you started")));
+                    }
+                }
+                // Until a state, or `any` change; nothing said means "left running or starting".
+                let until = match until.as_deref() {
+                    Some("any") => vec![],
+                    Some("done") | None => vec!["ready", "asking", "approval", "failed", "asleep", "closed"],
+                    Some(state) => vec![crate::state::ThreadState::from_name(state).expect("checked").name()],
+                };
+                command::Answer::Later(command::Wait { threads: threads.unwrap_or_default(), until, deadline: wait_deadline })
+            }
+            _ => command::Answer::Now(Err("not a thread command".into())),
+        }
+    }
+
+    /// Holds a wait the window answered later, and starts its timer.
+    fn add_waiter(&mut self, caller: command::Caller, wait: command::Wait, reply: std::sync::mpsc::Sender<command::Reply>, _window: &mut Window, cx: &mut Context<Self>) {
+        let (token, handle) = (self.next_waiter, self.window);
+        self.next_waiter += 1;
+        let left = wait.deadline.saturating_duration_since(std::time::Instant::now());
+        self.waiters.push(Waiter { token, caller, threads: wait.threads, until: wait.until, reply });
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(left).await;
+            let _ = handle.update(cx, |_, window, cx| this.update(cx, |reader, cx| reader.time_out(token, window, cx)));
+        })
+        .detach();
+    }
+
+    /// Replies to a wait that ran out, unless it was already answered.
+    fn time_out(&mut self, token: u64, _window: &mut Window, _cx: &mut Context<Self>) {
+        if let Some(at) = self.waiters.iter().position(|waiter| waiter.token == token) {
+            let waiter = self.waiters.remove(at);
+            waiter.reply.send(Ok(serde_json::json!({ "timed_out": true }))).ok();
+        }
+    }
+
+    /// Ends the waits of a caller whose turn stopped, failed or exited, or whose grant was
+    /// lowered: they would never be answered in time, and the caller is told why.
+    fn drop_waiters(&mut self, caller: command::Caller, why: &str) {
+        let mut kept = Vec::new();
+        for waiter in self.waiters.drain(..) {
+            if waiter.caller == caller {
+                waiter.reply.send(Err(format!("cancelled: {why}"))).ok();
+            } else {
+                kept.push(waiter);
+            }
+        }
+        self.waiters = kept;
+    }
+
+    /// Answers the waits `id`'s change satisfies. A waiter whose receiving side is gone is
+    /// dropped here, rather than held for a sweep.
+    fn wake_waiters(&mut self, id: u64, after: crate::state::ThreadState) {
+        // The parent of the thread that changed, computed before the waits are taken out, so
+        // the two looks at the threads don't meet.
+        let parent = self.threads_all().find(|thread| thread.id == id).and_then(|thread| thread.parent);
+        let mut kept = Vec::new();
+        for waiter in self.waiters.drain(..) {
+            let watched = matches!(waiter.caller, command::Caller::User)
+                || matches!(waiter.caller, command::Caller::Thread(caller) if parent == Some(caller));
+            let hit = (waiter.threads.contains(&id) || (waiter.threads.is_empty() && watched))
+                && (waiter.until.is_empty() || waiter.until.contains(&after.name()));
+            if hit && waiter.reply.send(Ok(serde_json::json!({ "thread": id, "state": after.name(), "timed_out": false }))).is_ok() {
+                continue;
+            }
+            kept.push(waiter);
+        }
+        self.waiters = kept;
+    }
+
+    /// Runs `work` on the thread swapped in, watching its state: if it changed, the waiters
+    /// and the parent hear about it.
+    fn observed<R>(&mut self, window: &mut Window, cx: &mut Context<Self>, work: impl FnOnce(&mut Self, &mut Window, &mut Context<Self>) -> R) -> R {
+        let before = crate::state::state(&self.thread.facts());
+        let out = work(self, window, cx);
+        let after = crate::state::state(&self.thread.facts());
+        if before != after {
+            self.changed(self.thread.id, after, window, cx);
+        }
+        out
+    }
+
+    /// Tells whoever listens that `id` now stands in `after`: its waiters, then its parent.
+    fn changed(&mut self, id: u64, after: crate::state::ThreadState, window: &mut Window, cx: &mut Context<Self>) {
+        self.wake_waiters(id, after);
+        self.publish(id, after);
+        self.notify_parent(id, after, window, cx);
+    }
+
+    /// Tells every `po ctl watch` that thread `id` is now in `after`; one that has hung up is
+    /// dropped.
+    fn publish(&mut self, id: u64, after: crate::state::ThreadState) {
+        if self.subscribers.is_empty() {
+            return;
+        }
+        let event = serde_json::json!({
+            "event": "thread.state",
+            "thread": id,
+            "state": after.name(),
+            "title": self.title_of(id),
+            "project": self.project_of(id),
+            "at": now_ms(),
+        });
+        self.subscribers.retain(|subscriber| subscriber.send(Ok(event.clone())).is_ok());
+    }
+
+    /// Puts a line about `id`'s state on the notice of the thread that started it, unless it
+    /// asked not to hear or the change isn't one it asked about.
+    fn notify_parent(&mut self, id: u64, after: crate::state::ThreadState, _window: &mut Window, cx: &mut Context<Self>) {
+        let Some((Some(parent), level)) = self.with_thread(id, |reader, _| Some((reader.thread.parent, reader.thread.notify))).flatten() else { return };
+        if level == Notify::Never {
+            return;
+        }
+        // `done` hears when the turn is over, the child asks, or it is failed, asleep or
+        // closed; `all` also hears that a turn started. A parent's own messages never quote
+        // the child: what it said is read with last_reply, on purpose.
+        if level == Notify::Done && matches!(after, crate::state::ThreadState::Running | crate::state::ThreadState::Starting) {
+            return;
+        }
+        let word = match after {
+            crate::state::ThreadState::Running => "started a turn",
+            crate::state::ThreadState::Asking | crate::state::ThreadState::Approval => "asks for an answer",
+            crate::state::ThreadState::Failed => "failed",
+            crate::state::ThreadState::Asleep => "went to sleep",
+            crate::state::ThreadState::Closed => "is closed",
+            crate::state::ThreadState::Starting => "is starting",
+            crate::state::ThreadState::Ready => "finished its turn",
+        };
+        let line = format!("[Po] Thread #{id} {word}. Use last_reply or get_thread to read what it said.");
+        let notice = self.notices.entry(parent).or_insert_with(|| Notice { text: String::new() });
+        if !notice.text.is_empty() {
+            notice.text.push('\n');
+        }
+        notice.text.push_str(&line);
+        // Changes that happen within the coalesce window go out together.
+        if self.notice_scheduled.insert(parent) {
+            let (handle, parent) = (self.window, parent);
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(NOTICE_COALESCE).await;
+                let _ = handle.update(cx, |_, window, cx| this.update(cx, |reader, cx| reader.flush_notice(parent, window, cx)));
+            })
+            .detach();
+        }
+    }
+
+    /// Sends a parent the notice it has been waiting for, once the rate limit lets it speak.
+    fn flush_notice(&mut self, parent: u64, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.notices.contains_key(&parent) {
+            self.notice_scheduled.remove(&parent);
+            return;
+        }
+        // Every notice is a turn of the parent's: more frequent ones merge into the next.
+        if let Some(left) = NOTICE_RATE.checked_sub(self.notice_sent_at.get(&parent).map_or(NOTICE_RATE, |at| at.elapsed())) {
+            let (handle, parent) = (self.window, parent);
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(left).await;
+                let _ = handle.update(cx, |_, window, cx| this.update(cx, |reader, cx| reader.flush_notice(parent, window, cx)));
+            })
+            .detach();
+            return;
+        }
+        let Some(notice) = self.notices.remove(&parent) else { return };
+        self.notice_scheduled.remove(&parent);
+        self.notice_sent_at.insert(parent, Instant::now());
+        let out = Outgoing { text: notice.text, origin: Origin::Po };
+        self.with_thread(parent, |reader, _| {
+            reader.submit(out, false, window, cx);
+            Some(())
+        });
+        cx.notify();
+    }
+
+    /// What a thread is called, for labelling text it sends to a child.
+    fn title_of(&self, id: u64) -> Option<String> {
+        self.threads_all().find(|thread| thread.id == id).map(|thread| thread.title())
+    }
+
+    /// The project `id`'s thread belongs to, if it is still here.
+    fn project_of(&self, id: u64) -> Option<u64> {
+        self.views().into_iter().find(|view| view.threads.iter().any(|thread| thread.id == id)).map(|view| view.id)
+    }
+
+    /// The project the caller's thread belongs to, if it is still here.
+    fn own_project(&self, id: u64) -> Option<u64> {
+        self.views().into_iter().find(|view| view.threads.iter().any(|thread| thread.id == id)).map(|view| view.id)
+    }
+
+    /// One thread as the read model sees it: a snapshot of the fields an outsider gets.
+    fn thread_info(&self, view: &View<'_>, thread: &Thread) -> state::ThreadInfo {
+        let asking = thread.messages.iter().rev().find_map(|msg| {
+            let Msg::Agent(blocks) = msg else { return None };
+            blocks.iter().find_map(|block| match block {
+                Block::Permission(Ask { request: _, title, options, answered: None }) => {
+                    Some(state::AskInfo { title: title.clone(), options: options.iter().map(|o| state::AskOption { id: o.id.clone(), name: o.name.clone(), kind: o.kind.clone() }).collect() })
+                }
+                _ => None,
+            })
+        });
+        let children = self.threads_all().filter(|child| child.parent == Some(thread.id)).map(|child| child.id).collect();
+        state::ThreadInfo {
+            id: thread.id,
+            project: view.id,
+            title: thread.title(),
+            agent: thread.agent.clone().unwrap_or_default(),
+            state: state::state(&thread.facts()),
+            unread: thread.unread,
+            busy: thread.busy,
+            status: thread.status.clone(),
+            last_error: thread.last_error.clone(),
+            session: thread.session.clone(),
+            preview: thread.preview(),
+            queued: thread.queue.len(),
+            dropped: thread.dropped.clone(),
+            asking,
+            parent: thread.parent,
+            children,
+            active_at: thread.active_at,
+            on_screen: thread.id == view.shown,
+            usage: thread.usage,
+        }
+    }
+
+    /// One project as the read model sees it.
+    fn project_info(&self, view: &View<'_>) -> state::ProjectInfo {
+        state::ProjectInfo {
+            id: view.id,
+            root: view.project.root.to_string_lossy().into_owned(),
+            name: view.project.name(),
+            branch: match &view.project.worktree {
+                Some(wt) => Some(wt.spec.branch.clone()),
+                None => self.heads.get(&view.project.root).map(|head| head.name.clone()).or(view.project.pr.as_ref().map(|_| String::new())),
+            },
+            dirty: !view.project.changes.is_empty(),
+            pr: view.project.pr.as_ref().map(|pr| pr.number),
+            worktree_of: view.project.worktree.as_ref().map(|wt| {
+                self.views().iter().find(|other| other.project.root == wt.spec.repo).map(|other| other.id).unwrap_or(0)
+            }),
+            on_screen: view.id == self.project_id,
+            threads: view.threads.len(),
+        }
     }
 
     /// Renders the thread's views again after they changed, and drops what belongs to views that are gone.
@@ -2241,6 +3457,8 @@ impl Reader {
     /// agent's session list to resume from when `resume`.
     fn connect(&mut self, key: &str, resume: bool, window: &mut Window, cx: &mut Context<Self>) {
         self.thread.generation += 1;
+        self.thread.failed = false;
+        self.thread.last_error = None;
         let generation = self.thread.generation;
         let id = self.thread.id;
         self.thread.client = None;
@@ -2277,8 +3495,12 @@ impl Reader {
             return;
         }
         self.thread.status = if resume { "listing sessions…" } else { "starting…" }.into();
-        let control = self.control.as_ref().map(|control| control.register(id)).unwrap_or_default();
-        match Client::spawn(&agent, &self.project.root, resume, &control) {
+        // The token the agent's MCP server gets is made once the child exists, so that it is
+        // bound to the child's process: from then on it works only from that process and its
+        // descendants (see `control`).
+        let control = self.control.clone();
+        let registered = move |pid: Option<u32>| control.as_ref().map(|control| control.register(id, pid)).unwrap_or_default();
+        match Client::spawn(&agent, &self.project.root, resume, registered) {
             Ok((client, mut events)) => {
                 self.thread.client = Some(client);
                 let handle = window.window_handle();
@@ -2315,7 +3537,8 @@ impl Reader {
                                     .with_thread(id, |reader, visible| {
                                         let current = reader.thread.generation == generation;
                                         if current {
-                                            reader.on_event(event, visible, window, cx);
+                                            // The waiters and the parent hear of a change of state.
+                                            reader.observed(window, cx, |reader, window, cx| reader.on_event(event, visible, window, cx));
                                         }
                                         current
                                     })
@@ -2335,7 +3558,7 @@ impl Reader {
                 self.thread.fail(format!("{error:#}"));
             }
         }
-        self.enforce_cap();
+        self.enforce_cap(window, cx);
         cx.notify();
     }
 
@@ -2363,13 +3586,24 @@ impl Reader {
     /// Sets a new session's settings to what was last chosen for its agent, in the order of
     /// [`Thread::ordered`]. A first message waits until they are taken.
     fn apply_choices(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.thread.applying = Some(Applying { carrying: true, ..Default::default() });
+        self.apply_next(window, cx);
+    }
+
+    /// Applies what the API asked a thread's session to change, without carrying over the
+    /// choices of earlier threads; when the session has none to take, the waiting message goes.
+    fn apply_overrides(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.thread.overrides.is_empty() {
+            return self.send_pending(window, cx);
+        }
         self.thread.applying = Some(Applying::default());
         self.apply_next(window, cx);
     }
 
-    /// Asks the agent for the next setting to carry over that it doesn't already have, judged
-    /// by what it offers now, so that one it only offers after a change is carried over too.
-    /// Once none are left, the first message goes.
+    /// Asks the agent for the next setting to take: what the API asked for first, then (while
+    /// `carrying`) what was last chosen for its agent — judged by what it offers now, so that
+    /// one it only offers after a change is carried over too. Once none are left, the first
+    /// message goes.
     fn apply_next(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let thread = &mut self.thread;
         let (Some(applying), Some(key), Some(client)) = (thread.applying.as_mut(), &thread.agent, &thread.client) else {
@@ -2380,8 +3614,15 @@ impl Reader {
         let options: Vec<&ConfigOption> = thread.options.iter().filter(|option| !applying.settled.contains(&option.id)).collect();
         for option in Thread::ordered(options) {
             applying.settled.insert(option.id.clone());
-            let Some(value) = chosen.and_then(|chosen| chosen.get(&option.id)) else { continue };
-            if *value != option.current && option.choices.iter().any(|(choice, _)| choice == value) && client.set_option(&option.id, value) {
+            // What the API asked for beats what was carried over; when this session was woken
+            // only for the API's settings, carried choices don't come in at all.
+            let want = if applying.carrying {
+                thread.overrides.get(&option.id).or(chosen.and_then(|chosen| chosen.get(&option.id)))
+            } else {
+                thread.overrides.get(&option.id)
+            };
+            let Some(value) = want.cloned() else { continue };
+            if value != option.current && option.choices.iter().any(|(choice, _)| *choice == value) && client.set_option(&option.id, &value) {
                 applying.asked = Some(option.id.clone());
                 applying.asks += 1;
                 // An agent that never answers would hold the first message back for good.
@@ -2413,6 +3654,8 @@ impl Reader {
         }
         thread.applying = None;
         self.send_pending(window, cx);
+        // The queued messages waited for the settings; they go now.
+        self.send_next(window, cx);
     }
 
     /// Sends the first message, once the agent is ready and has the settings it starts with.
@@ -2420,10 +3663,10 @@ impl Reader {
         if !self.thread.ready || self.thread.applying.is_some() {
             return;
         }
-        if let Some(prompt) = self.thread.pending.take()
-            && !self.send_to_agent(&prompt)
+        if let Some(out) = self.thread.pending.take()
+            && !self.send_to_agent(&out)
         {
-            self.thread.pending = Some(prompt);
+            self.thread.pending = Some(out);
             self.return_pending();
             self.thread.fail("The agent has no session yet.".into());
             self.restore_queue(window, cx);
@@ -2473,10 +3716,10 @@ impl Reader {
         self.connect(&key, true, window, cx);
     }
 
-    /// Starts the blank thread on screen with `prompt`, the draft, as its first message: in
-    /// the session its agent already has open, or in a worktree of its own if that was asked
-    /// for. `later` is as for [`Self::send`].
-    fn start_thread(&mut self, prompt: String, later: bool, window: &mut Window, cx: &mut Context<Self>) {
+    /// Starts the blank thread on screen with `out` as its first message: in the session its
+    /// agent already has open, or in a worktree of its own if that was asked for. `later` is as
+    /// for [`Self::send`].
+    fn start_thread(&mut self, out: Outgoing, later: bool, window: &mut Window, cx: &mut Context<Self>) {
         let Some(key) = self.thread.agent.clone().or_else(|| self.chosen().map(|agent| agent.id.clone())) else {
             self.thread.fail("No agents are configured.".into());
             cx.notify();
@@ -2485,12 +3728,16 @@ impl Reader {
         if self.finishing {
             return;
         }
-        self.chosen_agent = Some(key.clone());
+        // The agent the user last chose is theirs to change; text sent through the API never
+        // moves that default.
+        if matches!(out.origin, Origin::User) {
+            self.chosen_agent = Some(key.clone());
+        }
         if self.thread.isolate && worktree::in_repo(&self.project.root) {
             // The draft stays until the worktree exists, so a failure loses nothing.
             let blank = (self.project_id, self.thread.id);
             self.thread.status = "creating worktree…".into();
-            self.new_worktree_thread(&key, Some((prompt, blank)), window, cx);
+            self.new_worktree_thread(&key, Some((out, blank)), window, cx);
             return;
         }
         log::info!("agent: new thread with {key}");
@@ -2500,23 +3747,101 @@ impl Reader {
         }
         // One that couldn't be started has said why, and the next message tries again.
         if self.thread.client.is_none() {
+            // Text the user typed stays in their draft; text sent through the API has nowhere
+            // else to be, so it waits here for the agent to be approved and started.
+            if !matches!(out.origin, Origin::User) {
+                self.thread.pending = Some(out);
+            }
             return;
         }
         self.thread.blank = false;
-        self.send(later, window, cx);
+        self.submit(out, later, window, cx);
         self.request_save(cx);
     }
 
-    /// Puts a first message back in the draft after the agent failed before it could be sent.
+    /// Starts a child of the thread `id`: parked in its project, never shown, its grant
+    /// Viewer, its first message waiting for the agent. The reply says where it got to: a
+    /// thread with an agent that isn't approved says `approval` until the user has clicked.
+    fn create_thread(&mut self, id: u64, command: command::Command, window: &mut Window, cx: &mut Context<Self>) -> command::Reply {
+        let command::Command::ThreadCreate { prompt, agent, options, notify } = command else {
+            return Err("not a thread.create".into());
+        };
+        let key = self.child_agent(id, agent)?;
+        let Some(project) = self.project_of(id) else { return Err("that thread is gone".into()) };
+        self.start_child(id, project, key, prompt, options, notify, window, cx)
+    }
+
+    /// The agent a thread of `id`'s may start, if it may start another: one `agent.list` knows,
+    /// the caller's own by default.
+    fn child_agent(&self, id: u64, agent: Option<String>) -> Result<String, String> {
+        let key = match agent {
+            Some(key) => key,
+            None => self.threads_all().find(|thread| thread.id == id).and_then(|thread| thread.agent.clone()).unwrap_or_default(),
+        };
+        if self.agents.iter().all(|known| known.id != key) {
+            return Err(format!("no agent `{key}`; agent.list has the ids"));
+        }
+        if self.threads_all().filter(|thread| thread.parent == Some(id)).count() >= MAX_CHILDREN {
+            return Err(format!("a thread starts at most {MAX_CHILDREN} others; close one first"));
+        }
+        Ok(key)
+    }
+
+    /// Starts a thread of parent `id`'s in project `project`, parked, with `prompt` as its
+    /// first message.
+    #[allow(clippy::too_many_arguments)]
+    fn start_child(&mut self, id: u64, project: u64, key: String, prompt: String, options: Vec<(String, String)>, notify: Option<String>, window: &mut Window, cx: &mut Context<Self>) -> command::Reply {
+        let level = notify.as_deref().and_then(Notify::from_name).unwrap_or_default();
+        let title = self.title_of(id).unwrap_or_default();
+        let out = Outgoing { text: prompt, origin: Origin::Thread { id, title } };
+        let mut fresh = self.blank_thread(window, cx);
+        fresh.blank = false;
+        fresh.parent = Some(id);
+        fresh.notify = level;
+        for (setting, value) in options {
+            fresh.overrides.insert(setting.clone(), value);
+            fresh.api_options.insert(setting);
+        }
+        let fresh_id = fresh.id;
+        if project == self.project_id {
+            self.parked.push(fresh);
+        } else if let Some(slot) = self.slots.iter_mut().find(|slot| slot.id == project) {
+            slot.parked.push(fresh);
+        } else {
+            return Err("that thread is gone".into());
+        }
+        let state = self.with_thread(fresh_id, |reader, _| {
+            reader.observed(window, cx, |reader, window, cx| {
+                reader.connect(&key, false, window, cx);
+                if reader.thread.client.is_some() {
+                    // Shown as sent, as a message typed while the agent starts is.
+                    reader.begin_turn(&out.text);
+                    reader.thread.pending = Some(out);
+                } else {
+                    // The agent isn't approved or won't run yet; the message waits for it, the
+                    // way one typed while the agent starts does.
+                    reader.thread.pending = Some(out);
+                }
+            });
+            crate::state::state(&reader.thread.facts()).name().to_string()
+        });
+        self.request_save(cx);
+        cx.notify();
+        Ok(serde_json::json!({ "thread": fresh_id, "state": state.unwrap_or_else(|| "starting".into()) }))
+    }
+
+    /// Puts a first message back in the queue after the agent failed before it could be sent,
+    /// still labelled by where it came from.
     fn return_pending(&mut self) {
-        let Some(prompt) = self.thread.pending.take() else { return };
+        let Some(out) = self.thread.pending.take() else { return };
+        let prompt = out.text.clone();
         let shown = matches!(self.thread.messages.as_slice(), [.., Msg::User(text), Msg::Agent(blocks)] if *text == prompt && blocks.is_empty());
         if shown {
             let keep = self.thread.messages.len() - 2;
             self.thread.messages.truncate(keep);
             self.thread.relist(keep);
         }
-        self.thread.queue.insert(0, Queued { content: prompt, kind: None });
+        self.thread.queue.insert(0, Queued { out, kind: None });
     }
 
     /// Sends the draft on Enter, while its thread is the one on screen.
@@ -2539,6 +3864,14 @@ impl Reader {
         self.next_thread += 1;
         Thread {
             id,
+            parent: None,
+            failed: false,
+            last_error: None,
+            dropped: vec![],
+            usage: None,
+            notify: Notify::default(),
+            overrides: HashMap::new(),
+            api_options: HashSet::new(),
             unread: false,
             session: None,
             restore: None,
@@ -2678,6 +4011,8 @@ impl Reader {
     fn restore(&mut self, saved: workspace::Workspace, window: &mut Window, cx: &mut Context<Self>) -> bool {
         let mut resumed = false;
         let mut seen = HashSet::new();
+        // Children of threads that came back with them, by the parent's session.
+        let mut linked: Vec<(u64, String)> = vec![];
         self.side_open = saved.viewer_open;
         self.swapped = saved.swapped;
         self.agent_open = saved.agent_open;
@@ -2725,7 +4060,10 @@ impl Reader {
                     if t.active_at == 0 {
                         t.active_at = ix as u64 + 1;
                     }
-                    self.sleeping_thread(t, window, cx)
+                    let parent = t.parent_session.clone();
+                    let thread = self.sleeping_thread(t, window, cx);
+                    linked.extend(parent.map(|parent| (thread.id, parent)));
+                    thread
                 })
                 .collect();
             let shown = (!threads.is_empty()).then(|| threads.remove(state.active.min(threads.len() - 1)));
@@ -2751,7 +4089,21 @@ impl Reader {
             let mode = if state.review { Mode::Diff } else { Mode::Source };
             self.slots.push(Slot { id, mode, project, thread, parked: threads });
         }
+        self.relink_children(linked);
         resumed
+    }
+
+    /// Links each `(child, parent session)` to the thread of this window that has that session.
+    /// A parent that is not here leaves its child an ordinary thread.
+    fn relink_children(&mut self, linked: Vec<(u64, String)>) {
+        let parents: HashMap<String, u64> = self.threads_all().filter_map(|thread| Some((thread.session.clone()?, thread.id))).collect();
+        let wanted: HashMap<u64, u64> = linked.into_iter().filter_map(|(child, session)| Some((child, *parents.get(&session)?))).filter(|(child, parent)| child != parent).collect();
+        if wanted.is_empty() {
+            return;
+        }
+        let link = |thread: &mut Thread| thread.parent = wanted.get(&thread.id).copied().or(thread.parent);
+        link(&mut self.thread);
+        self.background_threads().for_each(link);
     }
 
     /// Every open project with its threads, oldest first.
@@ -2781,6 +4133,7 @@ impl Reader {
     /// What is worth keeping of the projects and threads: those with an agent session.
     fn workspace(&self, cx: &App) -> workspace::Workspace {
         // A PR is a throwaway checkout; it is not brought back.
+        let all: Vec<&Thread> = self.threads_all().collect();
         let projects = self
             .views()
             .into_iter()
@@ -2796,7 +4149,8 @@ impl Reader {
                     threads: threads
                         .into_iter()
                         .filter_map(|t| {
-                            Some(workspace::ThreadState { agent: t.agent.clone()?, session: t.session.clone()?, title: t.title(), active_at: t.active_at })
+                            let parent_session = t.parent.and_then(|parent| all.iter().find(|p| p.id == parent)).and_then(|p| p.session.clone());
+                            Some(workspace::ThreadState { agent: t.agent.clone()?, session: t.session.clone()?, title: t.title(), active_at: t.active_at, parent_session })
                         })
                         .collect(),
                 }
@@ -2823,30 +4177,37 @@ impl Reader {
     }
 
     /// Stops the agents of threads that have been idle in the background for too long.
-    fn sleep_idle(&mut self, cx: &mut Context<Self>) {
+    fn sleep_idle(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(after) = self.idle_after else { return };
-        let mut slept = false;
+        let mut slept: Vec<u64> = vec![];
         for thread in self.background_threads().filter(|t| t.restful() && t.touched.elapsed() > after) {
             log::info!("agent: stopping idle thread {}", thread.id);
             thread.sleep();
-            slept = true;
+            slept.push(thread.id);
         }
-        if slept {
+        for id in slept {
+            // The parent of a sleeping child hears, so it can wait or wake it.
+            self.changed(id, crate::state::ThreadState::Asleep, window, cx);
             cx.notify();
         }
     }
 
     /// Stops the longest idle agents in the background while more than `max_live` run.
-    fn enforce_cap(&mut self) {
+    fn enforce_cap(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let mut live = usize::from(self.thread.client.is_some());
         live += self.background_threads().filter(|t| t.client.is_some()).count();
         let Some(excess) = live.checked_sub(self.max_live).filter(|n| *n > 0) else { return };
         let mut idle: Vec<&mut Thread> = self.background_threads().filter(|t| t.restful()).collect();
         // Blank threads lose nothing by stopping, so they go first.
         idle.sort_by_key(|t| (!t.blank, t.touched));
+        let mut slept = vec![];
         for thread in idle.into_iter().take(excess) {
             log::info!("agent: stopping thread {} to stay under the limit", thread.id);
             thread.sleep();
+            slept.push(thread.id);
+        }
+        for id in slept {
+            self.changed(id, crate::state::ThreadState::Asleep, window, cx);
         }
     }
 
@@ -2868,6 +4229,7 @@ impl Reader {
 
     /// Ends thread `tid` of project `pid`, whichever is on screen.
     fn close_any_thread(&mut self, pid: u64, tid: u64, window: &mut Window, cx: &mut Context<Self>) {
+        let before = self.threads_all().find(|thread| thread.id == tid).map(|thread| crate::state::state(&thread.facts()));
         if pid == self.project_id {
             return self.close_thread(tid, window, cx);
         }
@@ -2880,6 +4242,9 @@ impl Reader {
             && let Some(next) = slot.parked.pop().or(blank)
         {
             slot.thread = next;
+        }
+        if before.is_some() && before != Some(crate::state::ThreadState::Closed) {
+            self.changed(tid, crate::state::ThreadState::Closed, window, cx);
         }
         self.request_save(cx);
         cx.notify();
@@ -2895,6 +4260,7 @@ impl Reader {
 
     /// Ends thread `id`, stopping its agent. Closing the one on screen brings up another.
     fn close_thread(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
+        let before = self.threads_all().find(|thread| thread.id == id).map(|thread| crate::state::state(&thread.facts()));
         if let Some(at) = self.parked.iter().position(|thread| thread.id == id) {
             self.parked.remove(at);
         } else if self.thread.id == id {
@@ -2905,6 +4271,10 @@ impl Reader {
             self.thread = next;
             self.thread.unread = false;
             self.wake_thread(window, cx);
+        }
+        // Whoever waited on it hears, as does its parent.
+        if before.is_some() && before != Some(crate::state::ThreadState::Closed) {
+            self.changed(id, crate::state::ThreadState::Closed, window, cx);
         }
         self.request_save(cx);
         cx.notify();
@@ -2977,6 +4347,7 @@ impl Reader {
             }
             Event::OptionSet { id, value } => {
                 if !self.took_setting(&id, window, cx)
+                    && !self.thread.api_options.contains(&id)
                     && let Some(key) = self.thread.agent.clone()
                 {
                     self.choices.entry(key.clone()).or_default().insert(id.clone(), value.clone());
@@ -2998,10 +4369,15 @@ impl Reader {
                 if fresh {
                     self.apply_choices(window, cx);
                 } else {
-                    self.send_pending(window, cx);
+                    // A resumed session applies what the API asked for; with none, the waiting
+                    // message goes.
+                    self.apply_overrides(window, cx);
                 }
             }
             Event::Update(update) => {
+                if let Some(usage) = state::Usage::from_update(&update) {
+                    self.thread.usage = Some(usage);
+                }
                 if let Some(ix) = self.thread.tool_message(&update) {
                     changed = changed.min(ix);
                 }
@@ -3017,25 +4393,36 @@ impl Reader {
             Event::Stopped(reason) => {
                 self.thread.busy = false;
                 self.thread.unread = !visible;
-                self.alert(window, visible, "Finished");
+                // A child's parent is told instead; the desktop hears of it only when nobody
+                // is waiting on the child.
+                let parent_hears = self.thread.parent.is_some() && self.thread.notify != Notify::Never;
+                if !(parent_hears || visible) {
+                    self.alert(window, visible, "Finished");
+                }
                 log::info!("agent: stopped ({reason})");
                 // What the daemon didn't take into the turn is no longer in its queue.
                 for item in &mut self.thread.queue {
                     item.kind = None;
                 }
-                self.send_next(window, cx);
+                // What the API asked the session to change applies between turns.
+                if self.thread.client.is_some() && !self.thread.overrides.is_empty() {
+                    self.apply_overrides(window, cx);
+                } else {
+                    self.send_next(window, cx);
+                }
                 // The order of the thread list is saved with the time the turn ended.
                 self.request_save(cx);
+                self.drop_waiters(command::Caller::Thread(self.thread.id), "the turn ended");
             }
             Event::Accepted { content, queue } => {
-                if let Some(at) = self.thread.queue.iter().position(|q| q.kind == Some(queue) && q.content == content) {
+                if let Some(at) = self.thread.queue.iter().position(|q| q.kind == Some(queue) && q.out.text == content) {
                     self.thread.queue.remove(at);
                 }
                 self.thread.messages.push(Msg::User(content));
             }
             Event::Rejected { content, queue } => {
                 // No turn to join: it waits for the turn to end like any other queued message.
-                if let Some(item) = self.thread.queue.iter_mut().find(|q| q.kind == Some(queue) && q.content == content) {
+                if let Some(item) = self.thread.queue.iter_mut().find(|q| q.kind == Some(queue) && q.out.text == content) {
                     item.kind = None;
                 }
                 self.send_next(window, cx);
@@ -3049,6 +4436,7 @@ impl Reader {
                 self.restore_queue(window, cx);
                 self.thread.applying = None;
                 self.unstart();
+                self.drop_waiters(command::Caller::Thread(self.thread.id), "the turn failed");
             }
             Event::Exited(status) => {
                 log::warn!("agent exited: {status}");
@@ -3061,6 +4449,7 @@ impl Reader {
                 }
                 self.thread.applying = None;
                 self.unstart();
+                self.drop_waiters(command::Caller::Thread(self.thread.id), "the agent exited");
             }
         }
         self.thread.relist(changed);
@@ -3330,40 +4719,65 @@ impl Reader {
         if prompt.is_empty() {
             return;
         }
-        if self.thread.blank || self.thread.unstarted() {
-            return self.start_thread(prompt, later, window, cx);
-        }
+        self.submit(Outgoing::user(prompt), later, window, cx);
+    }
+
+    /// Takes a message headed for the agent wherever the thread is: a blank or unstarted one
+    /// starts; one still starting, loading or waking from sleep waits; a busy one is steered
+    /// (dex) or queued; a ready idle one dispatches now. The draft is cleared exactly where it
+    /// was before, so a message that can't be sent yet stays where the user can edit it.
+    fn submit(&mut self, out: Outgoing, later: bool, window: &mut Window, cx: &mut Context<Self>) -> Where {
         let thread = &self.thread;
         let starting = thread.client.is_some()
             && (thread.applying.is_some() || !thread.ready && !thread.loading && !thread.picking && thread.restore.is_none());
-        if starting && !self.thread.busy {
-            // The agent is still starting, or taking its settings: the message waits for it,
-            // shown as sent.
-            self.thread.draft.update(cx, |input, cx| input.set_value("", window, cx));
-            self.begin_turn(&prompt);
-            self.thread.pending = Some(prompt);
-            cx.notify();
-            return;
-        }
-        if !self.thread.busy {
-            if self.dispatch(prompt, cx) {
-                self.thread.draft.update(cx, |input, cx| input.set_value("", window, cx));
+        let takes_messages = thread.client.as_ref().is_some_and(|client| client.queues()) && thread.pending.is_none();
+        let where_ = route(thread.blank, thread.unstarted(), thread.asleep(), starting, thread.busy, takes_messages, later);
+        // Only the user's text is taken out of the draft; text from a thread or from Po was
+        // never in it, and their draft is theirs.
+        let from_user = matches!(out.origin, Origin::User);
+        match where_ {
+            Where::Start => {
+                self.start_thread(out, later, window, cx);
+                Where::Start
             }
-            return;
-        }
-        self.thread.draft.update(cx, |input, cx| input.set_value("", window, cx));
-        // An agent that can't take messages mid-turn gets them when the turn is over; neither
-        // can one that hasn't been given the first message yet.
-        let kind = match self.thread.client.as_ref().filter(|client| client.queues() && self.thread.pending.is_none()) {
-            Some(client) => {
-                let kind = if later { Queue::Followup } else { Queue::Steer };
-                client.enqueue(&prompt, kind);
-                Some(kind)
+            Where::Wait => {
+                // The agent is still starting, or taking its settings: the message waits for
+                // it, shown as sent. A sleeping thread is woken by it.
+                if thread.asleep() {
+                    self.wake_thread(window, cx);
+                }
+                if from_user {
+                    self.thread.draft.update(cx, |input, cx| input.set_value("", window, cx));
+                }
+                self.begin_turn(&out.text);
+                self.thread.pending = Some(out);
+                cx.notify();
+                Where::Wait
             }
-            None => None,
-        };
-        self.thread.queue.push(Queued { content: prompt, kind });
-        cx.notify();
+            Where::Dispatch => {
+                if self.dispatch(out, cx) && from_user {
+                    self.thread.draft.update(cx, |input, cx| input.set_value("", window, cx));
+                }
+                Where::Dispatch
+            }
+            Where::Take(kind) => {
+                if from_user {
+                    self.thread.draft.update(cx, |input, cx| input.set_value("", window, cx));
+                }
+                self.thread.client.as_ref().unwrap().enqueue(&out.text, kind);
+                self.thread.queue.push(Queued { out, kind: Some(kind) });
+                cx.notify();
+                Where::Take(kind)
+            }
+            Where::Queue => {
+                if from_user {
+                    self.thread.draft.update(cx, |input, cx| input.set_value("", window, cx));
+                }
+                self.thread.queue.push(Queued { out, kind: None });
+                cx.notify();
+                Where::Queue
+            }
+        }
     }
 
     /// Takes a queued message back into the draft to edit.
@@ -3373,10 +4787,10 @@ impl Reader {
         }
         let item = self.thread.queue.remove(ix);
         if let (Some(kind), Some(client)) = (item.kind, &self.thread.client) {
-            client.recall(&item.content, kind);
+            client.recall(&item.out.text, kind);
         }
         let draft = self.thread.draft.read(cx).value().to_string();
-        let text = if draft.trim().is_empty() { item.content } else { format!("{}\n{draft}", item.content) };
+        let text = if draft.trim().is_empty() { item.out.text } else { format!("{}\n{draft}", item.out.text) };
         self.thread.draft.update(cx, |input, cx| input.set_value(text, window, cx));
         cx.notify();
     }
@@ -3388,14 +4802,16 @@ impl Reader {
             return;
         }
         let Some(at) = self.thread.queue.iter().position(|q| q.kind.is_none()) else { return };
-        let next = self.thread.queue.remove(at);
-        if !self.dispatch(next.content.clone(), cx) {
+        let mut next = self.thread.queue.remove(at);
+        if !self.dispatch(std::mem::replace(&mut next.out, Outgoing::user(String::new())), cx) {
             self.thread.queue.insert(0, next);
             self.restore_queue(window, cx);
         }
     }
 
     /// Moves everything queued back into the draft, taking back what the daemon still holds.
+    /// The user's own queued messages are theirs to edit again; text sent through the API is
+    /// dropped, and reported to its sender (phase 2's notifications) rather than typed over.
     fn restore_queue(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.thread.queue.is_empty() {
             return;
@@ -3404,9 +4820,18 @@ impl Reader {
         let mut text = Vec::new();
         for item in items {
             if let (Some(kind), Some(client)) = (item.kind, &self.thread.client) {
-                client.recall(&item.content, kind);
+                client.recall(&item.out.text, kind);
             }
-            text.push(item.content);
+            if matches!(item.out.origin, Origin::User) {
+                text.push(item.out.text);
+            } else {
+                // Kept for `thread.get` to report; phase 2 notifies the sender as well.
+                let dropped = &mut self.thread.dropped;
+                dropped.push(item.out.text);
+                if dropped.len() > 8 {
+                    dropped.drain(..dropped.len() - 8);
+                }
+            }
         }
         let draft = self.thread.draft.read(cx).value().to_string();
         if !draft.trim().is_empty() {
@@ -3416,26 +4841,30 @@ impl Reader {
         cx.notify();
     }
 
-    /// Sends `prompt` as a new turn; false if it could not be sent (the error is in the thread).
-    fn dispatch(&mut self, prompt: String, cx: &mut Context<Self>) -> bool {
-        if !self.thread.ready || !self.send_to_agent(&prompt) {
+    /// Sends `out` as a new turn; false if it could not be sent (the error is in the thread).
+    fn dispatch(&mut self, out: Outgoing, cx: &mut Context<Self>) -> bool {
+        if !self.thread.ready || !self.send_to_agent(&out) {
             let why = if self.thread.client.is_some() && self.thread.ready { "The agent has no session yet." } else { "The agent is not ready yet." };
             self.thread.fail(why.into());
             cx.notify();
             return false;
         }
-        self.begin_turn(&prompt);
+        self.begin_turn(&out.text);
         self.request_save(cx);
         cx.notify();
         true
     }
 
-    /// Hands `prompt` to the agent, with the file in view as context. False if it can't take it.
-    fn send_to_agent(&self, prompt: &str) -> bool {
+    /// Hands `out` to the agent, labelled by where it came from: the user's messages say what
+    /// file is in view (the thread on screen's project; that is where they type), a thread's
+    /// messages say which thread sent them, and Po's say they are Po's.
+    fn send_to_agent(&self, out: &Outgoing) -> bool {
         let Some(client) = &self.thread.client else { return false };
-        let context = match &self.project.current {
-            Some(file) => format!("[The user has `{file}` open in the viewer.]\n\n{prompt}"),
-            None => prompt.to_string(),
+        let context = match (&self.project.current, &out.origin) {
+            (Some(file), Origin::User) => format!("[The user has `{file}` open in the viewer.]\n\n{}", out.text),
+            (_, Origin::Thread { id, title }) => format!("[From thread \"{title}\" (#{id}), sent through Po.]\n\n{}", out.text),
+            (_, Origin::Po) => format!("[Po]\n\n{}", out.text),
+            (None, Origin::User) => out.text.clone(),
         };
         client.prompt(&context)
     }
@@ -3444,6 +4873,8 @@ impl Reader {
     fn begin_turn(&mut self, prompt: &str) {
         self.thread.blank = false;
         self.thread.busy = true;
+        self.thread.failed = false;
+        self.thread.last_error = None;
         self.thread.touched = Instant::now();
         self.thread.active_at = now_ms();
         // The message that was last stops being so: it loses its bottom padding and folds its
@@ -3918,6 +5349,8 @@ impl Reader {
                 let tid = thread.id;
                 let (glyph, tint) = thread.activity().mark(colors);
                 let (select, close) = (cx.entity(), cx.entity());
+                // What its agent may do through Po's API, when that is more than talk.
+                let controlled = self.grants.get(&tid).is_some_and(|grant| *grant != command::Grant::default());
                 group = group.child(
                     div()
                         .id(("agent-thread", tid as usize))
@@ -3933,6 +5366,14 @@ impl Reader {
                         .when((pid, tid) != (active_project, active_thread), |row| row.hover(move |row| row.bg(hover)))
                         .on_click(move |_, window, cx| select.update(cx, |reader, cx| reader.open_thread(pid, tid, window, cx)))
                         .child(div().w(rems(1.)).flex_none().flex().justify_center().text_xs().text_color(tint).child(glyph))
+                        .children(controlled.then(|| {
+                            Button::new(("grant-badge", tid as usize))
+                                .label("⌁")
+                                .tooltip("Agent control granted")
+                                .ghost()
+                                .xsmall()
+                                .selected(true)
+                        }))
                         .child(
                             // The project is a quiet label; the threads are what you pick, so they
                             // carry the weight.
@@ -3942,7 +5383,7 @@ impl Reader {
                                 .truncate()
                                 .text_sm()
                                 .text_color(if (pid, tid) == (active_project, active_thread) { foreground } else { foreground.opacity(theme::tokens::GUIDE) })
-                                .child(thread.title()),
+                                .child(self.thread_label(thread)),
                         )
                         .child(show_on_hover(
                             row_group("agent-thread", tid),
@@ -4012,6 +5453,7 @@ impl Reader {
             .children(self.worktree_status.clone().filter(|_| !projects_folded).map(|text| {
                 div().px_3().py_1().text_xs().text_color(muted).max_h(rems(5.)).overflow_hidden().child(text)
             }))
+            .children(self.suggestion_rows(cx))
             .child(div().flex_1().min_h_0().child(tree));
         let (live, any_live) = self.live_section(&views, cx);
         let colors = cx.global::<Palette>();
@@ -4022,6 +5464,48 @@ impl Reader {
             stack(&self.sections).fixed(LIVE, (!any_live).then_some(rems(LIVE_EMPTY_REMS))).section(live).section(projects),
         );
         floating(pane, cx)
+    }
+
+    /// What agents have put to the user: one line each, with a way to say yes or no.
+    fn suggestion_rows(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let colors = cx.global::<Palette>();
+        let (muted, border) = (colors.muted_foreground, colors.border);
+        let views = self.views();
+        self.suggestions
+            .iter()
+            .map(|suggestion| {
+                let (text, yes) = match &suggestion.what {
+                    Proposal::Go(project) => {
+                        let name = views.iter().find(|view| view.id == *project).map_or_else(|| "a project".to_string(), |view| view.project.root.file_name().map_or_else(|| "a project".into(), |name| name.to_string_lossy().into_owned()));
+                        (format!("“{}” suggests {name}", suggestion.by), "Go")
+                    }
+                    Proposal::Open(root) => (format!("“{}” wants to open {}", suggestion.by, root.display()), "Open"),
+                    Proposal::Pr { spec, .. } => (format!("“{}” wants to check out PR {spec}", suggestion.by), "Check out"),
+                    Proposal::Merge(project) => {
+                        let what = views.iter().find(|view| view.id == *project).and_then(|view| view.project.worktree.as_ref()).map_or_else(|| "a worktree".to_string(), |wt| format!("{} into {}", wt.spec.branch, wt.spec.repo.display()));
+                        (format!("“{}” wants to merge {what}", suggestion.by), "Merge")
+                    }
+                };
+                let (id, accept, turn_away) = (suggestion.id, cx.entity(), cx.entity());
+                div()
+                    .px_3()
+                    .py_1()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .border_b_1()
+                    .border_color(border)
+                    .child(div().text_xs().text_color(muted).child(text))
+                    .child(
+                        div()
+                            .flex()
+                            .gap_1()
+                            .child(Button::new(SharedString::from(format!("suggest-yes-{id}"))).label(yes).primary().xsmall().on_click(move |_, window, cx| accept.update(cx, |reader, cx| reader.answer_suggestion(id, true, window, cx))))
+                            .child(Button::new(SharedString::from(format!("suggest-no-{id}"))).label("Not now").ghost().xsmall().on_click(move |_, window, cx| turn_away.update(cx, |reader, cx| reader.answer_suggestion(id, false, window, cx)))),
+                    )
+                    .into_any_element()
+            })
+            .collect()
     }
 
     /// The threads that are asking, finished unseen or running, plus any agent still alive and
@@ -4073,7 +5557,7 @@ impl Reader {
                             .min_w_0()
                             .flex()
                             .flex_col()
-                            .child(div().truncate().text_sm().text_color(foreground).child(thread.title()))
+                            .child(div().truncate().text_sm().text_color(foreground).child(self.thread_label(thread)))
                             .child(div().truncate().text_xs().text_color(muted.opacity(theme::tokens::GUIDE)).child(detail)),
                     ),
             );
@@ -4547,10 +6031,125 @@ impl Reader {
             .into_any_element()
     }
 
+    /// Sets what thread `id`'s agent may do through Po's API. Held in memory only, so it is
+    /// lost on restart and is not shared between windows, and set only here, from the UI —
+    /// never from anything an agent could write to. A raise applies when the agent next starts
+    /// (its tool list is fixed then); a lowering, on its next request.
+    fn set_grant(&mut self, id: u64, scope: command::Scope, read_project: bool, approvals: bool, cx: &mut Context<Self>) {
+        let grant = command::Grant { scope, read_project, approvals };
+        let lowered = self.grants.get(&id).is_some_and(|before| before.scope > grant.scope);
+        if self.grants.get(&id) == Some(&grant) {
+            return;
+        }
+        self.grants.insert(id, grant);
+        // A lowered grant ends the thread's waits; they would answer what it can no longer ask.
+        if lowered {
+            self.drop_waiters(command::Caller::Thread(id), "the grant was lowered");
+        }
+        log::info!("control: thread {id} granted {:?} read_project={read_project} approvals={approvals}", grant.scope);
+        cx.notify();
+    }
+
+    /// Ends what thread `id`'s agent may do: back to Viewer, its waiters gone (none until
+    /// phase 2), and its children left running as ordinary threads.
+    fn stop_agent_control(&mut self, id: u64, cx: &mut Context<Self>) {
+        self.set_grant(id, command::Scope::Viewer, false, false, cx);
+    }
+
+    /// The Control menu for thread `id`, next to the model in the settings row: its scopes,
+    /// the two separate opt-ins, and the way out. The items are built when the menu opens,
+    /// from what the grant was at the last render.
+    fn control_dropdown(&self, id: u64, this: Entity<Self>) -> AnyElement {
+        let grant = self.grants.get(&id).copied().unwrap_or_default();
+        let label = match grant.scope {
+            command::Scope::Viewer if !grant.read_project && !grant.approvals => "Control".to_string(),
+            command::Scope::Viewer => "Control · reads".to_string(),
+            command::Scope::Orchestrate => "Control · orchestrate".to_string(),
+            command::Scope::Global => "Control · global".to_string(),
+        };
+        let control = grant != command::Grant::default();
+        dropdown(
+            ("control", id as usize),
+            Button::new(("control", id as usize))
+                .label(label)
+                .tooltip("What this thread's agent may do through Po")
+                .ghost()
+                .small()
+                .dropdown_caret(true)
+                .when(control, |button| button.selected(true)),
+            move || {
+                let (this, id) = (this.clone(), id);
+                let set = |label: String, scope: command::Scope, read: bool, approvals: bool| {
+                    let (this, id) = (this.clone(), id);
+                    MenuItem::new(label, move |_, cx| this.update(cx, |reader, cx| reader.set_grant(id, scope, read, approvals, cx)))
+                };
+                let checked = |label: &str, on: bool| if on { format!("{CHECKED}{label}") } else { label.to_string() };
+                let mut items = vec![
+                    set(checked("Viewer", grant.scope == command::Scope::Viewer), command::Scope::Viewer, grant.read_project, grant.approvals),
+                    set(checked("Orchestrate", grant.scope == command::Scope::Orchestrate), command::Scope::Orchestrate, grant.read_project, grant.approvals),
+                    set(checked("Global", grant.scope == command::Scope::Global), command::Scope::Global, grant.read_project, grant.approvals),
+                    MenuItem::separator(),
+                ];
+                let read = {
+                    let (this, id) = (this.clone(), id);
+                    let on = grant.read_project;
+                    MenuItem::new(checked("May read other threads here", on), move |_, cx| {
+                        this.update(cx, |reader, cx| reader.set_grant(id, command::Scope::Viewer, !on, false, cx))
+                    })
+                };
+                items.push(read);
+                if grant.scope >= command::Scope::Orchestrate {
+                    let approvals = {
+                        let (this, id) = (this.clone(), id);
+                        let on = grant.approvals;
+                        MenuItem::new(checked("May answer its threads' permission asks", on), move |_, cx| {
+                            this.update(cx, |reader, cx| reader.set_grant(id, command::Scope::Viewer, false, !on, cx))
+                        })
+                    };
+                    items.push(approvals);
+                }
+                items.push(MenuItem::separator());
+                items.push(MenuItem::disabled("A raise takes effect when the agent restarts"));
+                if control {
+                    let (this, id) = (this.clone(), id);
+                    items.push(MenuItem::new("Stop agent control", move |_, cx| this.update(cx, |reader, cx| reader.stop_agent_control(id, cx))));
+                }
+                items
+            },
+        )
+        .into_any_element()
+    }
+
+    /// What a thread is called in the lists: a child shows under the thread that started it.
+    fn thread_label(&self, thread: &Thread) -> String {
+        match thread.parent.and_then(|parent| self.title_of(parent)) {
+            Some(parent) => format!("↳ {parent}"),
+            None => thread.title(),
+        }
+    }
+
+    /// What the parent of children says in its header: `3 threads · 1 asking · 1 failed`.
+    fn children_status(&self, id: u64) -> Option<String> {
+        let children: Vec<&Thread> = self.threads_all().filter(|thread| thread.parent == Some(id)).collect();
+        if children.is_empty() {
+            return None;
+        }
+        let in_state = |state: crate::state::ThreadState| children.iter().filter(|t| crate::state::state(&t.facts()) == state).count();
+        let mut line = format!("{} thread{}", children.len(), if children.len() == 1 { "" } else { "s" });
+        let asking = in_state(crate::state::ThreadState::Asking);
+        if asking > 0 {
+            line.push_str(&format!(" · {asking} asking"));
+        }
+        let failed = in_state(crate::state::ThreadState::Failed);
+        if failed > 0 {
+            line.push_str(&format!(" · {failed} failed"));
+        }
+        Some(line)
+    }
+
     /// A menu for each of the thread's session settings: the model first, then the agent's
     /// others in the order it gave them.
-    fn setting_menus(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        let this = cx.entity();
+    fn setting_menus(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {        let this = cx.entity();
         let (busy, id) = (self.thread.busy, self.thread.id);
         Thread::ordered(self.thread.options.iter().collect())
             .into_iter()
@@ -4580,6 +6179,8 @@ impl Reader {
 
     fn agent_panel(&self, lead: Option<AnyElement>, trail: Option<AnyElement>, cx: &mut Context<Self>) -> impl IntoElement + Styled + use<> {
         let this = cx.entity();
+        // For the Control menu, whose handle outlives the list's closure taking `this`.
+        let control = this.clone();
         self.thread.selection.update(cx, |s, _| s.begin_frame());
         // Only the messages in view are built and laid out, however long the thread gets.
         let selection = self.thread.selection.clone();
@@ -4676,7 +6277,7 @@ impl Reader {
                     .text_xs()
                     .text_color(muted)
                     .child(div().flex_none().child(label))
-                    .child(div().flex_1().min_w_0().truncate().child(item.content.replace('\n', " ")))
+                    .child(div().flex_1().min_w_0().truncate().child(item.out.text.replace('\n', " ")))
                     .child(
                         Button::new(("recall", ix))
                             .icon(IconName::Close)
@@ -4738,8 +6339,11 @@ impl Reader {
                 .gap_1()
                 .child(div().pl_2().text_sm().text_color(muted).child(self.agent_label().unwrap_or("Agent").to_string()))
                 .children(settings)
+                .child(self.control_dropdown(self.thread.id, control.clone()))
                 .into_any_element()
         };
+        // A thread whose agent may do more than talk shows it, in the header as in the lists.
+        let controlled = self.grants.get(&self.thread.id).is_some_and(|grant| *grant != command::Grant::default());
         div()
             .size_full()
             .flex()
@@ -4751,6 +6355,8 @@ impl Reader {
                     .flex()
                     .items_center()
                     .gap_2()
+                    .children(controlled.then(|| self.control_dropdown(self.thread.id, control.clone())))
+                    .children(self.children_status(self.thread.id).map(|line| status_text(line, cx)))
                     .children((!self.thread.status.is_empty()).then(|| status_text(self.thread.status.clone(), cx)))
                     .child(
                         Button::new("history")
@@ -5560,6 +7166,13 @@ fn main() {
         }
         return;
     }
+    if cli.first().is_some_and(|arg| arg == "ctl") {
+        if let Err(error) = ctl::run(&cli[1..]) {
+            eprintln!("po ctl: {error:#}");
+            std::process::exit(1);
+        }
+        return;
+    }
     if cli.len() == 1 && cli[0] == "update" {
         if std::path::Path::new("update").exists() {
             eprintln!("po-update: running self-update (use `po ./update` to open the local path 'update')");
@@ -5727,6 +7340,24 @@ fn preview_of(messages: &[Msg], busy: bool) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::{Queue, Where, route};
+
+    // submit's paths (§4.3 of the control plan): blank, unstarted, starting, asleep, ready,
+    // busy for an agent that takes messages mid-turn (dex) and one that doesn't (ACP).
+    #[test]
+    fn a_message_goes_where_its_thread_is() {
+        assert_eq!(route(true, false, false, false, false, false, false), Where::Start, "blank");
+        assert_eq!(route(false, true, false, false, false, false, false), Where::Start, "unstarted");
+        assert_eq!(route(false, false, false, true, false, false, false), Where::Wait, "starting");
+        assert_eq!(route(false, false, true, false, false, false, false), Where::Wait, "asleep");
+        assert_eq!(route(false, false, false, false, false, false, false), Where::Dispatch, "ready");
+        assert_eq!(route(false, false, false, false, true, true, false), Where::Take(Queue::Steer), "dex mid-turn");
+        assert_eq!(route(false, false, false, false, true, true, true), Where::Take(Queue::Followup), "dex follow-up");
+        assert_eq!(route(false, false, false, false, true, false, false), Where::Queue, "ACP mid-turn");
+        // A thread that is busy is not starting anything, however the rest stands.
+        assert_eq!(route(false, false, false, true, true, false, false), Where::Queue);
+    }
+
     #[test]
     fn the_file_tree_needs_a_pane_of_at_least_the_minimum_width() {
         use super::{TREE_MIN_PANE, tree_fits};
