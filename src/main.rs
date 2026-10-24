@@ -3845,21 +3845,30 @@ impl Reader {
                             .justify_center()
                             .child(Icon::new(IconName::Folder).size(IconSize::XSmall).color(label)),
                     )
+                    // The name, then the branch right after it, on one baseline. They share what is
+                    // left of the row, each cut with an ellipsis when it doesn't fit.
                     .child(
                         div()
                             .flex_1()
-                            .min_w(rems(4.))
-                            .truncate()
-                            .text_sm()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(label)
-                            .child(view.project.name()),
+                            .min_w_0()
+                            .flex()
+                            .items_baseline()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_sm()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(label)
+                                    .child(view.project.name()),
+                            )
+                            .when_some(self.heads.get(&view.project.root).filter(|_| view.project.shows_branch()), |name, head| {
+                                name.child(div().min_w_0().flex().items_baseline().gap_1().text_xs().text_color(muted).child(
+                                    div().truncate().child(format!("⎇ {}", head.name)),
+                                ).when(head.dirty, |tag| tag.child(div().flex_none().child("*"))))
+                            }),
                     )
-                    .when_some(self.heads.get(&view.project.root).filter(|_| view.project.shows_branch()), |row, head| {
-                        row.child(div().min_w_0().max_w(rems(7.)).flex().items_center().gap_1().text_xs().text_color(muted).child(
-                            div().truncate().child(format!("⎇ {}", head.name)),
-                        ).when(head.dirty, |tag| tag.child(div().flex_none().child("*"))))
-                    })
                     // Starting a thread is on the project's own row, shown when it is hovered.
                     .child(show_on_hover(
                         row_group("agent-project", pid),
