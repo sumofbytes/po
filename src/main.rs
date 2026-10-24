@@ -913,7 +913,10 @@ impl Activity {
 /// hover action.
 const SIDEBAR_GUTTER: gpui::Rems = rems(0.5);
 const ROW_INSET: gpui::Rems = rems(0.625);
-const SIDE_COLUMN: gpui::Rems = rems(1.25);
+/// The lead column is as wide as its icon, so the gap after it is the only space between icon and
+/// label; the trail column is wide enough for a mark.
+const SIDE_LEAD: gpui::Rems = rems(1.);
+const SIDE_TRAIL: gpui::Rems = rems(1.25);
 
 /// The sidebar's spacing, on a 4px grid and ordered by what belongs together: rows of one list sit
 /// close, a project's name sits close over its threads, and projects are set apart by more than
@@ -937,17 +940,17 @@ fn side_row(radius: gpui::Pixels, icon: Option<Icon>) -> gpui::Div {
 
 /// The lead column: its content hugs the left edge, where a header's title starts.
 fn side_lead(content: impl IntoElement) -> gpui::Div {
-    div().w(SIDE_COLUMN).flex_none().flex().items_center().justify_start().child(content)
+    div().w(SIDE_LEAD).flex_none().flex().items_center().justify_start().child(content)
 }
 
 /// The trail column: its content hugs the right edge.
 fn side_trail(content: impl IntoElement) -> gpui::Div {
-    div().w(SIDE_COLUMN).flex_none().flex().items_center().justify_end().child(content)
+    div().w(SIDE_TRAIL).flex_none().flex().items_center().justify_end().child(content)
 }
 
 /// An icon for the lead column.
 fn side_icon(name: IconName, color: gpui::Hsla) -> Icon {
-    Icon::new(name).size(IconSize::Small).color(color)
+    Icon::new(name).size(IconSize::Medium).color(color)
 }
 
 /// A sidebar header, its title inset like the rows below it.
