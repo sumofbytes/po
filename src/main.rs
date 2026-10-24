@@ -4742,7 +4742,7 @@ impl Reader {
             .flex_col()
             .bg(colors.background)
             .child(pane_header(
-                self.agent_label().unwrap_or("Agent"),
+                &self.thread.title(),
                 div()
                     .flex()
                     .items_center()
