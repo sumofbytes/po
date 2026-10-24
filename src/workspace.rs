@@ -12,6 +12,8 @@ pub struct ThreadState {
     pub agent: String,
     pub session: String,
     pub title: String,
+    /// When it last did anything, in milliseconds since the Unix epoch; 0 if unknown.
+    pub active_at: u64,
 }
 
 pub struct ProjectState {
@@ -88,7 +90,7 @@ impl Workspace {
                     })),
                     "active": project.active,
                     "threads": project.threads.iter().map(|t| json!({
-                        "agent": t.agent, "session": t.session, "title": t.title,
+                        "agent": t.agent, "session": t.session, "title": t.title, "active_at": t.active_at,
                     })).collect::<Vec<_>>(),
                 })
             })
@@ -115,7 +117,7 @@ impl Workspace {
                     .into_iter()
                     .flatten()
                     .filter_map(|t| {
-                        Some(ThreadState { agent: text(&t["agent"])?, session: text(&t["session"])?, title: text(&t["title"]).unwrap_or_default() })
+                        Some(ThreadState { agent: text(&t["agent"])?, session: text(&t["session"])?, title: text(&t["title"]).unwrap_or_default(), active_at: t["active_at"].as_u64().unwrap_or(0) })
                     })
                     .collect();
                 Some(ProjectState {

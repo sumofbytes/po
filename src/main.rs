@@ -476,6 +476,9 @@ struct Thread {
     saved_title: Option<String>,
     /// When the thread last did anything; an idle one in the background is put to sleep.
     touched: Instant,
+    /// When the thread last did anything, in milliseconds since the Unix epoch. Unlike
+    /// `touched` it is saved, so the thread list keeps its order across restarts.
+    active_at: u64,
     /// A first message waiting for the agent to be ready, already shown in the thread.
     pending: Option<String>,
     /// Start the thread in a git worktree of its own. Only asked before it has started.
@@ -695,6 +698,11 @@ impl Activity {
             Activity::Idle => None,
         }
     }
+}
+
+/// The time now in milliseconds since the Unix epoch.
+fn now_ms() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
 }
 
 /// How many of a project's threads the project list shows before the rest fold under "more".
@@ -1068,6 +1076,7 @@ impl Reader {
             restore: None,
             saved_title: None,
             touched: Instant::now(),
+            active_at: now_ms(),
             pending: None,
             isolate: false,
             blank: true,
@@ -2477,6 +2486,7 @@ impl Reader {
             restore: None,
             saved_title: None,
             touched: Instant::now(),
+            active_at: now_ms(),
             pending: None,
             isolate: false,
             blank: true,
@@ -2599,6 +2609,7 @@ impl Reader {
         thread.session = Some(saved.session);
         thread.saved_title = Some(saved.title).filter(|title| !title.is_empty());
         thread.blank = false;
+        thread.active_at = saved.active_at;
         thread.status = "asleep".into();
         thread
     }
@@ -2716,7 +2727,7 @@ impl Reader {
                     threads: threads
                         .into_iter()
                         .filter_map(|t| {
-                            Some(workspace::ThreadState { agent: t.agent.clone()?, session: t.session.clone()?, title: t.title() })
+                            Some(workspace::ThreadState { agent: t.agent.clone()?, session: t.session.clone()?, title: t.title(), active_at: t.active_at })
                         })
                         .collect(),
                 }
@@ -2869,6 +2880,10 @@ impl Reader {
         // Most events change the last message; a tool call update may change an earlier one.
         let mut changed = self.thread.messages.len().saturating_sub(1);
         self.thread.touched = Instant::now();
+        // A resumed session replaying its history isn't the thread doing anything.
+        if !self.thread.loading {
+            self.thread.active_at = now_ms();
+        }
         match event {
             Event::Sessions(sessions) => match self.thread.restore.take() {
                 // A thread being woken goes straight to its own session.
@@ -3358,6 +3373,7 @@ impl Reader {
         self.thread.blank = false;
         self.thread.busy = true;
         self.thread.touched = Instant::now();
+        self.thread.active_at = now_ms();
         // The message that was last stops being so: it loses its bottom padding and folds its
         // finished runs of tool calls, so it is laid out again too.
         let was_last = self.thread.messages.len().saturating_sub(1);
@@ -3796,7 +3812,7 @@ impl Reader {
             // Most recently active first. Past `THREADS_SHOWN` the rest fold away, except the
             // thread on screen, which stays in sight.
             let mut recent: Vec<&Thread> = view.threads.iter().copied().filter(|t| !t.blank || t.id == view.shown).collect();
-            recent.sort_by_key(|t| (std::cmp::Reverse(t.touched), std::cmp::Reverse(t.id)));
+            recent.sort_by_key(|t| (std::cmp::Reverse(t.active_at), std::cmp::Reverse(t.id)));
             let expanded = self.threads_expanded.contains(&pid);
             let hidden = if expanded || recent.len() <= THREADS_SHOWN {
                 0
