@@ -476,6 +476,9 @@ struct Thread {
     saved_title: Option<String>,
     /// When the thread last did anything; an idle one in the background is put to sleep.
     touched: Instant,
+    /// When the thread last did anything, in milliseconds since the Unix epoch. Unlike
+    /// `touched` it is saved, so the thread list keeps its order across restarts.
+    active_at: u64,
     /// A first message waiting for the agent to be ready, already shown in the thread.
     pending: Option<String>,
     /// Start the thread in a git worktree of its own. Only asked before it has started.
@@ -696,6 +699,14 @@ impl Activity {
         }
     }
 }
+
+/// The time now in milliseconds since the Unix epoch.
+fn now_ms() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
+}
+
+/// How many of a project's threads the project list shows before the rest fold under "more".
+const THREADS_SHOWN: usize = 3;
 
 /// Where a running agent with nothing to show sorts in the live list: after all that need a look.
 const IDLE_RANK: u8 = 3;
@@ -958,6 +969,8 @@ struct Reader {
     left_open: bool,
     /// The left side's sections: live agents and projects.
     sections: Entity<StackState>,
+    /// Projects whose thread list is shown in full rather than cut to [`THREADS_SHOWN`].
+    threads_expanded: HashSet<u64>,
     /// The width of the file tree inside the viewer pane.
     tree_cols: Entity<SidebarsState>,
     /// The file tree in the viewer is hidden.
@@ -1063,6 +1076,7 @@ impl Reader {
             restore: None,
             saved_title: None,
             touched: Instant::now(),
+            active_at: now_ms(),
             pending: None,
             isolate: false,
             blank: true,
@@ -1122,6 +1136,7 @@ impl Reader {
             sidebars,
             left_open: true,
             sections,
+            threads_expanded: HashSet::new(),
             tree_cols,
             tree_hidden: false,
             viewer_narrow: Rc::default(),
@@ -2471,6 +2486,7 @@ impl Reader {
             restore: None,
             saved_title: None,
             touched: Instant::now(),
+            active_at: now_ms(),
             pending: None,
             isolate: false,
             blank: true,
@@ -2593,6 +2609,7 @@ impl Reader {
         thread.session = Some(saved.session);
         thread.saved_title = Some(saved.title).filter(|title| !title.is_empty());
         thread.blank = false;
+        thread.active_at = saved.active_at;
         thread.status = "asleep".into();
         thread
     }
@@ -2641,7 +2658,18 @@ impl Reader {
             if !start && (!state.root.is_dir() || !seen.insert(state.root.clone()) || state.root == self.project.root) {
                 continue;
             }
-            let mut threads: Vec<Thread> = state.threads.into_iter().map(|t| self.sleeping_thread(t, window, cx)).collect();
+            // Files saved before the time was kept list the threads oldest first.
+            let mut threads: Vec<Thread> = state
+                .threads
+                .into_iter()
+                .enumerate()
+                .map(|(ix, mut t)| {
+                    if t.active_at == 0 {
+                        t.active_at = ix as u64 + 1;
+                    }
+                    self.sleeping_thread(t, window, cx)
+                })
+                .collect();
             let shown = (!threads.is_empty()).then(|| threads.remove(state.active.min(threads.len() - 1)));
             if start {
                 if let Some(shown) = shown {
@@ -2710,7 +2738,7 @@ impl Reader {
                     threads: threads
                         .into_iter()
                         .filter_map(|t| {
-                            Some(workspace::ThreadState { agent: t.agent.clone()?, session: t.session.clone()?, title: t.title() })
+                            Some(workspace::ThreadState { agent: t.agent.clone()?, session: t.session.clone()?, title: t.title(), active_at: t.active_at })
                         })
                         .collect(),
                 }
@@ -2863,6 +2891,11 @@ impl Reader {
         // Most events change the last message; a tool call update may change an earlier one.
         let mut changed = self.thread.messages.len().saturating_sub(1);
         self.thread.touched = Instant::now();
+        // Only the agent's work counts as activity, not a session opening or its settings, and
+        // not a resumed session replaying its history.
+        if !self.thread.loading && matches!(event, Event::Update(_) | Event::Permission { .. } | Event::Stopped(_) | Event::Accepted { .. }) {
+            self.thread.active_at = now_ms();
+        }
         match event {
             Event::Sessions(sessions) => match self.thread.restore.take() {
                 // A thread being woken goes straight to its own session.
@@ -2933,6 +2966,8 @@ impl Reader {
                     item.kind = None;
                 }
                 self.send_next(window, cx);
+                // The order of the thread list is saved with the time the turn ended.
+                self.request_save(cx);
             }
             Event::Accepted { content, queue } => {
                 if let Some(at) = self.thread.queue.iter().position(|q| q.kind == Some(queue) && q.content == content) {
@@ -3352,6 +3387,7 @@ impl Reader {
         self.thread.blank = false;
         self.thread.busy = true;
         self.thread.touched = Instant::now();
+        self.thread.active_at = now_ms();
         // The message that was last stops being so: it loses its bottom padding and folds its
         // finished runs of tool calls, so it is laid out again too.
         let was_last = self.thread.messages.len().saturating_sub(1);
@@ -3787,7 +3823,26 @@ impl Reader {
                         ))
                     }),
             );
-            for thread in view.threads.iter().filter(|t| !t.blank || t.id == view.shown) {
+            // Most recently active first. Past `THREADS_SHOWN` the rest fold away, except the
+            // thread on screen, which stays in sight.
+            let mut recent: Vec<&Thread> = view.threads.iter().copied().filter(|t| !t.blank || t.id == view.shown).collect();
+            recent.sort_by_key(|t| (std::cmp::Reverse(t.active_at), std::cmp::Reverse(t.id)));
+            let expanded = self.threads_expanded.contains(&pid);
+            let foldable = recent.len() > THREADS_SHOWN;
+            let hidden = if expanded || !foldable {
+                0
+            } else {
+                let mut keep: Vec<&Thread> = recent[..THREADS_SHOWN].to_vec();
+                if !keep.iter().any(|t| t.id == view.shown) {
+                    if let Some(shown) = recent.iter().find(|t| t.id == view.shown) {
+                        keep[THREADS_SHOWN - 1] = shown;
+                    }
+                }
+                let hidden = recent.len() - THREADS_SHOWN;
+                recent = keep;
+                hidden
+            };
+            for thread in recent {
                 let tid = thread.id;
                 let (glyph, tint) = thread.activity().mark(colors);
                 let (select, close) = (cx.entity(), cx.entity());
@@ -3826,6 +3881,33 @@ impl Reader {
                                 .tooltip("Close thread")
                                 .on_click(move |_, window, cx| close.update(cx, |reader, cx| reader.close_any_thread(pid, tid, window, cx))),
                         )),
+                );
+            }
+            if foldable && (hidden > 0 || expanded) {
+                let toggle = cx.entity();
+                let label = if expanded { "Show less".to_string() } else { format!("{hidden} more") };
+                group = group.child(
+                    div()
+                        .id(("agent-more", pid as usize))
+                        .flex()
+                        .items_center()
+                        .px_1p5()
+                        .h(theme::tokens::ROW_HEIGHT)
+                        .pl(rems(1.75))
+                        .rounded(colors.radius)
+                        .cursor_pointer()
+                        .text_xs()
+                        .text_color(muted)
+                        .hover(move |row| row.bg(hover))
+                        .on_click(move |_, _, cx| {
+                            toggle.update(cx, |reader, cx| {
+                                if !reader.threads_expanded.insert(pid) {
+                                    reader.threads_expanded.remove(&pid);
+                                }
+                                cx.notify();
+                            })
+                        })
+                        .child(label),
                 );
             }
             tree = tree.child(group);
