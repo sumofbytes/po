@@ -43,13 +43,6 @@ pub struct Workspace {
     pub agent_open: bool,
     /// The agent last chosen for a new thread.
     pub agent: Option<String>,
-    /// The height, in pixels, the projects list was dragged to, if it was.
-    pub split: Option<f32>,
-    /// The height, in pixels, of the live agents list above the projects, if dragged.
-    pub live_split: Option<f32>,
-    /// The live agents list and the projects list were folded down to their headers.
-    pub live_folded: bool,
-    pub projects_folded: bool,
     /// The width, in pixels, of the file tree in the viewer, if dragged.
     pub explorer_width: Option<f32>,
     /// How wide the left side was, and the right side if it had been dragged to a width.
@@ -105,7 +98,7 @@ impl Workspace {
                 })
             })
             .collect();
-        json!({ "version": 1, "viewer_open": self.viewer_open, "swapped": self.swapped, "agent_open": self.agent_open, "agent": self.agent, "split": self.split, "live_split": self.live_split, "live_folded": self.live_folded, "projects_folded": self.projects_folded, "explorer_width": self.explorer_width, "left_width": self.left_width, "right_width": self.right_width, "projects": projects })
+        json!({ "version": 1, "viewer_open": self.viewer_open, "swapped": self.swapped, "agent_open": self.agent_open, "agent": self.agent, "explorer_width": self.explorer_width, "left_width": self.left_width, "right_width": self.right_width, "projects": projects })
     }
 
     fn from_json(value: &Value) -> Option<Self> {
@@ -144,14 +137,10 @@ impl Workspace {
             swapped: value["swapped"].as_bool().unwrap_or(false),
             agent_open: value["agent_open"].as_bool().unwrap_or(true),
             agent: text(&value["agent"]),
-            // A saved height that isn't a sensible number is dropped rather than trusted.
+            // A saved width that isn't a sensible number is dropped rather than trusted.
             explorer_width: width(&value["explorer_width"]),
             left_width: width(&value["left_width"]),
             right_width: width(&value["right_width"]),
-            live_folded: value["live_folded"].as_bool().unwrap_or(false),
-            projects_folded: value["projects_folded"].as_bool().unwrap_or(false),
-            live_split: value["live_split"].as_f64().map(|height| height as f32).filter(|height| height.is_finite() && *height > 0.),
-            split: value["split"].as_f64().map(|height| height as f32).filter(|height| height.is_finite() && *height > 0.),
         })
     }
 
@@ -275,10 +264,6 @@ mod tests {
             swapped: true,
             agent_open: false,
             agent: Some("dex".into()),
-            split: Some(212.5),
-            live_split: Some(140.0),
-            live_folded: true,
-            projects_folded: false,
             explorer_width: Some(240.0),
             left_width: Some(300.0),
             right_width: Some(640.0),
@@ -307,10 +292,7 @@ mod tests {
         assert!(back.swapped);
         assert!(!back.agent_open);
         assert_eq!(back.agent.as_deref(), Some("dex"));
-        assert_eq!(back.split, Some(212.5));
-        assert_eq!(back.live_split, Some(140.0));
         assert_eq!(back.explorer_width, Some(240.0));
-        assert!(back.live_folded && !back.projects_folded);
         assert_eq!((back.left_width, back.right_width), (Some(300.0), Some(640.0)));
         assert_eq!(back.projects.len(), 2);
         assert_eq!(back.projects[0].active, 1);
@@ -335,14 +317,6 @@ mod tests {
         for bad in [json!(-5), json!(0), json!(1), json!(1e9), json!("wide"), Value::Null] {
             let back = Workspace::from_json(&json!({ "projects": [], "left_width": bad, "right_width": bad })).expect("parses");
             assert_eq!((back.left_width, back.right_width), (None, None));
-        }
-    }
-
-    #[test]
-    fn a_nonsense_split_is_dropped() {
-        for bad in [json!(-5), json!("tall"), json!(0), Value::Null] {
-            let back = Workspace::from_json(&json!({ "projects": [], "split": bad })).expect("parses");
-            assert_eq!(back.split, None);
         }
     }
 

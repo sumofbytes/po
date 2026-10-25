@@ -495,7 +495,7 @@ Other orchestration commands:
 
 `project.offer`:
 
-- It never switches. It puts a chip in the live list, "#7 suggests project X", and the user
+- It never switches. It puts a chip in the sidebar, "#7 suggests project X", and the user
   clicks to go there. This takes the place of the old `thread.show`/`project.show`.
 
 `thread.create_isolated`:
@@ -527,9 +527,9 @@ behaviour, at scope `Viewer`, reach self.
     its threads' permission asks".
   - It shows "applies when the agent restarts" when the grant is raised.
 - **Grant indicator:** any thread above `Viewer` shows a small badge in its header and in the
-  project list. Clicking it opens the menu. **Stop agent control** lowers the grant to `Viewer`,
+  sidebar. Clicking it opens the menu. **Stop agent control** lowers the grant to `Viewer`,
   cancels its waiters, and leaves its children running as ordinary threads.
-- **Children** show `↳ <parent title>` in the project list and the live list. Their first
+- **Children** show `↳ <parent title>` in the project list. Their first
   message shows `from <parent>`, and notifications in the parent show `Po`.
 - **The parent's header** shows a status line with its children: "3 threads · 1 asking ·
   1 failed".
