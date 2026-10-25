@@ -312,15 +312,23 @@ pub struct Stack {
     state: Entity<StackState>,
     sections: Vec<AnyElement>,
     fixed: Option<(usize, gpui::Rems)>,
+    at_most: Option<(usize, gpui::Rems)>,
 }
 
 pub fn stack(state: &Entity<StackState>) -> Stack {
-    Stack { state: state.clone(), sections: Vec::new(), fixed: None }
+    Stack { state: state.clone(), sections: Vec::new(), fixed: None, at_most: None }
 }
 
 impl Stack {
     pub fn section(mut self, element: impl IntoElement) -> Self {
         self.sections.push(element.into_any_element());
+        self
+    }
+
+    /// Keeps `section` from being taller than this, however far it was dragged, so a section with
+    /// little in it doesn't leave an empty gap.
+    pub fn at_most(mut self, section: usize, height: gpui::Rems) -> Self {
+        self.at_most = Some((section, height));
         self
     }
 
@@ -428,8 +436,14 @@ impl RenderOnce for Stack {
                 section = section.flex_none().h(folded_height).when(ix > 0, |s| s.border_t_1().border_color(border));
             } else if Some(ix) == last_open {
                 section = section.flex_1().min_h(MIN_SECTION);
+                if let Some((_, height)) = self.at_most.filter(|(capped, _)| *capped == ix) {
+                    section = section.max_h(height);
+                }
             } else {
                 section = section.flex_grow(0.).flex_shrink(1.).min_h(MIN_SECTION);
+                if let Some((_, height)) = self.at_most.filter(|(capped, _)| *capped == ix) {
+                    section = section.max_h(height);
+                }
                 section = match sizes[ix] {
                     Some(height) => section.flex_basis(fitted_size(height, bounds_height, room_below(&folded, ix, folded_height))),
                     None => section.flex_basis(gpui::relative(0.5)),
