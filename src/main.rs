@@ -5861,7 +5861,7 @@ impl Reader {
             let current = (pid, tid) == (active_project, active_thread);
             rows = rows.child(
                 side_row(radius, None)
-                    .child(side_lead(div()))
+                    .child(side_lead(div().text_base().text_color(tint).child(glyph)))
                     .id(("live-thread", tid as usize))
                     .items_start()
                     .py_1p5()
@@ -5884,8 +5884,6 @@ impl Reader {
                             )
                             .child(div().truncate().text_sm().text_color(muted.opacity(theme::tokens::GUIDE)).child(detail)),
                     )
-                    // An idle thread has nothing to report, so it has no mark.
-                    .children(thread.activity().live_rank().map(|_| side_trail(div().text_base().text_color(tint).child(glyph)))),
             );
         }
         let title = self.fold_title(
