@@ -956,6 +956,8 @@ const SIDE_LIST_TOP: gpui::Rems = rems(0.25);
 const SIDE_LIST_BOTTOM: gpui::Rems = rems(0.75);
 /// Between New and the search box, which belong together.
 const SIDE_ACTION_GAP: gpui::Rems = rems(0.25);
+/// Space above a section's title, so it sits closer to its own rows than to the section above.
+const SIDE_SECTION_GAP: gpui::Rems = rems(0.5);
 /// A live agent's row: its title and a line under it.
 const SIDE_LIVE_ROW: gpui::Rems = rems(3.625);
 /// Section titles (LIVE, PROJECTS) are small labels, shorter than the pane header above them.
@@ -5734,7 +5736,7 @@ impl Reader {
                     .small()
                     .on_click(move |_, window, cx| add.update(cx, |reader, cx| reader.pick_project(window, cx))),
                 cx,
-            )).h(SIDE_SECTION_HEIGHT).border_b_0())
+            )).h(SIDE_SECTION_HEIGHT + SIDE_SECTION_GAP).pt(SIDE_SECTION_GAP).border_b_0())
             .children(self.worktree_status.clone().filter(|_| !projects_folded).map(|text| {
                 div().px(SIDEBAR_GUTTER + ROW_INSET).py_1().text_sm().text_color(muted).max_h(rems(5.)).overflow_hidden().child(text)
             }))
