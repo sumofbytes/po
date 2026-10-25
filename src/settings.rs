@@ -7,6 +7,7 @@ use gpui::{
 use serde_json::{Map, Value};
 
 use crate::config;
+use crate::fonts;
 use crate::schemes;
 use crate::theme::Palette;
 use crate::ui::button::Button;
@@ -62,13 +63,21 @@ fn names_value(line: &str) -> Option<Value> {
     }
 }
 
-/// A field's number: nothing for an empty field (the default applies), an error for text.
-fn number(label: &str, line: &str) -> Result<Option<f64>, String> {
+/// A field's number: nothing for an empty field (the default applies), an error for text, for a
+/// fraction where `whole` is asked, or for a number the option would ignore.
+fn number(label: &str, line: &str, range: std::ops::RangeInclusive<f64>, whole: bool) -> Result<Option<f64>, String> {
     let line = line.trim();
     if line.is_empty() {
         return Ok(None);
     }
-    line.parse::<f64>().ok().filter(|n| n.is_finite() && *n >= 0.).map(Some).ok_or_else(|| format!("{label} needs a number"))
+    let n = line.parse::<f64>().ok().filter(|n| n.is_finite()).ok_or_else(|| format!("{label} needs a number"))?;
+    if whole && n.fract() != 0. {
+        return Err(format!("{label} needs a whole number"));
+    }
+    if !range.contains(&n) {
+        return Err(format!("{label} must be from {} to {}", range.start(), range.end()));
+    }
+    Ok(Some(n))
 }
 
 fn json_number(n: f64) -> Value {
@@ -172,10 +181,11 @@ impl SettingsView {
     /// The edit to make to `config.json`, or what is wrong with the fields.
     fn collect(&self, cx: &Context<Self>) -> Result<impl FnOnce(&mut Map<String, Value>) + use<>, String> {
         let read = |input: &Entity<InputState>| input.read(cx).value().trim().to_string();
-        let font_size = number("Font size", &read(&self.font_size))?;
-        let mono_size = number("Mono font size", &read(&self.mono_size))?;
-        let idle = number("Idle minutes", &read(&self.idle_minutes))?;
-        let max_live = number("Max live agents", &read(&self.max_live))?.map(|n| n.max(1.));
+        let sizes = f64::from(*fonts::SIZES.start())..=f64::from(*fonts::SIZES.end());
+        let font_size = number("Font size", &read(&self.font_size), sizes.clone(), false)?;
+        let mono_size = number("Mono font size", &read(&self.mono_size), sizes, false)?;
+        let idle = number("Idle minutes", &read(&self.idle_minutes), 0.0..=1_000_000., true)?;
+        let max_live = number("Max live agents", &read(&self.max_live), 1.0..=1000., true)?;
         let (theme, font_family, mono_family) = (read(&self.theme), names_value(&read(&self.font_family)), names_value(&read(&self.mono_family)));
         let (notifications, glass) = (self.notifications, self.glass);
         let mut agents = Vec::new();
@@ -365,11 +375,15 @@ mod tests {
     }
 
     #[test]
-    fn numbers_may_be_empty_but_not_text_or_negative() {
-        assert_eq!(number("n", ""), Ok(None));
-        assert_eq!(number("n", " 14 "), Ok(Some(14.)));
-        assert!(number("n", "big").is_err());
-        assert!(number("n", "-1").is_err());
+    fn numbers_may_be_empty_but_must_be_usable() {
+        let any = 0.0..=100.;
+        assert_eq!(number("n", "", any.clone(), false), Ok(None));
+        assert_eq!(number("n", " 14 ", any.clone(), true), Ok(Some(14.)));
+        assert!(number("n", "big", any.clone(), false).is_err());
+        assert!(number("n", "-1", any.clone(), false).is_err());
+        assert!(number("n", "1e20", any.clone(), true).is_err());
+        assert!(number("n", "1.5", any.clone(), true).is_err());
+        assert_eq!(number("n", "1.5", any, false), Ok(Some(1.5)));
         assert_eq!(json_number(14.), json!(14));
         assert_eq!(json_number(13.5), json!(13.5));
     }

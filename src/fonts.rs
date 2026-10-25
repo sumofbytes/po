@@ -9,7 +9,7 @@ use serde_json::Value;
 const UI_SIZE: f32 = 15.0;
 const MONO_SIZE: f32 = 14.0;
 /// Sizes outside this are a typo, not a wish.
-const SIZES: std::ops::RangeInclusive<f32> = 8.0..=48.0;
+pub const SIZES: std::ops::RangeInclusive<f32> = 8.0..=48.0;
 const SYSTEM: &str = ".SystemUIFont";
 
 /// The monospace font in the binary, so the viewer's columns line up even where no monospace font is installed.

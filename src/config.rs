@@ -72,7 +72,9 @@ pub fn load() -> Value {
 /// parse is left as it is, since overwriting it would throw away what a person wrote.
 pub fn update(change: impl FnOnce(&mut serde_json::Map<String, Value>)) -> Result<(), String> {
     let dir = dir().ok_or("no config folder")?;
+    // Written through a symlink, so a config kept in a dotfiles repo stays a link to it.
     let path = dir.join("config.json");
+    let path = std::fs::canonicalize(&path).unwrap_or(path);
     let mut config = match std::fs::read_to_string(&path) {
         Ok(text) => match serde_json::from_str::<Value>(&text) {
             Ok(Value::Object(map)) => map,
@@ -82,7 +84,7 @@ pub fn update(change: impl FnOnce(&mut serde_json::Map<String, Value>)) -> Resul
         Err(error) => return Err(format!("{}: {error}", path.display())),
     };
     change(&mut config);
-    std::fs::create_dir_all(&dir).map_err(|error| format!("{}: {error}", dir.display()))?;
+    std::fs::create_dir_all(path.parent().unwrap_or(&dir)).map_err(|error| format!("{}: {error}", dir.display()))?;
     let temp = path.with_extension("json.tmp");
     let text = serde_json::to_string_pretty(&Value::Object(config)).map_err(|error| error.to_string())?;
     std::fs::write(&temp, text + "\n").and_then(|()| std::fs::rename(&temp, &path)).map_err(|error| format!("{}: {error}", path.display()))
