@@ -95,6 +95,9 @@ pub fn init(cx: &mut App) {
 pub enum InputEvent {
     Change,
     PressEnter { shift: bool, alt: bool },
+    /// The clipboard held a picture, or files, instead of text; the input doesn't take those itself.
+    PasteImage(std::sync::Arc<gpui::Image>),
+    PasteFiles(Vec<std::path::PathBuf>),
 }
 
 /// The laid-out text from the last frame, for hit testing and moving between rows.
@@ -424,9 +427,18 @@ impl InputState {
         }
     }
     fn paste(&mut self, _: &Paste, _: &mut Window, cx: &mut Context<Self>) {
-        if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+        let Some(item) = cx.read_from_clipboard() else { return };
+        if let Some(text) = item.text() {
             let text = if self.multi_line { text } else { text.replace('\n', " ") };
             self.edit(self.selection.clone(), &text, cx);
+            return;
+        }
+        for entry in item.into_entries() {
+            match entry {
+                gpui::ClipboardEntry::Image(image) => cx.emit(InputEvent::PasteImage(std::sync::Arc::new(image))),
+                gpui::ClipboardEntry::ExternalPaths(paths) => cx.emit(InputEvent::PasteFiles(paths.paths().to_vec())),
+                gpui::ClipboardEntry::String(_) => {}
+            }
         }
     }
     fn on_undo(&mut self, _: &Undo, _: &mut Window, cx: &mut Context<Self>) {

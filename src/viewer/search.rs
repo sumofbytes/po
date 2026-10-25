@@ -91,6 +91,7 @@ impl SearchBar {
                 let shift = *shift;
                 this.view.update(cx, |view, cx| if shift { view.previous_match(cx) } else { view.next_match(cx) }).ok();
             }
+            InputEvent::PasteImage(_) | InputEvent::PasteFiles(_) => {}
         });
         // The field is drawn inside the viewer's cached view, which redraws only when notified.
         let redraw = cx.observe(&input, |_, _, cx| cx.notify());
