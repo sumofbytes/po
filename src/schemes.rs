@@ -15,8 +15,7 @@ pub fn load(name: &str) -> Option<Value> {
 }
 
 /// The names of the bundled schemes.
-#[cfg(test)]
-fn names() -> impl Iterator<Item = &'static str> {
+pub fn names() -> impl Iterator<Item = &'static str> {
     BUNDLE.lines().filter_map(|line| line.strip_prefix("@@ "))
 }
 

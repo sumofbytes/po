@@ -272,6 +272,10 @@ on Linux), then a well-known one for the platform, then the bundled Fira Mono.
 `size` also scales the UI's spacing, since layout is measured in units of it.
 Edits to `config.json` and to theme files apply without a restart.
 
+Ctrl+, (Cmd+, on macOS) opens a settings page for the theme, fonts, glass,
+notifications, idle and live-agent limits, and `agents`. Save writes them to
+`config.json`, keeping any other keys in it (`mcp_servers` is still edited there).
+
 Set `"glass": true` for a frosted look like macOS's Liquid Glass: the window
 shows the desktop through it, blurred, the panes become translucent tints of the
 theme's colours and float apart from each other with a bright rim. A number from

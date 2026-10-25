@@ -12,6 +12,7 @@ mod fonts;
 mod mcp;
 mod pr;
 mod schemes;
+mod settings;
 mod theme;
 mod state;
 mod trace;
@@ -49,7 +50,7 @@ use gpui::{
     prelude::*, px, rems, size, KeyBinding,
 };
 
-gpui::actions!(po, [ToggleTools, ToggleThoughts, ToggleLeft, ToggleRight, ShowSource, ShowChanges, ShowChat, SwapPanes, ShowHistory, ToggleSplit, ToggleRendered, NewThread, OpenProject, ShowFinder, CloseWindow, CloseFinder, FinderUp, FinderDown]);
+gpui::actions!(po, [ToggleTools, ToggleThoughts, ToggleLeft, ToggleRight, ShowSource, ShowChanges, ShowChat, SwapPanes, ShowHistory, ToggleSplit, ToggleRendered, NewThread, OpenProject, ShowFinder, ShowSettings, CloseSettings, CloseWindow, CloseFinder, FinderUp, FinderDown]);
 
 const SKIP: [&str; 5] = ["target", "node_modules", "dist", "build", "__pycache__"];
 const MAX_FILES: usize = 5000;
@@ -1309,6 +1310,8 @@ struct Reader {
     finder_open: bool,
     /// Keeps the finder input's event subscription alive for the reader's lifetime.
     finder_events: Option<Subscription>,
+    /// The settings page (Ctrl+,), while it is open.
+    settings_page: Option<(Entity<settings::SettingsView>, Subscription)>,
     painted: bool,
     agents: Vec<config::Agent>,
     /// Tell the desktop when a thread finishes or asks while it isn't being looked at.
@@ -1512,6 +1515,7 @@ impl Reader {
             finder_list: ListState::new(0, ListAlignment::Top, px(400.)),
             finder_open: false,
             finder_events: None,
+            settings_page: None,
             painted: false,
             agents,
             notifications: settings["notifications"].as_bool().unwrap_or(true),
@@ -4696,6 +4700,43 @@ impl Reader {
         }
     }
 
+    /// Ctrl+,: opens the settings page, or closes it when it is already open.
+    fn toggle_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.settings_page.is_some() {
+            return self.hide_settings(window, cx);
+        }
+        let page = cx.new(|cx| settings::SettingsView::new(window, cx));
+        let subscription = cx.subscribe_in(&page, window, |reader, _, event: &settings::SettingsEvent, window, cx| match event {
+            settings::SettingsEvent::Close => reader.hide_settings(window, cx),
+            settings::SettingsEvent::Saved => reader.apply_settings(cx),
+        });
+        page.update(cx, |page, cx| page.focus(window, cx));
+        self.settings_page = Some((page, subscription));
+        cx.notify();
+    }
+
+    fn hide_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.settings_page = None;
+        self.focus.focus(window, cx);
+        cx.notify();
+    }
+
+    /// Takes up the options of `config.json` that are read once, after the settings page saved
+    /// them. The theme and fonts are reapplied by the config watcher.
+    fn apply_settings(&mut self, cx: &mut Context<Self>) {
+        let settings = config::load();
+        self.notifications = settings["notifications"].as_bool().unwrap_or(true);
+        let idle_minutes = settings["idle_minutes"].as_u64().unwrap_or(15);
+        self.idle_after = (idle_minutes > 0).then(|| Duration::from_secs(idle_minutes * 60));
+        self.max_live = settings["max_live_agents"].as_u64().unwrap_or(8).max(1) as usize;
+        // An agent that was added on the command line isn't in the config; it stays.
+        let mut agents = config::agents(&settings);
+        let kept: Vec<_> = self.agents.iter().filter(|agent| agent.vouched && !agents.iter().any(|known| known.id == agent.id)).cloned().collect();
+        agents.extend(kept);
+        self.agents = agents;
+        cx.notify();
+    }
+
     /// Hides the finder and gives the keys back to the reader.
     fn hide_finder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.finder_open = false;
@@ -7225,6 +7266,8 @@ impl Render for Reader {
             .on_scroll_wheel(cx.listener(|reader, _, _, _| reader.last_input = Instant::now()))
             .on_mouse_down(gpui::MouseButton::Left, cx.listener(|reader, _, _, _| reader.last_input = Instant::now()))
             .on_action(cx.listener(|reader, _: &ShowFinder, window, cx| reader.show_finder(window, cx)))
+            .on_action(cx.listener(|reader, _: &ShowSettings, window, cx| reader.toggle_settings(window, cx)))
+            .on_action(cx.listener(|reader, _: &CloseSettings, window, cx| reader.hide_settings(window, cx)))
             .on_action(cx.listener(|reader, _: &ToggleTools, _, cx| reader.toggle_tools(cx)))
             .on_action(cx.listener(|reader, _: &ToggleThoughts, _, cx| reader.toggle_thoughts(cx)))
             .on_action(cx.listener(|reader, _: &ToggleLeft, _, cx| reader.toggle_left(cx)))
@@ -7254,6 +7297,7 @@ impl Render for Reader {
                 ),
             )
             .when(self.finder_open, |this| this.child(self.finder(cx)))
+            .children(self.settings_page.as_ref().map(|(page, _)| page.clone()))
     }
 }
 
@@ -7440,7 +7484,9 @@ fn main() {
             KeyBinding::new("secondary-n", NewThread, None),
             KeyBinding::new("secondary-shift-o", OpenProject, None),
             KeyBinding::new("secondary-p", ShowFinder, None),
+            KeyBinding::new("secondary-,", ShowSettings, None),
             KeyBinding::new("secondary-w", CloseWindow, None),
+            KeyBinding::new("escape", CloseSettings, Some("Settings")),
             KeyBinding::new("escape", CloseFinder, Some("Finder")),
             // The Input binds up/down itself and swallows them when single-line, so these name it.
             KeyBinding::new("up", FinderUp, Some("Finder > Input")),

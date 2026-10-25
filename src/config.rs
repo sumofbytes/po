@@ -67,6 +67,27 @@ pub fn load() -> Value {
     dir().and_then(|dir| read_json(&dir.join("config.json"))).unwrap_or(Value::Null)
 }
 
+/// Changes the user's `config.json` and writes it back, keeping every key `change` leaves alone.
+/// The file is replaced whole, so a crash can't leave half of one; one that exists but doesn't
+/// parse is left as it is, since overwriting it would throw away what a person wrote.
+pub fn update(change: impl FnOnce(&mut serde_json::Map<String, Value>)) -> Result<(), String> {
+    let dir = dir().ok_or("no config folder")?;
+    let path = dir.join("config.json");
+    let mut config = match std::fs::read_to_string(&path) {
+        Ok(text) => match serde_json::from_str::<Value>(&text) {
+            Ok(Value::Object(map)) => map,
+            _ => return Err(format!("{} isn't a JSON object; fix it first", path.display())),
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => serde_json::Map::new(),
+        Err(error) => return Err(format!("{}: {error}", path.display())),
+    };
+    change(&mut config);
+    std::fs::create_dir_all(&dir).map_err(|error| format!("{}: {error}", dir.display()))?;
+    let temp = path.with_extension("json.tmp");
+    let text = serde_json::to_string_pretty(&Value::Object(config)).map_err(|error| error.to_string())?;
+    std::fs::write(&temp, text + "\n").and_then(|()| std::fs::rename(&temp, &path)).map_err(|error| format!("{}: {error}", path.display()))
+}
+
 fn parse(list: &Value) -> Vec<Agent> {
     list.as_array()
         .into_iter()
