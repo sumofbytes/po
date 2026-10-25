@@ -37,6 +37,7 @@ pub struct SettingsView {
     max_live: Entity<InputState>,
     notifications: bool,
     glass: bool,
+    viewer_left: bool,
     agents: Vec<AgentRow>,
     error: Option<String>,
     _events: Vec<Subscription>,
@@ -97,7 +98,8 @@ fn put(map: &mut Map<String, Value>, key: &str, value: Option<Value>) {
 }
 
 impl SettingsView {
-    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    /// `viewer_left` is where the viewer is now, which is what the page starts from.
+    pub fn new(viewer_left: bool, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let config = config::load();
         let field = |value: String, placeholder: &str, window: &mut Window, cx: &mut Context<Self>| {
             let input = cx.new(|cx| InputState::new(window, cx).placeholder(placeholder.to_string()));
@@ -149,6 +151,7 @@ impl SettingsView {
             max_live,
             notifications: config["notifications"].as_bool().unwrap_or(true),
             glass,
+            viewer_left,
             agents,
             error: None,
             _events: events,
@@ -187,7 +190,7 @@ impl SettingsView {
         let idle = number("Idle minutes", &read(&self.idle_minutes), 0.0..=1_000_000., true)?;
         let max_live = number("Max live agents", &read(&self.max_live), 1.0..=1000., true)?;
         let (theme, font_family, mono_family) = (read(&self.theme), names_value(&read(&self.font_family)), names_value(&read(&self.mono_family)));
-        let (notifications, glass) = (self.notifications, self.glass);
+        let (notifications, glass, viewer_left) = (self.notifications, self.glass, self.viewer_left);
         let mut agents = Vec::new();
         for row in &self.agents {
             let (id, name, command) = (read(&row.id), read(&row.name), read(&row.command));
@@ -218,6 +221,7 @@ impl SettingsView {
             // A glass opacity set by hand stays while glass is on.
             let kept = config.get("glass").filter(|value| value.is_number()).cloned();
             put(config, "glass", if glass { Some(kept.unwrap_or(Value::Bool(true))) } else { config.contains_key("glass").then_some(Value::Bool(false)) });
+            put(config, "viewer_position", Some((if viewer_left { "left" } else { "right" }).into()));
             put(config, "agents", (!agents.is_empty()).then(|| Value::Array(agents)));
         })
     }
@@ -257,9 +261,14 @@ impl Render for SettingsView {
         };
         let field = |input: &Entity<InputState>| div().w_full().child(Input::new(input).field());
         let toggle = |id: &'static str, on: bool, cx: &mut Context<Self>| {
-            Button::new(id).outline().label(if on { "On" } else { "Off" }).selected(on).on_click(cx.listener(move |view, _, _, cx| {
+            let label = match id {
+                "viewer" => if on { "Left" } else { "Right" },
+                _ => if on { "On" } else { "Off" },
+            };
+            Button::new(id).outline().label(label).selected(on && id != "viewer").on_click(cx.listener(move |view, _, _, cx| {
                 match id {
                     "notifications" => view.notifications = !view.notifications,
+                    "viewer" => view.viewer_left = !view.viewer_left,
                     _ => view.glass = !view.glass,
                 }
                 cx.notify();
@@ -332,6 +341,8 @@ impl Render for SettingsView {
                             .child(row("UI font size", "Also scales spacing", muted, field(&self.font_size)))
                             .child(row("Monospace font", "Names tried in order, comma separated", muted, field(&self.mono_family)))
                             .child(row("Monospace font size", "Code and diffs", muted, field(&self.mono_size)))
+                            .child(section("Layout", muted))
+                            .child(row("Viewer position", "Which side of the conversation (Ctrl+Shift+S)", muted, toggle("viewer", self.viewer_left, cx)))
                             .child(section("Behavior", muted))
                             .child(row("Notifications", "When a thread needs you in the background", muted, toggle("notifications", self.notifications, cx)))
                             .child(row("Idle minutes", "Stop an idle agent after this long; 0 never", muted, field(&self.idle_minutes)))

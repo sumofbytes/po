@@ -50,7 +50,7 @@ use gpui::{
     prelude::*, px, rems, size, KeyBinding,
 };
 
-gpui::actions!(po, [ToggleTools, ToggleThoughts, ToggleLeft, ToggleRight, ShowSource, ShowChanges, ShowChat, SwapPanes, ShowHistory, ToggleSplit, ToggleRendered, NewThread, OpenProject, ShowFinder, ShowSettings, CloseSettings, CloseWindow, CloseFinder, FinderUp, FinderDown]);
+gpui::actions!(po, [ToggleTools, ToggleThoughts, ToggleLeft, ToggleRight, ShowSource, ShowChanges, ShowChat, SwapPanes, ShowHistory, ToggleSplit, ToggleRendered, NewThread, OpenProject, ShowFinder, ToggleFocus, ShowSettings, CloseSettings, CloseWindow, CloseFinder, FinderUp, FinderDown]);
 
 const SKIP: [&str; 5] = ["target", "node_modules", "dist", "build", "__pycache__"];
 const MAX_FILES: usize = 5000;
@@ -515,13 +515,11 @@ fn tree_fits(width: f32) -> bool {
 }
 
 /// What an empty viewer says to do: pick from the tree, or how to get it back.
-fn pick_hint(what: &str, tree_visible: bool, tree_hidden: bool) -> String {
+fn pick_hint(what: &str, tree_visible: bool) -> String {
     if tree_visible {
         format!("Pick {what} in the tree")
-    } else if tree_hidden {
-        format!("Pick {what} with Ctrl+P, or show the file tree")
     } else {
-        format!("Pick {what} with Ctrl+P, or widen the pane to show the file tree")
+        format!("Pick {what} with Ctrl+P, or go back to the explorer")
     }
 }
 
@@ -1333,8 +1331,6 @@ struct Reader {
     heads: HashMap<PathBuf, worktree::Head>,
     /// The width of the file tree inside the viewer pane.
     tree_cols: Entity<SidebarsState>,
-    /// The file tree in the viewer is hidden.
-    tree_hidden: bool,
     /// The viewer pane is too narrow for the file tree, as of the last frame it was drawn.
     viewer_narrow: Rc<Cell<bool>>,
     /// In a pane too narrow for the tree beside the file, the explorer is what the pane shows.
@@ -1530,11 +1526,10 @@ impl Reader {
             projects_collapsed: HashSet::new(),
             heads: HashMap::new(),
             tree_cols,
-            tree_hidden: false,
             viewer_narrow: Rc::default(),
             browse: true,
             side_open: true,
-            swapped: false,
+            swapped: config::viewer_left(&settings).unwrap_or(false),
             agent_open: true,
             agent_menu: cx.new(MenuState::new),
             choices: config::load_choices(),
@@ -3449,27 +3444,36 @@ impl Reader {
         cx.notify();
     }
 
-    /// Puts the viewer in the middle and the conversation on the right, or back. The
-    /// conversation always shows after a swap: it lands in the middle, where it can't be
-    /// collapsed, and keeps its place when it goes back to the right.
+    /// Puts the viewer on the other side of the conversation, and remembers it in `config.json`
+    /// so the Settings page shows it. The conversation shows after a swap.
     fn swap_panes(&mut self, cx: &mut Context<Self>) {
         self.swapped = !self.swapped;
         self.agent_open = true;
+        let position = if self.swapped { "left" } else { "right" };
+        if let Err(error) = config::update(|config| {
+            config.insert("viewer_position".into(), position.into());
+        }) {
+            log::warn!("viewer position: {error}");
+        }
         self.request_save(cx);
         cx.notify();
     }
 
+    /// Shows the viewer, or closes it. It is always the viewer, whichever side it is on.
     fn toggle_right(&mut self, cx: &mut Context<Self>) {
-        // The right toggle works on the pane that sits on the right: the conversation while the
-        // viewer is open and swapped, the viewer otherwise.
-        if self.side_open && self.swapped {
-            self.agent_open = !self.agent_open;
-            self.request_save(cx);
-            cx.notify();
-        } else if self.side_open {
+        if self.side_open {
             self.show_chat(cx);
         } else {
             self.open_viewer_wide(cx);
+        }
+    }
+
+    /// With the viewer open, hides the conversation so the viewer has the room, or brings it back.
+    fn toggle_focus(&mut self, cx: &mut Context<Self>) {
+        if self.side_open {
+            self.agent_open = !self.agent_open;
+            self.request_save(cx);
+            cx.notify();
         }
     }
 
@@ -4139,10 +4143,10 @@ impl Reader {
         // Children of threads that came back with them, by the parent's session.
         let mut linked: Vec<(u64, String)> = vec![];
         self.side_open = saved.viewer_open;
-        self.swapped = saved.swapped;
+        // The Settings page's choice wins over the layout the last window saved.
+        self.swapped = config::viewer_left(&config::load()).unwrap_or(saved.swapped);
         self.agent_open = saved.agent_open;
         self.sidebars.update(cx, |sidebars, _| sidebars.set_widths(saved.left_width.map(px), saved.right_width.map(px)));
-        self.tree_hidden = saved.explorer_collapsed;
         self.tree_cols.update(cx, |cols, _| cols.set_widths(saved.explorer_width.map(px), None));
         self.chosen_agent = saved.agent.clone().or(self.chosen_agent.take());
         self.sections.update(cx, |sections, _| {
@@ -4297,7 +4301,7 @@ impl Reader {
             })
             .collect();
         let panes = AgentChange::saved(self.agent_panes.as_ref(), self.panes());
-        workspace::Workspace { projects, viewer_open: panes.viewer, agent_open: panes.agent, swapped: self.swapped, agent: self.chosen_agent.clone(), split: self.sections.read(cx).size(PROJECTS).map(f32::from), explorer_collapsed: self.tree_hidden, explorer_width: Some(self.tree_cols.read(cx).widths().0.into()), live_split: self.sections.read(cx).size(LIVE).map(f32::from), live_folded: self.sections.read(cx).folded(LIVE), projects_folded: self.sections.read(cx).folded(PROJECTS), left_width: Some(self.sidebars.read(cx).widths().0.into()), right_width: self.sidebars.read(cx).widths().1.map(f32::from) }
+        workspace::Workspace { projects, viewer_open: panes.viewer, agent_open: panes.agent, swapped: self.swapped, agent: self.chosen_agent.clone(), split: self.sections.read(cx).size(PROJECTS).map(f32::from), explorer_width: Some(self.tree_cols.read(cx).widths().0.into()), live_split: self.sections.read(cx).size(LIVE).map(f32::from), live_folded: self.sections.read(cx).folded(LIVE), projects_folded: self.sections.read(cx).folded(PROJECTS), left_width: Some(self.sidebars.read(cx).widths().0.into()), right_width: self.sidebars.read(cx).widths().1.map(f32::from) }
     }
 
     /// Saves the workspace once the current change has settled, so that a thread that is
@@ -4709,7 +4713,7 @@ impl Reader {
         if self.settings_page.is_some() {
             return self.hide_settings(window, cx);
         }
-        let page = cx.new(|cx| settings::SettingsView::new(window, cx));
+        let page = cx.new(|cx| settings::SettingsView::new(self.swapped, window, cx));
         let subscription = cx.subscribe_in(&page, window, |reader, _, event: &settings::SettingsEvent, window, cx| match event {
             settings::SettingsEvent::Close => reader.hide_settings(window, cx),
             settings::SettingsEvent::Saved => reader.apply_settings(cx),
@@ -4733,6 +4737,10 @@ impl Reader {
         let idle_minutes = settings["idle_minutes"].as_u64().unwrap_or(15);
         self.idle_after = (idle_minutes > 0).then(|| Duration::from_secs(idle_minutes * 60));
         self.max_live = settings["max_live_agents"].as_u64().unwrap_or(8).max(1) as usize;
+        if let Some(left) = config::viewer_left(&settings) {
+            self.swapped = left;
+            self.request_save(cx);
+        }
         // An agent that was added on the command line isn't in the config; it stays.
         let mut agents = config::agents(&settings);
         let kept: Vec<_> = self.agents.iter().filter(|agent| agent.vouched && !agents.iter().any(|known| known.id == agent.id)).cloned().collect();
@@ -5273,7 +5281,7 @@ impl Reader {
         let colors = cx.global::<Palette>();
         let this = cx.entity();
         let mode = self.mode;
-        let (source, changes, hide) = (cx.entity(), cx.entity(), cx.entity());
+        let (source, changes) = (cx.entity(), cx.entity());
         let modes = div()
             .flex_none()
             .flex()
@@ -5296,14 +5304,6 @@ impl Reader {
                     .tooltip("Changes (Ctrl+2)")
                     .selected(mode == Mode::Diff)
                     .on_click(move |_, _, cx| changes.update(cx, |reader, cx| reader.set_mode(Mode::Diff, cx))),
-            )
-            .child(
-                Button::new("hide-tree")
-                    .icon(IconName::PanelLeftClose)
-                    .ghost()
-                    .small()
-                    .tooltip("Hide the file tree")
-                    .on_click(move |_, _, cx| hide.update(cx, |reader, cx| reader.set_tree_hidden(true, cx))),
             );
         let title = match mode {
             Mode::Source => "Explorer",
@@ -5411,13 +5411,6 @@ impl Reader {
     /// Switches a narrow viewer pane between the explorer and the file.
     fn set_browsing(&mut self, browse: bool, cx: &mut Context<Self>) {
         self.browse = browse;
-        cx.notify();
-    }
-
-    /// Hides the file tree beside the viewer, or shows it again.
-    fn set_tree_hidden(&mut self, hidden: bool, cx: &mut Context<Self>) {
-        self.tree_hidden = hidden;
-        self.request_save(cx);
         cx.notify();
     }
 
@@ -5833,13 +5826,13 @@ impl Reader {
             .into_any_element()
     }
 
-    /// The file tree is drawn beside the viewer: not hidden, and the pane wide enough for both.
+    /// The file tree is drawn beside the viewer: the pane is wide enough for both.
     fn tree_visible(&self) -> bool {
-        !self.tree_hidden && !self.viewer_narrow.get()
+        !self.viewer_narrow.get()
     }
 
     fn pick_hint(&self, what: &str) -> String {
-        pick_hint(what, self.tree_visible(), self.tree_hidden)
+        pick_hint(what, self.tree_visible())
     }
 
     /// The viewer or the diff viewer, as the project's mode says, with the file tree beside it
@@ -5852,11 +5845,10 @@ impl Reader {
             Some((view, self.thread.docs.get(id)?))
         });
         let with_tree = shown.is_none() && self.tree_visible();
-        // The window's own control goes in the leftmost header: the tree's, or the viewer's when
-        // the tree is away, where a button brings it back.
+        // The window's own control goes in the leftmost header: the tree's, or the viewer's.
         // A pane too narrow for the tree beside the file takes turns: the explorer fills it until a
         // file is picked, then the file does, with a button back to the explorer.
-        let stacked = shown.is_none() && !self.tree_hidden && self.viewer_narrow.get();
+        let stacked = shown.is_none() && self.viewer_narrow.get();
         let nothing_picked = if self.mode == Mode::Diff { self.project.picked.is_none() } else { self.project.current.is_none() };
         let explorer_only = stacked && (self.browse || nothing_picked);
         let (mut tree_lead, body_lead) = if with_tree || explorer_only {
@@ -5869,16 +5861,6 @@ impl Reader {
                 .small()
                 .tooltip("Back to the explorer")
                 .on_click(move |_, _, cx| back.update(cx, |reader, cx| reader.set_browsing(true, cx)))
-                .into_any_element();
-            (None, Some(div().flex().items_center().gap_1().children(lead).child(button).into_any_element()))
-        } else if shown.is_none() && self.tree_hidden {
-            let show = cx.entity();
-            let button = Button::new("show-tree")
-                .icon(IconName::FolderTree)
-                .ghost()
-                .small()
-                .tooltip("Show the explorer")
-                .on_click(move |_, _, cx| show.update(cx, |reader, cx| reader.set_tree_hidden(false, cx)))
                 .into_any_element();
             (None, Some(div().flex().items_center().gap_1().children(lead).child(button).into_any_element()))
         } else {
@@ -7256,53 +7238,56 @@ impl Render for Reader {
         let foreground = colors.foreground;
         let glass = colors.glass;
         let (left_open, side_open, swapped, agent_open) = (self.left_open, self.side_open, self.swapped, self.agent_open);
-        // The window's controls live in the headers of the panes at its edges: the sidebar toggle
-        // at the left of the leftmost pane, the viewer toggle (and the swap, while the viewer is
-        // open) at the right of the rightmost one.
-        let (left, right, swap) = (cx.entity(), cx.entity(), cx.entity());
+        // The window's controls live in the headers of the panes at its edges. Each button is one
+        // pane and never changes what it means: the sidebar toggle at the left of the leftmost
+        // pane, the viewer toggle in the viewer's header (or, while it is closed, in the
+        // conversation's, on the side the viewer opens), and, with the viewer open, a button that
+        // gives it the room by hiding the conversation.
+        let focus = side_open && !agent_open;
+        let (left, right, focus_viewer) = (cx.entity(), cx.entity(), cx.entity());
         let sidebar_toggle = Button::new("toggle-left")
-            .icon(if left_open { IconName::PanelLeftClose } else { IconName::PanelLeftOpen })
+            .icon(IconName::PanelLeft)
             .ghost()
             .small()
-            .tooltip("Toggle the sidebar (Ctrl+B)")
+            .selected(left_open)
+            .tooltip("Sidebar (Ctrl+B)")
             .on_click(move |_, _, cx| left.update(cx, |reader, cx| reader.toggle_left(cx)))
             .into_any_element();
-        let swap_button = Button::new("swap-panes")
-            .icon(IconName::ArrowLeftRight)
-            .ghost()
-            .small()
-            .tooltip("Swap the viewer and the conversation (Ctrl+Shift+S)")
-            .on_click(move |_, _, cx| swap.update(cx, |reader, cx| reader.swap_panes(cx)));
-        // The right toggle works on the pane that sits on the right: the conversation while the
-        // viewer is open and swapped, the viewer otherwise. Its icon says whether that pane shows.
-        let (toggles_agent, right_open) = if side_open && swapped { (true, agent_open) } else { (false, side_open) };
-        let viewer_toggle = Button::new("toggle-right")
-            .icon(match (right_open, toggles_agent) {
-                (true, _) => IconName::PanelRightClose,
-                // A closed viewer shows what it holds; a closed conversation keeps the panel mark.
-                (false, false) => IconName::FileText,
-                (false, true) => IconName::PanelRightOpen,
-            })
-            .ghost()
-            .small()
-            .tooltip(if toggles_agent { "Toggle the conversation (Ctrl+Shift+B)" } else { "Toggle the viewer (Ctrl+Shift+B)" })
-            .on_click(move |_, _, cx| right.update(cx, |reader, cx| reader.toggle_right(cx)));
-        let trailing = div().flex().items_center().gap_1().children(side_open.then_some(swap_button)).child(viewer_toggle).into_any_element();
-        // With the viewer open they can trade places; with it closed the conversation is the middle
-        // either way, and has both controls.
-        let (middle, side) = if !side_open {
-            (floating(self.agent_panel(Some(sidebar_toggle), Some(trailing), cx), cx), self.pane(None, None, cx))
-        } else if swapped {
-            // The conversation sits on the right; with it collapsed the viewer keeps the middle
-            // and carries both controls.
-            if agent_open {
-                (self.pane(Some(sidebar_toggle), None, cx), floating(self.agent_panel(None, Some(trailing), cx), cx))
-            } else {
-                (self.pane(Some(sidebar_toggle), Some(trailing), cx), self.pane(None, None, cx))
-            }
-        } else {
-            (floating(self.agent_panel(Some(sidebar_toggle), None, cx), cx), self.pane(None, Some(trailing), cx))
+        let viewer_toggle = move |right: Entity<Reader>| {
+            Button::new("toggle-right")
+                .icon(IconName::FileText)
+                .ghost()
+                .small()
+                .selected(side_open)
+                .tooltip("Viewer (Ctrl+Shift+B)")
+                .on_click(move |_, _, cx| right.update(cx, |reader, cx| reader.toggle_right(cx)))
+                .into_any_element()
         };
+        let focus_button = Button::new("focus-viewer")
+            .icon(if focus { IconName::Minimize } else { IconName::Maximize })
+            .ghost()
+            .small()
+            .tooltip(if focus { "Show the conversation (Ctrl+Shift+F)" } else { "Focus the viewer (Ctrl+Shift+F)" })
+            .on_click(move |_, _, cx| focus_viewer.update(cx, |reader, cx| reader.toggle_focus(cx)))
+            .into_any_element();
+        let viewer_trail = div().flex().items_center().gap_1().child(focus_button).child(viewer_toggle(right.clone())).into_any_element();
+        let (middle, side) = if !side_open {
+            // Only the conversation shows, and the viewer's button waits on the side it opens.
+            let button = viewer_toggle(right);
+            if swapped {
+                let lead = div().flex().items_center().gap_1().child(sidebar_toggle).child(button).into_any_element();
+                (floating(self.agent_panel(Some(lead), None, cx), cx), self.pane(None, None, cx))
+            } else {
+                (floating(self.agent_panel(Some(sidebar_toggle), Some(button), cx), cx), self.pane(None, None, cx))
+            }
+        } else if focus {
+            (self.pane(Some(sidebar_toggle), Some(viewer_trail), cx), self.pane(None, None, cx))
+        } else if swapped {
+            (self.pane(Some(sidebar_toggle), Some(viewer_trail), cx), floating(self.agent_panel(None, None, cx), cx))
+        } else {
+            (floating(self.agent_panel(Some(sidebar_toggle), None, cx), cx), self.pane(None, Some(viewer_trail), cx))
+        };
+        let right_open = side_open && !focus;
         div()
             .size_full()
             .flex()
@@ -7325,6 +7310,7 @@ impl Render for Reader {
             .on_action(cx.listener(|reader, _: &ShowChanges, _, cx| reader.show_viewer(Mode::Diff, cx)))
             .on_action(cx.listener(|reader, _: &ShowChat, _, cx| reader.show_chat(cx)))
             .on_action(cx.listener(|reader, _: &SwapPanes, _, cx| reader.swap_panes(cx)))
+            .on_action(cx.listener(|reader, _: &ToggleFocus, _, cx| reader.toggle_focus(cx)))
             .on_action(cx.listener(|reader, _: &ShowHistory, window, cx| reader.resume_thread(window, cx)))
             .on_action(cx.listener(|reader, _: &ToggleSplit, _, cx| reader.set_split(!reader.split, cx)))
             .on_action(cx.listener(|reader, _: &ToggleRendered, _, cx| reader.toggle_rendered(cx)))
@@ -7527,6 +7513,7 @@ fn main() {
             KeyBinding::new("secondary-2", ShowChanges, None),
             KeyBinding::new("secondary-3", ShowChat, None),
             KeyBinding::new("secondary-shift-s", SwapPanes, None),
+            KeyBinding::new("secondary-shift-f", ToggleFocus, None),
             KeyBinding::new("secondary-shift-h", ShowHistory, None),
             KeyBinding::new("secondary-\\", ToggleSplit, None),
             KeyBinding::new("secondary-shift-m", ToggleRendered, None),
@@ -7646,9 +7633,8 @@ mod tests {
     #[test]
     fn an_empty_viewer_says_how_to_get_the_tree_back() {
         use super::pick_hint;
-        assert_eq!(pick_hint("a file", true, false), "Pick a file in the tree");
-        assert!(pick_hint("a file", false, true).ends_with("show the file tree"));
-        assert!(pick_hint("a file", false, false).contains("widen the pane"));
+        assert_eq!(pick_hint("a file", true), "Pick a file in the tree");
+        assert!(pick_hint("a file", false).ends_with("back to the explorer"));
     }
 
     #[test]

@@ -90,6 +90,16 @@ pub fn update(change: impl FnOnce(&mut serde_json::Map<String, Value>)) -> Resul
     std::fs::write(&temp, text + "\n").and_then(|()| std::fs::rename(&temp, &path)).map_err(|error| format!("{}: {error}", path.display()))
 }
 
+/// Whether the config puts the viewer left of the conversation (`"viewer_position": "left"`), or
+/// right of it; none when it doesn't say.
+pub fn viewer_left(config: &Value) -> Option<bool> {
+    match config["viewer_position"].as_str()? {
+        "left" => Some(true),
+        "right" => Some(false),
+        _ => None,
+    }
+}
+
 fn parse(list: &Value) -> Vec<Agent> {
     list.as_array()
         .into_iter()

@@ -4,7 +4,6 @@ use gpui::{App, IntoElement, ParentElement as _, Rems, RenderOnce, Styled as _, 
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum IconName {
-    ArrowLeftRight,
     ArrowUp,
     CaseSensitive,
     ChevronDown,
@@ -14,10 +13,9 @@ pub enum IconName {
     FileText,
     Folder,
     FolderTree,
-    PanelLeftClose,
-    PanelLeftOpen,
-    PanelRightClose,
-    PanelRightOpen,
+    Maximize,
+    Minimize,
+    PanelLeft,
     Plus,
     Replace,
     Search,
@@ -33,7 +31,6 @@ impl IconName {
             };
         }
         match self {
-            Self::ArrowLeftRight => icon!("arrow-left-right"),
             Self::ArrowUp => icon!("arrow-up"),
             Self::CaseSensitive => icon!("case-sensitive"),
             Self::ChevronDown => icon!("chevron-down"),
@@ -43,10 +40,9 @@ impl IconName {
             Self::FileText => icon!("file-text"),
             Self::Folder => icon!("folder"),
             Self::FolderTree => icon!("folder-tree"),
-            Self::PanelLeftClose => icon!("panel-left-close"),
-            Self::PanelLeftOpen => icon!("panel-left-open"),
-            Self::PanelRightClose => icon!("panel-right-close"),
-            Self::PanelRightOpen => icon!("panel-right-open"),
+            Self::Maximize => icon!("maximize-2"),
+            Self::Minimize => icon!("minimize-2"),
+            Self::PanelLeft => icon!("panel-left"),
             Self::Plus => icon!("plus"),
             Self::Replace => icon!("replace"),
             Self::Search => icon!("search"),
