@@ -18,6 +18,7 @@ pub enum IconName {
     PanelRightOpen,
     Plus,
     Replace,
+    Search,
     Square,
 }
 
@@ -43,6 +44,7 @@ impl IconName {
             Self::PanelRightOpen => icon!("panel-right-open"),
             Self::Plus => icon!("plus"),
             Self::Replace => icon!("replace"),
+            Self::Search => icon!("search"),
             Self::Square => icon!("square"),
         }
     }

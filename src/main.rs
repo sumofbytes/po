@@ -1290,6 +1290,8 @@ struct Reader {
     /// The directory `po` was started in: where PRs are checked out from and where Close returns to.
     home: PathBuf,
     pr_input: Entity<InputState>,
+    /// The sidebar's filter: threads and projects that don't match it are left out of its lists.
+    side_search: Entity<InputState>,
     /// Progress or failure of the last attempt to open a PR.
     pr_status: Option<String>,
     opening: bool,
@@ -1383,6 +1385,7 @@ impl Reader {
         let pr_input = cx.new(|cx| {
             InputState::new(window, cx).auto_grow(1, 1).submit_on_enter(true).placeholder("PR number or URL")
         });
+        let side_search = cx.new(|cx| InputState::new(window, cx).placeholder("Search"));
         let draft = cx.new(|cx| {
             InputState::new(window, cx)
                 .auto_grow(1, 6)
@@ -1408,6 +1411,7 @@ impl Reader {
                     reader.request_save(cx);
                 }
             }),
+            cx.subscribe(&side_search, |_, _, _: &InputEvent, cx| cx.notify()),
             cx.subscribe_in(&pr_input, window, |reader, _, event: &InputEvent, window, cx| {
                 if matches!(event, InputEvent::PressEnter { shift: false, alt: false }) {
                     reader.open_pr(window, cx);
@@ -1496,6 +1500,7 @@ impl Reader {
             next_thread: 1,
             home,
             pr_input,
+            side_search,
             pr_status: None,
             opening: false,
             worktree_status: None,
@@ -5365,7 +5370,19 @@ impl Reader {
     }
 
     /// The left side: the live agents, and every project with its threads.
+    /// What the sidebar's filter asks for, lowercased; empty when it is not filtering.
+    fn side_query(&self, cx: &App) -> String {
+        self.side_search.read(cx).value().trim().to_lowercase()
+    }
+
+    /// Whether a thread answers the sidebar's filter: its title or its latest line says it.
+    fn matches_query(&self, thread: &Thread, query: &str) -> bool {
+        self.thread_label(thread).to_lowercase().contains(query) || thread.preview().to_lowercase().contains(query)
+    }
+
     fn left_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let query = self.side_query(cx);
+        let searching = !query.is_empty();
         let colors = cx.global::<Palette>();
         let (hover, selected, muted, foreground, primary, warning) = (colors.list_hover, colors.list_selected, colors.muted_foreground, colors.foreground, colors.primary, colors.warning);
         let views = self.views();
@@ -5373,6 +5390,10 @@ impl Reader {
         let project_count = views.len();
         let many = project_count > 1;
         let add = cx.entity();
+        // Filtering keeps a project whose name matches, with all its threads, and any project with a
+        // thread that does.
+        let project_hit = |view: &View<'_>| view.project.name().to_lowercase().contains(&query);
+        let views: Vec<_> = views.into_iter().filter(|view| !searching || project_hit(view) || view.threads.iter().any(|t| self.matches_query(t, &query))).collect();
         // Groups are spaced apart by more than anything inside one, so the eye reads them as units.
         let mut tree = div().id("agents-tree").size_full().overflow_y_scroll().flex().flex_col().gap(SIDE_GROUP_GAP).px(SIDEBAR_GUTTER).pt_1().pb_3();
         // Folded, only the header shows, so no project is built.
@@ -5380,7 +5401,7 @@ impl Reader {
         for view in views.iter().filter(|_| !projects_folded) {
             let pid = view.id;
             let (select, close, start) = (cx.entity(), cx.entity(), cx.entity());
-            let collapsed = self.projects_collapsed.contains(&pid);
+            let collapsed = self.projects_collapsed.contains(&pid) && !searching;
             // A project and its threads are one group, set apart from the next by space, not a box.
             // The one on screen has its name at full strength, the rest are muted; the selected
             // thread is the only filled row. Names and thread titles share one left edge, after a column for the
@@ -5454,11 +5475,14 @@ impl Reader {
             // Most recently active first. Only the active ones show; the rest fold under "more".
             let mut recent: Vec<&Thread> = view.threads.iter().copied().filter(|t| !t.blank || t.id == view.shown).collect();
             recent.sort_by_key(|t| (std::cmp::Reverse(t.active_at), std::cmp::Reverse(t.id)));
-            let expanded = self.threads_expanded.contains(&pid);
+            if searching && !project_hit(view) {
+                recent.retain(|t| self.matches_query(t, &query));
+            }
+            let expanded = self.threads_expanded.contains(&pid) || searching;
             // Active: asking, running, finished unseen, or an agent still alive; the one on screen too.
             let active = |t: &Thread| t.id == view.shown || t.activity().live_rank().is_some() || t.client.is_some();
             let shown_count = recent.iter().filter(|t| active(t)).count();
-            let foldable = recent.len() > shown_count.max(1);
+            let foldable = !searching && recent.len() > shown_count.max(1);
             let hidden = if expanded || !foldable {
                 0
             } else {
@@ -5541,6 +5565,9 @@ impl Reader {
             }
             tree = tree.child(group);
         }
+        if searching && views.is_empty() && !projects_folded {
+            tree = tree.child(side_row(colors.radius, None).h(SIDE_MORE_HEIGHT).text_xs().text_color(muted).child("No matches"));
+        }
         let title = self.fold_title(
             PROJECTS,
             div()
@@ -5578,7 +5605,7 @@ impl Reader {
         let new_thread = cx.entity();
         let (hover, muted, foreground, radius) = (colors.list_hover, colors.muted_foreground, colors.foreground, colors.radius);
         // A plain text action below the title bar, not a button: it lights up under the pointer.
-        let actions = div().flex_none().px(SIDEBAR_GUTTER).pt_2().pb_3().child(
+        let actions = div().flex_none().flex().flex_col().gap(SIDE_ITEM_GAP).px(SIDEBAR_GUTTER).pt_2().pb_3().child(
             side_row(radius, Some(side_icon(IconName::Plus, muted)))
                 .id("sidebar-new-thread")
                 .h(SIDE_ROW_HEIGHT)
@@ -5589,7 +5616,8 @@ impl Reader {
                 .tooltip(|_, cx| ui::button::tooltip("New thread (Ctrl+N)".into(), cx))
                 .on_click(move |_, window, cx| new_thread.update(cx, |reader, cx| reader.new_blank_thread(window, cx)))
                 .child("New"),
-        );
+        )
+        .child(self.search_row(cx));
         let pane = div().size_full().flex().flex_col().bg(colors.sidebar).child(side_header(pane_header("Po", div(), None, None, cx))).child(actions).child(
             div().flex_1().min_h_0().child(
                 stack(&self.sections).fixed(LIVE, (!any_live).then_some(rems(LIVE_EMPTY_REMS))).section(live).section(projects),
@@ -5654,13 +5682,17 @@ impl Reader {
             .collect();
         live.sort_by_key(|(rank, _, thread)| (*rank, thread.id));
         let count = live.len();
+        let query = self.side_query(cx);
+        if !query.is_empty() {
+            live.retain(|(_, view, thread)| view.project.name().to_lowercase().contains(&query) || self.matches_query(thread, &query));
+        }
         let folded = self.sections.read(cx).folded(LIVE);
         // Folded, the most pressing thread's mark stays in view.
         let (glyph, tint) = if folded { live.first().map_or(("", muted), |(_, _, thread)| thread.activity().mark(colors)) } else { ("", muted) };
         let (active_project, active_thread) = (self.project_id, self.thread.id);
         let mut rows = div().id("live-list").size_full().overflow_y_scroll().flex().flex_col().gap_0p5().px(SIDEBAR_GUTTER).pt_1().pb_2();
         if live.is_empty() && !folded {
-            rows = rows.child(side_row(radius, None).py_1().text_xs().text_color(muted).child("No active agents"));
+            rows = rows.child(side_row(radius, None).py_1().text_xs().text_color(muted).child(if query.is_empty() { "No active agents" } else { "No matches" }));
         }
         for (_, view, thread) in live.into_iter().filter(|_| !folded) {
             let (pid, tid) = (view.id, thread.id);
@@ -6267,6 +6299,34 @@ impl Reader {
             Some(parent) => format!("↳ {parent}"),
             None => thread.title(),
         }
+    }
+
+    /// The sidebar's filter, a row like the ones around it: a click anywhere on it starts typing, and
+    /// a cross clears it.
+    fn search_row(&self, cx: &App) -> impl IntoElement {
+        let colors = cx.global::<Palette>();
+        let (hover, muted, radius) = (colors.list_hover, colors.muted_foreground, colors.radius);
+        let input = self.side_search.clone();
+        let filled = !self.side_search.read(cx).value().is_empty();
+        let clear = filled.then(|| {
+            let input = input.clone();
+            Button::new("sidebar-search-clear")
+                .icon(IconName::Close)
+                .ghost()
+                .xsmall()
+                .tooltip("Clear search")
+                .on_click(move |_, window, cx| input.update(cx, |input, cx| input.set_value("", window, cx)))
+        });
+        let focus = input.clone();
+        side_row(radius, Some(side_icon(IconName::Search, muted)))
+            .id("sidebar-search")
+            .h(SIDE_ROW_HEIGHT)
+            .cursor_text()
+            .text_color(muted)
+            .hover(move |this| this.bg(hover))
+            .on_click(move |_, window, cx| focus.update(cx, |input, cx| input.focus(window, cx)))
+            .child(div().flex_1().min_w_0().child(Input::new(&input)))
+            .children(clear)
     }
 
     /// What the parent of children says in its header: `3 threads · 1 asking · 1 failed`.
