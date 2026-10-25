@@ -5545,8 +5545,8 @@ impl Reader {
             let collapsed = self.projects_collapsed.contains(&pid) && !searching;
             // A project and its threads are one group, set apart from the next by space, not a box.
             // The one on screen has its name at full strength, the rest are muted; the selected
-            // thread is the only filled row. Thread titles sit under the project's name, past its
-            // folder, so each group reads as one name and what is in it.
+            // thread is the only filled row. Thread titles start at the folder's left edge, so the
+            // groups are told apart by the project's row and the space between them.
             let label = if pid == active_project { foreground } else { muted };
             let mut group = div().flex().flex_col().gap(SIDE_ITEM_GAP);
             group = group.child(
@@ -5643,7 +5643,6 @@ impl Reader {
                 let controlled = self.grants.get(&tid).is_some_and(|grant| *grant != command::Grant::default());
                 group = group.child(
                     side_row(colors.radius, None)
-                        .child(side_lead(div()))
                         .id(("agent-thread", tid as usize))
                         .group(row_group("agent-thread", tid))
                         .h(SIDE_ROW_HEIGHT)
@@ -5688,7 +5687,6 @@ impl Reader {
                 let label = if expanded { "Show less".to_string() } else { format!("{hidden} more") };
                 group = group.child(
                     side_row(colors.radius, None)
-                        .child(side_lead(div()))
                         .id(("agent-more", pid as usize))
                         .h(SIDE_MORE_HEIGHT)
                         .cursor_pointer()
@@ -5850,7 +5848,7 @@ impl Reader {
         let (active_project, active_thread) = (self.project_id, self.thread.id);
         let mut rows = div().id("live-list").size_full().overflow_y_scroll().flex().flex_col().gap(SIDE_ITEM_GAP).px(SIDEBAR_GUTTER).pt(SIDE_LIST_TOP).pb(SIDE_LIST_BOTTOM);
         if live.is_empty() && !folded {
-            rows = rows.child(side_row(radius, None).child(side_lead(div())).h(SIDE_MORE_HEIGHT).text_sm().text_color(muted).child(if query.is_empty() { "No active agents" } else { "No matches" }));
+            rows = rows.child(side_row(radius, None).h(SIDE_MORE_HEIGHT).text_sm().text_color(muted).child(if query.is_empty() { "No active agents" } else { "No matches" }));
         }
         for (_, view, thread) in live.into_iter().filter(|_| !folded) {
             let (pid, tid) = (view.id, thread.id);
@@ -5861,7 +5859,6 @@ impl Reader {
             let current = (pid, tid) == (active_project, active_thread);
             rows = rows.child(
                 side_row(radius, None)
-                    .child(side_lead(div().text_base().text_color(tint).child(glyph)))
                     .id(("live-thread", tid as usize))
                     .items_start()
                     .py_1p5()
@@ -5884,6 +5881,8 @@ impl Reader {
                             )
                             .child(div().truncate().text_sm().text_color(muted.opacity(theme::tokens::GUIDE)).child(detail)),
                     )
+                    // An idle thread has nothing to report, so it has no mark.
+                    .children(thread.activity().live_rank().map(|_| side_trail(div().text_base().text_color(tint).child(glyph)))),
             );
         }
         let title = self.fold_title(
