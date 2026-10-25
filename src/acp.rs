@@ -6,7 +6,7 @@ use std::{
     process::{Child, ChildStdin, Command, Stdio},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
 };
 
@@ -135,6 +135,8 @@ struct Shared {
     listed: Mutex<Vec<SessionInfo>>,
     /// Po's own MCP server for this thread, if the window has a socket to give it.
     po_mcp: Option<Value>,
+    /// Whether the agent said, at the handshake, that it takes images in a prompt.
+    images: AtomicBool,
 }
 
 impl Shared {
@@ -247,6 +249,7 @@ impl Shared {
                 if let Some(name) = result["agentInfo"]["name"].as_str() {
                     *self.agent.lock().expect("agent lock") = name.to_string();
                 }
+                self.images.store(result["agentCapabilities"]["promptCapabilities"]["image"].as_bool() == Some(true), Ordering::Relaxed);
                 if self.resume {
                     let caps = &result["agentCapabilities"];
                     if caps["loadSession"].as_bool() != Some(true) || !caps["sessionCapabilities"]["list"].is_object() {
@@ -356,8 +359,9 @@ pub struct Client {
 impl Client {
     /// Starts `command` (program and arguments) in `cwd` and begins the handshake.
     /// With `resume`, lists the agent's sessions rather than opening a new one; `load` picks one.
-    /// `control` is the environment Po's MCP server for this thread gets; the agent itself does not.
-    pub fn spawn(command: &str, cwd: &Path, resume: bool, control: &[(String, String)]) -> Result<(Self, UnboundedReceiver<Event>)> {
+    /// The child's pid is known once it is started, and `control` is then asked for the
+    /// environment Po's MCP server for this thread gets; the agent itself does not.
+    pub fn spawn(command: &str, cwd: &Path, resume: bool, control: impl FnOnce(u32) -> Vec<(String, String)>) -> Result<(Self, UnboundedReceiver<Event>)> {
         let mut parts = command.split_whitespace();
         let program = parts.next().context("empty agent command")?;
         let mut child = Command::new(program)
@@ -371,6 +375,7 @@ impl Client {
         let stdin = child.stdin.take().context("no stdin")?;
         let stdout = child.stdout.take().context("no stdout")?;
         let (events, receiver) = unbounded();
+        let control = control(child.id());
         let shared = Arc::new(Shared {
             stdin: Mutex::new(stdin),
             pending: Mutex::new(HashMap::new()),
@@ -381,7 +386,8 @@ impl Client {
             agent: Mutex::new(program.to_string()),
             resume,
             listed: Mutex::new(Vec::new()),
-            po_mcp: if control.is_empty() { None } else { crate::mcp::server(control) },
+            images: AtomicBool::new(false),
+            po_mcp: if control.is_empty() { None } else { crate::mcp::server(&control) },
         });
         let child = Arc::new(Mutex::new(child));
         let (reader, reaper) = (shared.clone(), child.clone());
@@ -410,13 +416,22 @@ impl Client {
         Ok((Self { shared, child }, receiver))
     }
 
-    pub fn prompt(&self, text: &str) -> bool {
+    /// Whether pictures can go in a prompt as image blocks.
+    pub fn takes_images(&self) -> bool {
+        self.shared.images.load(Ordering::Relaxed)
+    }
+
+    /// Sends `text`, then `images` as image blocks.
+    pub fn prompt(&self, text: &str, images: &[Value]) -> bool {
         let Some(session) = self.shared.session.lock().expect("session lock").clone() else {
             return false;
         };
+        // An empty text block is refused by the API, so a picture sent alone goes without one.
+        let mut blocks = if text.is_empty() { vec![] } else { vec![json!({ "type": "text", "text": text })] };
+        blocks.extend_from_slice(images);
         self.shared.request(
             "session/prompt",
-            json!({ "sessionId": session, "prompt": [{ "type": "text", "text": text }] }),
+            json!({ "sessionId": session, "prompt": blocks }),
             Pending::Prompt,
         );
         true

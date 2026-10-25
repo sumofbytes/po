@@ -30,7 +30,7 @@ const MAX_SESSIONS: usize = 100;
 const MODES: [(&str, &str, &str); 3] = [("plan", "Plan", "read-only"), ("manual", "Manual", "ask"), ("auto", "Auto", "trusted")];
 
 /// Where a steering or follow-up message ended up.
-#[derive(Clone, Copy, PartialEq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Queue {
     Steer,
     Followup,

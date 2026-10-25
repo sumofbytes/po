@@ -312,15 +312,23 @@ pub struct Stack {
     state: Entity<StackState>,
     sections: Vec<AnyElement>,
     fixed: Option<(usize, gpui::Rems)>,
+    at_most: Option<(usize, gpui::Rems)>,
 }
 
 pub fn stack(state: &Entity<StackState>) -> Stack {
-    Stack { state: state.clone(), sections: Vec::new(), fixed: None }
+    Stack { state: state.clone(), sections: Vec::new(), fixed: None, at_most: None }
 }
 
 impl Stack {
     pub fn section(mut self, element: impl IntoElement) -> Self {
         self.sections.push(element.into_any_element());
+        self
+    }
+
+    /// Keeps `section` from being taller than this, however far it was dragged, so a section with
+    /// little in it doesn't leave an empty gap.
+    pub fn at_most(mut self, section: usize, height: gpui::Rems) -> Self {
+        self.at_most = Some((section, height));
         self
     }
 
@@ -428,21 +436,29 @@ impl RenderOnce for Stack {
                 section = section.flex_none().h(folded_height).when(ix > 0, |s| s.border_t_1().border_color(border));
             } else if Some(ix) == last_open {
                 section = section.flex_1().min_h(MIN_SECTION);
+                if let Some((_, height)) = self.at_most.filter(|(capped, _)| *capped == ix) {
+                    section = section.max_h(height);
+                }
             } else {
                 section = section.flex_grow(0.).flex_shrink(1.).min_h(MIN_SECTION);
+                if let Some((_, height)) = self.at_most.filter(|(capped, _)| *capped == ix) {
+                    section = section.max_h(height);
+                }
                 section = match sizes[ix] {
                     Some(height) => section.flex_basis(fitted_size(height, bounds_height, room_below(&folded, ix, folded_height))),
                     None => section.flex_basis(gpui::relative(0.5)),
                 };
             }
             section = section.child(div().size_full().overflow_hidden().child(element));
-            // The boundary with the open section above sets that section's height.
+            // The boundary with the open section above sets that section's height. Its line shows only
+            // under the pointer or while dragged: at rest the sections are told apart by their headers.
             if let (false, Some(resized), None) = (folded[ix], above, pinned) {
                 let grab = self.state.clone();
-                let color = if dragging == Some(resized) { active } else { border };
+                let (color, hover) = if dragging == Some(resized) { (active, active) } else { (border.opacity(0.), border) };
                 section = section.child(
                     div()
                         .id(("stack-handle", ix))
+                        .group("stack-handle")
                         .occlude()
                         .absolute()
                         .left_0()
@@ -451,7 +467,7 @@ impl RenderOnce for Stack {
                         .h(px(1.) + HANDLE_PADDING * 2.)
                         .py(HANDLE_PADDING)
                         .cursor_row_resize()
-                        .child(div().flex_none().w_full().h(px(1.)).bg(color))
+                        .child(div().flex_none().w_full().h(px(1.)).bg(color).group_hover("stack-handle", move |line| line.bg(hover)))
                         .on_mouse_down(MouseButton::Left, move |_, _, cx| {
                             grab.update(cx, |state, cx| {
                                 state.dragging = Some(resized);

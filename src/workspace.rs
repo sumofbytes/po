@@ -1,6 +1,7 @@
-//! The projects and threads of a window, kept so that the next `po` started in the same
-//! directory picks up where this one left off. A window is identified by the directory it was
-//! started in, so windows for different directories don't overwrite each other.
+//! The projects and threads of a window, kept so that the next `po` picks up where this one
+//! left off, wherever it is started. There is one set for all of them; the directory `po` is
+//! started in only decides which project is shown.
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
@@ -12,6 +13,11 @@ pub struct ThreadState {
     pub agent: String,
     pub session: String,
     pub title: String,
+    /// When it last did anything, in milliseconds since the Unix epoch; 0 if unknown.
+    pub active_at: u64,
+    /// The session of the thread that started this one, which survives a restart where its id
+    /// does not; the child is linked to it again when both come back in one window.
+    pub parent_session: Option<String>,
 }
 
 pub struct ProjectState {
@@ -44,8 +50,6 @@ pub struct Workspace {
     /// The live agents list and the projects list were folded down to their headers.
     pub live_folded: bool,
     pub projects_folded: bool,
-    /// The file tree in the viewer was hidden.
-    pub explorer_collapsed: bool,
     /// The width, in pixels, of the file tree in the viewer, if dragged.
     pub explorer_width: Option<f32>,
     /// How wide the left side was, and the right side if it had been dragged to a width.
@@ -53,12 +57,20 @@ pub struct Workspace {
     pub right_width: Option<f32>,
 }
 
-/// The file for the window started in `start`.
-fn file(start: &Path) -> PathBuf {
+/// What a window last wrote: each project and the sessions of its threads. Anything in the file
+/// beyond it was added by another window.
+pub type Known = HashMap<PathBuf, HashSet<String>>;
+
+fn file() -> PathBuf {
+    crate::config::data_dir().join("workspace.json")
+}
+
+/// Where the window started in `start` was kept before there was one set for all of them.
+fn legacy_file_in(dir: &Path, start: &Path) -> PathBuf {
     // FNV-1a: unlike the standard hasher it is the same in every build.
     let hash = start.to_string_lossy().bytes().fold(0xcbf29ce484222325u64, |h, b| (h ^ u64::from(b)).wrapping_mul(0x100000001b3));
     let name = start.file_name().map_or_else(|| "root".to_string(), |n| n.to_string_lossy().to_string());
-    crate::config::data_dir().join("workspaces").join(format!("{name}-{hash:016x}.json"))
+    dir.join(format!("{name}-{hash:016x}.json"))
 }
 
 /// A saved width in pixels, if it is a sensible one.
@@ -88,12 +100,12 @@ impl Workspace {
                     })),
                     "active": project.active,
                     "threads": project.threads.iter().map(|t| json!({
-                        "agent": t.agent, "session": t.session, "title": t.title,
+                        "agent": t.agent, "session": t.session, "title": t.title, "active_at": t.active_at, "parent_session": t.parent_session,
                     })).collect::<Vec<_>>(),
                 })
             })
             .collect();
-        json!({ "version": 1, "viewer_open": self.viewer_open, "swapped": self.swapped, "agent_open": self.agent_open, "agent": self.agent, "split": self.split, "live_split": self.live_split, "live_folded": self.live_folded, "projects_folded": self.projects_folded, "explorer_collapsed": self.explorer_collapsed, "explorer_width": self.explorer_width, "left_width": self.left_width, "right_width": self.right_width, "projects": projects })
+        json!({ "version": 1, "viewer_open": self.viewer_open, "swapped": self.swapped, "agent_open": self.agent_open, "agent": self.agent, "split": self.split, "live_split": self.live_split, "live_folded": self.live_folded, "projects_folded": self.projects_folded, "explorer_width": self.explorer_width, "left_width": self.left_width, "right_width": self.right_width, "projects": projects })
     }
 
     fn from_json(value: &Value) -> Option<Self> {
@@ -115,7 +127,7 @@ impl Workspace {
                     .into_iter()
                     .flatten()
                     .filter_map(|t| {
-                        Some(ThreadState { agent: text(&t["agent"])?, session: text(&t["session"])?, title: text(&t["title"]).unwrap_or_default() })
+                        Some(ThreadState { agent: text(&t["agent"])?, session: text(&t["session"])?, title: text(&t["title"]).unwrap_or_default(), active_at: t["active_at"].as_u64().unwrap_or(0), parent_session: text(&t["parent_session"]) })
                     })
                     .collect();
                 Some(ProjectState {
@@ -133,7 +145,6 @@ impl Workspace {
             agent_open: value["agent_open"].as_bool().unwrap_or(true),
             agent: text(&value["agent"]),
             // A saved height that isn't a sensible number is dropped rather than trusted.
-            explorer_collapsed: value["explorer_collapsed"].as_bool().unwrap_or(false),
             explorer_width: width(&value["explorer_width"]),
             left_width: width(&value["left_width"]),
             right_width: width(&value["right_width"]),
@@ -144,24 +155,113 @@ impl Workspace {
         })
     }
 
-    /// What the window started in `start` saved last, if anything.
+    /// What was saved last, if anything. `start` is where this window was started: before there
+    /// was one set for all windows, each directory kept its own, and those are picked up once.
     pub fn load(start: &Path) -> Option<Self> {
-        Self::from_json(&crate::config::read_json(&file(start))?)
+        Self::load_from(&file(), &crate::config::data_dir().join("workspaces"), start)
     }
 
-    /// Saves it as the window started in `start`'s, replacing the file in one step so that a
-    /// crash can't leave half of one.
-    pub fn save(&self, start: &Path) {
-        let target = file(start);
-        let Some(dir) = target.parent() else { return };
-        let temp = target.with_extension("json.tmp");
-        let written = std::fs::create_dir_all(dir)
-            .and_then(|()| std::fs::write(&temp, serde_json::to_vec_pretty(&self.to_json()).unwrap_or_default()))
-            .and_then(|()| std::fs::rename(&temp, &target));
-        if let Err(error) = written {
+    fn load_from(target: &Path, legacy: &Path, start: &Path) -> Option<Self> {
+        if target.exists() {
+            return Self::from_json(&crate::config::read_json(target)?);
+        }
+        let mut files: Vec<PathBuf> = std::fs::read_dir(legacy).into_iter().flatten().flatten().map(|entry| entry.path()).collect();
+        files.sort();
+        // The one for this directory is the base, so its layout is the one kept.
+        let own = legacy_file_in(legacy, start);
+        files.retain(|file| *file != own);
+        files.insert(0, own);
+        let mut base: Option<Value> = None;
+        for file in files {
+            let Some(value) = crate::config::read_json(&file) else { continue };
+            match &mut base {
+                None => base = Some(value),
+                Some(base) => {
+                    let known: HashSet<Option<String>> = base["projects"].as_array().into_iter().flatten().map(|p| text(&p["root"])).collect();
+                    let more: Vec<Value> = value["projects"].as_array().into_iter().flatten().filter(|p| !known.contains(&text(&p["root"]))).cloned().collect();
+                    if let Some(projects) = base["projects"].as_array_mut() {
+                        projects.extend(more);
+                    }
+                }
+            }
+        }
+        Self::from_json(&base?)
+    }
+
+    /// What this window has now, for telling it from what other windows add.
+    pub fn known(&self) -> Known {
+        self.projects.iter().map(|project| (project.root.clone(), project.threads.iter().map(|t| t.session.clone()).collect())).collect()
+    }
+
+    /// Saves it, replacing the file in one step so that a crash can't leave half of one.
+    /// Projects and threads other windows saved since this one last did (those not in `known`)
+    /// are kept, and ones in `known` that are no longer open here were closed here.
+    pub fn save(&self, known: &mut Known) {
+        let target = file();
+        if let Err(error) = self.save_to(&target, known) {
             log::warn!("saving {}: {error}", target.display());
         }
     }
+
+    fn save_to(&self, target: &Path, known: &mut Known) -> std::io::Result<()> {
+        let dir = target.parent().ok_or_else(|| std::io::Error::other("no directory"))?;
+        std::fs::create_dir_all(dir)?;
+        // Windows saving at once take turns, so none reads the file before another has written it.
+        let lock = std::fs::File::create(target.with_extension("lock"))?;
+        lock.lock()?;
+        let mut value = self.to_json();
+        let saved = std::fs::read_to_string(target).ok().map(|text| serde_json::from_str::<Value>(&text));
+        let disk = match saved {
+            Some(Ok(saved)) => saved["projects"].as_array().cloned().unwrap_or_default(),
+            Some(Err(error)) => {
+                // Keep what can't be read rather than writing over it.
+                log::error!("{}: {error}; kept as a .bak", target.display());
+                std::fs::copy(target, target.with_extension("json.bak"))?;
+                vec![]
+            }
+            None => vec![],
+        };
+        let ours = value["projects"].as_array().cloned().unwrap_or_default();
+        value["projects"] = Value::Array(merge(ours, disk, known));
+        let temp = target.with_extension(format!("json.{}.tmp", std::process::id()));
+        std::fs::write(&temp, serde_json::to_vec_pretty(&value).unwrap_or_default())?;
+        std::fs::rename(&temp, target)?;
+        *known = self.known();
+        Ok(())
+    }
+}
+
+/// `ours` in the order the file has them, with what other windows added beside them: projects in
+/// `disk` that `known` doesn't have, and threads in a project that it doesn't have. What `known`
+/// has but `ours` doesn't was closed here. Projects whose directory is gone are let go.
+fn merge(ours: Vec<Value>, disk: Vec<Value>, known: &Known) -> Vec<Value> {
+    let mut ours: Vec<Option<Value>> = ours.into_iter().map(Some).collect();
+    let mut merged = vec![];
+    for entry in disk {
+        let Some(root) = path(&entry["root"]) else { continue };
+        let mine = ours.iter_mut().find(|mine| mine.as_ref().is_some_and(|mine| path(&mine["root"]).as_ref() == Some(&root)));
+        match mine.and_then(Option::take) {
+            Some(mut mine) => {
+                let had = known.get(&root);
+                let mut sessions: HashSet<String> = mine["threads"].as_array().into_iter().flatten().filter_map(|t| text(&t["session"])).collect();
+                let added: Vec<Value> = entry["threads"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter(|t| text(&t["session"]).is_some_and(|session| !had.is_some_and(|had| had.contains(&session)) && sessions.insert(session)))
+                    .cloned()
+                    .collect();
+                if let Some(threads) = mine["threads"].as_array_mut() {
+                    threads.extend(added);
+                }
+                merged.push(mine);
+            }
+            None if !known.contains_key(&root) && root.is_dir() => merged.push(entry),
+            None => {}
+        }
+    }
+    merged.extend(ours.into_iter().flatten());
+    merged
 }
 
 #[cfg(test)]
@@ -179,7 +279,6 @@ mod tests {
             live_split: Some(140.0),
             live_folded: true,
             projects_folded: false,
-            explorer_collapsed: true,
             explorer_width: Some(240.0),
             left_width: Some(300.0),
             right_width: Some(640.0),
@@ -190,8 +289,8 @@ mod tests {
                     worktree: None,
                     active: 1,
                     threads: vec![
-                        ThreadState { agent: "dex".into(), session: "s1".into(), title: "fix the retry".into() },
-                        ThreadState { agent: "opencode".into(), session: "s2".into(), title: "quote \"this\"".into() },
+                        ThreadState { agent: "dex".into(), session: "s1".into(), title: "fix the retry".into(), active_at: 1_700_000_000_000, parent_session: None },
+                        ThreadState { agent: "opencode".into(), session: "s2".into(), title: "quote \"this\"".into(), active_at: 0, parent_session: Some("s1".into()) },
                     ],
                 },
                 ProjectState {
@@ -210,7 +309,6 @@ mod tests {
         assert_eq!(back.agent.as_deref(), Some("dex"));
         assert_eq!(back.split, Some(212.5));
         assert_eq!(back.live_split, Some(140.0));
-        assert!(back.explorer_collapsed);
         assert_eq!(back.explorer_width, Some(240.0));
         assert!(back.live_folded && !back.projects_folded);
         assert_eq!((back.left_width, back.right_width), (Some(300.0), Some(640.0)));
@@ -256,9 +354,100 @@ mod tests {
         assert_eq!(back.projects[0].threads.len(), 1);
     }
 
+    fn project(root: &str, sessions: &[&str]) -> ProjectState {
+        let threads = sessions.iter().map(|s| ThreadState { agent: "a".into(), session: s.to_string(), title: String::new(), active_at: 1, parent_session: None }).collect();
+        ProjectState { root: root.into(), review: false, worktree: None, active: 0, threads }
+    }
+
+    fn window(projects: Vec<ProjectState>) -> Workspace {
+        Workspace { projects, ..Default::default() }
+    }
+
+    /// The projects, each with its sessions, as the file has them.
+    fn contents(target: &Path) -> Vec<(String, Vec<String>)> {
+        let saved = Workspace::load_from(target, Path::new("/none"), Path::new("/")).expect("saved");
+        saved.projects.iter().map(|p| (p.root.to_string_lossy().to_string(), p.threads.iter().map(|t| t.session.clone()).collect())).collect()
+    }
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("po-ws-{name}-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        dir
+    }
+
+    fn row(root: &str, sessions: &[&str]) -> (String, Vec<String>) {
+        (root.to_string(), sessions.iter().map(|s| s.to_string()).collect())
+    }
+
+    #[test]
+    fn projects_of_other_windows_are_kept_when_saving() {
+        let dir = scratch("projects");
+        let target = dir.join("workspace.json");
+        let (mut a, mut b) = (Known::new(), Known::new());
+        window(vec![project("/tmp", &[]), project("/usr", &[])]).save_to(&target, &mut a).unwrap();
+        window(vec![project("/bin", &[])]).save_to(&target, &mut b).unwrap();
+        // The order the file has is kept, and what was added goes after it.
+        assert_eq!(contents(&target), [row("/tmp", &[]), row("/usr", &[]), row("/bin", &[])]);
+        // A closes /usr; B's /bin and A's /tmp stay.
+        window(vec![project("/tmp", &[])]).save_to(&target, &mut a).unwrap();
+        assert_eq!(contents(&target), [row("/tmp", &[]), row("/bin", &[])]);
+        // B opens /usr, which A closed; A saving again doesn't take it away.
+        window(vec![project("/bin", &[]), project("/usr", &["u"])]).save_to(&target, &mut b).unwrap();
+        window(vec![project("/tmp", &[])]).save_to(&target, &mut a).unwrap();
+        assert_eq!(contents(&target), [row("/tmp", &[]), row("/bin", &[]), row("/usr", &["u"])]);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn threads_of_other_windows_are_kept_in_a_shared_project() {
+        let dir = scratch("threads");
+        let target = dir.join("workspace.json");
+        let (mut a, mut b) = (Known::new(), Known::new());
+        window(vec![project("/tmp", &["one"])]).save_to(&target, &mut a).unwrap();
+        b.extend(a.clone());
+        // A starts a thread; B, which hasn't seen it, saves with its own.
+        window(vec![project("/tmp", &["one", "a2"])]).save_to(&target, &mut a).unwrap();
+        window(vec![project("/tmp", &["one", "b2"])]).save_to(&target, &mut b).unwrap();
+        assert_eq!(contents(&target), [row("/tmp", &["one", "b2", "a2"])]);
+        // A closes "one" and it stays closed.
+        window(vec![project("/tmp", &["a2"])]).save_to(&target, &mut a).unwrap();
+        assert_eq!(contents(&target), [row("/tmp", &["a2", "b2"])]);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn an_unreadable_file_is_kept_as_a_backup() {
+        let dir = scratch("corrupt");
+        let target = dir.join("workspace.json");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(&target, "{ not json").unwrap();
+        window(vec![project("/tmp", &[])]).save_to(&target, &mut Known::new()).unwrap();
+        assert_eq!(std::fs::read_to_string(target.with_extension("json.bak")).unwrap(), "{ not json");
+        assert_eq!(contents(&target), [row("/tmp", &[])]);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn files_from_before_one_set_for_all_windows_are_all_picked_up() {
+        let dir = scratch("legacy");
+        let legacy = dir.join("workspaces");
+        std::fs::create_dir_all(&legacy).unwrap();
+        let start = Path::new("/tmp");
+        let write = |name: PathBuf, roots: &[&str]| {
+            let projects: Vec<Value> = roots.iter().map(|r| json!({ "root": r })).collect();
+            std::fs::write(name, json!({ "projects": projects, "left_width": 300.0 }).to_string()).unwrap();
+        };
+        write(legacy_file_in(&legacy, start), &["/tmp"]);
+        write(legacy.join("other.json"), &["/usr", "/tmp"]);
+        let loaded = Workspace::load_from(&dir.join("workspace.json"), &legacy, start).expect("loads");
+        assert_eq!(loaded.projects.iter().map(|p| p.root.to_string_lossy().to_string()).collect::<Vec<_>>(), ["/tmp", "/usr"]);
+        std::fs::remove_dir_all(dir).ok();
+    }
+
     #[test]
     fn windows_for_different_directories_have_different_files() {
-        assert_ne!(file(Path::new("/a/po")), file(Path::new("/b/po")));
-        assert_eq!(file(Path::new("/a/po")), file(Path::new("/a/po")));
+        let d = Path::new("/d");
+        assert_ne!(legacy_file_in(d, Path::new("/a/po")), legacy_file_in(d, Path::new("/b/po")));
+        assert_eq!(legacy_file_in(d, Path::new("/a/po")), legacy_file_in(d, Path::new("/a/po")));
     }
 }

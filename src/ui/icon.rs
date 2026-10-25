@@ -4,20 +4,22 @@ use gpui::{App, IntoElement, ParentElement as _, Rems, RenderOnce, Styled as _, 
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum IconName {
-    ArrowLeftRight,
     ArrowUp,
     CaseSensitive,
     ChevronDown,
     ChevronLeft,
     ChevronRight,
     Close,
+    FileText,
     Folder,
-    PanelLeftClose,
-    PanelLeftOpen,
-    PanelRightClose,
-    PanelRightOpen,
+    FolderTree,
+    Maximize,
+    Minimize,
+    PanelLeft,
     Plus,
     Replace,
+    Search,
+    Settings,
     Square,
 }
 
@@ -29,20 +31,22 @@ impl IconName {
             };
         }
         match self {
-            Self::ArrowLeftRight => icon!("arrow-left-right"),
             Self::ArrowUp => icon!("arrow-up"),
             Self::CaseSensitive => icon!("case-sensitive"),
             Self::ChevronDown => icon!("chevron-down"),
             Self::ChevronLeft => icon!("chevron-left"),
             Self::ChevronRight => icon!("chevron-right"),
             Self::Close => icon!("close"),
+            Self::FileText => icon!("file-text"),
             Self::Folder => icon!("folder"),
-            Self::PanelLeftClose => icon!("panel-left-close"),
-            Self::PanelLeftOpen => icon!("panel-left-open"),
-            Self::PanelRightClose => icon!("panel-right-close"),
-            Self::PanelRightOpen => icon!("panel-right-open"),
+            Self::FolderTree => icon!("folder-tree"),
+            Self::Maximize => icon!("maximize-2"),
+            Self::Minimize => icon!("minimize-2"),
+            Self::PanelLeft => icon!("panel-left"),
             Self::Plus => icon!("plus"),
             Self::Replace => icon!("replace"),
+            Self::Search => icon!("search"),
+            Self::Settings => icon!("settings"),
             Self::Square => icon!("square"),
         }
     }
