@@ -168,12 +168,16 @@ One layout, in three columns:
 
 Shortcuts are written with Ctrl; on macOS the same keys use Cmd (Cmd+P, Cmd+W to close the window).
 
-The window's own controls sit in the pane headers, at the edges: the sidebar
-toggle (Ctrl+B) at the left of the leftmost pane, and the viewer toggle
-(Ctrl+Shift+B) at the right of the rightmost one, with **⇄** beside it (Ctrl+Shift+S)
-while the viewer is open. **⇄** swaps the viewer with the conversation, putting
-the viewer in the middle and the chat on the right, for when you are reading
-code more than talking to an agent.
+The window's own controls sit in the pane headers, one button per pane, each always meaning
+the same thing: the sidebar toggle (Ctrl+B) at the left of the leftmost pane, and the viewer
+toggle (file icon, Ctrl+Shift+B) in the viewer's header, or in the conversation's while the
+viewer is closed. With the viewer open, the button beside it (Ctrl+Shift+F) hides the
+conversation to give the viewer the room, and brings it back. In a viewer pane too narrow for the
+tree beside the file, the explorer fills the pane until you pick a file, and a button in the
+file's header goes back to it.
+
+Which side of the conversation the viewer is on is a setting, not a button: **Viewer position**
+on the settings page, or `"viewer_position": "left"` in `config.json`. Ctrl+Shift+S flips it.
 
 Three shortcuts set how the layout is used:
 
@@ -189,8 +193,8 @@ read it. Two shortcuts act on the whole thread: Ctrl+O opens every tool
 call's details (or folds them all when they are already open), and Ctrl+T
 does the same for thinking.
 
-Widths, the split, whether the explorer is folded, whether the viewer is open and
-which way round they are come back with your workspace.
+Widths, the split, whether the viewer is open and which way round they are come back with
+your workspace.
 
 ### Projects and threads
 
@@ -271,6 +275,10 @@ skipped. Without one, the monospace font is the system's `monospace` (fontconfig
 on Linux), then a well-known one for the platform, then the bundled Fira Mono.
 `size` also scales the UI's spacing, since layout is measured in units of it.
 Edits to `config.json` and to theme files apply without a restart.
+
+Ctrl+, (Cmd+, on macOS) opens a settings page for the theme, fonts, glass,
+notifications, idle and live-agent limits, and `agents`. Save writes them to
+`config.json`, keeping any other keys in it (`mcp_servers` is still edited there).
 
 Set `"glass": true` for a frosted look like macOS's Liquid Glass: the window
 shows the desktop through it, blurred, the panes become translucent tints of the

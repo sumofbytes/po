@@ -436,10 +436,11 @@ impl RenderOnce for Stack {
                 };
             }
             section = section.child(div().size_full().overflow_hidden().child(element));
-            // The boundary with the open section above sets that section's height.
+            // The boundary with the open section above sets that section's height. Its line shows only
+            // under the pointer or while dragged: at rest the sections are told apart by their headers.
             if let (false, Some(resized), None) = (folded[ix], above, pinned) {
                 let grab = self.state.clone();
-                let (color, hover) = if dragging == Some(resized) { (active, active) } else { (border.opacity(0.5), border) };
+                let (color, hover) = if dragging == Some(resized) { (active, active) } else { (border.opacity(0.), border) };
                 section = section.child(
                     div()
                         .id(("stack-handle", ix))

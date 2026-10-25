@@ -50,8 +50,6 @@ pub struct Workspace {
     /// The live agents list and the projects list were folded down to their headers.
     pub live_folded: bool,
     pub projects_folded: bool,
-    /// The file tree in the viewer was hidden.
-    pub explorer_collapsed: bool,
     /// The width, in pixels, of the file tree in the viewer, if dragged.
     pub explorer_width: Option<f32>,
     /// How wide the left side was, and the right side if it had been dragged to a width.
@@ -107,7 +105,7 @@ impl Workspace {
                 })
             })
             .collect();
-        json!({ "version": 1, "viewer_open": self.viewer_open, "swapped": self.swapped, "agent_open": self.agent_open, "agent": self.agent, "split": self.split, "live_split": self.live_split, "live_folded": self.live_folded, "projects_folded": self.projects_folded, "explorer_collapsed": self.explorer_collapsed, "explorer_width": self.explorer_width, "left_width": self.left_width, "right_width": self.right_width, "projects": projects })
+        json!({ "version": 1, "viewer_open": self.viewer_open, "swapped": self.swapped, "agent_open": self.agent_open, "agent": self.agent, "split": self.split, "live_split": self.live_split, "live_folded": self.live_folded, "projects_folded": self.projects_folded, "explorer_width": self.explorer_width, "left_width": self.left_width, "right_width": self.right_width, "projects": projects })
     }
 
     fn from_json(value: &Value) -> Option<Self> {
@@ -147,7 +145,6 @@ impl Workspace {
             agent_open: value["agent_open"].as_bool().unwrap_or(true),
             agent: text(&value["agent"]),
             // A saved height that isn't a sensible number is dropped rather than trusted.
-            explorer_collapsed: value["explorer_collapsed"].as_bool().unwrap_or(false),
             explorer_width: width(&value["explorer_width"]),
             left_width: width(&value["left_width"]),
             right_width: width(&value["right_width"]),
@@ -282,7 +279,6 @@ mod tests {
             live_split: Some(140.0),
             live_folded: true,
             projects_folded: false,
-            explorer_collapsed: true,
             explorer_width: Some(240.0),
             left_width: Some(300.0),
             right_width: Some(640.0),
@@ -313,7 +309,6 @@ mod tests {
         assert_eq!(back.agent.as_deref(), Some("dex"));
         assert_eq!(back.split, Some(212.5));
         assert_eq!(back.live_split, Some(140.0));
-        assert!(back.explorer_collapsed);
         assert_eq!(back.explorer_width, Some(240.0));
         assert!(back.live_folded && !back.projects_folded);
         assert_eq!((back.left_width, back.right_width), (Some(300.0), Some(640.0)));

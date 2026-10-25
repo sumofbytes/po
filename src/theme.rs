@@ -13,10 +13,8 @@ const DEFAULT_THEME: &str = "Rose Pine";
 
 /// Design tokens that don't vary by theme. Draw with these, not literals, so the UI stays uniform.
 pub mod tokens {
-    use gpui::{Pixels, Rems, px, rems};
+    use gpui::{Pixels, px};
 
-    /// Height of a list row (sidebar projects and threads).
-    pub const ROW_HEIGHT: Rems = rems(1.875);
     /// Radius that turns a square element into a circle or pill.
     pub const RADIUS_FULL: Pixels = px(999.);
     /// Radius of tiny marks, like the dot beside a file.
@@ -417,6 +415,16 @@ impl Glass {
     }
 }
 
+/// How strongly a selection is tinted when its theme gives a solid colour. Editors draw selections
+/// translucent, so syntax colours and the text itself stay legible through them.
+const SELECTION_ALPHA: f32 = 0.4;
+
+/// A theme's selection colour as it is painted: its own translucency kept, since the theme chose
+/// it, but never solid, which would hide the text under it.
+fn selection_tint(color: Hsla) -> Hsla {
+    if color.a > 0.6 { color.alpha(SELECTION_ALPHA) } else { color }
+}
+
 /// The colors markdown is drawn with, for the agent's replies and for `.md` files alike. Each
 /// comes from the theme's `markdown` object (`heading`, `code`, `code_background`,
 /// `inline_code_background`, `quote`, `quote_border`, `rule`, `marker`, `strong`, `emphasis`)
@@ -591,7 +599,7 @@ impl Palette {
             scrollbar_thumb,
             scrollbar_thumb_hover: get("scrollbar.thumb.hover.background", scrollbar_thumb),
             border: base.border,
-            selection: clamp_alpha(get("selection.background", primary), 0.3),
+            selection: selection_tint(get("selection.background", primary.opacity(SELECTION_ALPHA))),
             caret: get("caret", primary),
             editor_background: editor("editor.background").unwrap_or(base.background),
             editor_foreground: editor("editor.foreground").unwrap_or(base.foreground),
