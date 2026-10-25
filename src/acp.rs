@@ -426,7 +426,8 @@ impl Client {
         let Some(session) = self.shared.session.lock().expect("session lock").clone() else {
             return false;
         };
-        let mut blocks = vec![json!({ "type": "text", "text": text })];
+        // An empty text block is refused by the API, so a picture sent alone goes without one.
+        let mut blocks = if text.is_empty() { vec![] } else { vec![json!({ "type": "text", "text": text })] };
         blocks.extend_from_slice(images);
         self.shared.request(
             "session/prompt",

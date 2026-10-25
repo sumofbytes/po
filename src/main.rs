@@ -706,6 +706,8 @@ struct Thread {
     draft: Entity<InputState>,
     /// Pictures attached to the draft, sent with it.
     attachments: Vec<Arc<Attachment>>,
+    /// Why some of what was pasted or dropped was left out, until the draft changes.
+    attach_note: Option<String>,
     /// The messages as laid out; only those in view are drawn.
     list: ListState,
     /// The selection across the agent's replies.
@@ -1488,6 +1490,7 @@ impl Reader {
             generation: 0,
             draft,
             attachments: vec![],
+            attach_note: None,
             list: ListState::new(0, ListAlignment::Top, px(400.)),
             selection: cx.new(|_| ui::markdown::Selection::default()),
             focus: cx.focus_handle(),
@@ -4053,6 +4056,7 @@ impl Reader {
             generation: 0,
             draft,
             attachments: vec![],
+            attach_note: None,
             list: ListState::new(0, ListAlignment::Top, px(400.)),
             selection: cx.new(|_| ui::markdown::Selection::default()),
             focus: cx.focus_handle(),
@@ -4998,28 +5002,44 @@ impl Reader {
     /// is left out.
     fn attach(&mut self, sources: Vec<Source>, cx: &mut Context<Self>) {
         let thread = self.thread.id;
+        self.thread.attach_note = None;
         cx.spawn(async move |this, cx| {
-            let made = cx
+            let (made, skipped) = cx
                 .background_executor()
                 .spawn(async move {
-                    sources
-                        .into_iter()
-                        .filter_map(|source| {
-                            let made = match &source {
-                                Source::Bytes(bytes) => Attachment::from_bytes(bytes.clone()),
-                                Source::Path(path) => Attachment::from_path(path),
-                            };
-                            made.map_err(|error| log::info!("attach: {error:#}")).ok()
-                        })
-                        .collect::<Vec<_>>()
+                    let mut made = Vec::new();
+                    let mut skipped = 0;
+                    for source in sources {
+                        let result = match &source {
+                            Source::Bytes(bytes) => Attachment::from_bytes(bytes.clone()),
+                            Source::Path(path) => Attachment::from_path(path),
+                        };
+                        match result {
+                            Ok(attachment) => made.push(Arc::new(attachment)),
+                            Err(error) => {
+                                log::info!("attach: {error:#}");
+                                skipped += 1;
+                            }
+                        }
+                    }
+                    (made, skipped)
                 })
                 .await;
+            // The thread may have been switched away from meanwhile; the pictures still go to it.
             this.update(cx, |reader, cx| {
-                if reader.thread.id != thread {
-                    return;
-                }
-                let room = attach::MAX_PER_MESSAGE.saturating_sub(reader.thread.attachments.len());
-                reader.thread.attachments.extend(made.into_iter().take(room).map(Arc::new));
+                reader.with_thread(thread, |reader, _| {
+                    let room = attach::MAX_PER_MESSAGE.saturating_sub(reader.thread.attachments.len());
+                    let over = made.len().saturating_sub(room);
+                    reader.thread.attachments.extend(made.into_iter().take(room));
+                    let mut notes = Vec::new();
+                    if skipped > 0 {
+                        notes.push(format!("{skipped} not attached: only PNG, JPEG, WebP and GIF pictures are taken"));
+                    }
+                    if over > 0 {
+                        notes.push(format!("{over} not attached: a message holds at most {} pictures", attach::MAX_PER_MESSAGE));
+                    }
+                    reader.thread.attach_note = (!notes.is_empty()).then(|| notes.join("; "));
+                });
                 cx.notify();
             })
             .ok();
@@ -5030,6 +5050,7 @@ impl Reader {
     /// Empties the draft, and the pictures attached to it.
     fn clear_draft(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.thread.attachments.clear();
+        self.thread.attach_note = None;
         self.thread.draft.update(cx, |input, cx| input.set_value("", window, cx));
     }
 
@@ -5044,6 +5065,7 @@ impl Reader {
         }
         let draft = self.thread.draft.read(cx).value().to_string();
         self.thread.attachments.splice(0..0, item.out.images.iter().cloned());
+        self.thread.attachments.truncate(attach::MAX_PER_MESSAGE);
         let text = if draft.trim().is_empty() { item.out.text } else { format!("{}\n{draft}", item.out.text) };
         self.thread.draft.update(cx, |input, cx| input.set_value(text, window, cx));
         cx.notify();
@@ -5078,6 +5100,7 @@ impl Reader {
             }
             if matches!(item.out.origin, Origin::User) {
                 self.thread.attachments.splice(0..0, item.out.images.iter().cloned());
+                self.thread.attachments.truncate(attach::MAX_PER_MESSAGE);
                 text.push(item.out.text);
             } else {
                 // Kept for `thread.get` to report; phase 2 notifies the sender as well.
@@ -6807,6 +6830,7 @@ impl Reader {
                         .when(!queued.is_empty(), |this| {
                             this.child(div().flex().flex_col().gap_1().pb_1().border_b_1().border_color(border).children(queued))
                         })
+                        .children(self.thread.attach_note.as_ref().map(|note| div().text_xs().text_color(muted).child(note.clone())))
                         .children((!strip.is_empty()).then(|| div().flex().flex_wrap().gap_2().children(strip)))
                         .child(div().py_1().child(Input::new(&self.thread.draft).large()))
                         .child(
