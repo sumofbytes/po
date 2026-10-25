@@ -956,6 +956,8 @@ const SIDE_LIST_TOP: gpui::Rems = rems(0.25);
 const SIDE_LIST_BOTTOM: gpui::Rems = rems(0.75);
 /// Between New and the search box, which belong together.
 const SIDE_ACTION_GAP: gpui::Rems = rems(0.25);
+/// A live agent's row: its title and a line under it.
+const SIDE_LIVE_ROW: gpui::Rems = rems(3.625);
 /// Section titles (LIVE, PROJECTS) are small labels, shorter than the pane header above them.
 const SIDE_SECTION_HEIGHT: gpui::Rems = rems(2.0);
 
@@ -5581,7 +5583,7 @@ impl Reader {
                                     .min_w_0()
                                     .truncate()
                                     .text_base()
-                                    .font_weight(FontWeight::MEDIUM)
+                                    .font_weight(FontWeight::SEMIBOLD)
                                     .text_color(label)
                                     .child(view.project.name()),
                             )
@@ -5738,7 +5740,7 @@ impl Reader {
             }))
             .children(self.suggestion_rows(cx))
             .child(div().flex_1().min_h_0().child(tree));
-        let (live, any_live) = self.live_section(&views, cx);
+        let (live, any_live, live_wanted) = self.live_section(&views, cx);
         let colors = cx.global::<Palette>();
         // Live agents sit above everything, in a pane of their own whose height is dragged, so
         // that the projects below don't move when an agent starts or stops. With none, it is
@@ -5762,7 +5764,7 @@ impl Reader {
         .child(self.search_row(cx));
         let pane = div().size_full().flex().flex_col().bg(colors.sidebar).child(side_header(pane_header("Po", div(), None, None, cx))).child(actions).child(
             div().flex_1().min_h_0().child(
-                stack(&self.sections).fixed(LIVE, (!any_live).then_some(rems(LIVE_EMPTY_REMS))).section(live).section(projects),
+                stack(&self.sections).fixed(LIVE, (!any_live).then_some(rems(LIVE_EMPTY_REMS))).at_most(LIVE, live_wanted).section(live).section(projects),
             ),
         )
         .child(
@@ -5827,7 +5829,7 @@ impl Reader {
     /// The threads that are asking, finished unseen or running, plus any agent still alive and
     /// waiting, across every project, with a line of what each is doing. Jumping to one is a click.
     /// Also whether there are any, since the pane folds to its header when there are none.
-    fn live_section(&self, views: &[View<'_>], cx: &mut Context<Self>) -> (AnyElement, bool) {
+    fn live_section(&self, views: &[View<'_>], cx: &mut Context<Self>) -> (AnyElement, bool, gpui::Rems) {
         let colors = cx.global::<Palette>();
         let (hover, muted, foreground, radius) =
             (colors.list_hover, colors.muted_foreground, colors.foreground, colors.radius);
@@ -5842,6 +5844,8 @@ impl Reader {
         if !query.is_empty() {
             live.retain(|(_, view, thread)| view.project.name().to_lowercase().contains(&query) || self.matches_query(thread, &query));
         }
+        // The pane never grows taller than its header and rows, so a few agents don't leave a gap.
+        let wanted = SIDE_SECTION_HEIGHT + SIDE_LIST_TOP + SIDE_LIST_BOTTOM + (SIDE_LIVE_ROW + SIDE_ITEM_GAP) * live.len().max(1) as f32;
         let folded = self.sections.read(cx).folded(LIVE);
         // Folded, the most pressing thread's mark stays in view.
         let (glyph, tint) = if folded { live.first().map_or(("", muted), |(_, _, thread)| thread.activity().mark(colors)) } else { ("", muted) };
@@ -5901,7 +5905,7 @@ impl Reader {
             )).h(SIDE_SECTION_HEIGHT).border_b_0())
             .child(div().flex_1().min_h_0().child(rows))
             .into_any_element();
-        (section, count > 0)
+        (section, count > 0, wanted)
     }
 
     /// A section's title with a chevron, which folds it down to its header or opens it again.
