@@ -5643,7 +5643,7 @@ impl Reader {
         // Live agents sit above everything, in a pane of their own whose height is dragged, so
         // that the projects below don't move when an agent starts or stops. With none, it is
         // only its header and a line.
-        let new_thread = cx.entity();
+        let (new_thread, open_settings) = (cx.entity(), cx.entity());
         let (hover, muted, foreground, radius) = (colors.list_hover, colors.muted_foreground, colors.foreground, colors.radius);
         // A plain text action below the title bar, not a button: it lights up under the pointer.
         let actions = div().flex_none().flex().flex_col().gap(SIDE_ITEM_GAP).px(SIDEBAR_GUTTER).pt_2().pb_3().child(
@@ -5662,6 +5662,20 @@ impl Reader {
         let pane = div().size_full().flex().flex_col().bg(colors.sidebar).child(side_header(pane_header("Po", div(), None, None, cx))).child(actions).child(
             div().flex_1().min_h_0().child(
                 stack(&self.sections).fixed(LIVE, (!any_live).then_some(rems(LIVE_EMPTY_REMS))).section(live).section(projects),
+            ),
+        )
+        .child(
+            div().flex_none().px(SIDEBAR_GUTTER).pb_3().child(
+                side_row(radius, Some(side_icon(IconName::Settings, muted)))
+                    .id("sidebar-settings")
+                    .h(SIDE_ROW_HEIGHT)
+                    .cursor_pointer()
+                    .text_sm()
+                    .text_color(muted)
+                    .hover(move |this| this.bg(hover).text_color(foreground))
+                    .tooltip(|_, cx| ui::button::tooltip("Settings (Ctrl+,)".into(), cx))
+                    .on_click(move |_, window, cx| open_settings.update(cx, |reader, cx| reader.toggle_settings(window, cx)))
+                    .child("Settings"),
             ),
         );
         floating(pane, cx)

@@ -19,6 +19,7 @@ pub enum IconName {
     Plus,
     Replace,
     Search,
+    Settings,
     Square,
 }
 
@@ -45,6 +46,7 @@ impl IconName {
             Self::Plus => icon!("plus"),
             Self::Replace => icon!("replace"),
             Self::Search => icon!("search"),
+            Self::Settings => icon!("settings"),
             Self::Square => icon!("square"),
         }
     }
