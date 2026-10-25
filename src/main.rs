@@ -5429,7 +5429,7 @@ impl Reader {
         let query = self.side_query(cx);
         let searching = !query.is_empty();
         let colors = cx.global::<Palette>();
-        let (hover, selected, muted, foreground, primary, warning) = (colors.list_hover, colors.list_selected, colors.muted_foreground, colors.foreground, colors.primary, colors.warning);
+        let (hover, muted, foreground, primary, warning) = (colors.list_hover, colors.muted_foreground, colors.foreground, colors.primary, colors.warning);
         let views = self.views();
         let (active_project, active_thread) = (self.project_id, self.thread.id);
         let project_count = views.len();
@@ -5484,13 +5484,13 @@ impl Reader {
                                 div()
                                     .min_w_0()
                                     .truncate()
-                                    .text_sm()
+                                    .text_base()
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .text_color(if pid == active_project { primary } else { label })
                                     .child(view.project.name()),
                             )
                             .when_some(self.heads.get(&view.project.root).filter(|_| view.project.shows_branch()), |name, head| {
-                                name.child(div().min_w_0().flex().items_baseline().gap_1().text_xs().text_color(muted).child(
+                                name.child(div().min_w_0().flex().items_baseline().gap_1().text_sm().text_color(muted).child(
                                     div().truncate().child(format!("⎇ {}", head.name)),
                                 ).when(head.dirty, |tag| tag.child(div().flex_none().text_color(warning).child("*"))))
                             }),
@@ -5551,7 +5551,6 @@ impl Reader {
                         .group(row_group("agent-thread", tid))
                         .h(SIDE_ROW_HEIGHT)
                         .cursor_pointer()
-                        .when((pid, tid) == (active_project, active_thread), |row| row.bg(selected))
                         .when((pid, tid) != (active_project, active_thread), |row| row.hover(move |row| row.bg(hover)))
                         .on_click(move |_, window, cx| select.update(cx, |reader, cx| reader.open_thread(pid, tid, window, cx)))
                         .children(controlled.then(|| {
@@ -5569,8 +5568,9 @@ impl Reader {
                                 .flex_1()
                                 .min_w_0()
                                 .truncate()
-                                .text_sm()
-                                .text_color(if (pid, tid) == (active_project, active_thread) { foreground } else { foreground.opacity(theme::tokens::GUIDE) })
+                                .text_base()
+                                .when((pid, tid) == (active_project, active_thread), |label| label.font_weight(FontWeight::MEDIUM))
+                                .text_color(if (pid, tid) == (active_project, active_thread) { foreground } else { foreground.opacity(theme::tokens::DIM) })
                                 .child(self.thread_label(thread)),
                         )
                         .child(show_on_hover(
@@ -5583,7 +5583,7 @@ impl Reader {
                                 .on_click(move |_, window, cx| close.update(cx, |reader, cx| reader.close_any_thread(pid, tid, window, cx))),
                         ))
                         // An idle thread has nothing to report, so it has no mark.
-                        .children(thread.activity().live_rank().map(|_| side_trail(div().text_xs().text_color(tint).child(glyph)))),
+                        .children(thread.activity().live_rank().map(|_| side_trail(div().text_sm().text_color(tint).child(glyph)))),
                 );
             }
             if foldable && !collapsed && (hidden > 0 || expanded) {
@@ -5594,7 +5594,7 @@ impl Reader {
                         .id(("agent-more", pid as usize))
                         .h(SIDE_MORE_HEIGHT)
                         .cursor_pointer()
-                        .text_xs()
+                        .text_sm()
                         .text_color(muted)
                         .hover(move |row| row.bg(hover))
                         .on_click(move |_, _, cx| {
@@ -5611,7 +5611,7 @@ impl Reader {
             tree = tree.child(group);
         }
         if searching && views.is_empty() && !projects_folded {
-            tree = tree.child(side_row(colors.radius, None).h(SIDE_MORE_HEIGHT).text_xs().text_color(muted).child("No matches"));
+            tree = tree.child(side_row(colors.radius, None).h(SIDE_MORE_HEIGHT).text_sm().text_color(muted).child("No matches"));
         }
         let title = self.fold_title(
             PROJECTS,
@@ -5638,7 +5638,7 @@ impl Reader {
                 cx,
             )).h(SIDE_SECTION_HEIGHT).border_b_0())
             .children(self.worktree_status.clone().filter(|_| !projects_folded).map(|text| {
-                div().px_3().py_1().text_xs().text_color(muted).max_h(rems(5.)).overflow_hidden().child(text)
+                div().px_3().py_1().text_sm().text_color(muted).max_h(rems(5.)).overflow_hidden().child(text)
             }))
             .children(self.suggestion_rows(cx))
             .child(div().flex_1().min_h_0().child(tree));
@@ -5650,14 +5650,18 @@ impl Reader {
         let (new_thread, open_settings) = (cx.entity(), cx.entity());
         let (hover, muted, foreground, radius) = (colors.list_hover, colors.muted_foreground, colors.foreground, colors.radius);
         // A plain text action below the title bar, not a button: it lights up under the pointer.
-        let actions = div().flex_none().flex().flex_col().gap(SIDE_ITEM_GAP).px(SIDEBAR_GUTTER).pt_2().pb_3().child(
-            side_row(radius, Some(side_icon(IconName::Plus, muted)))
+        let (primary, input_border) = (colors.primary, colors.input_border);
+        let actions = div().flex_none().flex().flex_col().gap_2().px(SIDEBAR_GUTTER).pt_2().pb_3().child(
+            side_row(radius, Some(side_icon(IconName::Plus, primary)))
                 .id("sidebar-new-thread")
                 .h(SIDE_ROW_HEIGHT)
                 .cursor_pointer()
-                .text_sm()
-                .text_color(muted)
-                .hover(move |this| this.bg(hover).text_color(foreground))
+                .text_base()
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(foreground)
+                .border_1()
+                .border_color(input_border)
+                .hover(move |this| this.bg(hover))
                 .tooltip(|_, cx| ui::button::tooltip("New thread (Ctrl+N)".into(), cx))
                 .on_click(move |_, window, cx| new_thread.update(cx, |reader, cx| reader.new_blank_thread(window, cx)))
                 .child("New"),
@@ -5674,7 +5678,7 @@ impl Reader {
                     .id("sidebar-settings")
                     .h(SIDE_ROW_HEIGHT)
                     .cursor_pointer()
-                    .text_sm()
+                    .text_base()
                     .text_color(muted)
                     .hover(move |this| this.bg(hover).text_color(foreground))
                     .tooltip(|_, cx| ui::button::tooltip("Settings (Ctrl+,)".into(), cx))
@@ -5732,8 +5736,8 @@ impl Reader {
     /// Also whether there are any, since the pane folds to its header when there are none.
     fn live_section(&self, views: &[View<'_>], cx: &mut Context<Self>) -> (AnyElement, bool) {
         let colors = cx.global::<Palette>();
-        let (hover, selected, muted, foreground, radius) =
-            (colors.list_hover, colors.list_selected, colors.muted_foreground, colors.foreground, colors.radius);
+        let (hover, muted, foreground, radius) =
+            (colors.list_hover, colors.muted_foreground, colors.foreground, colors.radius);
         let mut live: Vec<(u8, &View<'_>, &Thread)> = views
             .iter()
             .flat_map(|view| view.threads.iter().map(move |thread| (view, *thread)))
@@ -5751,7 +5755,7 @@ impl Reader {
         let (active_project, active_thread) = (self.project_id, self.thread.id);
         let mut rows = div().id("live-list").size_full().overflow_y_scroll().flex().flex_col().gap_0p5().px(SIDEBAR_GUTTER).pt_1().pb_2();
         if live.is_empty() && !folded {
-            rows = rows.child(side_row(radius, None).py_1().text_xs().text_color(muted).child(if query.is_empty() { "No active agents" } else { "No matches" }));
+            rows = rows.child(side_row(radius, None).py_1().text_sm().text_color(muted).child(if query.is_empty() { "No active agents" } else { "No matches" }));
         }
         for (_, view, thread) in live.into_iter().filter(|_| !folded) {
             let (pid, tid) = (view.id, thread.id);
@@ -5766,8 +5770,7 @@ impl Reader {
                     .items_start()
                     .py_1p5()
                     .cursor_pointer()
-                    .when(current, |row| row.bg(selected))
-                    .hover(move |row| row.bg(hover))
+                    .when(!current, |row| row.hover(move |row| row.bg(hover)))
                     .on_click(move |_, window, cx| select.update(cx, |reader, cx| reader.open_thread(pid, tid, window, cx)))
                     .child(
                         div()
@@ -5775,11 +5778,18 @@ impl Reader {
                             .min_w_0()
                             .flex()
                             .flex_col()
-                            .child(div().truncate().text_sm().text_color(foreground).child(self.thread_label(thread)))
-                            .child(div().truncate().text_xs().text_color(muted.opacity(theme::tokens::GUIDE)).child(detail)),
+                            .child(
+                                div()
+                                    .truncate()
+                                    .text_base()
+                                    .when(current, |label| label.font_weight(FontWeight::MEDIUM))
+                                    .text_color(if current { foreground } else { foreground.opacity(theme::tokens::DIM) })
+                                    .child(self.thread_label(thread)),
+                            )
+                            .child(div().truncate().text_sm().text_color(muted.opacity(theme::tokens::GUIDE)).child(detail)),
                     )
                     // An idle thread has nothing to report, so it has no mark.
-                    .children(thread.activity().live_rank().map(|_| side_trail(div().text_sm().text_color(tint).child(glyph)))),
+                    .children(thread.activity().live_rank().map(|_| side_trail(div().text_base().text_color(tint).child(glyph)))),
             );
         }
         let title = self.fold_title(
@@ -5793,7 +5803,7 @@ impl Reader {
             .flex_col()
             .child(side_header(header_row(
                 title,
-                div().text_sm().text_color(tint).child(glyph),
+                div().text_base().text_color(tint).child(glyph),
                 cx,
             )).h(SIDE_SECTION_HEIGHT).border_b_0())
             .child(div().flex_1().min_h_0().child(rows))
@@ -5812,7 +5822,7 @@ impl Reader {
             .gap_1()
             .min_w_0()
             .cursor_pointer()
-            .text_xs()
+            .text_sm()
             .font_weight(FontWeight::SEMIBOLD)
             .text_color(muted)
             .on_click(move |_, _, cx| {
@@ -6390,6 +6400,9 @@ impl Reader {
             .h(SIDE_ROW_HEIGHT)
             .cursor_text()
             .text_color(muted)
+            .bg(colors.input_background)
+            .border_1()
+            .border_color(colors.input_border)
             .hover(move |this| this.bg(hover))
             .on_click(move |_, window, cx| focus.update(cx, |input, cx| input.focus(window, cx)))
             .child(div().flex_1().min_w_0().child(Input::new(&input)))
