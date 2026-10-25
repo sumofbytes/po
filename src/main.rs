@@ -5848,10 +5848,10 @@ impl Reader {
         } else if shown.is_none() && self.tree_hidden {
             let show = cx.entity();
             let button = Button::new("show-tree")
-                .icon(IconName::PanelLeftOpen)
+                .icon(IconName::FolderTree)
                 .ghost()
                 .small()
-                .tooltip("Show the file tree")
+                .tooltip("Show the explorer")
                 .on_click(move |_, _, cx| show.update(cx, |reader, cx| reader.set_tree_hidden(false, cx)))
                 .into_any_element();
             (None, Some(div().flex().items_center().gap_1().children(lead).child(button).into_any_element()))
@@ -7247,7 +7247,12 @@ impl Render for Reader {
         // viewer is open and swapped, the viewer otherwise. Its icon says whether that pane shows.
         let (toggles_agent, right_open) = if side_open && swapped { (true, agent_open) } else { (false, side_open) };
         let viewer_toggle = Button::new("toggle-right")
-            .icon(if right_open { IconName::PanelRightClose } else { IconName::PanelRightOpen })
+            .icon(match (right_open, toggles_agent) {
+                (true, _) => IconName::PanelRightClose,
+                // A closed viewer shows what it holds; a closed conversation keeps the panel mark.
+                (false, false) => IconName::FileText,
+                (false, true) => IconName::PanelRightOpen,
+            })
             .ghost()
             .small()
             .tooltip(if toggles_agent { "Toggle the conversation (Ctrl+Shift+B)" } else { "Toggle the viewer (Ctrl+Shift+B)" })
