@@ -5850,7 +5850,7 @@ impl Reader {
         let (active_project, active_thread) = (self.project_id, self.thread.id);
         let mut rows = div().id("live-list").size_full().overflow_y_scroll().flex().flex_col().gap(SIDE_ITEM_GAP).px(SIDEBAR_GUTTER).pt(SIDE_LIST_TOP).pb(SIDE_LIST_BOTTOM);
         if live.is_empty() && !folded {
-            rows = rows.child(side_row(radius, None).h(SIDE_MORE_HEIGHT).text_sm().text_color(muted).child(if query.is_empty() { "No active agents" } else { "No matches" }));
+            rows = rows.child(side_row(radius, None).child(side_lead(div())).h(SIDE_MORE_HEIGHT).text_sm().text_color(muted).child(if query.is_empty() { "No active agents" } else { "No matches" }));
         }
         for (_, view, thread) in live.into_iter().filter(|_| !folded) {
             let (pid, tid) = (view.id, thread.id);
@@ -5861,6 +5861,7 @@ impl Reader {
             let current = (pid, tid) == (active_project, active_thread);
             rows = rows.child(
                 side_row(radius, None)
+                    .child(side_lead(div()))
                     .id(("live-thread", tid as usize))
                     .items_start()
                     .py_1p5()
