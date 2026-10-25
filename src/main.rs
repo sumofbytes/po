@@ -1337,6 +1337,8 @@ struct Reader {
     tree_hidden: bool,
     /// The viewer pane is too narrow for the file tree, as of the last frame it was drawn.
     viewer_narrow: Rc<Cell<bool>>,
+    /// In a pane too narrow for the tree beside the file, the explorer is what the pane shows.
+    browse: bool,
     /// The viewer pane (a file or a diff) on the right is shown.
     side_open: bool,
     /// The viewer is in the middle and the conversation on the right, instead of the reverse.
@@ -1530,6 +1532,7 @@ impl Reader {
             tree_cols,
             tree_hidden: false,
             viewer_narrow: Rc::default(),
+            browse: true,
             side_open: true,
             swapped: false,
             agent_open: true,
@@ -1829,6 +1832,7 @@ impl Reader {
 
     /// Shows `path`'s diff in the viewer, once `git` has produced it off the UI thread.
     fn pick(&mut self, path: &str, cx: &mut Context<Self>) {
+        self.browse = false;
         let Some(change) = self.project.changes.iter().find(|c| c.path == path).cloned() else { return };
         if self.project.picked.as_deref() != Some(path) {
             self.project.picked = Some(path.to_string());
@@ -4853,6 +4857,7 @@ impl Reader {
     }
 
     fn open(&mut self, path: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.browse = false;
         let full = self.project.root.join(path);
         let too_big = std::fs::metadata(&full).is_ok_and(|m| m.len() > 4 * 1024 * 1024);
         // A file too big to show isn't read at all.
@@ -5264,7 +5269,7 @@ impl Reader {
     /// The file tree beside the viewer: every file, or the changed ones in Changes mode, under a
     /// header with the mode switch. `lead` is the window's own control, when this is the
     /// leftmost pane.
-    fn explorer(&self, lead: Option<AnyElement>, cx: &mut Context<Self>) -> AnyElement {
+    fn explorer(&self, lead: Option<AnyElement>, trail: Option<AnyElement>, cx: &mut Context<Self>) -> AnyElement {
         let colors = cx.global::<Palette>();
         let this = cx.entity();
         let mode = self.mode;
@@ -5394,13 +5399,19 @@ impl Reader {
                     .min_w_0()
                     .children(lead)
                     .child(div().min_w_0().truncate().text_sm().font_weight(FontWeight::MEDIUM).text_color(foreground).child(title.to_string())),
-                modes,
+                div().flex().items_center().gap_2().child(modes).children(trail),
                 cx,
             ))
             .children(self.worktree_strip(cx))
             .children((mode == Mode::Diff).then(|| self.pr_strip(cx)))
             .child(div().flex_1().min_h_0().p_1().child(body))
             .into_any_element()
+    }
+
+    /// Switches a narrow viewer pane between the explorer and the file.
+    fn set_browsing(&mut self, browse: bool, cx: &mut Context<Self>) {
+        self.browse = browse;
+        cx.notify();
     }
 
     /// Hides the file tree beside the viewer, or shows it again.
@@ -5843,8 +5854,23 @@ impl Reader {
         let with_tree = shown.is_none() && self.tree_visible();
         // The window's own control goes in the leftmost header: the tree's, or the viewer's when
         // the tree is away, where a button brings it back.
-        let (tree_lead, body_lead) = if with_tree {
+        // A pane too narrow for the tree beside the file takes turns: the explorer fills it until a
+        // file is picked, then the file does, with a button back to the explorer.
+        let stacked = shown.is_none() && !self.tree_hidden && self.viewer_narrow.get();
+        let nothing_picked = if self.mode == Mode::Diff { self.project.picked.is_none() } else { self.project.current.is_none() };
+        let explorer_only = stacked && (self.browse || nothing_picked);
+        let (mut tree_lead, body_lead) = if with_tree || explorer_only {
             (lead, None)
+        } else if stacked {
+            let back = cx.entity();
+            let button = Button::new("show-explorer")
+                .icon(IconName::FolderTree)
+                .ghost()
+                .small()
+                .tooltip("Back to the explorer")
+                .on_click(move |_, _, cx| back.update(cx, |reader, cx| reader.set_browsing(true, cx)))
+                .into_any_element();
+            (None, Some(div().flex().items_center().gap_1().children(lead).child(button).into_any_element()))
         } else if shown.is_none() && self.tree_hidden {
             let show = cx.entity();
             let button = Button::new("show-tree")
@@ -5859,6 +5885,10 @@ impl Reader {
             (None, lead)
         };
         let body = match (shown, self.mode) {
+            _ if explorer_only => {
+                let background = cx.global::<Palette>().background;
+                div().size_full().when(!has_tabs, |d| d.bg(background)).child(self.explorer(tree_lead.take(), trail, cx)).into_any_element()
+            }
             (Some((view, doc)), _) => self.agent_view(&view.title, doc, body_lead, trail, cx).into_any_element(),
             (None, Mode::Source) => self.viewer(body_lead, trail, cx).into_any_element(),
             (None, Mode::Diff) => self.diff_viewer(body_lead, trail, cx).into_any_element(),
@@ -5867,7 +5897,7 @@ impl Reader {
         let body = if with_tree {
             // The viewers paint their own background; the column paints its own too, unless the
             // pane does for both, which would lay a second translucent layer under glass.
-            let column = div().size_full().when(!has_tabs, |d| d.bg(background)).child(self.explorer(tree_lead, cx));
+            let column = div().size_full().when(!has_tabs, |d| d.bg(background)).child(self.explorer(tree_lead, None, cx));
             sidebars(&self.tree_cols).id("tree").left(true, TREE_RANGE, column).center(div().size_full().child(body)).into_any_element()
         } else {
             body
