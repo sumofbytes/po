@@ -1,5 +1,5 @@
 //! The agent behind a thread: an ACP process, or a dex daemon that can also take steering.
-use std::path::Path;
+use std::{path::Path, sync::Arc};
 
 use anyhow::Result;
 use futures::channel::mpsc::UnboundedReceiver;
@@ -7,6 +7,7 @@ use serde_json::Value;
 
 use crate::{
     acp::{self, Event},
+    attach::{self, Attachment},
     config,
     dex::{self, Queue},
 };
@@ -34,10 +35,16 @@ impl Client {
         }
     }
 
-    pub fn prompt(&self, text: &str) -> bool {
+    /// Sends `text` and `images`. An agent that takes no images in a prompt (dex always) is
+    /// told where the pictures are saved instead.
+    pub fn prompt(&self, text: &str, images: &[Arc<Attachment>]) -> bool {
         match self {
-            Self::Acp(client) => client.prompt(text),
-            Self::Dex(client) => client.prompt(text),
+            Self::Acp(client) if client.takes_images() => {
+                let blocks: Vec<Value> = images.iter().map(|image| image.block()).collect();
+                client.prompt(text, &blocks)
+            }
+            Self::Acp(client) => client.prompt(&format!("{text}{}", attach::note(images)), &[]),
+            Self::Dex(client) => client.prompt(&format!("{text}{}", attach::note(images))),
         }
     }
 
@@ -81,6 +88,11 @@ impl Client {
     /// Whether messages can be added to a running turn, rather than only sent after it.
     pub fn queues(&self) -> bool {
         matches!(self, Self::Dex(_))
+    }
+
+    /// What a steering or follow-up message says: the daemon takes only text, so the pictures are paths.
+    pub fn queued_text(text: &str, images: &[Arc<Attachment>]) -> String {
+        format!("{text}{}", attach::note(images))
     }
 
     pub fn enqueue(&self, content: &str, queue: Queue) {

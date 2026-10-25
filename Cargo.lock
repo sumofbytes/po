@@ -4112,11 +4112,13 @@ version = "0.10.1"
 dependencies = [
  "aho-corasick",
  "anyhow",
+ "base64 0.22.1",
  "env_logger",
  "futures",
  "gpui-pre",
  "gpui-pre-platform",
  "ignore",
+ "image",
  "libc",
  "log",
  "markdown",

@@ -2,6 +2,7 @@
 mod acp;
 mod agent;
 mod alert;
+mod attach;
 mod command;
 mod config;
 mod control;
@@ -26,10 +27,12 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::cell::Cell;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 use acp::{ConfigOption, Event, PermissionOption, SessionInfo};
 use agent::Client;
+use attach::Attachment;
 use dex::Queue;
 use diff::{Change, Kind, Pair, Row};
 use theme::Palette;
@@ -259,10 +262,17 @@ fn notice_wait(since_last: Option<Duration>) -> Option<Duration> {
 /// What starts a message of Po's in a transcript, so that it isn't taken for the user's.
 const PO_MARK: &str = "[Po] ";
 
+/// Where a picture to attach comes from.
+enum Source {
+    Bytes(Vec<u8>),
+    Path(PathBuf),
+}
+
 /// A message headed for an agent, with where it came from.
 struct Outgoing {
     text: String,
     origin: Origin,
+    images: Vec<Arc<Attachment>>,
 }
 
 impl Outgoing {
@@ -274,8 +284,13 @@ impl Outgoing {
         }
     }
 
-    fn user(text: String) -> Self {
-        Self { text, origin: Origin::User }
+    fn user(text: String, images: Vec<Arc<Attachment>>) -> Self {
+        Self { text, origin: Origin::User, images }
+    }
+
+    /// What a daemon that takes only text is sent, and later tells back as accepted.
+    fn queued_text(&self) -> String {
+        Client::queued_text(&self.text, &self.images)
     }
 }
 
@@ -311,7 +326,7 @@ struct Queued {
 
 #[derive(Clone)]
 enum Msg {
-    User(String),
+    User(String, Vec<Arc<Attachment>>),
     Agent(Vec<Block>),
 }
 
@@ -396,7 +411,7 @@ fn transcript(thread: &Thread, full: bool) -> Vec<state::Entry> {
     let mut out = Vec::new();
     for msg in &thread.messages {
         match msg {
-            Msg::User(text) => out.push(state::Entry { index: out.len(), role: "user", text: text.clone(), tools: vec![], plan: None }),
+            Msg::User(text, _) => out.push(state::Entry { index: out.len(), role: "user", text: text.clone(), tools: vec![], plan: None }),
             Msg::Agent(blocks) => {
                 let mut said = Vec::new();
                 let mut tools = Vec::new();
@@ -689,6 +704,10 @@ struct Thread {
     agent: Option<String>,
     generation: u64,
     draft: Entity<InputState>,
+    /// Pictures attached to the draft, sent with it.
+    attachments: Vec<Arc<Attachment>>,
+    /// Why some of what was pasted or dropped was left out, until the draft changes.
+    attach_note: Option<String>,
     /// The messages as laid out; only those in view are drawn.
     list: ListState,
     /// The selection across the agent's replies.
@@ -705,7 +724,7 @@ impl Thread {
         let mut sources = Vec::new();
         for msg in &self.messages {
             match msg {
-                Msg::User(text) => sources.push((text.as_str(), true)),
+                Msg::User(text, _) => sources.push((text.as_str(), true)),
                 Msg::Agent(blocks) => {
                     for block in blocks {
                         match block {
@@ -774,7 +793,7 @@ impl Thread {
         let id = update["toolCallId"].as_str().unwrap_or_default();
         self.messages.iter().rposition(|msg| match msg {
             Msg::Agent(blocks) => blocks.iter().any(|b| matches!(b, Block::Tool(tool) if tool.id == id)),
-            Msg::User(_) => false,
+            Msg::User(..) => false,
         })
     }
 
@@ -788,10 +807,14 @@ impl Thread {
             },
             Some("user_message_chunk") if self.loading || !self.busy => {
                 let text = without_context(text);
+                let picture = (update["content"]["type"] == "image").then(|| Attachment::from_block(&update["content"])).flatten().map(Arc::new);
                 match self.messages.last_mut() {
-                    Some(Msg::User(body)) => body.push_str(text),
+                    Some(Msg::User(body, pictures)) => {
+                        body.push_str(text);
+                        pictures.extend(picture);
+                    }
                     _ => {
-                        self.messages.push(Msg::User(text.to_string()));
+                        self.messages.push(Msg::User(text.to_string(), picture.into_iter().collect()));
                         self.relist(self.messages.len() - 1);
                     }
                 }
@@ -1004,8 +1027,8 @@ impl Thread {
     fn title(&self) -> String {
         let first = self.messages.iter().find_map(|msg| match msg {
             // A thread is named for what it was asked, not for what Po told it.
-            Msg::User(text) if text.starts_with(PO_MARK) => None,
-            Msg::User(text) => text.lines().find(|line| !line.trim().is_empty()),
+            Msg::User(text, _) if text.starts_with(PO_MARK) => None,
+            Msg::User(text, _) => text.lines().find(|line| !line.trim().is_empty()),
             Msg::Agent(_) => None,
         });
         match first {
@@ -1466,6 +1489,8 @@ impl Reader {
             agent: None,
             generation: 0,
             draft,
+            attachments: vec![],
+            attach_note: None,
             list: ListState::new(0, ListAlignment::Top, px(400.)),
             selection: cx.new(|_| ui::markdown::Selection::default()),
             focus: cx.focus_handle(),
@@ -2068,7 +2093,7 @@ impl Reader {
         self.confirm_discard = false;
         self.open_project(project, Mode::Diff, Some(agent), window, cx);
         if let Some((out, (pid, tid))) = first {
-            self.begin_turn(&out.shown());
+            self.begin_turn(&out);
             self.thread.pending = Some(out);
             // The thread it was typed in stays only if something has happened to it since.
             let blank = self.views().iter().any(|v| v.id == pid && v.threads.iter().any(|t| t.id == tid && t.blank));
@@ -2717,7 +2742,7 @@ impl Reader {
 
     /// Says `text` to thread `id` as Po, wherever that thread is.
     fn tell(&mut self, id: u64, text: String, window: &mut Window, cx: &mut Context<Self>) {
-        let out = Outgoing { text, origin: Origin::Po };
+        let out = Outgoing { text, origin: Origin::Po, images: vec![] };
         self.with_thread(id, |reader, _| reader.submit(out, false, window, cx));
     }
 
@@ -2838,7 +2863,7 @@ impl Reader {
                     return command::Answer::Now(Err("send to a thread you started, not to yourself".into()));
                 }
                 let Some(title) = self.title_of(id) else { return command::Answer::Now(Err("that thread is gone".into())) };
-                let out = Outgoing { text, origin: Origin::Thread { id, title } };
+                let out = Outgoing { text, origin: Origin::Thread { id, title }, images: vec![] };
                 let sent = self.with_thread(target, |reader, _| {
                     // The waiters and the parent hear when this starts or ends the child's turn.
                     Some(reader.observed(window, cx, |reader, window, cx| reader.submit(out, later.unwrap_or(false), window, cx)))
@@ -3137,7 +3162,7 @@ impl Reader {
         let Some(notice) = self.notices.remove(&parent) else { return };
         self.notice_scheduled.remove(&parent);
         self.notice_sent_at.insert(parent, Instant::now());
-        let out = Outgoing { text: notice.text, origin: Origin::Po };
+        let out = Outgoing { text: notice.text, origin: Origin::Po, images: vec![] };
         self.with_thread(parent, |reader, _| {
             reader.submit(out, false, window, cx);
             Some(())
@@ -3922,7 +3947,7 @@ impl Reader {
             return Err(format!("a thread starts at most {MAX_CHILDREN} others; close one first"));
         }
         let level = notify.as_deref().and_then(Notify::from_name).unwrap_or_default();
-        let out = Outgoing { text: prompt, origin: Origin::Thread { id, title } };
+        let out = Outgoing { text: prompt, origin: Origin::Thread { id, title }, images: vec![] };
         let mut fresh = self.blank_thread(window, cx);
         fresh.blank = false;
         fresh.parent = Some(id);
@@ -3944,7 +3969,7 @@ impl Reader {
                 reader.connect(&key, false, window, cx);
                 if reader.thread.client.is_some() {
                     // Shown as sent, as a message typed while the agent starts is.
-                    reader.begin_turn(&out.shown());
+                    reader.begin_turn(&out);
                     reader.thread.pending = Some(out);
                 } else {
                     // The agent isn't approved or won't run yet; the message waits for it, the
@@ -3964,7 +3989,7 @@ impl Reader {
     fn return_pending(&mut self) {
         let Some(out) = self.thread.pending.take() else { return };
         let prompt = out.shown();
-        let shown = matches!(self.thread.messages.as_slice(), [.., Msg::User(text), Msg::Agent(blocks)] if *text == prompt && blocks.is_empty());
+        let shown = matches!(self.thread.messages.as_slice(), [.., Msg::User(text, _), Msg::Agent(blocks)] if *text == prompt && blocks.is_empty());
         if shown {
             let keep = self.thread.messages.len() - 2;
             self.thread.messages.truncate(keep);
@@ -3976,10 +4001,14 @@ impl Reader {
     /// Sends the draft on Enter, while its thread is the one on screen.
     fn send_on_enter(draft: &Entity<InputState>, window: &mut Window, cx: &mut Context<Self>) -> Subscription {
         cx.subscribe_in(draft, window, |reader, input, event: &InputEvent, window, cx| {
-            if let InputEvent::PressEnter { shift: false, alt } = event
-                && reader.thread.draft == *input
-            {
-                reader.send(*alt, window, cx);
+            if reader.thread.draft != *input {
+                return;
+            }
+            match event {
+                InputEvent::PressEnter { shift: false, alt } => reader.send(*alt, window, cx),
+                InputEvent::PasteImage(image) => reader.attach(vec![Source::Bytes(image.bytes.clone())], cx),
+                InputEvent::PasteFiles(paths) => reader.attach(paths.iter().cloned().map(Source::Path).collect(), cx),
+                _ => {}
             }
         })
     }
@@ -4026,6 +4055,8 @@ impl Reader {
             agent: None,
             generation: 0,
             draft,
+            attachments: vec![],
+            attach_note: None,
             list: ListState::new(0, ListAlignment::Top, px(400.)),
             selection: cx.new(|_| ui::markdown::Selection::default()),
             focus: cx.focus_handle(),
@@ -4560,14 +4591,14 @@ impl Reader {
                 self.drop_waiters(command::Caller::Thread(self.thread.id), "the turn ended");
             }
             Event::Accepted { content, queue } => {
-                if let Some(at) = self.thread.queue.iter().position(|q| q.kind == Some(queue) && q.out.text == content) {
+                if let Some(at) = self.thread.queue.iter().position(|q| q.kind == Some(queue) && q.out.queued_text() == content) {
                     self.thread.queue.remove(at);
                 }
-                self.thread.messages.push(Msg::User(content));
+                self.thread.messages.push(Msg::User(content, vec![]));
             }
             Event::Rejected { content, queue } => {
                 // No turn to join: it waits for the turn to end like any other queued message.
-                if let Some(item) = self.thread.queue.iter_mut().find(|q| q.kind == Some(queue) && q.out.text == content) {
+                if let Some(item) = self.thread.queue.iter_mut().find(|q| q.kind == Some(queue) && q.out.queued_text() == content) {
                     item.kind = None;
                 }
                 self.send_next(window, cx);
@@ -4657,7 +4688,7 @@ impl Reader {
                     cx.notify();
                 }
                 InputEvent::PressEnter { alt: false, .. } => this.accept_picked(window, cx),
-                InputEvent::PressEnter { .. } => {}
+                _ => {}
             }));
             self.finder = Some(input);
         }
@@ -4903,10 +4934,10 @@ impl Reader {
     /// (`later` for after the turn rather than into it).
     fn send(&mut self, later: bool, window: &mut Window, cx: &mut Context<Self>) {
         let prompt = self.thread.draft.read(cx).value().trim().to_string();
-        if prompt.is_empty() {
+        if prompt.is_empty() && self.thread.attachments.is_empty() {
             return;
         }
-        self.submit(Outgoing::user(prompt), later, window, cx);
+        self.submit(Outgoing::user(prompt, self.thread.attachments.clone()), later, window, cx);
     }
 
     /// Takes a message headed for the agent wherever the thread is: a blank or unstarted one
@@ -4934,37 +4965,93 @@ impl Reader {
                     self.wake_thread(window, cx);
                 }
                 if from_user {
-                    self.thread.draft.update(cx, |input, cx| input.set_value("", window, cx));
+                    self.clear_draft(window, cx);
                 }
-                self.begin_turn(&out.shown());
+                self.begin_turn(&out);
                 self.thread.pending = Some(out);
                 cx.notify();
                 Where::Wait
             }
             Where::Dispatch => {
                 if self.dispatch(out, cx) && from_user {
-                    self.thread.draft.update(cx, |input, cx| input.set_value("", window, cx));
+                    self.clear_draft(window, cx);
                 }
                 Where::Dispatch
             }
             Where::Take(kind) => {
                 if from_user {
-                    self.thread.draft.update(cx, |input, cx| input.set_value("", window, cx));
+                    self.clear_draft(window, cx);
                 }
-                self.thread.client.as_ref().unwrap().enqueue(&out.text, kind);
+                self.thread.client.as_ref().unwrap().enqueue(&out.queued_text(), kind);
                 self.thread.queue.push(Queued { out, kind: Some(kind) });
                 cx.notify();
                 Where::Take(kind)
             }
             Where::Queue => {
                 if from_user {
-                    self.thread.draft.update(cx, |input, cx| input.set_value("", window, cx));
+                    self.clear_draft(window, cx);
                 }
                 self.thread.queue.push(Queued { out, kind: None });
                 cx.notify();
                 Where::Queue
             }
         }
+    }
+
+    /// Attaches pictures to the draft, read and shrunk off the UI thread. What isn't a picture
+    /// is left out.
+    fn attach(&mut self, sources: Vec<Source>, cx: &mut Context<Self>) {
+        let thread = self.thread.id;
+        self.thread.attach_note = None;
+        cx.spawn(async move |this, cx| {
+            let (made, skipped) = cx
+                .background_executor()
+                .spawn(async move {
+                    let mut made = Vec::new();
+                    let mut skipped = 0;
+                    for source in sources {
+                        let result = match &source {
+                            Source::Bytes(bytes) => Attachment::from_bytes(bytes.clone()),
+                            Source::Path(path) => Attachment::from_path(path),
+                        };
+                        match result {
+                            Ok(attachment) => made.push(Arc::new(attachment)),
+                            Err(error) => {
+                                log::info!("attach: {error:#}");
+                                skipped += 1;
+                            }
+                        }
+                    }
+                    (made, skipped)
+                })
+                .await;
+            // The thread may have been switched away from meanwhile; the pictures still go to it.
+            this.update(cx, |reader, cx| {
+                reader.with_thread(thread, |reader, _| {
+                    let room = attach::MAX_PER_MESSAGE.saturating_sub(reader.thread.attachments.len());
+                    let over = made.len().saturating_sub(room);
+                    reader.thread.attachments.extend(made.into_iter().take(room));
+                    let mut notes = Vec::new();
+                    if skipped > 0 {
+                        notes.push(format!("{skipped} not attached: only PNG, JPEG, WebP and GIF pictures are taken"));
+                    }
+                    if over > 0 {
+                        notes.push(format!("{over} not attached: a message holds at most {} pictures", attach::MAX_PER_MESSAGE));
+                    }
+                    reader.thread.attach_note = (!notes.is_empty()).then(|| notes.join("; "));
+                });
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Empties the draft, and the pictures attached to it.
+    fn clear_draft(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.thread.attachments.clear();
+        self.thread.attach_note = None;
+        self.thread.draft.update(cx, |input, cx| input.set_value("", window, cx));
     }
 
     /// Takes a queued message back into the draft to edit.
@@ -4974,9 +5061,11 @@ impl Reader {
         }
         let item = self.thread.queue.remove(ix);
         if let (Some(kind), Some(client)) = (item.kind, &self.thread.client) {
-            client.recall(&item.out.text, kind);
+            client.recall(&item.out.queued_text(), kind);
         }
         let draft = self.thread.draft.read(cx).value().to_string();
+        self.thread.attachments.splice(0..0, item.out.images.iter().cloned());
+        self.thread.attachments.truncate(attach::MAX_PER_MESSAGE);
         let text = if draft.trim().is_empty() { item.out.text } else { format!("{}\n{draft}", item.out.text) };
         self.thread.draft.update(cx, |input, cx| input.set_value(text, window, cx));
         cx.notify();
@@ -4990,7 +5079,7 @@ impl Reader {
         }
         let Some(at) = self.thread.queue.iter().position(|q| q.kind.is_none()) else { return };
         let mut next = self.thread.queue.remove(at);
-        if !self.dispatch(std::mem::replace(&mut next.out, Outgoing::user(String::new())), cx) {
+        if !self.dispatch(std::mem::replace(&mut next.out, Outgoing::user(String::new(), vec![])), cx) {
             self.thread.queue.insert(0, next);
             self.restore_queue(window, cx);
         }
@@ -5007,9 +5096,11 @@ impl Reader {
         let mut text = Vec::new();
         for item in items {
             if let (Some(kind), Some(client)) = (item.kind, &self.thread.client) {
-                client.recall(&item.out.text, kind);
+                client.recall(&item.out.queued_text(), kind);
             }
             if matches!(item.out.origin, Origin::User) {
+                self.thread.attachments.splice(0..0, item.out.images.iter().cloned());
+                self.thread.attachments.truncate(attach::MAX_PER_MESSAGE);
                 text.push(item.out.text);
             } else {
                 // Kept for `thread.get` to report; phase 2 notifies the sender as well.
@@ -5036,7 +5127,7 @@ impl Reader {
             cx.notify();
             return false;
         }
-        self.begin_turn(&out.shown());
+        self.begin_turn(&out);
         self.request_save(cx);
         cx.notify();
         true
@@ -5053,11 +5144,11 @@ impl Reader {
             (_, Origin::Po) => format!("[Po]\n\n{}", out.text),
             (None, Origin::User) => out.text.clone(),
         };
-        client.prompt(&context)
+        client.prompt(&context, &out.images)
     }
 
     /// Shows `prompt` as the start of a turn the agent is working on.
-    fn begin_turn(&mut self, prompt: &str) {
+    fn begin_turn(&mut self, out: &Outgoing) {
         self.thread.blank = false;
         self.thread.busy = true;
         self.thread.failed = false;
@@ -5067,7 +5158,7 @@ impl Reader {
         // The message that was last stops being so: it loses its bottom padding and folds its
         // finished runs of tool calls, so it is laid out again too.
         let was_last = self.thread.messages.len().saturating_sub(1);
-        self.thread.messages.push(Msg::User(prompt.to_string()));
+        self.thread.messages.push(Msg::User(out.shown(), out.images.clone()));
         self.thread.messages.push(Msg::Agent(vec![]));
         self.thread.relist(was_last);
         self.thread.list.scroll_to_end();
@@ -6558,7 +6649,7 @@ impl Reader {
                     .text_xs()
                     .text_color(muted)
                     .child(div().flex_none().child(label))
-                    .child(div().flex_1().min_w_0().truncate().child(item.out.text.replace('\n', " ")))
+                    .child(div().flex_1().min_w_0().truncate().child(if item.out.text.is_empty() { format!("{} image(s)", item.out.images.len()) } else { item.out.text.replace('\n', " ") }))
                     .child(
                         Button::new(("recall", ix))
                             .icon(IconName::Close)
@@ -6566,6 +6657,36 @@ impl Reader {
                             .small()
                             .tooltip("Take back to edit")
                             .on_click(move |_, window, cx| this.update(cx, |reader, cx| reader.recall(ix, window, cx))),
+                    )
+                    .into_any_element()
+            })
+            .collect();
+        let drafting = cx.entity();
+        let strip: Vec<AnyElement> = self
+            .thread
+            .attachments
+            .iter()
+            .enumerate()
+            .map(|(ix, picture)| {
+                let this = drafting.clone();
+                div()
+                    .id(("attachment", ix))
+                    .relative()
+                    .flex_none()
+                    .child(gpui::img(picture.image.clone()).size(px(64.0)).object_fit(gpui::ObjectFit::Cover).rounded(colors.radius).border_1().border_color(border))
+                    .child(
+                        div().absolute().top_0p5().right_0p5().child(
+                            Button::new(("detach", ix))
+                                .icon(IconName::Close)
+                                .small()
+                                .tooltip("Remove the picture")
+                                .on_click(move |_, _, cx| this.update(cx, |reader, cx| {
+                                    if ix < reader.thread.attachments.len() {
+                                        reader.thread.attachments.remove(ix);
+                                    }
+                                    cx.notify();
+                                })),
+                        ),
                     )
                     .into_any_element()
             })
@@ -6625,11 +6746,17 @@ impl Reader {
         };
         // A thread whose agent may do more than talk shows it, in the header as in the lists.
         let controlled = self.grants.get(&self.thread.id).is_some_and(|grant| *grant != command::Grant::default());
+        let drop_tint = colors.primary.opacity(theme::tokens::TINT_SUBTLE);
         div()
             .size_full()
             .flex()
             .flex_col()
             .bg(colors.background)
+            // Pictures dropped anywhere on the thread join the draft.
+            .drag_over::<gpui::ExternalPaths>(move |style, _, _, _| style.bg(drop_tint))
+            .on_drop(cx.listener(|reader, dropped: &gpui::ExternalPaths, _, cx| {
+                reader.attach(dropped.paths().iter().cloned().map(Source::Path).collect(), cx);
+            }))
             .child(pane_header(
                 &self.thread.title(),
                 div()
@@ -6716,6 +6843,8 @@ impl Reader {
                         .when(!queued.is_empty(), |this| {
                             this.child(div().flex().flex_col().gap_1().pb_1().border_b_1().border_color(border).children(queued))
                         })
+                        .children(self.thread.attach_note.as_ref().map(|note| div().text_xs().text_color(muted).child(note.clone())))
+                        .children((!strip.is_empty()).then(|| div().flex().flex_wrap().gap_2().children(strip)))
                         .child(div().py_1().child(Input::new(&self.thread.draft).large()))
                         .child(
                             // The input's text sits 0.75rem in; the chips' own padding (0.5rem) plus this
@@ -6748,10 +6877,11 @@ fn render_msg(
     cx: &mut App,
 ) -> AnyElement {
     let blocks = match msg {
-        Msg::User(text) => {
+        Msg::User(text, pictures) => {
             let colors = cx.global::<Palette>();
-            let (bg, radius) = (colors.secondary, colors.radius_xl);
+            let (bg, radius, border) = (colors.secondary, colors.radius_xl, colors.border);
             let text_el = ui::markdown::plain(("user", ix), text, selection, window, cx);
+            let shown = (!text.is_empty()).then_some(text_el);
             return div()
                 .flex()
                 .justify_end()
@@ -6763,7 +6893,20 @@ fn render_msg(
                         .rounded(radius)
                         .bg(bg)
                         .text_base()
-                        .child(text_el),
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .children((!pictures.is_empty()).then(|| {
+                            div().flex().flex_wrap().gap_2().children(pictures.iter().map(|picture| {
+                                gpui::img(picture.image.clone())
+                                    .max_w(px(420.0))
+                                    .max_h(px(280.0))
+                                    .rounded(radius)
+                                    .border_1()
+                                    .border_color(border)
+                            }))
+                        }))
+                        .children(shown),
                 )
                 .into_any_element();
         }
@@ -6871,7 +7014,7 @@ fn tool_run(ix: usize, n: usize, run: &[Block], folded: bool, this: &Entity<Read
 fn toggle_all(messages: &mut [Msg], flag: fn(&mut Block) -> Option<&mut bool>) -> Option<usize> {
     let open = messages.iter_mut().any(|m| match m {
         Msg::Agent(blocks) => blocks.iter_mut().any(|b| flag(b).is_some_and(|f| !*f)),
-        Msg::User(_) => false,
+        Msg::User(..) => false,
     });
     let mut first = None;
     for (ix, msg) in messages.iter_mut().enumerate() {
@@ -7707,7 +7850,7 @@ mod tests {
     #[test]
     fn toggling_opens_all_then_folds_all() {
         let mut messages = vec![
-            Msg::User("hi".into()),
+            Msg::User("hi".into(), vec![]),
             Msg::Agent(vec![Block::Thought("a".into(), true), Block::Text("t".into())]),
             Msg::Agent(vec![Block::Thought("b".into(), false)]),
         ];
@@ -7716,7 +7859,7 @@ mod tests {
         assert!(matches!(&messages[2], Msg::Agent(b) if matches!(b[0], Block::Thought(_, true))));
         assert_eq!(toggle_all(&mut messages, thought_flag), Some(1));
         assert!(matches!(&messages[1], Msg::Agent(b) if matches!(b[0], Block::Thought(_, false))));
-        assert_eq!(toggle_all(&mut vec![Msg::User("x".into())], thought_flag), None);
+        assert_eq!(toggle_all(&mut vec![Msg::User("x".into(), vec![])], thought_flag), None);
     }
 
     use super::{NOTICE_RATE, notice_wait, Activity, Block, Msg, PermissionOption, Step, ToolBlock, folded_runs, preview_of, language, run_folded, toggle_all, match_files, primary_option, syntax};

@@ -6,7 +6,7 @@ use std::{
     process::{Child, ChildStdin, Command, Stdio},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
 };
 
@@ -135,6 +135,8 @@ struct Shared {
     listed: Mutex<Vec<SessionInfo>>,
     /// Po's own MCP server for this thread, if the window has a socket to give it.
     po_mcp: Option<Value>,
+    /// Whether the agent said, at the handshake, that it takes images in a prompt.
+    images: AtomicBool,
 }
 
 impl Shared {
@@ -247,6 +249,7 @@ impl Shared {
                 if let Some(name) = result["agentInfo"]["name"].as_str() {
                     *self.agent.lock().expect("agent lock") = name.to_string();
                 }
+                self.images.store(result["agentCapabilities"]["promptCapabilities"]["image"].as_bool() == Some(true), Ordering::Relaxed);
                 if self.resume {
                     let caps = &result["agentCapabilities"];
                     if caps["loadSession"].as_bool() != Some(true) || !caps["sessionCapabilities"]["list"].is_object() {
@@ -383,6 +386,7 @@ impl Client {
             agent: Mutex::new(program.to_string()),
             resume,
             listed: Mutex::new(Vec::new()),
+            images: AtomicBool::new(false),
             po_mcp: if control.is_empty() { None } else { crate::mcp::server(&control) },
         });
         let child = Arc::new(Mutex::new(child));
@@ -412,13 +416,22 @@ impl Client {
         Ok((Self { shared, child }, receiver))
     }
 
-    pub fn prompt(&self, text: &str) -> bool {
+    /// Whether pictures can go in a prompt as image blocks.
+    pub fn takes_images(&self) -> bool {
+        self.shared.images.load(Ordering::Relaxed)
+    }
+
+    /// Sends `text`, then `images` as image blocks.
+    pub fn prompt(&self, text: &str, images: &[Value]) -> bool {
         let Some(session) = self.shared.session.lock().expect("session lock").clone() else {
             return false;
         };
+        // An empty text block is refused by the API, so a picture sent alone goes without one.
+        let mut blocks = if text.is_empty() { vec![] } else { vec![json!({ "type": "text", "text": text })] };
+        blocks.extend_from_slice(images);
         self.shared.request(
             "session/prompt",
-            json!({ "sessionId": session, "prompt": [{ "type": "text", "text": text }] }),
+            json!({ "sessionId": session, "prompt": blocks }),
             Pending::Prompt,
         );
         true
