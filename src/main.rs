@@ -890,6 +890,11 @@ enum Activity {
 }
 
 impl Activity {
+    /// Waiting on the user: a question to answer, or a finished turn nobody has looked at.
+    fn needs_you(self) -> bool {
+        matches!(self, Activity::Asking | Activity::Unread)
+    }
+
     /// The mark the thread and project lists draw, and its colour.
     fn mark(self, colors: &Palette) -> (&'static str, gpui::Hsla) {
         match self {
@@ -937,7 +942,9 @@ const SIDE_LIST_BOTTOM: gpui::Rems = rems(0.75);
 const SIDE_ACTION_GAP: gpui::Rems = rems(0.25);
 /// Space above a section's title, so it sits closer to its own rows than to the section above.
 const SIDE_SECTION_GAP: gpui::Rems = rems(0.5);
-/// Section titles (PROJECTS) are small labels, shorter than the pane header above them.
+/// The most rows NEEDS YOU shows before it scrolls, so a pile of them leaves room for the projects.
+const NEEDS_YOU_ROWS: usize = 5;
+/// Section titles (NEEDS YOU, PROJECTS) are small labels, shorter than the pane header above them.
 const SIDE_SECTION_HEIGHT: gpui::Rems = rems(2.0);
 
 /// A row of the sidebar, with its icon in the lead column if it has one, then whatever is added,
@@ -5480,9 +5487,10 @@ impl Reader {
     fn left_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let query = self.side_query(cx);
         let searching = !query.is_empty();
+        let views = self.views();
+        let needs_you = self.needs_you_section(&views, &query, cx);
         let colors = cx.global::<Palette>();
         let (hover, muted, foreground, warning) = (colors.list_hover, colors.muted_foreground, colors.foreground, colors.warning);
-        let views = self.views();
         let (active_project, active_thread) = (self.project_id, self.thread.id);
         let project_count = views.len();
         let many = project_count > 1;
@@ -5490,7 +5498,10 @@ impl Reader {
         // Filtering keeps a project whose name matches, with all its threads, and any project with a
         // thread that does.
         let project_hit = |view: &View<'_>| view.project.name().to_lowercase().contains(&query);
-        let views: Vec<_> = views.into_iter().filter(|view| !searching || project_hit(view) || view.threads.iter().any(|t| self.matches_query(t, &query))).collect();
+        // A thread waiting on the user leaves its project for NEEDS YOU above, so a folded project
+        // can't hide it. The one on screen is already in view, so it stays where it is.
+        let waiting = |view: &View<'_>, t: &Thread| t.activity().needs_you() && (view.id, t.id) != (active_project, active_thread);
+        let views: Vec<_> = views.into_iter().filter(|view| !searching || project_hit(view) || view.threads.iter().any(|t| !waiting(view, t) && self.matches_query(t, &query))).collect();
         // Groups are spaced apart by more than anything inside one, so the eye reads them as units.
         let mut tree = div().id("agents-tree").size_full().overflow_y_scroll().flex().flex_col().gap(SIDE_GROUP_GAP).px(SIDEBAR_GUTTER).pt(SIDE_LIST_TOP).pb(SIDE_LIST_BOTTOM);
         for view in &views {
@@ -5568,7 +5579,7 @@ impl Reader {
                     }),
             );
             // Most recently active first. Only the active ones show; the rest fold under "more".
-            let mut recent: Vec<&Thread> = view.threads.iter().copied().filter(|t| !t.blank || t.id == view.shown).collect();
+            let mut recent: Vec<&Thread> = view.threads.iter().copied().filter(|t| (!t.blank || t.id == view.shown) && !waiting(view, t)).collect();
             recent.sort_by_key(|t| (std::cmp::Reverse(t.active_at), std::cmp::Reverse(t.id)));
             if searching && !project_hit(view) {
                 recent.retain(|t| self.matches_query(t, &query));
@@ -5701,7 +5712,7 @@ impl Reader {
                 .child("New"),
         )
         .child(self.search_row(cx));
-        let pane = div().size_full().flex().flex_col().bg(colors.sidebar).child(side_header(pane_header("Po", div(), None, None, cx))).child(actions).child(
+        let pane = div().size_full().flex().flex_col().bg(colors.sidebar).child(side_header(pane_header("Po", div(), None, None, cx))).child(actions).children(needs_you).child(
             div().flex_1().min_h_0().child(projects),
         )
         .child(
@@ -5719,6 +5730,64 @@ impl Reader {
             ),
         );
         floating(pane, cx)
+    }
+
+    /// The threads asking a question or finished unseen, from every project and whether or not
+    /// it is folded, each with its project's name. Nothing at all when none are: the section is
+    /// only there while something waits. Questions come first, the rest in the order they were
+    /// made, so rows don't reshuffle as turns end.
+    fn needs_you_section(&self, views: &[View<'_>], query: &str, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let colors = cx.global::<Palette>();
+        let (hover, muted, foreground, radius) = (colors.list_hover, colors.muted_foreground, colors.foreground, colors.radius);
+        let (active_project, active_thread) = (self.project_id, self.thread.id);
+        let mut waiting: Vec<(&View<'_>, &Thread)> = views
+            .iter()
+            .flat_map(|view| view.threads.iter().map(move |thread| (view, *thread)))
+            .filter(|(view, thread)| thread.activity().needs_you() && (view.id, thread.id) != (active_project, active_thread))
+            .filter(|(view, thread)| query.is_empty() || view.project.name().to_lowercase().contains(query) || self.matches_query(thread, query))
+            .collect();
+        if waiting.is_empty() {
+            return None;
+        }
+        waiting.sort_by_key(|(_, thread)| (thread.activity() != Activity::Asking, thread.id));
+        let count = waiting.len();
+        let most = SIDE_LIST_TOP + SIDE_LIST_BOTTOM + (SIDE_ROW_HEIGHT + SIDE_ITEM_GAP) * NEEDS_YOU_ROWS as f32;
+        let mut rows = div().id("needs-you-list").max_h(most).overflow_y_scroll().flex().flex_col().gap(SIDE_ITEM_GAP).px(SIDEBAR_GUTTER).pt(SIDE_LIST_TOP).pb(SIDE_LIST_BOTTOM);
+        for (view, thread) in waiting {
+            let (pid, tid) = (view.id, thread.id);
+            let (glyph, tint) = thread.activity().mark(colors);
+            let select = cx.entity();
+            rows = rows.child(
+                side_row(radius, None)
+                    .id(("needs-you-thread", tid as usize))
+                    .h(SIDE_ROW_HEIGHT)
+                    .cursor_pointer()
+                    .hover(move |row| row.bg(hover))
+                    .on_click(move |_, window, cx| select.update(cx, |reader, cx| reader.open_thread(pid, tid, window, cx)))
+                    // The title, then the project it is in, which the row no longer sits under.
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .items_baseline()
+                            .gap_2()
+                            .child(div().min_w_0().truncate().text_base().text_color(foreground.opacity(theme::tokens::DIM)).child(self.thread_label(thread)))
+                            .child(div().min_w_0().truncate().text_sm().text_color(muted).child(view.project.name())),
+                    )
+                    .child(side_trail(div().text_base().text_color(tint).child(glyph))),
+            );
+        }
+        let title = div().text_xs().font_weight(FontWeight::MEDIUM).text_color(muted).child(format!("NEEDS YOU · {count}"));
+        Some(
+            div()
+                .flex_none()
+                .flex()
+                .flex_col()
+                .child(side_header(header_row(title, div(), cx)).h(SIDE_SECTION_HEIGHT + SIDE_SECTION_GAP).pt(SIDE_SECTION_GAP).border_b_0())
+                .child(rows)
+                .into_any_element(),
+        )
     }
 
     /// What agents have put to the user: one line each, with a way to say yes or no.
@@ -7697,7 +7766,7 @@ mod tests {
         assert_eq!(toggle_all(&mut vec![Msg::User("x".into(), vec![])], thought_flag), None);
     }
 
-    use super::{NOTICE_RATE, notice_wait, Block, Msg, PermissionOption, Step, ToolBlock, folded_runs, preview_of, language, run_folded, toggle_all, match_files, primary_option, syntax};
+    use super::{NOTICE_RATE, notice_wait, Activity, Block, Msg, PermissionOption, Step, ToolBlock, folded_runs, preview_of, language, run_folded, toggle_all, match_files, primary_option, syntax};
 
     #[test]
     fn file_matches_rank_names_before_paths() {
@@ -7831,5 +7900,11 @@ mod tests {
         let silent = vec![Msg::Agent(vec![tool("Read", Step::Done)])];
         assert_eq!(preview_of(&silent, true), "Working…");
         assert_eq!(preview_of(&silent, false), "");
+    }
+
+    #[test]
+    fn only_a_question_or_an_unseen_turn_needs_you() {
+        assert!(Activity::Asking.needs_you() && Activity::Unread.needs_you());
+        assert!(!Activity::Running.needs_you() && !Activity::Idle.needs_you());
     }
 }
