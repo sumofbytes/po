@@ -951,6 +951,11 @@ const SIDE_MORE_HEIGHT: gpui::Rems = rems(1.75);
 const SIDE_ITEM_GAP: gpui::Rems = rems(0.125);
 /// Between one project and the next.
 const SIDE_GROUP_GAP: gpui::Rems = rems(1.0);
+/// Above and below the rows of a list, so every list starts and ends the same distance from its edges.
+const SIDE_LIST_TOP: gpui::Rems = rems(0.25);
+const SIDE_LIST_BOTTOM: gpui::Rems = rems(0.75);
+/// Between New and the search box, which belong together.
+const SIDE_ACTION_GAP: gpui::Rems = rems(0.25);
 /// Section titles (LIVE, PROJECTS) are small labels, shorter than the pane header above them.
 const SIDE_SECTION_HEIGHT: gpui::Rems = rems(2.0);
 
@@ -5520,7 +5525,7 @@ impl Reader {
         let query = self.side_query(cx);
         let searching = !query.is_empty();
         let colors = cx.global::<Palette>();
-        let (hover, muted, foreground, primary, warning) = (colors.list_hover, colors.muted_foreground, colors.foreground, colors.primary, colors.warning);
+        let (hover, muted, foreground, warning) = (colors.list_hover, colors.muted_foreground, colors.foreground, colors.warning);
         let views = self.views();
         let (active_project, active_thread) = (self.project_id, self.thread.id);
         let project_count = views.len();
@@ -5531,7 +5536,7 @@ impl Reader {
         let project_hit = |view: &View<'_>| view.project.name().to_lowercase().contains(&query);
         let views: Vec<_> = views.into_iter().filter(|view| !searching || project_hit(view) || view.threads.iter().any(|t| self.matches_query(t, &query))).collect();
         // Groups are spaced apart by more than anything inside one, so the eye reads them as units.
-        let mut tree = div().id("agents-tree").size_full().overflow_y_scroll().flex().flex_col().gap(SIDE_GROUP_GAP).px(SIDEBAR_GUTTER).pt_1().pb_3();
+        let mut tree = div().id("agents-tree").size_full().overflow_y_scroll().flex().flex_col().gap(SIDE_GROUP_GAP).px(SIDEBAR_GUTTER).pt(SIDE_LIST_TOP).pb(SIDE_LIST_BOTTOM);
         // Folded, only the header shows, so no project is built.
         let projects_folded = self.sections.read(cx).folded(PROJECTS);
         for view in views.iter().filter(|_| !projects_folded) {
@@ -5540,12 +5545,12 @@ impl Reader {
             let collapsed = self.projects_collapsed.contains(&pid) && !searching;
             // A project and its threads are one group, set apart from the next by space, not a box.
             // The one on screen has its name at full strength, the rest are muted; the selected
-            // thread is the only filled row. Names and thread titles share one left edge, after a column for the
-            // folder or status mark.
+            // thread is the only filled row. Thread titles sit under the project's name, past its
+            // folder, so each group reads as one name and what is in it.
             let label = if pid == active_project { foreground } else { muted };
             let mut group = div().flex().flex_col().gap(SIDE_ITEM_GAP);
             group = group.child(
-                side_row(colors.radius, Some(side_icon(IconName::Folder, if pid == active_project { primary } else { label })))
+                side_row(colors.radius, Some(side_icon(IconName::Folder, muted)))
                     .id(("agent-project", pid as usize))
                     .group(row_group("agent-project", pid))
                     .h(SIDE_ROW_HEIGHT)
@@ -5576,8 +5581,8 @@ impl Reader {
                                     .min_w_0()
                                     .truncate()
                                     .text_base()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(if pid == active_project { primary } else { label })
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(label)
                                     .child(view.project.name()),
                             )
                             .when_some(self.heads.get(&view.project.root).filter(|_| view.project.shows_branch()), |name, head| {
@@ -5638,6 +5643,7 @@ impl Reader {
                 let controlled = self.grants.get(&tid).is_some_and(|grant| *grant != command::Grant::default());
                 group = group.child(
                     side_row(colors.radius, None)
+                        .child(side_lead(div()))
                         .id(("agent-thread", tid as usize))
                         .group(row_group("agent-thread", tid))
                         .h(SIDE_ROW_HEIGHT)
@@ -5674,7 +5680,7 @@ impl Reader {
                                 .on_click(move |_, window, cx| close.update(cx, |reader, cx| reader.close_any_thread(pid, tid, window, cx))),
                         ))
                         // An idle thread has nothing to report, so it has no mark.
-                        .children(thread.activity().live_rank().map(|_| side_trail(div().text_sm().text_color(tint).child(glyph)))),
+                        .children(thread.activity().live_rank().map(|_| side_trail(div().text_base().text_color(tint).child(glyph)))),
                 );
             }
             if foldable && !collapsed && (hidden > 0 || expanded) {
@@ -5682,6 +5688,7 @@ impl Reader {
                 let label = if expanded { "Show less".to_string() } else { format!("{hidden} more") };
                 group = group.child(
                     side_row(colors.radius, None)
+                        .child(side_lead(div()))
                         .id(("agent-more", pid as usize))
                         .h(SIDE_MORE_HEIGHT)
                         .cursor_pointer()
@@ -5729,7 +5736,7 @@ impl Reader {
                 cx,
             )).h(SIDE_SECTION_HEIGHT).border_b_0())
             .children(self.worktree_status.clone().filter(|_| !projects_folded).map(|text| {
-                div().px_3().py_1().text_sm().text_color(muted).max_h(rems(5.)).overflow_hidden().child(text)
+                div().px(SIDEBAR_GUTTER + ROW_INSET).py_1().text_sm().text_color(muted).max_h(rems(5.)).overflow_hidden().child(text)
             }))
             .children(self.suggestion_rows(cx))
             .child(div().flex_1().min_h_0().child(tree));
@@ -5741,17 +5748,14 @@ impl Reader {
         let (new_thread, open_settings) = (cx.entity(), cx.entity());
         let (hover, muted, foreground, radius) = (colors.list_hover, colors.muted_foreground, colors.foreground, colors.radius);
         // A plain text action below the title bar, not a button: it lights up under the pointer.
-        let (primary, input_border) = (colors.primary, colors.input_border);
-        let actions = div().flex_none().flex().flex_col().gap_2().px(SIDEBAR_GUTTER).pt_2().pb_3().child(
+        let primary = colors.primary;
+        let actions = div().flex_none().flex().flex_col().gap(SIDE_ACTION_GAP).px(SIDEBAR_GUTTER).pt_2().pb_3().child(
             side_row(radius, Some(side_icon(IconName::Plus, primary)))
                 .id("sidebar-new-thread")
                 .h(SIDE_ROW_HEIGHT)
                 .cursor_pointer()
                 .text_base()
-                .font_weight(FontWeight::SEMIBOLD)
                 .text_color(foreground)
-                .border_1()
-                .border_color(input_border)
                 .hover(move |this| this.bg(hover))
                 .tooltip(|_, cx| ui::button::tooltip("New thread (Ctrl+N)".into(), cx))
                 .on_click(move |_, window, cx| new_thread.update(cx, |reader, cx| reader.new_blank_thread(window, cx)))
@@ -5844,9 +5848,9 @@ impl Reader {
         // Folded, the most pressing thread's mark stays in view.
         let (glyph, tint) = if folded { live.first().map_or(("", muted), |(_, _, thread)| thread.activity().mark(colors)) } else { ("", muted) };
         let (active_project, active_thread) = (self.project_id, self.thread.id);
-        let mut rows = div().id("live-list").size_full().overflow_y_scroll().flex().flex_col().gap_0p5().px(SIDEBAR_GUTTER).pt_1().pb_2();
+        let mut rows = div().id("live-list").size_full().overflow_y_scroll().flex().flex_col().gap(SIDE_ITEM_GAP).px(SIDEBAR_GUTTER).pt(SIDE_LIST_TOP).pb(SIDE_LIST_BOTTOM);
         if live.is_empty() && !folded {
-            rows = rows.child(side_row(radius, None).py_1().text_sm().text_color(muted).child(if query.is_empty() { "No active agents" } else { "No matches" }));
+            rows = rows.child(side_row(radius, None).h(SIDE_MORE_HEIGHT).text_sm().text_color(muted).child(if query.is_empty() { "No active agents" } else { "No matches" }));
         }
         for (_, view, thread) in live.into_iter().filter(|_| !folded) {
             let (pid, tid) = (view.id, thread.id);
@@ -5913,8 +5917,8 @@ impl Reader {
             .gap_1()
             .min_w_0()
             .cursor_pointer()
-            .text_sm()
-            .font_weight(FontWeight::SEMIBOLD)
+            .text_xs()
+            .font_weight(FontWeight::MEDIUM)
             .text_color(muted)
             .on_click(move |_, _, cx| {
                 sections.update(cx, |sections, cx| {
@@ -6490,10 +6494,9 @@ impl Reader {
             .id("sidebar-search")
             .h(SIDE_ROW_HEIGHT)
             .cursor_text()
+            .text_base()
             .text_color(muted)
             .bg(colors.input_background)
-            .border_1()
-            .border_color(colors.input_border)
             .hover(move |this| this.bg(hover))
             .on_click(move |_, window, cx| focus.update(cx, |input, cx| input.focus(window, cx)))
             .child(div().flex_1().min_w_0().child(Input::new(&input)))
