@@ -527,7 +527,7 @@ behaviour, at scope `Viewer`, reach self.
     its threads' permission asks".
   - It shows "applies when the agent restarts" when the grant is raised.
 - **Grant indicator:** any thread above `Viewer` shows a small badge in its header and in the
-  project list. Clicking it opens the menu. **Stop agent control** lowers the grant to `Viewer`,
+  sidebar. Clicking it opens the menu. **Stop agent control** lowers the grant to `Viewer`,
   cancels its waiters, and leaves its children running as ordinary threads.
 - **Children** show `↳ <parent title>` in the project list. Their first
   message shows `from <parent>`, and notifications in the parent show `Po`.

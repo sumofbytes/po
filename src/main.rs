@@ -890,9 +890,10 @@ enum Activity {
 }
 
 impl Activity {
-    /// Waiting on the user: a question to answer, or a finished turn nobody has looked at.
-    fn needs_you(self) -> bool {
-        matches!(self, Activity::Asking | Activity::Unread)
+    /// Waiting on the user: a question to answer, or a finished turn nobody has looked at, unless
+    /// `parent_hears` of it, since then the parent agent picks it up.
+    fn needs_you(self, parent_hears: bool) -> bool {
+        self == Activity::Asking || (self == Activity::Unread && !parent_hears)
     }
 
     /// The mark the thread and project lists draw, and its colour.
@@ -5489,6 +5490,7 @@ impl Reader {
         let searching = !query.is_empty();
         let views = self.views();
         let needs_you = self.needs_you_section(&views, &query, cx);
+        let any_waiting = needs_you.is_some();
         let colors = cx.global::<Palette>();
         let (hover, muted, foreground, warning) = (colors.list_hover, colors.muted_foreground, colors.foreground, colors.warning);
         let (active_project, active_thread) = (self.project_id, self.thread.id);
@@ -5498,10 +5500,8 @@ impl Reader {
         // Filtering keeps a project whose name matches, with all its threads, and any project with a
         // thread that does.
         let project_hit = |view: &View<'_>| view.project.name().to_lowercase().contains(&query);
-        // A thread waiting on the user leaves its project for NEEDS YOU above, so a folded project
-        // can't hide it. The one on screen is already in view, so it stays where it is.
-        let waiting = |view: &View<'_>, t: &Thread| t.activity().needs_you() && (view.id, t.id) != (active_project, active_thread);
-        let views: Vec<_> = views.into_iter().filter(|view| !searching || project_hit(view) || view.threads.iter().any(|t| !waiting(view, t) && self.matches_query(t, &query))).collect();
+        // A thread waiting on the user is in NEEDS YOU instead.
+        let views: Vec<_> = views.into_iter().filter(|view| !searching || project_hit(view) || view.threads.iter().any(|t| !self.waits_on_user(view.id, t) && self.matches_query(t, &query))).collect();
         // Groups are spaced apart by more than anything inside one, so the eye reads them as units.
         let mut tree = div().id("agents-tree").size_full().overflow_y_scroll().flex().flex_col().gap(SIDE_GROUP_GAP).px(SIDEBAR_GUTTER).pt(SIDE_LIST_TOP).pb(SIDE_LIST_BOTTOM);
         for view in &views {
@@ -5579,13 +5579,14 @@ impl Reader {
                     }),
             );
             // Most recently active first. Only the active ones show; the rest fold under "more".
-            let mut recent: Vec<&Thread> = view.threads.iter().copied().filter(|t| (!t.blank || t.id == view.shown) && !waiting(view, t)).collect();
+            let mut recent: Vec<&Thread> = view.threads.iter().copied().filter(|t| (!t.blank || t.id == view.shown) && !self.waits_on_user(pid, t)).collect();
             recent.sort_by_key(|t| (std::cmp::Reverse(t.active_at), std::cmp::Reverse(t.id)));
             if searching && !project_hit(view) {
                 recent.retain(|t| self.matches_query(t, &query));
             }
             let expanded = self.threads_expanded.contains(&pid) || searching;
-            // Active: asking, running, finished unseen, or an agent still alive; the one on screen too.
+            // Active: running, finished unseen with its parent told, or an agent still alive; the one
+            // on screen too, whatever it is doing.
             let active = |t: &Thread| t.id == view.shown || t.activity() != Activity::Idle || t.client.is_some();
             let shown_count = recent.iter().filter(|t| active(t)).count();
             let foldable = !searching && recent.len() > shown_count.max(1);
@@ -5671,7 +5672,7 @@ impl Reader {
             }
             tree = tree.child(group);
         }
-        if searching && views.is_empty() {
+        if searching && views.is_empty() && !any_waiting {
             tree = tree.child(side_row(colors.radius, None).h(SIDE_MORE_HEIGHT).text_sm().text_color(muted).child("No matches"));
         }
         let title = div().text_xs().font_weight(FontWeight::MEDIUM).text_color(muted).child("PROJECTS");
@@ -5732,18 +5733,25 @@ impl Reader {
         floating(pane, cx)
     }
 
-    /// The threads asking a question or finished unseen, from every project and whether or not
+    /// Whether thread `thread` of project `pid` waits on the user, which takes it out of its
+    /// project and into NEEDS YOU, so a folded project can't hide it. The one on screen is
+    /// already in view, so it stays where it is.
+    fn waits_on_user(&self, pid: u64, thread: &Thread) -> bool {
+        let parent_hears = thread.parent.is_some() && thread.notify != Notify::Never;
+        (pid, thread.id) != (self.project_id, self.thread.id) && thread.activity().needs_you(parent_hears)
+    }
+
+    /// The threads that wait on the user ([`Self::waits_on_user`]), from every project and whether or not
     /// it is folded, each with its project's name. Nothing at all when none are: the section is
     /// only there while something waits. Questions come first, the rest in the order they were
     /// made, so rows don't reshuffle as turns end.
     fn needs_you_section(&self, views: &[View<'_>], query: &str, cx: &mut Context<Self>) -> Option<AnyElement> {
         let colors = cx.global::<Palette>();
         let (hover, muted, foreground, radius) = (colors.list_hover, colors.muted_foreground, colors.foreground, colors.radius);
-        let (active_project, active_thread) = (self.project_id, self.thread.id);
         let mut waiting: Vec<(&View<'_>, &Thread)> = views
             .iter()
             .flat_map(|view| view.threads.iter().map(move |thread| (view, *thread)))
-            .filter(|(view, thread)| thread.activity().needs_you() && (view.id, thread.id) != (active_project, active_thread))
+            .filter(|(view, thread)| self.waits_on_user(view.id, thread))
             .filter(|(view, thread)| query.is_empty() || view.project.name().to_lowercase().contains(query) || self.matches_query(thread, query))
             .collect();
         if waiting.is_empty() {
@@ -5756,14 +5764,24 @@ impl Reader {
         for (view, thread) in waiting {
             let (pid, tid) = (view.id, thread.id);
             let (glyph, tint) = thread.activity().mark(colors);
-            let select = cx.entity();
+            let (select, close) = (cx.entity(), cx.entity());
+            let controlled = self.grants.get(&tid).is_some_and(|grant| *grant != command::Grant::default());
             rows = rows.child(
                 side_row(radius, None)
                     .id(("needs-you-thread", tid as usize))
+                    .group(row_group("needs-you-thread", tid))
                     .h(SIDE_ROW_HEIGHT)
                     .cursor_pointer()
                     .hover(move |row| row.bg(hover))
                     .on_click(move |_, window, cx| select.update(cx, |reader, cx| reader.open_thread(pid, tid, window, cx)))
+                    .children(controlled.then(|| {
+                        Button::new(("needs-you-grant-badge", tid as usize))
+                            .label("⌁")
+                            .tooltip("Agent control granted")
+                            .ghost()
+                            .xsmall()
+                            .selected(true)
+                    }))
                     // The title, then the project it is in, which the row no longer sits under.
                     .child(
                         div()
@@ -5775,6 +5793,15 @@ impl Reader {
                             .child(div().min_w_0().truncate().text_base().text_color(foreground.opacity(theme::tokens::DIM)).child(self.thread_label(thread)))
                             .child(div().min_w_0().truncate().text_sm().text_color(muted).child(view.project.name())),
                     )
+                    .child(show_on_hover(
+                        row_group("needs-you-thread", tid),
+                        Button::new(("needs-you-thread-close", tid as usize))
+                            .icon(IconName::Close)
+                            .ghost()
+                            .xsmall()
+                            .tooltip("Close thread")
+                            .on_click(move |_, window, cx| close.update(cx, |reader, cx| reader.close_any_thread(pid, tid, window, cx))),
+                    ))
                     .child(side_trail(div().text_base().text_color(tint).child(glyph))),
             );
         }
@@ -7904,7 +7931,9 @@ mod tests {
 
     #[test]
     fn only_a_question_or_an_unseen_turn_needs_you() {
-        assert!(Activity::Asking.needs_you() && Activity::Unread.needs_you());
-        assert!(!Activity::Running.needs_you() && !Activity::Idle.needs_you());
+        assert!(Activity::Asking.needs_you(false) && Activity::Unread.needs_you(false));
+        assert!(!Activity::Running.needs_you(false) && !Activity::Idle.needs_you(false));
+        // A child's parent picks up its finished turn; a question is still the user's.
+        assert!(!Activity::Unread.needs_you(true) && Activity::Asking.needs_you(true));
     }
 }
