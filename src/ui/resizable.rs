@@ -325,8 +325,6 @@ impl Stack {
         self
     }
 
-    /// Holds `section` at this height, with no handle under it, for as long as it is set. The
-    /// height it was dragged to is kept for when it is not.
     /// Keeps `section` from being taller than this, however far it was dragged, so a section with
     /// little in it doesn't leave an empty gap.
     pub fn at_most(mut self, section: usize, height: gpui::Rems) -> Self {
@@ -334,6 +332,8 @@ impl Stack {
         self
     }
 
+    /// Holds `section` at this height, with no handle under it, for as long as it is set. The
+    /// height it was dragged to is kept for when it is not.
     pub fn fixed(mut self, section: usize, height: Option<gpui::Rems>) -> Self {
         self.fixed = height.map(|height| (section, height));
         self
@@ -436,6 +436,9 @@ impl RenderOnce for Stack {
                 section = section.flex_none().h(folded_height).when(ix > 0, |s| s.border_t_1().border_color(border));
             } else if Some(ix) == last_open {
                 section = section.flex_1().min_h(MIN_SECTION);
+                if let Some((_, height)) = self.at_most.filter(|(capped, _)| *capped == ix) {
+                    section = section.max_h(height);
+                }
             } else {
                 section = section.flex_grow(0.).flex_shrink(1.).min_h(MIN_SECTION);
                 if let Some((_, height)) = self.at_most.filter(|(capped, _)| *capped == ix) {
