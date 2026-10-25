@@ -6710,7 +6710,7 @@ impl Reader {
         };
         // A thread whose agent may do more than talk shows it, in the header as in the lists.
         let controlled = self.grants.get(&self.thread.id).is_some_and(|grant| *grant != command::Grant::default());
-        let drop_tint = colors.primary.opacity(0.12);
+        let drop_tint = colors.primary.opacity(theme::tokens::TINT_SUBTLE);
         div()
             .size_full()
             .flex()
