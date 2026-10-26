@@ -250,6 +250,10 @@ impl InputState {
         self.focus.focus(window, cx);
     }
 
+    pub fn is_focused(&self, window: &Window) -> bool {
+        self.focus.is_focused(window)
+    }
+
     fn caret(&self) -> usize {
         if self.reversed { self.selection.start } else { self.selection.end }
     }

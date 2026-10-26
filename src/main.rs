@@ -910,28 +910,28 @@ impl Activity {
 /// The sidebar's layout, one grid for every row and header in it:
 ///
 /// ```text
-/// | gutter | inset | [LEAD | gap] | label ............ | TRAIL | inset | gutter |
+/// | gutter | inset | [LEAD | gap] | label ............ | actions | inset | gutter |
 /// ```
 ///
 /// Rows sit `SIDEBAR_GUTTER` in from the pane's edges so their highlight floats clear of them, and
 /// their content `ROW_INSET` further in. A row with an icon puts it in the lead column; a row
 /// without one has no lead column, so its text starts where an icon would, not after it. Headers
-/// use the same inset, so a title sits over the icons. The trail column holds a row's mark or
-/// hover action.
+/// use the same inset, so a title sits over the icons. A thread's state mark goes in the lead
+/// column, under its project's chevron; hover actions go at the end.
 const SIDEBAR_GUTTER: gpui::Rems = rems(0.5);
 const ROW_INSET: gpui::Rems = rems(0.625);
 /// The lead column is as wide as its icon, so the gap after it is the only space between icon and
-/// label; the trail column is wide enough for a mark.
+/// label.
 const SIDE_LEAD: gpui::Rems = rems(1.);
-const SIDE_TRAIL: gpui::Rems = rems(1.25);
 
 /// The sidebar's spacing, on a 4px grid and ordered by what belongs together: rows of one list sit
 /// close, a project's name sits close over its threads, and projects are set apart by more than
-/// anything inside one. Every row is the same height whatever its rank, which weight and colour
-/// carry instead, so the list scans as one column.
+/// anything inside one. Actions such as New and Settings take full-height rows.
 const SIDE_ROW_HEIGHT: gpui::Rems = rems(2.0);
+/// Projects and their threads: a tree of short rows, denser than the actions above it.
+const SIDE_TREE_HEIGHT: gpui::Rems = rems(1.75);
 /// Quiet rows, such as "3 more", that only reveal what is folded away.
-const SIDE_MORE_HEIGHT: gpui::Rems = rems(1.75);
+const SIDE_MORE_HEIGHT: gpui::Rems = rems(1.5);
 /// Between neighbouring rows of one list.
 const SIDE_ITEM_GAP: gpui::Rems = rems(0.125);
 /// Between one project and the next.
@@ -941,6 +941,9 @@ const SIDE_LIST_TOP: gpui::Rems = rems(0.25);
 const SIDE_LIST_BOTTOM: gpui::Rems = rems(0.75);
 /// Between New and the search box, which belong together.
 const SIDE_ACTION_GAP: gpui::Rems = rems(0.25);
+/// Above New, so the space between the title bar and New's text matches the space between New's
+/// text and Search's, which have the rows' own padding as well as `SIDE_ACTION_GAP`.
+const SIDE_ACTIONS_TOP: gpui::Rems = rems(0.75);
 /// Space above a section's title, so it sits closer to its own rows than to the section above.
 const SIDE_SECTION_GAP: gpui::Rems = rems(0.5);
 /// The most rows NEEDS YOU shows before it scrolls, so a pile of them leaves room for the projects.
@@ -959,9 +962,33 @@ fn side_lead(content: impl IntoElement) -> gpui::Div {
     div().w(SIDE_LEAD).flex_none().flex().items_center().justify_start().child(content)
 }
 
-/// The trail column: its content hugs the right edge.
-fn side_trail(content: impl IntoElement) -> gpui::Div {
-    div().w(SIDE_TRAIL).flex_none().flex().items_center().justify_end().child(content)
+/// A project's chevron in the lead column: pointing down while its threads show, right when it
+/// is folded.
+fn side_chevron(open: bool, color: gpui::Hsla) -> gpui::Div {
+    let name = if open { IconName::ChevronDown } else { IconName::ChevronRight };
+    side_centered(Icon::new(name).size(IconSize::Small).color(color))
+}
+
+/// A thread's state in the lead column, under its project's chevron, so its title lines up with
+/// the project's name: a dot while it runs or has news, a ! when it asks, nothing when idle.
+fn side_mark(activity: Activity, colors: &Palette) -> gpui::Div {
+    let (glyph, tint) = activity.mark(colors);
+    let mark = match activity {
+        Activity::Idle => div(),
+        Activity::Asking => div().text_sm().font_weight(FontWeight::BOLD).text_color(tint).child(glyph),
+        Activity::Running | Activity::Unread => div().size(rems(0.4375)).rounded_full().bg(tint),
+    };
+    side_centered(mark)
+}
+
+/// The lead column with its content centred, so a chevron and the marks under it share an axis.
+fn side_centered(content: impl IntoElement) -> gpui::Div {
+    div().w(SIDE_LEAD).flex_none().flex().items_center().justify_center().child(content)
+}
+
+/// A sidebar section's title: a quiet label in sentence case, the size of the rows' own text.
+fn side_title(text: impl Into<SharedString>, colors: &Palette) -> gpui::Div {
+    div().text_sm().font_weight(FontWeight::MEDIUM).text_color(colors.muted_foreground).child(text.into())
 }
 
 /// An icon for the lead column.
@@ -5485,14 +5512,14 @@ impl Reader {
     }
 
     /// The left side: every project with its threads.
-    fn left_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn left_sidebar(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         let query = self.side_query(cx);
         let searching = !query.is_empty();
         let views = self.views();
         let needs_you = self.needs_you_section(&views, &query, cx);
         let any_waiting = needs_you.is_some();
         let colors = cx.global::<Palette>();
-        let (hover, muted, foreground, warning) = (colors.list_hover, colors.muted_foreground, colors.foreground, colors.warning);
+        let (hover, selection, muted, foreground, warning) = (colors.list_hover, colors.list_selected, colors.muted_foreground, colors.foreground, colors.warning);
         let (active_project, active_thread) = (self.project_id, self.thread.id);
         let project_count = views.len();
         let many = project_count > 1;
@@ -5509,17 +5536,16 @@ impl Reader {
             let (select, close, start) = (cx.entity(), cx.entity(), cx.entity());
             let collapsed = self.projects_collapsed.contains(&pid) && !searching;
             // A project and its threads are one group, set apart from the next by space, not a box.
-            // The one on screen has its name at full strength, the rest are muted; the selected
-            // thread is the only filled row. Thread titles start at the folder's left edge, so the
-            // groups are told apart by the project's row and the space between them.
-            let label = if pid == active_project { foreground } else { muted };
+            // The one on screen has its name at full strength, the rest are dimmed.
+            let label = if pid == active_project { foreground } else { foreground.opacity(theme::tokens::DIM) };
             let mut group = div().flex().flex_col().gap(SIDE_ITEM_GAP);
+            let head = self.heads.get(&view.project.root).filter(|_| view.project.shows_branch());
             group = group.child(
-                side_row(colors.radius, Some(side_icon(IconName::Folder, muted)))
+                side_row(colors.radius, None)
                     .id(("agent-project", pid as usize))
                     .group(row_group("agent-project", pid))
-                    .h(SIDE_ROW_HEIGHT)
-                    .mb_0p5()
+                    .h(SIDE_TREE_HEIGHT)
+                    .child(side_chevron(!collapsed, muted))
                     .cursor_pointer()
                     .hover(move |row| row.bg(hover))
                     // Clicking the row opens the project and folds or unfolds its threads; the buttons on it are
@@ -5545,14 +5571,14 @@ impl Reader {
                                 div()
                                     .min_w_0()
                                     .truncate()
-                                    .text_base()
+                                    .text_sm()
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .text_color(label)
                                     .child(view.project.name()),
                             )
-                            .when_some(self.heads.get(&view.project.root).filter(|_| view.project.shows_branch()), |name, head| {
-                                name.child(div().min_w_0().flex().items_baseline().gap_1().text_sm().text_color(muted).child(
-                                    div().truncate().child(format!("⎇ {}", head.name)),
+                            .when_some(head, |name, head| {
+                                name.child(div().min_w_0().flex().items_baseline().gap_1().text_xs().text_color(muted).child(
+                                    div().truncate().child(head.name.clone()),
                                 ).when(head.dirty, |tag| tag.child(div().flex_none().text_color(warning).child("*"))))
                             }),
                     )
@@ -5603,18 +5629,33 @@ impl Reader {
             }
             for thread in recent {
                 let tid = thread.id;
-                let (glyph, tint) = thread.activity().mark(colors);
                 let (select, close) = (cx.entity(), cx.entity());
+                let selected = (pid, tid) == (active_project, active_thread);
                 // What its agent may do through Po's API, when that is more than talk.
                 let controlled = self.grants.get(&tid).is_some_and(|grant| *grant != command::Grant::default());
+                // A thread sits under its project like a file under a folder: its state in the lead
+                // column, its title on the project name's column. The one on screen is the only
+                // filled row.
                 group = group.child(
                     side_row(colors.radius, None)
                         .id(("agent-thread", tid as usize))
                         .group(row_group("agent-thread", tid))
-                        .h(SIDE_ROW_HEIGHT)
+                        .h(SIDE_TREE_HEIGHT)
                         .cursor_pointer()
-                        .when((pid, tid) != (active_project, active_thread), |row| row.hover(move |row| row.bg(hover)))
+                        .when(selected, |row| row.bg(selection))
+                        .when(!selected, |row| row.hover(move |row| row.bg(hover)))
                         .on_click(move |_, window, cx| select.update(cx, |reader, cx| reader.open_thread(pid, tid, window, cx)))
+                        .child(side_mark(thread.activity(), colors))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_sm()
+                                .when(selected, |label| label.font_weight(FontWeight::MEDIUM))
+                                .text_color(if selected { foreground } else { foreground.opacity(theme::tokens::DIM) })
+                                .child(self.thread_label(thread)),
+                        )
                         .children(controlled.then(|| {
                             Button::new(("grant-badge", tid as usize))
                                 .label("⌁")
@@ -5623,18 +5664,6 @@ impl Reader {
                                 .xsmall()
                                 .selected(true)
                         }))
-                        .child(
-                            // The project is a quiet label; the threads are what you pick, so they
-                            // carry the weight.
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .truncate()
-                                .text_base()
-                                .when((pid, tid) == (active_project, active_thread), |label| label.font_weight(FontWeight::MEDIUM))
-                                .text_color(if (pid, tid) == (active_project, active_thread) { foreground } else { foreground.opacity(theme::tokens::DIM) })
-                                .child(self.thread_label(thread)),
-                        )
                         .child(show_on_hover(
                             row_group("agent-thread", tid),
                             Button::new(("agent-thread-close", tid as usize))
@@ -5643,9 +5672,7 @@ impl Reader {
                                 .xsmall()
                                 .tooltip("Close thread")
                                 .on_click(move |_, window, cx| close.update(cx, |reader, cx| reader.close_any_thread(pid, tid, window, cx))),
-                        ))
-                        // An idle thread has nothing to report, so it has no mark.
-                        .children((thread.activity() != Activity::Idle).then(|| side_trail(div().text_base().text_color(tint).child(glyph)))),
+                        )),
                 );
             }
             if foldable && !collapsed && (hidden > 0 || expanded) {
@@ -5656,7 +5683,7 @@ impl Reader {
                         .id(("agent-more", pid as usize))
                         .h(SIDE_MORE_HEIGHT)
                         .cursor_pointer()
-                        .text_sm()
+                        .text_xs()
                         .text_color(muted)
                         .hover(move |row| row.bg(hover))
                         .on_click(move |_, _, cx| {
@@ -5667,6 +5694,7 @@ impl Reader {
                                 cx.notify();
                             })
                         })
+                        .child(side_lead(div()))
                         .child(label),
                 );
             }
@@ -5675,7 +5703,7 @@ impl Reader {
         if searching && views.is_empty() && !any_waiting {
             tree = tree.child(side_row(colors.radius, None).h(SIDE_MORE_HEIGHT).text_sm().text_color(muted).child("No matches"));
         }
-        let title = div().text_xs().font_weight(FontWeight::MEDIUM).text_color(muted).child("PROJECTS");
+        let title = side_title("Projects", colors);
         let projects = div()
             .size_full()
             .flex()
@@ -5687,7 +5715,7 @@ impl Reader {
                     .icon(IconName::Plus)
                     .tooltip("Add a project: open a folder (Ctrl+Shift+O)")
                     .ghost()
-                    .small()
+                    .xsmall()
                     .on_click(move |_, window, cx| add.update(cx, |reader, cx| reader.pick_project(window, cx))),
                 cx,
             )).h(SIDE_SECTION_HEIGHT + SIDE_SECTION_GAP).pt(SIDE_SECTION_GAP).border_b_0())
@@ -5700,19 +5728,19 @@ impl Reader {
         let (new_thread, open_settings) = (cx.entity(), cx.entity());
         let (hover, muted, foreground, radius) = (colors.list_hover, colors.muted_foreground, colors.foreground, colors.radius);
         // A plain text action below the title bar, not a button: it lights up under the pointer.
-        let actions = div().flex_none().flex().flex_col().gap(SIDE_ACTION_GAP).px(SIDEBAR_GUTTER).pt_2().pb_3().child(
-            side_row(radius, Some(side_icon(IconName::Plus, foreground)))
+        let actions = div().flex_none().flex().flex_col().gap(SIDE_ACTION_GAP).px(SIDEBAR_GUTTER).pt(SIDE_ACTIONS_TOP).child(
+            side_row(radius, Some(side_icon(IconName::Plus, muted)))
                 .id("sidebar-new-thread")
                 .h(SIDE_ROW_HEIGHT)
                 .cursor_pointer()
                 .text_base()
-                .text_color(foreground)
-                .hover(move |this| this.bg(hover))
+                .text_color(muted)
+                .hover(move |this| this.bg(hover).text_color(foreground))
                 .tooltip(|_, cx| ui::button::tooltip("New thread (Ctrl+N)".into(), cx))
                 .on_click(move |_, window, cx| new_thread.update(cx, |reader, cx| reader.new_blank_thread(window, cx)))
                 .child("New"),
         )
-        .child(self.search_row(cx));
+        .child(self.search_row(window, cx));
         let pane = div().size_full().flex().flex_col().bg(colors.sidebar).child(side_header(pane_header("Po", div(), None, None, cx))).child(actions).children(needs_you).child(
             div().flex_1().min_h_0().child(projects),
         )
@@ -5763,17 +5791,17 @@ impl Reader {
         let mut rows = div().id("needs-you-list").max_h(most).overflow_y_scroll().flex().flex_col().gap(SIDE_ITEM_GAP).px(SIDEBAR_GUTTER).pt(SIDE_LIST_TOP).pb(SIDE_LIST_BOTTOM);
         for (view, thread) in waiting {
             let (pid, tid) = (view.id, thread.id);
-            let (glyph, tint) = thread.activity().mark(colors);
             let (select, close) = (cx.entity(), cx.entity());
             let controlled = self.grants.get(&tid).is_some_and(|grant| *grant != command::Grant::default());
             rows = rows.child(
                 side_row(radius, None)
                     .id(("needs-you-thread", tid as usize))
                     .group(row_group("needs-you-thread", tid))
-                    .h(SIDE_ROW_HEIGHT)
+                    .h(SIDE_TREE_HEIGHT)
                     .cursor_pointer()
                     .hover(move |row| row.bg(hover))
                     .on_click(move |_, window, cx| select.update(cx, |reader, cx| reader.open_thread(pid, tid, window, cx)))
+                    .child(side_mark(thread.activity(), colors))
                     .children(controlled.then(|| {
                         Button::new(("needs-you-grant-badge", tid as usize))
                             .label("⌁")
@@ -5790,8 +5818,8 @@ impl Reader {
                             .flex()
                             .items_baseline()
                             .gap_2()
-                            .child(div().min_w_0().truncate().text_base().text_color(foreground.opacity(theme::tokens::DIM)).child(self.thread_label(thread)))
-                            .child(div().min_w_0().truncate().text_sm().text_color(muted).child(view.project.name())),
+                            .child(div().min_w_0().truncate().text_sm().text_color(foreground.opacity(theme::tokens::DIM)).child(self.thread_label(thread)))
+                            .child(div().min_w_0().truncate().text_xs().text_color(muted).child(view.project.name())),
                     )
                     .child(show_on_hover(
                         row_group("needs-you-thread", tid),
@@ -5801,11 +5829,10 @@ impl Reader {
                             .xsmall()
                             .tooltip("Close thread")
                             .on_click(move |_, window, cx| close.update(cx, |reader, cx| reader.close_any_thread(pid, tid, window, cx))),
-                    ))
-                    .child(side_trail(div().text_base().text_color(tint).child(glyph))),
+                    )),
             );
         }
-        let title = div().text_xs().font_weight(FontWeight::MEDIUM).text_color(muted).child(format!("NEEDS YOU · {count}"));
+        let title = side_title(format!("Needs you · {count}"), colors);
         Some(
             div()
                 .flex_none()
@@ -6403,11 +6430,13 @@ impl Reader {
 
     /// The sidebar's filter, a row like the ones around it: a click anywhere on it starts typing, and
     /// a cross clears it.
-    fn search_row(&self, cx: &App) -> impl IntoElement {
+    fn search_row(&self, window: &Window, cx: &App) -> impl IntoElement {
         let colors = cx.global::<Palette>();
         let (hover, muted, radius) = (colors.list_hover, colors.muted_foreground, colors.radius);
         let input = self.side_search.clone();
         let filled = !self.side_search.read(cx).value().is_empty();
+        // A plain row like New until it is in use: typed into, or holding a filter.
+        let in_use = filled || self.side_search.read(cx).is_focused(window);
         let clear = filled.then(|| {
             let input = input.clone();
             Button::new("sidebar-search-clear")
@@ -6424,10 +6453,10 @@ impl Reader {
             .cursor_text()
             .text_base()
             .text_color(muted)
-            .bg(colors.input_background)
-            .hover(move |this| this.bg(hover))
+            .when(in_use, |row| row.bg(colors.input_background))
+            .when(!in_use, |row| row.hover(move |this| this.bg(hover)))
             .on_click(move |_, window, cx| focus.update(cx, |input, cx| input.focus(window, cx)))
-            .child(div().flex_1().min_w_0().child(Input::new(&input)))
+            .child(div().flex_1().min_w_0().child(Input::new(&input).large()))
             .children(clear)
     }
 
@@ -7312,7 +7341,7 @@ fn centered(text: String, cx: &App) -> AnyElement {
 }
 
 impl Render for Reader {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.settle_agent_changes();
         if !self.painted {
             self.painted = true;
@@ -7413,7 +7442,7 @@ impl Render for Reader {
             .child(
                 div().flex_1().min_h_0().when_some(glass, |this, glass| this.p(glass.inset / 2.)).child(
                     sidebars(&self.sidebars)
-                        .left(left_open, px(220.0)..px(520.0), self.left_sidebar(cx))
+                        .left(left_open, px(220.0)..px(520.0), self.left_sidebar(window, cx))
                         .center(middle)
                         .right(right_open, px(320.0)..px(900.0), side),
                 ),
