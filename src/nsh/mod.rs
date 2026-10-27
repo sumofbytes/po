@@ -2,6 +2,7 @@
 //! Po's window like any other. This module is what they share: the theme and fonts they take from
 //! Po's [`Palette`], Po's icons, and the views themselves.
 pub mod bus;
+pub mod finder;
 pub mod overlay;
 pub mod settings;
 pub mod sidebar;
@@ -257,7 +258,12 @@ pub fn button(label: &'static str, primary: bool, on_press: impl Fn() + 'static)
 
 /// A line of text in a bordered box, as the settings page has them. `id` names it for tests.
 pub fn field(id: &str, value: Signal<String>, placeholder: &'static str, on_submit: impl Fn() + 'static) -> View {
-    let input = nsh_core::element::input()
+    field_with(id, value, placeholder, on_submit, |input| input)
+}
+
+/// [`field`], with `more` done to its input (a ref, focus).
+pub fn field_with(id: &str, value: Signal<String>, placeholder: &'static str, on_submit: impl Fn() + 'static, more: impl FnOnce(nsh_base::Input) -> nsh_base::Input) -> View {
+    let input = more(nsh_core::element::input()
         .test_id(id)
         .value(move || value.get())
         .placeholder(placeholder)
@@ -268,7 +274,7 @@ pub fn field(id: &str, value: Signal<String>, placeholder: &'static str, on_subm
         .submit_behavior(nsh_core::element::SubmitBehavior::Submit)
         .on_change(move |text: &str| value.set(text.to_string()))
         .on_submit(move |_: &str| on_submit())
-        .flex_1();
+        .flex_1());
     view()
         .h(field_height())
         .flex_row()

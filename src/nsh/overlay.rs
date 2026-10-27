@@ -32,6 +32,8 @@ pub enum OverlayEvent {
 pub struct Overlay {
     root: fn() -> Root,
     width: f32,
+    /// Kept clear above the card, and below it.
+    margin: f32,
     /// Made as the window opens and dropped as it closes, which stops its engine.
     view: Option<(Entity<AppView>, Subscription)>,
     height: f32,
@@ -41,7 +43,7 @@ pub struct Overlay {
 impl EventEmitter<OverlayEvent> for Overlay {}
 
 impl Overlay {
-    pub fn new(width: f32, root: fn() -> Root, measured: &'static Height, cx: &mut Context<Self>) -> Self {
+    pub fn new(width: f32, margin: f32, root: fn() -> Root, measured: &'static Height, cx: &mut Context<Self>) -> Self {
         let mut measured = measured.subscribe();
         let follow = cx.spawn(async move |overlay, cx| {
             while measured.changed().await.is_ok() {
@@ -54,7 +56,7 @@ impl Overlay {
                 }
             }
         });
-        Self { root, width, view: None, height: 0., _follow: follow }
+        Self { root, width, margin, view: None, height: 0., _follow: follow }
     }
 
     /// Starts the screen and gives it the keyboard, as the window opens.
@@ -85,7 +87,7 @@ impl Render for Overlay {
             .flex()
             .justify_center()
             .items_start()
-            .py_6()
+            .py(px(self.margin))
             .child(
                 div()
                     .id("overlay")

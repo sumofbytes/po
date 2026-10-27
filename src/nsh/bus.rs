@@ -23,6 +23,11 @@ pub enum Cmd {
     OpenSettings,
     ToggleTodos,
     CloseTodos,
+    /// The finder's query changed.
+    FinderQuery(String),
+    /// A file picked in the finder.
+    FinderPick(String),
+    CloseFinder,
     CloseSettings,
     /// The settings were written to config.json.
     SettingsSaved,

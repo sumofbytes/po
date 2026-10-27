@@ -55,7 +55,7 @@ use gpui::{
     prelude::*, px, rems, size, KeyBinding,
 };
 
-gpui::actions!(po, [ToggleTools, ToggleThoughts, ToggleLeft, ToggleRight, ShowSource, ShowChanges, ShowChat, SwapPanes, ShowHistory, ToggleSplit, ToggleRendered, NewThread, OpenProject, ShowFinder, ToggleFocus, ShowSettings, CloseSettings, CloseWindow, CloseFinder, FinderUp, FinderDown]);
+gpui::actions!(po, [ToggleTools, ToggleThoughts, ToggleLeft, ToggleRight, ShowSource, ShowChanges, ShowChat, SwapPanes, ShowHistory, ToggleSplit, ToggleRendered, NewThread, OpenProject, ShowFinder, ToggleFocus, ShowSettings, CloseSettings, CloseWindow]);
 
 const SKIP: [&str; 5] = ["target", "node_modules", "dist", "build", "__pycache__"];
 const MAX_FILES: usize = 5000;
@@ -1252,14 +1252,11 @@ struct Reader {
     finishing: bool,
     /// Discard was asked for once and waits for a second click, since it can't be undone.
     confirm_discard: bool,
-    /// The Ctrl+P finder, when open: its query field, the matching files and which is picked.
-    finder: Option<Entity<InputState>>,
-    finder_matches: Rc<Vec<String>>,
-    finder_selected: usize,
-    finder_list: ListState,
+    /// The Ctrl+P finder, drawn by NSH: what its field holds, and the files that match it.
+    finder: Entity<nsh::overlay::Overlay>,
+    finder_query: String,
+    finder_matches: Vec<String>,
     finder_open: bool,
-    /// Keeps the finder input's event subscription alive for the reader's lifetime.
-    finder_events: Option<Subscription>,
     /// The settings page (Ctrl+,), while it is open.
     settings: Entity<nsh::overlay::Overlay>,
     settings_open: bool,
@@ -1338,8 +1335,9 @@ impl Reader {
             InputState::new(window, cx).auto_grow(1, 1).submit_on_enter(true).placeholder("PR number or URL")
         });
         let (sidebar, sidebar_theme) = nsh::mount(nsh_platform_gpui::Root::of::<nsh::sidebar::Sidebar>(), window, cx);
-        let settings_window = cx.new(|cx| nsh::overlay::Overlay::new(680., || nsh_platform_gpui::Root::of::<nsh::settings::Settings>(), &nsh::settings::HEIGHT, cx));
-        let todos = cx.new(|cx| nsh::overlay::Overlay::new(600., || nsh_platform_gpui::Root::of::<nsh::todos::Todos>(), &nsh::todos::HEIGHT, cx));
+        let finder_window = cx.new(|cx| nsh::overlay::Overlay::new(560., 8., || nsh_platform_gpui::Root::of::<nsh::finder::Finder>(), &nsh::finder::HEIGHT, cx));
+        let settings_window = cx.new(|cx| nsh::overlay::Overlay::new(680., 24., || nsh_platform_gpui::Root::of::<nsh::settings::Settings>(), &nsh::settings::HEIGHT, cx));
+        let todos = cx.new(|cx| nsh::overlay::Overlay::new(600., 24., || nsh_platform_gpui::Root::of::<nsh::todos::Todos>(), &nsh::todos::HEIGHT, cx));
         let draft = cx.new(|cx| {
             InputState::new(window, cx)
                 .auto_grow(1, 6)
@@ -1357,6 +1355,9 @@ impl Reader {
                 if !sidebars.read(cx).dragging() {
                     reader.request_save(cx);
                 }
+            }),
+            cx.subscribe_in(&finder_window, window, |reader, _, event: &nsh::overlay::OverlayEvent, window, cx| match event {
+                nsh::overlay::OverlayEvent::Close => reader.hide_finder(window, cx),
             }),
             cx.subscribe_in(&settings_window, window, |reader, _, event: &nsh::overlay::OverlayEvent, window, cx| match event {
                 nsh::overlay::OverlayEvent::Close => reader.hide_settings(window, cx),
@@ -1467,12 +1468,10 @@ impl Reader {
             worktree_status: None,
             finishing: false,
             confirm_discard: false,
-            finder: None,
-            finder_matches: Rc::new(vec![]),
-            finder_selected: 0,
-            finder_list: ListState::new(0, ListAlignment::Top, px(400.)),
+            finder: finder_window,
+            finder_query: String::new(),
+            finder_matches: Vec::new(),
             finder_open: false,
-            finder_events: None,
             settings: settings_window,
             settings_open: false,
             painted: false,
@@ -1784,9 +1783,7 @@ impl Reader {
         self.project.files = files;
         self.refresh_tree(cx);
         if self.finder_open {
-            let picked = self.finder_selected;
-            self.refind(cx);
-            self.finder_selected = picked.min(self.finder_matches.len().saturating_sub(1));
+            self.refind();
         }
         cx.notify();
     }
@@ -4722,54 +4719,22 @@ impl Reader {
         cx.notify();
     }
 
-    /// Ctrl+P: shows the finder over the workspace's files, query and selection preserved.
+    /// Ctrl+P: shows the finder over the workspace's files, with the last query selected.
     fn show_finder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.finder.is_none() {
-            let input = cx.new(|cx| InputState::new(window, cx).placeholder("Search files…"));
-            // Every keystroke refilters the matches; Enter picks the selected file.
-            self.finder_events = Some(cx.subscribe_in(&input, window, |this, _, event: &InputEvent, window, cx| match event {
-                InputEvent::Change => {
-                    this.refind(cx);
-                    cx.notify();
-                }
-                InputEvent::PressEnter { alt: false, .. } => this.accept_picked(window, cx),
-                _ => {}
-            }));
-            self.finder = Some(input);
-        }
         self.finder_open = true;
-        self.refind(cx);
-        self.finder.as_ref().unwrap().update(cx, |input, cx| {
-            input.select_all(window, cx);
-            input.focus(window, cx);
+        self.refind();
+        nsh::finder::start(&self.finder_query);
+        self.finder.update(cx, |finder, cx| finder.open(window, cx));
+        cx.notify();
+    }
+
+    /// Refilters the finder's matches for its query, and shows them.
+    fn refind(&mut self) {
+        self.finder_matches = match_files(&self.project.files, &self.finder_query);
+        nsh::finder::publish(nsh::finder::Snapshot {
+            matches: self.finder_matches.clone(),
+            capped: (self.project.files.len() >= MAX_FILES).then_some(MAX_FILES),
         });
-        cx.notify();
-    }
-
-    /// Refilters the finder's matches for its query and rewinds the selection to the first.
-    fn refind(&mut self, cx: &mut Context<Self>) {
-        let query = self.finder.as_ref().map_or_else(String::new, |input| input.read(cx).value().to_string());
-        self.finder_matches = Rc::new(match_files(&self.project.files, &query));
-        self.finder_selected = 0;
-        self.finder_list.reset(self.finder_matches.len());
-        self.finder_list.scroll_to(gpui::ListOffset { item_ix: 0, offset_in_item: px(0.) });
-    }
-
-    /// Moves the finder's selection by `delta` rows, wrapping, and keeps it in view.
-    fn step_finder(&mut self, delta: isize, cx: &mut Context<Self>) {
-        if self.finder_matches.is_empty() {
-            return;
-        }
-        let len = self.finder_matches.len() as isize;
-        self.finder_selected = (self.finder_selected as isize + delta).rem_euclid(len) as usize;
-        self.finder_list.scroll_to_reveal_item(self.finder_selected);
-        cx.notify();
-    }
-
-    /// Opens the file under the finder's selection and closes the finder.
-    fn accept_picked(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(path) = self.finder_matches.get(self.finder_selected).cloned() else { return };
-        self.accept_path(&path, window, cx);
     }
 
     /// Opens `path` in the viewer and closes the finder.
@@ -4844,79 +4809,9 @@ impl Reader {
     /// Hides the finder and gives the keys back to the reader.
     fn hide_finder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.finder_open = false;
+        self.finder.update(cx, |finder, _| finder.close());
         self.focus.focus(window, cx);
         cx.notify();
-    }
-
-    /// The finder overlay, while Ctrl+P is open: a query field over the matching files.
-    fn finder(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let palette = cx.global::<Palette>();
-        let (popover, border, muted, radius) = (palette.popover, palette.border, palette.muted_foreground, palette.radius);
-        let Some(input) = self.finder.clone() else { return div().into_any_element() };
-        let matches = self.finder_matches.clone();
-        let this = cx.entity();
-        div()
-            .absolute()
-            .inset_0()
-            .id("finder-backdrop")
-            .occlude()
-            .on_click(cx.listener(|reader, _: &gpui::ClickEvent, window, cx| reader.hide_finder(window, cx)))
-            .flex()
-            .justify_center()
-            .pt_2()
-            .child(
-                div()
-                    .id("finder")
-                    .occlude()
-                    .w(px(560.0))
-                    .flex()
-                    .flex_col()
-                    .key_context("Finder")
-                    .on_action(cx.listener(|reader, _: &CloseFinder, window, cx| reader.hide_finder(window, cx)))
-                    .on_action(cx.listener(|reader, _: &FinderUp, _, cx| reader.step_finder(-1, cx)))
-                    .on_action(cx.listener(|reader, _: &FinderDown, _, cx| reader.step_finder(1, cx)))
-                    .rounded(radius)
-                    .border_1()
-                    .border_color(border)
-                    .bg(popover)
-                    .overflow_hidden()
-                    .child(Input::new(&input).field())
-                    .child(if matches.is_empty() {
-                        div().h(px(380.0)).flex().justify_center().pt_3().text_color(muted).child("No matching files").into_any_element()
-                    } else {
-                        div().h(px(380.0)).border_t_1().border_color(border).child(list(
-                            self.finder_list.clone(),
-                            cx.processor(move |reader: &mut Reader, ix, _, _| {
-                                let Some(path): Option<&String> = matches.get(ix) else { return div().into_any_element() };
-                                let name = path.rsplit('/').next().unwrap_or(path).to_string();
-                                let dir = path.strip_suffix(name.as_str()).unwrap_or("").to_string();
-                                let path = path.clone();
-                                let this = this.clone();
-                                ListItem::new(("file", ix))
-                                    .selected(ix == reader.finder_selected)
-                                    .on_click(move |_, window, cx| this.update(cx, |reader, cx| reader.accept_path(&path, window, cx)))
-                                    .child(name)
-                                    .when(!dir.is_empty(), |row| row.child(div().text_color(muted).child(dir)))
-                                    .into_any_element()
-                            }),
-                        )
-                        .size_full())
-                        .into_any_element()
-                    })
-                    .child(
-                        div()
-                            .flex()
-                            .justify_between()
-                            .px_3()
-                            .py_1()
-                            .border_t_1()
-                            .border_color(border)
-                            .text_color(muted)
-                            .child(if self.project.files.len() >= MAX_FILES { format!("first {MAX_FILES} files only") } else { "↑↓ navigate".to_string() })
-                            .child("↵ open · esc close"),
-                    ),
-            )
-            .into_any_element()
     }
 
     /// The rendered form of `text` if `path` is markdown, keeping the scroll position and
@@ -5717,6 +5612,14 @@ impl Reader {
             Cmd::OpenSettings => self.toggle_settings(window, cx),
             Cmd::ToggleTodos => self.toggle_todos(window, cx),
             Cmd::CloseTodos => self.hide_todos(window, cx),
+            Cmd::FinderQuery(query) => {
+                if query != self.finder_query {
+                    self.finder_query = query;
+                    self.refind();
+                }
+            }
+            Cmd::FinderPick(path) => self.accept_path(&path, window, cx),
+            Cmd::CloseFinder => self.hide_finder(window, cx),
             Cmd::CloseSettings => self.hide_settings(window, cx),
             Cmd::SettingsSaved => self.apply_settings(cx),
             Cmd::Answer(id, yes) => self.answer_suggestion(id, yes, window, cx),
@@ -7329,7 +7232,7 @@ impl Render for Reader {
                         .right(right_open, px(320.0)..px(900.0), side),
                 ),
             )
-            .when(self.finder_open, |this| this.child(self.finder(cx)))
+            .when(self.finder_open, |this| this.child(self.finder.clone()))
             .when(self.todos_open, |this| this.child(self.todos.clone()))
             .when(self.settings_open, |this| this.child(self.settings.clone()))
     }
@@ -7522,10 +7425,7 @@ fn main() {
             KeyBinding::new("secondary-,", ShowSettings, None),
             KeyBinding::new("secondary-w", CloseWindow, None),
             KeyBinding::new("escape", CloseSettings, Some("Settings")),
-            KeyBinding::new("escape", CloseFinder, Some("Finder")),
             // The Input binds up/down itself and swallows them when single-line, so these name it.
-            KeyBinding::new("up", FinderUp, Some("Finder > Input")),
-            KeyBinding::new("down", FinderDown, Some("Finder > Input")),
         ]);
         cx.on_action(|_: &CloseWindow, cx| {
             if let Some(window) = cx.active_window() {
