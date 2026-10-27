@@ -16,6 +16,7 @@ mod schemes;
 mod settings;
 mod theme;
 mod state;
+mod todo;
 mod trace;
 mod ui;
 mod update;
@@ -976,7 +977,7 @@ fn side_mark(activity: Activity, colors: &Palette) -> gpui::Div {
     let mark = match activity {
         Activity::Idle => div(),
         Activity::Asking => div().text_sm().font_weight(FontWeight::BOLD).text_color(tint).child(glyph),
-        Activity::Running | Activity::Unread => div().size(rems(0.4375)).rounded_full().bg(tint),
+        Activity::Running | Activity::Unread => div().size(rems(0.4375)).rounded(theme::tokens::RADIUS_FULL).bg(tint),
     };
     side_centered(mark)
 }
@@ -1332,6 +1333,9 @@ struct Reader {
     pr_input: Entity<InputState>,
     /// The sidebar's filter: threads and projects that don't match it are left out of its lists.
     side_search: Entity<InputState>,
+    /// The todos window, shown over everything while `todos_open`; the sidebar has a row for it.
+    todos: Entity<todo::TodoPanel>,
+    todos_open: bool,
     /// Progress or failure of the last attempt to open a PR.
     pr_status: Option<String>,
     opening: bool,
@@ -1426,6 +1430,7 @@ impl Reader {
             InputState::new(window, cx).auto_grow(1, 1).submit_on_enter(true).placeholder("PR number or URL")
         });
         let side_search = cx.new(|cx| InputState::new(window, cx).placeholder("Search"));
+        let todos = cx.new(|cx| todo::TodoPanel::new(window, cx));
         let draft = cx.new(|cx| {
             InputState::new(window, cx)
                 .auto_grow(1, 6)
@@ -1445,6 +1450,11 @@ impl Reader {
                 }
             }),
             cx.subscribe(&side_search, |_, _, _: &InputEvent, cx| cx.notify()),
+            cx.subscribe_in(&todos, window, |reader, _, event: &todo::TodoEvent, window, cx| match event {
+                todo::TodoEvent::Close => reader.hide_todos(window, cx),
+                // The sidebar's row counts what is left.
+                todo::TodoEvent::Changed => cx.notify(),
+            }),
             cx.subscribe_in(&pr_input, window, |reader, _, event: &InputEvent, window, cx| {
                 if matches!(event, InputEvent::PressEnter { shift: false, alt: false }) {
                     reader.open_pr(window, cx);
@@ -1536,6 +1546,8 @@ impl Reader {
             home,
             pr_input,
             side_search,
+            todos,
+            todos_open: false,
             pr_status: None,
             opening: false,
             worktree_status: None,
@@ -4750,6 +4762,24 @@ impl Reader {
         cx.notify();
     }
 
+    fn toggle_todos(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.todos_open {
+            return self.hide_todos(window, cx);
+        }
+        self.todos_open = true;
+        self.todos.update(cx, |todos, cx| todos.focus(window, cx));
+        cx.notify();
+    }
+
+    fn hide_todos(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.todos_open {
+            return;
+        }
+        self.todos_open = false;
+        self.focus.focus(window, cx);
+        cx.notify();
+    }
+
     fn hide_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.settings_page = None;
         self.focus.focus(window, cx);
@@ -5740,7 +5770,8 @@ impl Reader {
                 .on_click(move |_, window, cx| new_thread.update(cx, |reader, cx| reader.new_blank_thread(window, cx)))
                 .child("New"),
         )
-        .child(self.search_row(window, cx));
+        .child(self.search_row(window, cx))
+        .child(self.todos_row(cx));
         let pane = div().size_full().flex().flex_col().bg(colors.sidebar).child(side_header(pane_header("Po", div(), None, None, cx))).child(actions).children(needs_you).child(
             div().flex_1().min_h_0().child(projects),
         )
@@ -6460,6 +6491,29 @@ impl Reader {
             .children(clear)
     }
 
+    /// The row that opens the todos window, with how many are left: red while any are late.
+    fn todos_row(&self, cx: &Context<Self>) -> impl IntoElement {
+        let colors = cx.global::<Palette>();
+        let (hover, muted, foreground, danger, radius) = (colors.list_hover, colors.muted_foreground, colors.foreground, colors.danger, colors.radius);
+        let (left, late) = self.todos.read(cx).summary();
+        let open = cx.entity();
+        side_row(radius, Some(side_icon(IconName::SquareCheck, muted)))
+            .id("sidebar-todos")
+            .h(SIDE_ROW_HEIGHT)
+            .cursor_pointer()
+            .text_base()
+            .text_color(muted)
+            .when(self.todos_open, |row| row.bg(colors.list_selected).text_color(foreground))
+            .hover(move |this| this.bg(hover).text_color(foreground))
+            .on_click(move |_, window, cx| open.update(cx, |reader, cx| reader.toggle_todos(window, cx)))
+            .child(div().flex_1().child("Todos"))
+            .when(left > 0, |row| {
+                let tip = if late > 0 { format!("{left} left, {late} late") } else { format!("{left} left") };
+                // The width of the xsmall buttons on the project rows, so the count is centred under theirs.
+                row.child(div().id("sidebar-todos-count").min_w(rems(1.25)).flex_none().flex().justify_center().text_sm().text_color(if late > 0 { danger } else { muted }).tooltip(move |_, cx| ui::button::tooltip(tip.clone().into(), cx)).child(left.to_string()))
+            })
+    }
+
     /// What the parent of children says in its header: `3 threads · 1 asking · 1 failed`.
     fn children_status(&self, id: u64) -> Option<String> {
         let children: Vec<&Thread> = self.threads_all().filter(|thread| thread.parent == Some(id)).collect();
@@ -6801,7 +6855,8 @@ impl Reader {
                         .border_color(colors.border)
                         .bg(colors.sidebar)
                         .when(!queued.is_empty(), |this| {
-                            this.child(div().flex().flex_col().gap_1().pb_1().border_b_1().border_color(border).children(queued))
+                            // Inset like the input's text, so the queued text starts where the draft's does.
+                            this.child(div().flex().flex_col().gap_1().pb_1().pl(rems(INPUT_PAD_REM)).border_b_1().border_color(border).children(queued))
                         })
                         .children(self.thread.attach_note.as_ref().map(|note| div().text_xs().text_color(muted).child(note.clone())))
                         .children((!strip.is_empty()).then(|| div().flex().flex_wrap().gap_2().children(strip)))
@@ -7415,8 +7470,14 @@ impl Render for Reader {
             .on_key_down(cx.listener(|reader, _, _, _| reader.last_input = Instant::now()))
             .on_scroll_wheel(cx.listener(|reader, _, _, _| reader.last_input = Instant::now()))
             .on_mouse_down(gpui::MouseButton::Left, cx.listener(|reader, _, _, _| reader.last_input = Instant::now()))
-            .on_action(cx.listener(|reader, _: &ShowFinder, window, cx| reader.show_finder(window, cx)))
-            .on_action(cx.listener(|reader, _: &ShowSettings, window, cx| reader.toggle_settings(window, cx)))
+            .on_action(cx.listener(|reader, _: &ShowFinder, window, cx| {
+                reader.hide_todos(window, cx);
+                reader.show_finder(window, cx)
+            }))
+            .on_action(cx.listener(|reader, _: &ShowSettings, window, cx| {
+                reader.hide_todos(window, cx);
+                reader.toggle_settings(window, cx)
+            }))
             .on_action(cx.listener(|reader, _: &CloseSettings, window, cx| reader.hide_settings(window, cx)))
             .on_action(cx.listener(|reader, _: &ToggleTools, _, cx| reader.toggle_tools(cx)))
             .on_action(cx.listener(|reader, _: &ToggleThoughts, _, cx| reader.toggle_thoughts(cx)))
@@ -7430,8 +7491,12 @@ impl Render for Reader {
             .on_action(cx.listener(|reader, _: &ShowHistory, window, cx| reader.resume_thread(window, cx)))
             .on_action(cx.listener(|reader, _: &ToggleSplit, _, cx| reader.set_split(!reader.split, cx)))
             .on_action(cx.listener(|reader, _: &ToggleRendered, _, cx| reader.toggle_rendered(cx)))
-            .on_action(cx.listener(|reader, _: &OpenProject, window, cx| reader.pick_project(window, cx)))
+            .on_action(cx.listener(|reader, _: &OpenProject, window, cx| {
+                reader.hide_todos(window, cx);
+                reader.pick_project(window, cx)
+            }))
             .on_action(cx.listener(|reader, _: &NewThread, window, cx| {
+                reader.hide_todos(window, cx);
                 reader.new_blank_thread(window, cx);
             }))
             // macOS draws no titlebar of its own (see `main`): this strip clears the traffic lights
@@ -7448,6 +7513,7 @@ impl Render for Reader {
                 ),
             )
             .when(self.finder_open, |this| this.child(self.finder(cx)))
+            .when(self.todos_open, |this| this.child(self.todos.clone()))
             .children(self.settings_page.as_ref().map(|(page, _)| page.clone()))
     }
 }

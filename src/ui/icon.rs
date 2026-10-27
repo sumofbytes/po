@@ -5,6 +5,7 @@ use gpui::{App, IntoElement, ParentElement as _, Rems, RenderOnce, Styled as _, 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum IconName {
     ArrowUp,
+    Calendar,
     CaseSensitive,
     ChevronDown,
     ChevronLeft,
@@ -13,14 +14,17 @@ pub enum IconName {
     FileText,
     Folder,
     FolderTree,
+    Heading,
     Maximize,
     Minimize,
     PanelLeft,
+    Pencil,
     Plus,
     Replace,
     Search,
     Settings,
     Square,
+    SquareCheck,
 }
 
 impl IconName {
@@ -32,6 +36,7 @@ impl IconName {
         }
         match self {
             Self::ArrowUp => icon!("arrow-up"),
+            Self::Calendar => icon!("calendar"),
             Self::CaseSensitive => icon!("case-sensitive"),
             Self::ChevronDown => icon!("chevron-down"),
             Self::ChevronLeft => icon!("chevron-left"),
@@ -40,14 +45,17 @@ impl IconName {
             Self::FileText => icon!("file-text"),
             Self::Folder => icon!("folder"),
             Self::FolderTree => icon!("folder-tree"),
+            Self::Heading => icon!("heading"),
             Self::Maximize => icon!("maximize-2"),
             Self::Minimize => icon!("minimize-2"),
             Self::PanelLeft => icon!("panel-left"),
+            Self::Pencil => icon!("pencil"),
             Self::Plus => icon!("plus"),
             Self::Replace => icon!("replace"),
             Self::Search => icon!("search"),
             Self::Settings => icon!("settings"),
             Self::Square => icon!("square"),
+            Self::SquareCheck => icon!("square-check"),
         }
     }
 }
