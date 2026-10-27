@@ -5398,10 +5398,17 @@ impl Reader {
                 cx.notify();
             }
             Cmd::ToggleProject(pid) => {
-                if !self.projects_collapsed.insert(pid) {
+                let expanding = !self.projects_collapsed.insert(pid);
+                if expanding {
                     self.projects_collapsed.remove(&pid);
                 }
-                self.show_project(pid, window, cx);
+                // Folding is only a redraw; the project is switched to only when it opens another one.
+                if expanding && pid != self.project_id {
+                    self.show_project(pid, window, cx);
+                } else {
+                    self.request_save(cx);
+                    cx.notify();
+                }
             }
             Cmd::StartThread(pid) => self.start_thread_in(pid, window, cx),
             Cmd::CloseProject(pid) => self.close_project(pid, window, cx),
