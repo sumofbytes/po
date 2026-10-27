@@ -2,6 +2,7 @@
 //! Po's window like any other. This module is what they share: the theme and fonts they take from
 //! Po's [`Palette`], Po's icons, and the views themselves.
 pub mod agent;
+pub mod chat;
 pub mod bus;
 pub mod diff;
 pub mod finder;

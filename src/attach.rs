@@ -75,6 +75,11 @@ impl Attachment {
         json!({ "type": "image", "mimeType": self.image.format.mime_type(), "data": STANDARD.encode(&self.image.bytes) })
     }
 
+    /// The picture as a `data:` URI, so a screen drawn without file access can show it.
+    pub fn data_uri(&self) -> String {
+        format!("data:{};base64,{}", self.image.format.mime_type(), STANDARD.encode(&self.image.bytes))
+    }
+
     /// Writes the picture where an agent that can't be sent one can open it.
     pub fn saved(&self) -> Option<&Path> {
         if self.saved.get().is_none() {

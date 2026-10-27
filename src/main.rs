@@ -40,9 +40,8 @@ use diff::{Change, Kind, Row};
 use theme::Palette;
 use ui::button::Button;
 use ui::icon::{Icon, IconName, IconSize};
-use ui::input::{Input, InputEvent, InputState};
+use ui::input::InputState;
 use ui::list_item::ListItem;
-use ui::menu::{CHECKED, MenuItem, MenuState, dropdown};
 use ui::resizable::{SidebarsState, sidebars};
 use ui::file_tree::{FileKind, FileTree, file_kind};
 use ui::tree::{TreeEvent, tree};
@@ -50,8 +49,8 @@ use futures::StreamExt;
 use serde_json::Value;
 
 use gpui::{
-    AnyElement, App, Pixels, TitlebarOptions, WindowControlArea, point, Bounds, Context, Entity, FontWeight, IntoElement, ListAlignment, ListState, ParentElement,
-    Render, SharedString, Styled, Subscription, Task, Window, WindowBackgroundAppearance, WindowBounds, WindowOptions, div, list,
+    AnyElement, App, Pixels, TitlebarOptions, WindowControlArea, point, Bounds, Context, Entity, FontWeight, IntoElement, ParentElement,
+    Render, SharedString, Styled, Subscription, Task, Window, WindowBackgroundAppearance, WindowBounds, WindowOptions, div,
     prelude::*, px, rems, size, KeyBinding,
 };
 
@@ -690,38 +689,9 @@ struct Thread {
     attachments: Vec<Arc<Attachment>>,
     /// Why some of what was pasted or dropped was left out, until the draft changes.
     attach_note: Option<String>,
-    /// The messages as laid out; only those in view are drawn.
-    list: ListState,
-    /// The selection across the agent's replies.
-    selection: Entity<ui::markdown::Selection>,
-    focus: gpui::FocusHandle,
-    /// Sends the draft on Enter; goes with the thread.
-    _enter: Subscription,
 }
 
 impl Thread {
-    /// What Select All copies, in reading order: each text with whether it is plain (drawn by
-    /// `markdown::plain`) rather than markdown. Includes replies scrolled out of view.
-    fn selectable_sources(&self) -> Vec<(&str, bool)> {
-        let mut sources = Vec::new();
-        for msg in &self.messages {
-            match msg {
-                Msg::User(text, _) => sources.push((text.as_str(), true)),
-                Msg::Agent(blocks) => {
-                    for block in blocks {
-                        match block {
-                            Block::Text(text) | Block::Thought(text, true) => sources.push((text.as_str(), false)),
-                            Block::Tool(tool) if tool.open => {
-                                sources.extend([&tool.arguments, &tool.result].into_iter().filter(|t| !t.is_empty()).map(|t| (t.as_str(), true)));
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-            }
-        }
-        sources
-    }
 
     fn fail(&mut self, text: String) {
         self.busy = false;
@@ -748,13 +718,9 @@ impl Thread {
         crate::state::Facts { approval, asking, failed: self.failed, asleep: self.asleep(), started: self.client.is_some(), ready: self.ready, busy: self.busy }
     }
 
-    /// Tells the thread's list that messages from `from` on were added or changed, so it lays
-    /// them out again.
-    fn relist(&mut self, from: usize) {
-        let listed = self.list.item_count();
-        let from = from.min(listed).min(self.messages.len());
-        self.list.splice(from..listed, self.messages.len() - from);
-    }
+    /// The conversation the screen draws takes the whole list of messages in every
+    /// publish, so there is nothing to tell a list piecewise.
+    fn relist(&mut self, _from: usize) {}
 
     fn blocks(&mut self) -> &mut Vec<Block> {
         if !matches!(self.messages.last(), Some(Msg::Agent(_))) {
@@ -1242,6 +1208,16 @@ struct Reader {
     /// The sidebar, drawn by NSH, and what keeps it in Po's theme.
     sidebar: Entity<nsh_platform_gpui::AppView>,
     _sidebar_theme: Subscription,
+    /// The conversation pane, drawn by NSH from [`Self::chat_snapshot`], and what keeps it in Po's theme.
+    chat: Entity<nsh_platform_gpui::AppView>,
+    _chat_theme: Subscription,
+    /// What the conversation was last published as, one row for how many messages the transcript
+    /// showed and whether a turn went on the thread it shows; a change bumps [`Self::chat_follow`].
+    chat_marks: std::cell::Cell<(usize, usize, bool)>,
+    /// What the transcript's next publishing carries as [`Snapshot::follow`], bumped when the thread gets louder.
+    chat_follow: std::cell::Cell<u64>,
+    /// What [`Snapshot::draft_reset`] carries next, bumped whenever the app writes the draft itself.
+    chat_reset: std::cell::Cell<u64>,
     /// The todos window, shown over everything while `todos_open`; the sidebar has a row for it.
     todos: Entity<nsh::overlay::Overlay>,
     todos_open: bool,
@@ -1296,8 +1272,6 @@ struct Reader {
     /// The conversation pane is shown while it sits on the right, rather than collapsed. Only
     /// matters while it is there (`side_open` and `swapped`); in the middle it is always shown.
     agent_open: bool,
-    /// The agent picker in the input box.
-    agent_menu: Entity<MenuState>,
     /// What was chosen for each agent's settings, such as its model.
     choices: config::Choices,
     /// The agent new threads start with: the one last chosen.
@@ -1340,6 +1314,7 @@ impl Reader {
         let (agent_pane, agent_pane_theme) = nsh::mount(nsh_platform_gpui::Root::of::<nsh::agent::Agent>(), window, cx);
         let (source, source_theme) = nsh::mount(nsh_platform_gpui::Root::of::<nsh::source::Source>(), window, cx);
         let (sidebar, sidebar_theme) = nsh::mount(nsh_platform_gpui::Root::of::<nsh::sidebar::Sidebar>(), window, cx);
+        let (chat_pane, chat_theme) = nsh::mount(nsh_platform_gpui::Root::of::<nsh::chat::Chat>(), window, cx);
         let (strip, strip_theme) = nsh::mount(nsh_platform_gpui::Root::of::<nsh::strip::Strips>(), window, cx);
         let finder_window = cx.new(|cx| nsh::overlay::Overlay::new(560., 8., || nsh_platform_gpui::Root::of::<nsh::finder::Finder>(), &nsh::finder::HEIGHT, cx));
         let settings_window = cx.new(|cx| nsh::overlay::Overlay::new(680., 24., || nsh_platform_gpui::Root::of::<nsh::settings::Settings>(), &nsh::settings::HEIGHT, cx));
@@ -1372,7 +1347,6 @@ impl Reader {
                 nsh::overlay::OverlayEvent::Close => reader.hide_todos(window, cx),
             }),
         ];
-        let enter = Self::send_on_enter(&draft, window, cx);
         let settings = config::load();
         let mut agents = config::agents(&settings);
         let idle_minutes = settings["idle_minutes"].as_u64().unwrap_or(15);
@@ -1405,7 +1379,6 @@ impl Reader {
             blank: true,
             applying: None,
             unanswered: HashSet::new(),
-            _enter: enter,
             messages: vec![],
             busy: false,
             queue: vec![],
@@ -1421,9 +1394,6 @@ impl Reader {
             draft,
             attachments: vec![],
             attach_note: None,
-            list: ListState::new(0, ListAlignment::Top, px(400.)),
-            selection: cx.new(|_| ui::markdown::Selection::default()),
-            focus: cx.focus_handle(),
         };
         let (control, requests) = control::start().unzip();
         let mut reader = Self {
@@ -1469,6 +1439,11 @@ impl Reader {
             reveal_serial: 0,
             sidebar,
             _sidebar_theme: sidebar_theme,
+            chat: chat_pane,
+            _chat_theme: chat_theme,
+            chat_marks: std::cell::Cell::new((0, 0, false)),
+            chat_follow: std::cell::Cell::new(0),
+            chat_reset: std::cell::Cell::new(0),
             todos,
             todos_open: false,
             pr_status: None,
@@ -1499,7 +1474,6 @@ impl Reader {
             side_open: true,
             swapped: config::viewer_left(&settings).unwrap_or(false),
             agent_open: true,
-            agent_menu: cx.new(MenuState::new),
             choices: config::load_choices(),
             chosen_agent: command.clone(),
             split: false,
@@ -3633,7 +3607,6 @@ impl Reader {
         self.thread.agent = Some(key.to_string());
         self.thread.messages.clear();
         self.thread.relist(0);
-        self.thread.selection.update(cx, |s, _| s.clear());
         self.thread.busy = false;
         self.thread.queue.clear();
         self.thread.ready = false;
@@ -4015,21 +3988,6 @@ impl Reader {
         self.thread.queue.insert(0, Queued { out, kind: None });
     }
 
-    /// Sends the draft on Enter, while its thread is the one on screen.
-    fn send_on_enter(draft: &Entity<InputState>, window: &mut Window, cx: &mut Context<Self>) -> Subscription {
-        cx.subscribe_in(draft, window, |reader, input, event: &InputEvent, window, cx| {
-            if reader.thread.draft != *input {
-                return;
-            }
-            match event {
-                InputEvent::PressEnter { shift: false, alt } => reader.send(*alt, window, cx),
-                InputEvent::PasteImage(image) => reader.attach(vec![Source::Bytes(image.bytes.clone())], cx),
-                InputEvent::PasteFiles(paths) => reader.attach(paths.iter().cloned().map(Source::Path).collect(), cx),
-                _ => {}
-            }
-        })
-    }
-
     /// Makes a thread with no agent yet.
     fn blank_thread(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Thread {
         let draft = cx.new(|cx| {
@@ -4058,7 +4016,6 @@ impl Reader {
             blank: true,
             applying: None,
             unanswered: HashSet::new(),
-            _enter: Self::send_on_enter(&draft, window, cx),
             messages: vec![],
             busy: false,
             queue: vec![],
@@ -4074,9 +4031,6 @@ impl Reader {
             draft,
             attachments: vec![],
             attach_note: None,
-            list: ListState::new(0, ListAlignment::Top, px(400.)),
-            selection: cx.new(|_| ui::markdown::Selection::default()),
-            focus: cx.focus_handle(),
             views: Default::default(),
             forms: Default::default(),
             shown: None,
@@ -4487,13 +4441,6 @@ impl Reader {
         cx.notify();
     }
 
-    fn agent_label(&self) -> Option<&str> {
-        let key = self.thread.agent.as_ref()?;
-        self.agents.iter().find(|agent| agent.id == *key).map(|agent| agent.name.as_str())
-    }
-
-
-
 
     /// `visible`: this thread is the one on screen, so its edits may move the viewer.
     fn on_event(&mut self, event: Event, visible: bool, window: &mut Window, cx: &mut Context<Self>) {
@@ -4634,11 +4581,8 @@ impl Reader {
             }
         }
         self.thread.relist(changed);
-        self.thread.list.scroll_to_end();
         cx.notify();
     }
-
-
 
     /// After its agent failed or exited: a blank thread, or one whose first message never got
     /// a session, starts its agent again when it is next asked for. That includes one whose
@@ -4926,11 +4870,19 @@ impl Reader {
         .detach();
     }
 
-    /// Empties the draft, and the pictures attached to it.
+    /// Sets the draft to `text` from the app itself (a cleared draft after a send, a taken-back
+    /// queue row), marking the change so the screen the conversation draws picks the text up.
+    fn update_draft(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.chat_reset.set(self.chat_reset.get() + 1);
+        let text = text.to_string();
+        self.thread.draft.update(cx, |input, cx| input.set_value(text, window, cx));
+    }
+
+    /// Clears the draft, and the pictures attached to it.
     fn clear_draft(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.thread.attachments.clear();
         self.thread.attach_note = None;
-        self.thread.draft.update(cx, |input, cx| input.set_value("", window, cx));
+        self.update_draft("", window, cx);
     }
 
     /// Takes a queued message back into the draft to edit.
@@ -4946,7 +4898,7 @@ impl Reader {
         self.thread.attachments.splice(0..0, item.out.images.iter().cloned());
         self.thread.attachments.truncate(attach::MAX_PER_MESSAGE);
         let text = if draft.trim().is_empty() { item.out.text } else { format!("{}\n{draft}", item.out.text) };
-        self.thread.draft.update(cx, |input, cx| input.set_value(text, window, cx));
+        self.update_draft(&text, window, cx);
         cx.notify();
     }
 
@@ -4994,7 +4946,8 @@ impl Reader {
         if !draft.trim().is_empty() {
             text.push(draft);
         }
-        self.thread.draft.update(cx, |input, cx| input.set_value(text.join("\n\n"), window, cx));
+        let joined = text.join("\n\n");
+        self.update_draft(&joined, window, cx);
         cx.notify();
     }
 
@@ -5040,7 +4993,6 @@ impl Reader {
         self.thread.messages.push(Msg::User(out.shown(), out.images.clone()));
         self.thread.messages.push(Msg::Agent(vec![]));
         self.thread.relist(was_last);
-        self.thread.list.scroll_to_end();
     }
 
     fn stop(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -5397,6 +5349,145 @@ impl Reader {
         }
     }
 
+    /// The conversation, drawn by NSH from what [`Self::chat_snapshot`] publishes; published here in place
+    /// of the pane, as the viewer's panes are.
+    fn chat_pane(&self, lead: Vec<nsh::header::Control>, trail: Vec<nsh::header::Control>, cx: &mut Context<Self>) -> gpui::Div {
+        nsh::chat::publish(self.chat_snapshot(lead, trail, cx));
+        div().size_full().flex().flex_col().child(self.chat.clone())
+    }
+
+    /// What the conversation shows: the header, the transcript, and the composer.
+    fn chat_snapshot(&self, lead: Vec<nsh::header::Control>, trail: Vec<nsh::header::Control>, cx: &App) -> nsh::chat::Snapshot {
+        use nsh::chat as chat;
+        let thread = &self.thread;
+        // Bump the transcript's follow (the pane scrolls to its end) when the thread the pane
+        // shows got louder: a message came or went, or the turn started or stopped.
+        let busy = thread.busy;
+        let blocks = match thread.messages.last() {
+            Some(Msg::Agent(blocks)) => blocks.len(),
+            _ => 0,
+        };
+        let louder = (thread.messages.len(), blocks, busy);
+        let follow = if louder == self.chat_marks.get() { self.chat_follow.get() } else {
+            let follow = self.chat_follow.get() + 1;
+            self.chat_follow.set(follow);
+            follow
+        };
+        self.chat_marks.set(louder);
+        let mut statuses = Vec::new();
+        if let Some(line) = self.children_status(thread.id) {
+            statuses.push(line);
+        }
+        if !thread.status.is_empty() {
+            statuses.push(thread.status.clone());
+        }
+        let picking = thread.picking.then(|| match &thread.sessions {
+            Some(sessions) if !thread.loading && !sessions.is_empty() => chat::Picking::Sessions(sessions.iter().map(|session| chat::Session {
+                id: session.id.clone(),
+                title: session.title.clone(),
+                when: session.updated.get(..16).unwrap_or_default().replace('T', " "),
+            }).collect()),
+            Some(_) if !thread.loading => chat::Picking::Note(format!("No sessions to resume in {}", self.project.root.display())),
+            _ => chat::Picking::Note(thread.status.clone()),
+        });
+        let grant = self.grants.get(&thread.id).copied().filter(|g| *g != command::Grant::default());
+        chat::Snapshot {
+            glass: cx.global::<Palette>().glass.is_some(),
+            title: thread.title(),
+            lead,
+            trail,
+            statuses,
+            blank: thread.blank,
+            busy,
+            steer: thread.client.as_ref().is_some_and(|client| client.queues()),
+            agents: self.agents.iter().map(|agent| (agent.name.clone(), agent.id.clone())).collect(),
+            chosen: thread.agent.clone().or_else(|| self.chosen_agent.clone()),
+            settings: Thread::ordered(thread.options.iter().collect()).into_iter().map(|option| chat::Setting {
+                id: option.id.clone(),
+                name: option.name.clone(),
+                current: option.current.clone(),
+                choices: option.choices.clone(),
+            }).collect(),
+            isolate: worktree::in_repo(&self.project.root).then(|| thread.isolate),
+            grant: grant.map(|g| chat::Grant {
+                scope: match g.scope {
+                    command::Scope::Viewer => chat::Scope::Viewer,
+                    command::Scope::Orchestrate => chat::Scope::Orchestrate,
+                    command::Scope::Global => chat::Scope::Global,
+                },
+                read: g.read_project,
+                approvals: g.approvals,
+            }),
+            queue: thread.queue.iter().enumerate().map(|(at, queued)| chat::Queued {
+                at,
+                kind: match queued.kind {
+                    Some(Queue::Steer) => "Steer".into(),
+                    Some(Queue::Followup) => "Follow-up".into(),
+                    None => String::new(),
+                },
+                text: queued.out.text.clone(),
+                pictures: queued.out.images.len(),
+            }).collect(),
+            pictures: thread.attachments.iter().map(|a| chat::Picture { uri: a.data_uri() }).collect(),
+            note: thread.attach_note.clone(),
+            items: chat_items(&thread.messages),
+            picking,
+            draft: thread.draft.read(cx).value().to_string(),
+            draft_reset: self.chat_reset.get(),
+            follow,
+        }
+    }
+
+    /// Does what the user asked of on the conversation the NSH pane draws.
+    fn chat_cmd(&mut self, cmd: nsh::chat::Cmd, window: &mut Window, cx: &mut Context<Self>) {
+        use nsh::chat::{Cmd as Chat, GrantChange, Scope as ChatScope};
+        match cmd {
+            Chat::Draft(text) => self.thread.draft.update(cx, |input, cx| input.set_value(text, window, cx)),
+            Chat::Send { later } => self.send(later, window, cx),
+            Chat::Stop => self.stop(window, cx),
+            Chat::Drop(uris) => self.attach(uris.iter().filter_map(|uri| file_of(uri)).map(|path| Source::Path(PathBuf::from(path))).collect(), cx),
+            Chat::Paste(pictures) => self.attach(pictures.into_iter().map(Source::Bytes).collect(), cx),
+            Chat::Detach(at) => {
+                if at < self.thread.attachments.len() {
+                    self.thread.attachments.remove(at);
+                }
+                cx.notify();
+            }
+            Chat::Recall(at) => self.recall(at, window, cx),
+            Chat::Answer { message, block, at } => self.answer(message, block, at, cx),
+            Chat::Approve { message, block, yes } => self.answer_approval(message, block, yes, window, cx),
+            Chat::ToggleTool { message, block } => self.toggle_tool(message, block, cx),
+            Chat::ToggleThought { message, block } => self.toggle_thought(message, block, cx),
+            Chat::Fold { message, block, folded } => self.fold_run(message, block, folded, cx),
+            Chat::Open(path) => self.reveal(&path, window, cx),
+            Chat::Resume(id) => self.resume_session(&id, window, cx),
+            Chat::History => self.resume_thread(window, cx),
+            Chat::PickAgent(id) => self.pick_agent(id, window, cx),
+            Chat::Setting { id, value } => self.choose_option(&id, &value),
+            Chat::Isolate(isolate) => {
+                self.thread.isolate = isolate;
+                cx.notify();
+            }
+            Chat::Grant(change) => {
+                let id = self.thread.id;
+                let grant = self.grants.get(&id).copied().unwrap_or_default();
+                match change {
+                    GrantChange::Set(set) => {
+                        let scope = match set.scope {
+                            ChatScope::Viewer => command::Scope::Viewer,
+                            ChatScope::Orchestrate => command::Scope::Orchestrate,
+                            ChatScope::Global => command::Scope::Global,
+                        };
+                        self.set_grant(id, scope, set.read, set.approvals, cx);
+                    }
+                    GrantChange::Read => self.set_grant(id, grant.scope, !grant.read_project, grant.approvals, cx),
+                    GrantChange::Approvals => self.set_grant(id, grant.scope, grant.read_project, !grant.approvals, cx),
+                    GrantChange::Stop => self.stop_agent_control(id, cx),
+                }
+            }
+        }
+    }
+
     /// Does what the user asked of a screen drawn by NSH.
     fn run(&mut self, cmd: nsh::bus::Cmd, window: &mut Window, cx: &mut Context<Self>) {
         use nsh::bus::Cmd;
@@ -5449,6 +5540,7 @@ impl Reader {
             Cmd::ClosePr => self.close_pr(window, cx),
             Cmd::MergeWorktree => self.finish_worktree(true, window, cx),
             Cmd::DiscardWorktree => self.finish_worktree(false, window, cx),
+            Cmd::Chat(chat) => self.chat_cmd(chat, window, cx),
         }
     }
 
@@ -5773,71 +5865,6 @@ impl Reader {
         self.background_threads().for_each(quiet);
     }
 
-    /// The Control menu for thread `id`, next to the model in the settings row: its scopes,
-    /// the two separate opt-ins, and the way out. The items are built when the menu opens,
-    /// from what the grant was at the last render.
-    /// `place` names where it is drawn: the composer and the header each have one for the same
-    /// thread, and two with one id would share their menu's state and anchor.
-    fn control_dropdown(&self, id: u64, place: &'static str, this: Entity<Self>) -> AnyElement {
-        let grant = self.grants.get(&id).copied().unwrap_or_default();
-        let label = match grant.scope {
-            command::Scope::Viewer if !grant.read_project && !grant.approvals => "Control".to_string(),
-            command::Scope::Viewer => "Control · reads".to_string(),
-            command::Scope::Orchestrate => "Control · orchestrate".to_string(),
-            command::Scope::Global => "Control · global".to_string(),
-        };
-        let control = grant != command::Grant::default();
-        dropdown(
-            (place, id as usize),
-            Button::new((place, id as usize))
-                .label(label)
-                .tooltip("What this thread's agent may do through Po")
-                .ghost()
-                .small()
-                .dropdown_caret(true)
-                .when(control, |button| button.selected(true)),
-            move || {
-                let (this, id) = (this.clone(), id);
-                let set = |label: String, scope: command::Scope, read: bool, approvals: bool| {
-                    let (this, id) = (this.clone(), id);
-                    MenuItem::new(label, move |_, cx| this.update(cx, |reader, cx| reader.set_grant(id, scope, read, approvals, cx)))
-                };
-                let checked = |label: &str, on: bool| if on { format!("{CHECKED}{label}") } else { label.to_string() };
-                let mut items = vec![
-                    set(checked("Viewer", grant.scope == command::Scope::Viewer), command::Scope::Viewer, grant.read_project, grant.approvals),
-                    set(checked("Orchestrate", grant.scope == command::Scope::Orchestrate), command::Scope::Orchestrate, grant.read_project, grant.approvals),
-                    set(checked("Global", grant.scope == command::Scope::Global), command::Scope::Global, grant.read_project, grant.approvals),
-                    MenuItem::separator(),
-                ];
-                let read = {
-                    let (this, id) = (this.clone(), id);
-                    let on = grant.read_project;
-                    MenuItem::new(checked("May read other threads here", on), move |_, cx| {
-                        this.update(cx, |reader, cx| reader.set_grant(id, grant.scope, !on, grant.approvals, cx))
-                    })
-                };
-                items.push(read);
-                if grant.scope >= command::Scope::Orchestrate {
-                    let approvals = {
-                        let (this, id) = (this.clone(), id);
-                        let on = grant.approvals;
-                        MenuItem::new(checked("May answer its threads' permission asks", on), move |_, cx| {
-                            this.update(cx, |reader, cx| reader.set_grant(id, grant.scope, grant.read_project, !on, cx))
-                        })
-                    };
-                    items.push(approvals);
-                }
-                items.push(MenuItem::separator());
-                items.push(MenuItem::disabled("A raise takes effect when the agent restarts"));
-                if control {
-                    let (this, id) = (this.clone(), id);
-                    items.push(MenuItem::new("Stop agent control", move |_, cx| this.update(cx, |reader, cx| reader.stop_agent_control(id, cx))));
-                }
-                items
-            },
-        )
-        .into_any_element()
-    }
 
     /// What a thread is called in the lists: a child shows under the thread that started it.
     fn thread_label(&self, thread: &Thread) -> String {
@@ -5865,439 +5892,6 @@ impl Reader {
         }
         Some(line)
     }
-
-    /// A menu for each of the thread's session settings: the model first, then the agent's
-    /// others in the order it gave them.
-    fn setting_menus(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {        let this = cx.entity();
-        let (busy, id) = (self.thread.busy, self.thread.id);
-        Thread::ordered(self.thread.options.iter().collect())
-            .into_iter()
-            .map(|option| {
-                let key = SharedString::from(format!("option-{id}-{}", option.id));
-                let (this, setting) = (this.clone(), option.clone());
-                let button = Button::new(key.clone()).label(option.current_name().to_string()).ghost().small().dropdown_caret(true);
-                if busy {
-                    // Agents differ on changing settings mid-turn, so it waits for the turn to end.
-                    return button.tooltip(format!("{}: available when the agent is idle", option.name)).into_any_element();
-                }
-                dropdown(key, button.tooltip(option.name.clone()), move || {
-                    setting
-                        .choices
-                        .iter()
-                        .map(|(value, name)| {
-                            let (this, setting_id, value) = (this.clone(), setting.id.clone(), value.clone());
-                            let label = if *value == setting.current { format!("{}{name}", CHECKED) } else { name.clone() };
-                            MenuItem::new(label, move |_, cx| this.update(cx, |reader, _| reader.choose_option(&setting_id, &value)))
-                        })
-                        .collect()
-                })
-                .into_any_element()
-            })
-            .collect()
-    }
-
-    fn agent_panel(&self, lead: Option<AnyElement>, trail: Option<AnyElement>, cx: &mut Context<Self>) -> impl IntoElement + Styled + use<> {
-        let this = cx.entity();
-        // For the Control menu, whose handle outlives the list's closure taking `this`.
-        let control = this.clone();
-        self.thread.selection.update(cx, |s, _| s.begin_frame());
-        // Only the messages in view are built and laid out, however long the thread gets.
-        let selection = self.thread.selection.clone();
-        let thread: AnyElement = if self.thread.blank && self.thread.messages.is_empty() {
-            centered("Pick an agent and its settings below, then send a message to start a thread".into(), cx)
-        } else if self.thread.picking && self.thread.messages.is_empty() {
-            match &self.thread.sessions {
-                Some(sessions) if !self.thread.loading && !sessions.is_empty() => session_picker(sessions, &this, cx),
-                Some(sessions) if !self.thread.loading => centered(format!("No sessions to resume in {}", self.project.root.display()), cx),
-                _ => centered(self.thread.status.clone(), cx),
-            }
-        } else {
-            list(
-                self.thread.list.clone(),
-                cx.processor(move |reader: &mut Self, ix: usize, window, cx| {
-                    let Some(msg) = reader.thread.messages.get(ix) else { return div().into_any_element() };
-                    let last = ix + 1 == reader.thread.messages.len();
-                    // Boxes share the composer box's edges (the column's own padding); the text
-                    // inside them is inset to the composer's text edge (see `text_inset`).
-                    div()
-                        .pt_6()
-                        .when(last, |this| this.pb_6())
-                        .child(render_msg(ix, msg, last, &this, &selection, window, cx))
-                        .into_any_element()
-                }),
-            )
-            .size_full()
-            .into_any_element()
-        };
-        // The session's settings, which can be changed before the thread starts and after.
-        let settings = self.setting_menus(cx);
-        let colors = cx.global::<Palette>();
-        let (send, stop, history) = (cx.entity(), cx.entity(), cx.entity());
-        let agents = self.agents.clone();
-        let in_repo = worktree::in_repo(&self.project.root);
-        let (pick, isolate) = (cx.entity(), cx.entity());
-        let typed = !self.thread.draft.read(cx).value().trim().is_empty();
-        let stop_button = |stop: Entity<Reader>| {
-            Button::new("stop")
-                .icon(IconName::Square)
-                .ghost()
-                .pill()
-                .small()
-                .tooltip("Stop")
-                .on_click(move |_, window, cx| stop.update(cx, |reader, cx| reader.stop(window, cx)))
-        };
-        let send_button = |send: Entity<Reader>, tooltip: &'static str| {
-            let button = Button::new("send")
-                .icon(IconName::ArrowUp)
-                .ghost()
-                .pill()
-                .small()
-                .tooltip(tooltip)
-                .on_click(move |_, window, cx| send.update(cx, |reader, cx| reader.send(false, window, cx)));
-            // Quiet until there is something to send.
-            if typed { button.primary() } else { button }
-        };
-        let steer_tip = if self.thread.client.as_ref().is_some_and(|client| client.queues()) {
-            "Steer: the agent reads it before its next step (Alt+Enter: after this turn)"
-        } else {
-            "Queue: sent when this turn is over"
-        };
-        let action = if self.thread.busy && typed {
-            // Typing during a turn queues it; Stop stays one click away.
-            div()
-                .flex()
-                .gap_1()
-                .child(stop_button(stop))
-                .child(send_button(send, steer_tip))
-                .into_any_element()
-        } else if self.thread.busy {
-            stop_button(stop).into_any_element()
-        } else {
-            send_button(send, "Send").into_any_element()
-        };
-        let muted = colors.muted_foreground;
-        let (border, queue_this) = (colors.border, cx.entity());
-        let queued: Vec<AnyElement> = self
-            .thread
-            .queue
-            .iter()
-            .enumerate()
-            .map(|(ix, item)| {
-                let label = match item.kind {
-                    Some(Queue::Steer) => "Steer",
-                    Some(Queue::Followup) => "Follow-up",
-                    None => "Queued",
-                };
-                let this = queue_this.clone();
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .text_xs()
-                    .text_color(muted)
-                    .child(div().flex_none().child(label))
-                    .child(div().flex_1().min_w_0().truncate().child(if item.out.text.is_empty() { format!("{} image(s)", item.out.images.len()) } else { item.out.text.replace('\n', " ") }))
-                    .child(
-                        Button::new(("recall", ix))
-                            .icon(IconName::Close)
-                            .ghost()
-                            .small()
-                            .tooltip("Take back to edit")
-                            .on_click(move |_, window, cx| this.update(cx, |reader, cx| reader.recall(ix, window, cx))),
-                    )
-                    .into_any_element()
-            })
-            .collect();
-        let drafting = cx.entity();
-        let strip: Vec<AnyElement> = self
-            .thread
-            .attachments
-            .iter()
-            .enumerate()
-            .map(|(ix, picture)| {
-                let this = drafting.clone();
-                div()
-                    .id(("attachment", ix))
-                    .relative()
-                    .flex_none()
-                    .child(gpui::img(picture.image.clone()).size(px(64.0)).object_fit(gpui::ObjectFit::Cover).rounded(colors.radius).border_1().border_color(border))
-                    .child(
-                        div().absolute().top_0p5().right_0p5().child(
-                            Button::new(("detach", ix))
-                                .icon(IconName::Close)
-                                .small()
-                                .tooltip("Remove the picture")
-                                .on_click(move |_, _, cx| this.update(cx, |reader, cx| {
-                                    if ix < reader.thread.attachments.len() {
-                                        reader.thread.attachments.remove(ix);
-                                    }
-                                    cx.notify();
-                                })),
-                        ),
-                    )
-                    .into_any_element()
-            })
-            .collect();
-        // Before the thread starts, its agent is chosen here; after, it is only named.
-        let chips: AnyElement = if self.thread.blank {
-            let name = self.agent_label().map(str::to_string).or_else(|| self.chosen().map(|agent| agent.name.clone()));
-            let name = name.unwrap_or_else(|| "No agent".to_string());
-            let isolated = self.thread.isolate;
-            div()
-                .flex()
-                .items_center()
-                .gap_1()
-                .child(
-                    dropdown(
-                        "agent-chip",
-                        Button::new("agent-chip").label(name).tooltip("The agent this thread starts with").ghost().small().dropdown_caret(true),
-                        move || {
-                            agents
-                                .iter()
-                                .map(|agent| {
-                                    let (pick, key) = (pick.clone(), agent.id.clone());
-                                    MenuItem::new(agent.name.clone(), move |window, cx| {
-                                        pick.update(cx, |reader, cx| reader.pick_agent(key.clone(), window, cx))
-                                    })
-                                })
-                                .collect()
-                        },
-                    )
-                    .menu(self.agent_menu.clone()),
-                )
-                .children(settings)
-                .children(in_repo.then(|| {
-                    Button::new("worktree-chip")
-                        .label("⎇ Worktree")
-                        .tooltip("Work on a git branch of its own, to review and merge or discard")
-                        .ghost()
-                        .small()
-                        .selected(isolated)
-                        .on_click(move |_, _, cx| {
-                            isolate.update(cx, |reader, cx| {
-                                reader.thread.isolate = !reader.thread.isolate;
-                                cx.notify();
-                            })
-                        })
-                }))
-                .into_any_element()
-        } else {
-            div()
-                .flex()
-                .items_center()
-                .gap_1()
-                .child(div().pl_2().text_sm().text_color(muted).child(self.agent_label().unwrap_or("Agent").to_string()))
-                .children(settings)
-                .child(self.control_dropdown(self.thread.id, "control", control.clone()))
-                .into_any_element()
-        };
-        // A thread whose agent may do more than talk shows it, in the header as in the lists.
-        let controlled = self.grants.get(&self.thread.id).is_some_and(|grant| *grant != command::Grant::default());
-        let drop_tint = colors.primary.opacity(theme::tokens::TINT_SUBTLE);
-        div()
-            .size_full()
-            .flex()
-            .flex_col()
-            .bg(colors.background)
-            // Pictures dropped anywhere on the thread join the draft.
-            .drag_over::<gpui::ExternalPaths>(move |style, _, _, _| style.bg(drop_tint))
-            .on_drop(cx.listener(|reader, dropped: &gpui::ExternalPaths, _, cx| {
-                reader.attach(dropped.paths().iter().cloned().map(Source::Path).collect(), cx);
-            }))
-            .child(pane_header(
-                &self.thread.title(),
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .children(controlled.then(|| self.control_dropdown(self.thread.id, "control-header", control.clone())))
-                    .children(self.children_status(self.thread.id).map(|line| status_text(line, cx)))
-                    .children((!self.thread.status.is_empty()).then(|| status_text(self.thread.status.clone(), cx)))
-                    .child(
-                        Button::new("history")
-                            .label("History")
-                            .tooltip("Resume an earlier session (Ctrl+Shift+H)")
-                            .ghost()
-                            .small()
-                            .on_click(move |_, window, cx| history.update(cx, |reader, cx| reader.resume_thread(window, cx))),
-                    ),
-                lead,
-                trail,
-                cx,
-            ))
-            .child(
-                div()
-                    .id("thread")
-                    .key_context("Markdown")
-                    .track_focus(&self.thread.focus)
-                    .on_action(cx.listener(|reader, _: &ui::markdown::Copy, _, cx| {
-                        // Select All takes the replies scrolled out of view too, which aren't laid out.
-                        let text = if reader.thread.selection.read(cx).is_all() {
-                            ui::markdown::all_text_of(reader.thread.selectable_sources())
-                        } else {
-                            reader.thread.selection.read(cx).selected_text()
-                        };
-                        if text.is_empty() {
-                            return cx.propagate();
-                        }
-                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
-                    }))
-                    .on_action(cx.listener(|reader, _: &ui::markdown::SelectAll, _, cx| {
-                        reader.thread.selection.update(cx, |s, _| s.select_all());
-                        cx.notify();
-                    }))
-                    .on_mouse_down(gpui::MouseButton::Left, cx.listener(|reader, event: &gpui::MouseDownEvent, window, cx| {
-                        reader.thread.focus.focus(window, cx);
-                        reader.thread.selection.update(cx, |s, _| s.mouse_down(event.position, event.click_count));
-                        cx.notify();
-                    }))
-                    .on_mouse_move(cx.listener(|reader, event: &gpui::MouseMoveEvent, _, cx| {
-                        if event.pressed_button == Some(gpui::MouseButton::Left) && reader.thread.selection.read(cx).selecting {
-                            reader.thread.selection.update(cx, |s, _| s.drag(event.position));
-                            cx.notify();
-                        }
-                    }))
-                    .on_mouse_up(gpui::MouseButton::Left, cx.listener(|reader, event: &gpui::MouseUpEvent, _, cx| {
-                        if let Some(url) = reader.thread.selection.update(cx, |s, _| s.mouse_up(event.position)) {
-                            cx.open_url(&url);
-                        }
-                        cx.notify();
-                    }))
-                    .on_mouse_up_out(gpui::MouseButton::Left, cx.listener(|reader, event: &gpui::MouseUpEvent, _, cx| {
-                        reader.thread.selection.update(cx, |s, _| {
-                            s.mouse_up(event.position);
-                        });
-                    }))
-                    .flex_1()
-                    .min_h_0()
-                    // A long line of text is hard to read, so the conversation keeps to a column.
-                    // It has the composer's outer padding too, so both columns are the same width.
-                    .child(div().size_full().flex().justify_center().px_3().child(div().h_full().w_full().max_w(px(860.0)).child(thread))),
-            )
-            .child(
-                div().flex_none().px_3().pt_2().when(cx.global::<Palette>().glass.is_none(), |this| this.pb_3()).flex().justify_center().child(
-                    div()
-                        .w_full()
-                        .max_w(px(860.0))
-                        .flex()
-                        .flex_col()
-                        .gap_2()
-                        .p(rems(COMPOSER_PAD_REM))
-                        .rounded(colors.radius_xl)
-                        .border(px(BOX_BORDER))
-                        .border_color(colors.border)
-                        .bg(colors.sidebar)
-                        .when(!queued.is_empty(), |this| {
-                            // Inset like the input's text, so the queued text starts where the draft's does.
-                            this.child(div().flex().flex_col().gap_1().pb_1().pl(rems(INPUT_PAD_REM)).border_b_1().border_color(border).children(queued))
-                        })
-                        .children(self.thread.attach_note.as_ref().map(|note| div().text_xs().text_color(muted).child(note.clone())))
-                        .children((!strip.is_empty()).then(|| div().flex().flex_wrap().gap_2().children(strip)))
-                        .child(div().py_1().child(Input::new(&self.thread.draft).large()))
-                        .child(
-                            // The input's text sits 0.75rem in; the chips' own padding (0.5rem) plus this
-                            // inset puts their text, and the label after the thread has started, on its edge.
-                            div().flex().items_center().justify_between().gap_2().pl_1().child(chips).child(action),
-                        ),
-                ),
-            )
-    }
-}
-
-/// The composer's box: its border, its padding, and the padding of the input inside it. The
-/// transcript derives its edges from these, so the two cannot drift apart.
-const BOX_BORDER: f32 = 1.;
-const COMPOSER_PAD_REM: f32 = 0.5;
-const INPUT_PAD_REM: f32 = 0.75;
-
-/// From a box's edge to its text in the composer; the transcript insets its text by the same.
-fn text_inset(window: &Window) -> gpui::Pixels {
-    rems(COMPOSER_PAD_REM + INPUT_PAD_REM).to_pixels(window.rem_size()) + px(BOX_BORDER)
-}
-
-fn render_msg(
-    ix: usize,
-    msg: &Msg,
-    last: bool,
-    this: &Entity<Reader>,
-    selection: &Entity<ui::markdown::Selection>,
-    window: &mut Window,
-    cx: &mut App,
-) -> AnyElement {
-    let blocks = match msg {
-        Msg::User(text, pictures) => {
-            let colors = cx.global::<Palette>();
-            let (bg, radius, border) = (colors.secondary, colors.radius_xl, colors.border);
-            let text_el = ui::markdown::plain(("user", ix), text, selection, window, cx);
-            let shown = (!text.is_empty()).then_some(text_el);
-            return div()
-                .flex()
-                .justify_end()
-                .child(
-                    div()
-                        .max_w(gpui::relative(0.9))
-                        .px_4()
-                        .py_3()
-                        .rounded(radius)
-                        .bg(bg)
-                        .text_base()
-                        .flex()
-                        .flex_col()
-                        .gap_2()
-                        .children((!pictures.is_empty()).then(|| {
-                            div().flex().flex_wrap().gap_2().children(pictures.iter().map(|picture| {
-                                gpui::img(picture.image.clone())
-                                    .max_w(px(420.0))
-                                    .max_h(px(280.0))
-                                    .rounded(radius)
-                                    .border_1()
-                                    .border_color(border)
-                            }))
-                        }))
-                        .children(shown),
-                )
-                .into_any_element();
-        }
-        Msg::Agent(blocks) => blocks,
-    };
-    let colors = cx.global::<Palette>();
-    let mut column = div().flex().flex_col().min_w_0();
-    // Text blocks sit where the composer's text does; boxes (tool cards) span the composer's width.
-    let text_inset = text_inset(window);
-    if blocks.is_empty() {
-        let thinking = div().text_sm().text_color(colors.muted_foreground).child("Thinking…");
-        column = column.child(div().px(text_inset).child(thinking));
-    }
-    let mut n = 0;
-    while n < blocks.len() {
-        let id = ix * 10_000 + n;
-        // Runs of tool calls read as one list; anything else is set a step apart.
-        let run = n > 0 && matches!((&blocks[n - 1], &blocks[n]), (Block::Tool(_), Block::Tool(_)));
-        // A run of three or more tool calls gets a header that can fold it to a single line, and
-        // its first call sits as close under that as the calls do to each other.
-        let len = if matches!(blocks[n], Block::Tool(_)) && !run { blocks[n..].iter().take_while(|b| matches!(b, Block::Tool(_))).count() } else { 0 };
-        let titled = len >= 3;
-        if titled {
-            let folded = run_folded(&blocks[n..n + len], last && n + len == blocks.len());
-            column = column.child(div().when(n > 0, |this| this.mt_4()).child(tool_run(ix, n, &blocks[n..n + len], folded, this, text_inset, cx)));
-            if folded {
-                n += len;
-                continue;
-            }
-        }
-        let (el, boxed) = match &blocks[n] {
-            Block::Text(text) => (ui::markdown::markdown(("answer", id), text, selection, window, cx).into_any_element(), false),
-            Block::Thought(text, open) => (thought(ix, n, text, *open, this, selection, window, cx), false),
-            Block::Tool(tool) => (tool_card(ix, n, tool, this, text_inset, selection, window, cx).into_any_element(), true),
-            Block::Permission(ask) => (permission(ix, n, ask, this, text_inset, cx).into_any_element(), true),
-            Block::Plan(entries) => (plan(entries, cx).into_any_element(), false),
-            Block::Approve { agent, new_agent, mcp, answered, .. } => (approval(ix, n, agent, *new_agent, mcp, *answered, this, text_inset, cx).into_any_element(), true),
-        };
-        let el = if boxed { el } else { div().px(text_inset).child(el).into_any_element() };
-        column = column.child(div().when(n > 0, |this| if run || titled { this.mt_0p5() } else { this.mt_4() }).child(el));
-        n += 1;
-    }
-    column.into_any_element()
 }
 
 /// Whether a run of tool calls shows as one line. A run the user hasn't clicked folds once the
@@ -6326,36 +5920,6 @@ fn folded_runs(blocks: &[Block], last: bool) -> Vec<usize> {
     starts
 }
 
-/// The header of a run of tool calls: how many there were, and a click folds or unfolds them.
-fn tool_run(ix: usize, n: usize, run: &[Block], folded: bool, this: &Entity<Reader>, text_inset: gpui::Pixels, cx: &App) -> impl IntoElement {
-    let colors = cx.global::<Palette>();
-    let tools: Vec<&ToolBlock> = run.iter().filter_map(|b| if let Block::Tool(t) = b { Some(t) } else { None }).collect();
-    let status = if tools.iter().any(|t| t.status == Step::Failed) {
-        Step::Failed
-    } else if tools.iter().all(|t| t.status == Step::Done) {
-        Step::Done
-    } else {
-        Step::Working
-    };
-    let (mark, tint) = step_mark(status, colors);
-    let (muted, hover, radius) = (colors.muted_foreground, colors.list_hover, colors.radius);
-    let toggle = this.clone();
-    div()
-        .id(("tool-run", ix * 10_000 + n))
-        .flex()
-        .items_center()
-        .gap_2()
-        .py_1p5()
-        .px(text_inset)
-        .rounded(radius)
-        .cursor_pointer()
-        .text_sm()
-        .hover(move |row| row.bg(hover))
-        .on_click(move |_, _, cx| toggle.update(cx, |reader, cx| reader.fold_run(ix, n, !folded, cx)))
-        .child(div().text_color(tint).child(mark))
-        .child(div().text_color(muted).child(format!("{} tool calls", tools.len())))
-        .child(Icon::new(if folded { IconName::ChevronRight } else { IconName::ChevronDown }).size(IconSize::XSmall).color(muted))
-}
 
 /// Opens every block `flag` picks out, or closes them all when none is left to open. Returns
 /// the first message that changed, if any.
@@ -6377,178 +5941,10 @@ fn toggle_all(messages: &mut [Msg], flag: fn(&mut Block) -> Option<&mut bool>) -
     first
 }
 
-/// A thought: a quiet "Thinking" row that opens to the agent's reasoning.
-fn thought(ix: usize, n: usize, text: &str, open: bool, this: &Entity<Reader>, selection: &Entity<ui::markdown::Selection>, window: &mut Window, cx: &mut App) -> AnyElement {
-    let muted = cx.global::<Palette>().muted_foreground;
-    let toggle = this.clone();
-    let header = div()
-        .id(("thought", ix * 10_000 + n))
-        .flex()
-        .items_center()
-        .gap_1()
-        .cursor_pointer()
-        .text_sm()
-        .text_color(muted)
-        .on_click(move |_, _, cx| toggle.update(cx, |reader, cx| reader.toggle_thought(ix, n, cx)))
-        .child(Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight }).size(IconSize::XSmall))
-        .child("Thinking");
-    let column = div().flex().flex_col().gap_1().child(header);
-    if open {
-        column.child(div().opacity(theme::tokens::DIM).child(ui::markdown::italic(("thought", ix * 10_000 + n), text, selection, window, cx))).into_any_element()
-    } else {
-        column.into_any_element()
-    }
-}
 
-/// The sessions an agent offers to resume, newest first.
-fn session_picker(sessions: &[SessionInfo], this: &Entity<Reader>, cx: &App) -> AnyElement {
-    let colors = cx.global::<Palette>();
-    div()
-        .id("sessions")
-        .size_full()
-        .overflow_y_scroll()
-        .flex()
-        .flex_col()
-        .gap_1()
-        .p_3()
-        .children(sessions.iter().enumerate().map(|(ix, session)| {
-            let (this, id) = (this.clone(), session.id.clone());
-            let title = if session.title.is_empty() { format!("Session {}", session.id.chars().take(8).collect::<String>()) } else { session.title.clone() };
-            let when = session.updated.get(..16).unwrap_or_default().replace('T', " ");
-            div()
-                .id(("session", ix))
-                .flex()
-                .flex_col()
-                .p_2()
-                .rounded(colors.radius)
-                .cursor_pointer()
-                .hover(|style| style.bg(colors.list_hover))
-                .on_click(move |_, window, cx| this.update(cx, |reader, cx| reader.resume_session(&id, window, cx)))
-                .child(div().text_sm().truncate().child(title))
-                .child(div().text_xs().text_color(colors.muted_foreground).child(when))
-        }))
-        .into_any_element()
-}
 
-fn step_mark(status: Step, colors: &Palette) -> (&'static str, gpui::Hsla) {
-    match status {
-        Step::Waiting => ("○", colors.muted_foreground),
-        Step::Working => ("◐", colors.primary),
-        Step::Done => ("✓", colors.success),
-        Step::Failed => ("✕", colors.danger),
-    }
-}
 
-fn plan(entries: &[(String, Step)], cx: &App) -> impl IntoElement {
-    let colors = cx.global::<Palette>();
-    div()
-        .flex()
-        .flex_col()
-        .gap_1p5()
-        .text_sm()
-        .children(entries.iter().map(|(text, status)| {
-            let (mark, tint) = step_mark(*status, colors);
-            let done = *status == Step::Done;
-            div()
-                .flex()
-                .gap_2()
-                .child(div().flex_none().text_color(tint).child(mark))
-                .child(div().flex_1().min_w_0().text_color(if done { colors.muted_foreground } else { colors.foreground }).child(text.clone()))
-        }))
-}
 
-#[allow(clippy::too_many_arguments)]
-fn tool_card(
-    ix: usize,
-    n: usize,
-    tool: &ToolBlock,
-    this: &Entity<Reader>,
-    text_inset: gpui::Pixels,
-    selection: &Entity<ui::markdown::Selection>,
-    window: &mut Window,
-    cx: &mut App,
-) -> impl IntoElement {
-    let colors = cx.global::<Palette>();
-    let (mark, tint) = step_mark(tool.status, colors);
-    let (muted, hover, border) = (colors.muted_foreground, colors.list_hover, colors.border);
-    let radius = colors.radius;
-    let settled = tool.status == Step::Done;
-    let toggle = this.clone();
-    let reveal = this.clone();
-    let path = tool.path.clone();
-    // A tool call is a quiet row, not a box: it lights up under the pointer, and its text sits on
-    // the composer's text edge like the answer's.
-    let mut card = div()
-        .id(("tool-row", ix * 10_000 + n))
-        .flex()
-        .flex_col()
-        .gap_2()
-        .py_1p5()
-        .px(text_inset)
-        .rounded(radius)
-        .hover(move |row| row.bg(hover))
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .gap_2()
-                .child(
-                    div()
-                        .id(("tool", ix * 10_000 + n))
-                        .flex_1()
-                        .min_w_0()
-                        .flex()
-                        .items_start()
-                        .gap_2()
-                        .cursor_pointer()
-                        .text_sm()
-                        .on_click(move |_, _, cx| toggle.update(cx, |reader, cx| reader.toggle_tool(ix, n, cx)))
-                        .child(div().text_color(tint).child(mark))
-                        .child(div().flex_1().min_w_0().truncate().text_color(if settled { muted } else { colors.foreground }).child(tool.title.clone())),
-                )
-                .children(path.map(|path| {
-                    Button::new(("tool-open", ix * 10_000 + n))
-                        .label("Open")
-                        .tooltip("Show this file, or its changes")
-                        .ghost()
-                        .xsmall()
-                        .on_click(move |_, window, cx| reveal.update(cx, |reader, cx| reader.reveal(&path, window, cx)))
-                })),
-        );
-    if tool.open {
-        for (which, text) in [&tool.arguments, &tool.result].into_iter().enumerate() {
-            if !text.is_empty() {
-                let mono = cx.global::<Palette>().mono_font_family.clone();
-                let family = mono.clone();
-                let body = ui::markdown::plain_styled(
-                    ("tool-text", (ix * 10_000 + n) * 2 + which),
-                    text,
-                    selection,
-                    |style| {
-                        style.font_family = family;
-                        style.color = muted;
-                    },
-                    window,
-                    cx,
-                );
-                card = card.child(
-                    div()
-                        .id(("tool-pane", (ix * 10_000 + n) * 2 + which))
-                        .max_h(rems(16.))
-                        .overflow_y_scroll()
-                        .border_l_2()
-                        .border_color(border)
-                        .pl_3()
-                        .font_family(mono)
-                        .text_xs()
-                        .text_color(muted)
-                        .child(body),
-                );
-            }
-        }
-    }
-    card
-}
 
 /// The one option in a permission request rendered as the filled button: the first way of saying
 /// yes, however the agent orders the rest. Options that describe themselves in `kind` (ACP) are
@@ -6561,113 +5957,9 @@ fn primary_option(options: &[PermissionOption]) -> Option<usize> {
     }
 }
 
-fn permission(ix: usize, n: usize, ask: &Ask, this: &Entity<Reader>, text_inset: gpui::Pixels, cx: &App) -> impl IntoElement {
-    let colors = cx.global::<Palette>();
-    let (muted, warning) = (colors.muted_foreground, colors.warning);
-    let primary = primary_option(&ask.options);
-    let row = div().flex().flex_wrap().gap_2();
-    let row = match &ask.answered {
-        Some(name) => row.child(div().text_color(muted).child(format!("→ {name}"))),
-        None => row.children(ask.options.iter().enumerate().map(|(o, option)| {
-            let this = this.clone();
-            let button = Button::new(("permit", ix * 1_000_000 + n * 100 + o))
-                .label(option.name.clone())
-                .small()
-                .on_click(move |_, _, cx| this.update(cx, |reader, cx| reader.answer(ix, n, o, cx)));
-            if primary == Some(o) { button.primary() } else { button }
-        })),
-    };
-    let waiting = ask.answered.is_none();
-    div()
-        .flex()
-        .flex_col()
-        .gap_2()
-        .py_3()
-        .px(text_inset - px(BOX_BORDER))
-        .rounded(colors.radius)
-        .border(px(BOX_BORDER))
-        // A question still waiting for you is outlined in the warning tone; an answered one settles.
-        .border_color(if waiting { warning.opacity(theme::tokens::MUTED) } else { colors.border })
-        .text_sm()
-        .child(div().flex().gap_2().child(div().flex_none().text_color(muted).child("Permission")).child(div().flex_1().min_w_0().child(ask.title.clone())))
-        .child(row)
-}
 
-/// Asks whether Po may run an agent command it doesn't ship with.
-#[allow(clippy::too_many_arguments)]
-fn approval(ix: usize, n: usize, agent: &config::Agent, new_agent: bool, mcp: &[config::McpServer], answered: Option<bool>, this: &Entity<Reader>, text_inset: gpui::Pixels, cx: &App) -> impl IntoElement {
-    let colors = cx.global::<Palette>();
-    let (muted, warning) = (colors.muted_foreground, colors.warning);
-    let row = div().flex().flex_wrap().gap_2();
-    let row = match answered {
-        Some(yes) => row.child(div().text_color(muted).child(match (yes, new_agent) {
-            (true, _) => "→ Approved",
-            (false, true) => "→ Not run",
-            (false, false) => "→ Left out",
-        })),
-        None => row
-            .child({
-                let this = this.clone();
-                Button::new(("approve-run", ix * 100 + n)).label("Run it").primary().small().on_click(move |_, window, cx| {
-                    this.update(cx, |reader, cx| reader.answer_approval(ix, n, true, window, cx))
-                })
-            })
-            .child({
-                let this = this.clone();
-                Button::new(("approve-skip", ix * 100 + n)).label(if new_agent { "Don't run" } else { "Leave out" }).small().on_click(move |_, window, cx| {
-                    this.update(cx, |reader, cx| reader.answer_approval(ix, n, false, window, cx))
-                })
-            }),
-    };
-    let mut lines: Vec<String> = Vec::new();
-    if new_agent {
-        lines.push(match &agent.daemon {
-            Some(url) => format!("{}  (daemon {url})", agent.command),
-            None => agent.command.clone(),
-        });
-    }
-    lines.extend(mcp.iter().map(|server| format!("{}: {}", server.name, server.line())));
-    let question = match (new_agent, mcp.is_empty()) {
-        (true, true) => format!("“{}” is not one of Po's own agents: it comes from your config. Run this command?", agent.name),
-        (true, false) => format!("“{}” is not one of Po's own agents, and your config lists MCP servers for it. Run these commands?", agent.name),
-        (false, _) => "Your config lists MCP servers for the agent to start, which run as you. Hand them over?".to_string(),
-    };
-    div()
-        .flex()
-        .flex_col()
-        .gap_2()
-        .py_3()
-        .px(text_inset - px(BOX_BORDER))
-        .rounded(colors.radius)
-        .border(px(BOX_BORDER))
-        .border_color(if answered.is_none() { warning.opacity(theme::tokens::MUTED) } else { colors.border })
-        .text_sm()
-        .child(div().flex().gap_2().child(div().flex_none().text_color(muted).child("Approve")).child(
-            div().flex_1().min_w_0().child(question),
-        ))
-        .children(lines.into_iter().map(|line| div().font_family(cx.global::<Palette>().mono_font_family.clone()).child(line)))
-        .child(row)
-}
 
-fn status_text(text: String, cx: &App) -> impl IntoElement {
-    div().flex_none().truncate().text_xs().text_color(cx.global::<Palette>().muted_foreground).child(text)
-}
 
-/// A pane's header. The window's own controls sit in the headers of the panes at its edges:
-/// `lead` before the title in the leftmost pane, `trail` after what is on the right in the
-/// rightmost one.
-fn pane_header(title: &str, right: impl IntoElement, lead: Option<AnyElement>, trail: Option<AnyElement>, cx: &App) -> gpui::Div {
-    let colors = cx.global::<Palette>();
-    header_row(
-        div().flex().items_center().gap_1().min_w_0().children(lead).child(
-            div().min_w_0().truncate().text_sm().font_weight(FontWeight::MEDIUM).text_color(colors.foreground).child(title.to_string()),
-        ),
-        div().flex().items_center().gap_2().child(right).children(trail),
-        cx,
-    )
-    // The transcript scrolls under this one, so it keeps its line.
-    .when(colors.glass.is_some(), |row| row.border_b_1().border_color(colors.border))
-}
 
 /// `pane` as a sheet of glass floating apart from its neighbours when the glass look is on,
 /// else as it is. Each pane keeps half the gap; the window's padding makes up the other half at
@@ -6701,6 +5993,134 @@ fn header_row(left: impl IntoElement, right: impl IntoElement, cx: &App) -> gpui
         .text_color(colors.foreground)
         .child(left)
         .child(right)
+}
+
+/// Where the file of a `file:` URL pasted in, dropped on it, is.
+fn file_of(uri: &str) -> Option<&str> {
+    let path = uri.strip_prefix("file://")?;
+    let path = match path.split_once('/') {
+        Some((host, path)) if host.is_empty() || host == "localhost" => path,
+        _ => path,
+    };
+    Some(path)
+}
+
+/// The message of the conversation as the screen drawn by NSH shows it: the user's text with its
+/// pictures, or the agent's blocks.
+fn chat_items(messages: &[Msg]) -> Vec<nsh::chat::Item> {
+    let last = messages.len().saturating_sub(1);
+    messages.iter().enumerate().map(|(ix, msg)| match msg {
+        Msg::User(text, pictures) => nsh::chat::Item::User {
+            text: text.clone(),
+            pictures: pictures.iter().map(|a| nsh::chat::Picture { uri: a.data_uri() }).collect(),
+        },
+        Msg::Agent(blocks) => nsh::chat::Item::Agent { index: ix, blocks: chat_blocks(blocks, ix == last) },
+    }).collect()
+}
+
+/// Whether the run's calls waited, were all told to go, all went well, or one failed.
+fn chat_phase(step: Step) -> nsh::chat::Phase {
+    match step {
+        Step::Waiting => nsh::chat::Phase::Waiting,
+        Step::Working => nsh::chat::Phase::Working,
+        Step::Done => nsh::chat::Phase::Done,
+        Step::Failed => nsh::chat::Phase::Failed,
+    }
+}
+
+/// One agent message's blocks for the conversation drawn by NSH. Runs of three or more tool calls
+/// also carry the row that folds them; the calls stay in place either way, so the indexes their
+/// answers are told by hold.
+fn chat_blocks(blocks: &[Block], last: bool) -> Vec<nsh::chat::Block> {
+    let mut out: Vec<nsh::chat::Block> = Vec::with_capacity(blocks.len());
+    let mut n = 0;
+    while n < blocks.len() {
+        let run = n > 0 && matches!(&blocks[n - 1], Block::Tool(_));
+        let len = if matches!(blocks[n], Block::Tool(_)) && !run { blocks[n..].iter().take_while(|b| matches!(b, Block::Tool(_))).count() } else { 0 };
+        if len >= 3 {
+            let run = &blocks[n..n + len];
+            let phase = if run.iter().any(|b| matches!(b, Block::Tool(t) if t.status == Step::Failed)) {
+                Step::Failed
+            } else if run.iter().all(|b| matches!(b, Block::Tool(t) if t.status == Step::Done)) {
+                Step::Done
+            } else {
+                Step::Working
+            };
+            out.push(nsh::chat::Block::Run { index: n, count: len, phase: chat_phase(phase), folded: run_folded(run, last && n + len == blocks.len()) });
+            for (k, block) in run.iter().enumerate() {
+                if let Block::Tool(tool) = block {
+                    out.push(nsh::chat::Block::Tool(chat_tool(n + k, tool)));
+                }
+            }
+            n += len;
+            continue;
+        }
+        out.push(match &blocks[n] {
+            Block::Text(text) => nsh::chat::Block::Markdown(nsh::source::Shared(text.as_str().into())),
+            Block::Thought(text, open) => nsh::chat::Block::Thought { index: n, text: text.clone(), open: *open },
+            Block::Tool(tool) => nsh::chat::Block::Tool(chat_tool(n, tool)),
+            Block::Permission(ask) => {
+                let primary = primary_option(&ask.options);
+                nsh::chat::Block::Ask {
+                    index: n,
+                    title: ask.title.clone(),
+                    options: ask.options.iter().enumerate().map(|(at, option)| nsh::chat::AskOption {
+                        at,
+                        label: option.name.clone(),
+                        primary: primary == Some(at),
+                    }).collect(),
+                    answered: ask.answered.clone(),
+                }
+            }
+            Block::Plan(entries) => nsh::chat::Block::Plan(entries.iter().map(|(text, step)| nsh::chat::Entry { text: text.clone(), phase: chat_phase(*step) }).collect()),
+            Block::Approve { agent, new_agent, mcp, resume: _, answered } => {
+                let (question, lines) = approval_text(agent, *new_agent, mcp);
+                nsh::chat::Block::Approve {
+                    index: n,
+                    question,
+                    lines,
+                    answered: answered.map(|said| match (said, new_agent) {
+                        (true, _) => "Approved".into(),
+                        (false, true) => "Not run".into(),
+                        (false, false) => "Left out".into(),
+                    }),
+                }
+            }
+        });
+        n += 1;
+    }
+    out
+}
+
+/// One tool call for the conversation drawn by NSH.
+fn chat_tool(at: usize, tool: &ToolBlock) -> nsh::chat::Tool {
+    nsh::chat::Tool {
+        index: at,
+        title: tool.title.clone(),
+        phase: chat_phase(tool.status),
+        open: tool.open,
+        arguments: tool.arguments.clone(),
+        result: tool.result.clone(),
+        path: tool.path.clone(),
+    }
+}
+
+/// What the approval card says: the question Po asks, and the commands it would hand over.
+fn approval_text(agent: &config::Agent, new_agent: bool, mcp: &[config::McpServer]) -> (String, Vec<String>) {
+    let mut lines = Vec::new();
+    if new_agent {
+        lines.push(match &agent.daemon {
+            Some(url) => format!("{}  (daemon {url})", agent.command),
+            None => agent.command.clone(),
+        });
+    }
+    lines.extend(mcp.iter().map(|server| format!("{}: {}", server.name, server.line())));
+    let question = match (new_agent, mcp.is_empty()) {
+        (true, true) => format!("“{}” is not one of Po's own agents: it comes from your config. Run this command?", agent.name),
+        (true, false) => format!("“{}” is not one of Po's own agents, and your config lists MCP servers for it. Run these commands?", agent.name),
+        (false, _) => "Your config lists MCP servers for the agent to start, which run as you. Hand them over?".to_string(),
+    };
+    (question, lines)
 }
 
 fn centered(text: String, cx: &App) -> AnyElement {
@@ -6772,22 +6192,23 @@ impl Render for Reader {
         let hidden = || div().size_full().into_any_element();
         let (middle, side) = if !side_open {
             // Only the conversation shows, and the viewer's button waits on the side it opens.
-            let button = viewer_toggle(right);
+            let chat_lead = vec![Control::Sidebar(left_open), Control::Viewer(side_open)];
+            let chat_trail = vec![Control::Viewer(side_open)];
+            let mut chat = |lead: Vec<Control>, trail: Vec<Control>| floating(self.chat_pane(lead, trail, cx), cx);
             if swapped {
-                let lead = div().flex().items_center().gap_1().child(sidebar_toggle).child(button).into_any_element();
-                (floating(self.agent_panel(Some(lead), None, cx), cx), hidden())
+                (chat(chat_lead, vec![]), hidden())
             } else {
-                (floating(self.agent_panel(Some(sidebar_toggle), Some(button), cx), cx), hidden())
+                (chat(vec![Control::Sidebar(left_open)], chat_trail), hidden())
             }
         } else if focus {
             controls(vec![Control::Sidebar(left_open)], trail_all);
             (self.pane(Some(sidebar_toggle), Some(viewer_trail), cx), hidden())
         } else if swapped {
             controls(vec![Control::Sidebar(left_open)], trail_all);
-            (self.pane(Some(sidebar_toggle), Some(viewer_trail), cx), floating(self.agent_panel(None, None, cx), cx))
+            (self.pane(Some(sidebar_toggle), Some(viewer_trail), cx), floating(self.chat_pane(vec![], vec![], cx), cx))
         } else {
             controls(vec![], trail_all);
-            (floating(self.agent_panel(Some(sidebar_toggle), None, cx), cx), self.pane(None, Some(viewer_trail), cx))
+            (floating(self.chat_pane(vec![Control::Sidebar(left_open)], vec![], cx), cx), self.pane(None, Some(viewer_trail), cx))
         };
         let right_open = side_open && !focus;
         div()

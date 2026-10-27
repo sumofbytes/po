@@ -5,9 +5,13 @@ use std::sync::{LazyLock, Mutex};
 
 use tokio::sync::mpsc;
 
+use super::chat::Cmd as ChatCmd;
+
 /// Something the user did on a screen.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Cmd {
+    /// The conversation, the big one.
+    Chat(ChatCmd),
     /// The sidebar's filter changed.
     SideQuery(String),
     /// A project row was pressed: fold or unfold its threads, and show it.
