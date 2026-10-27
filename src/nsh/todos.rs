@@ -3,7 +3,7 @@
 //! itself is [`crate::todo`]'s store; [`crate::todo::TodoPanel`] is the frame Po shows this in.
 use nsh_core::prelude::*;
 
-use super::{Colors, icon, rems, text_sm, text_xs, tooltip};
+use super::{Colors, icon, icon_button, on_hover, rems, text_sm, text_xs};
 use crate::todo::{self, CLOSE, Date, HEIGHT, Item, Show, Target, due_label, parse_due, today};
 use crate::ui::icon::IconName;
 
@@ -494,26 +494,6 @@ fn row() -> View {
         .rounded(Colors::radius())
         .cursor_pointer()
         .hover(|s| s.bg(Colors::hover()))
-}
-
-/// A row's control that only shows while the pointer is on the row.
-fn on_hover(control: View) -> View {
-    control.opacity(0.).group_hover(|s| s.opacity(1.))
-}
-
-/// A small ghost button with an icon.
-fn icon_button(name: IconName, size: Points, label: &'static str, on_press: impl Fn() + 'static) -> View {
-    view()
-        .role(AccessibilityRole::Button)
-        .label(label)
-        .flex_none()
-        .p(rems(0.25))
-        .rounded(Colors::radius())
-        .cursor_pointer()
-        .hover(|s| s.bg(Colors::hover()))
-        .tooltip(tooltip(label))
-        .on_press(on_press)
-        .child(icon(name, size, Colors::muted()))
 }
 
 /// What is left, which todos to show, and a way to clear the done ones.

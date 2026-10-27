@@ -1,6 +1,8 @@
 //! Po's screens drawn with NSH: each runs as an NSH app in an [`AppView`], a GPUI view that sits in
 //! Po's window like any other. This module is what they share: the theme and fonts they take from
 //! Po's [`Palette`], Po's icons, and the views themselves.
+pub mod bus;
+pub mod sidebar;
 pub mod todos;
 
 use base64::Engine as _;
@@ -18,7 +20,7 @@ pub fn init() {
 
 /// A view running `root`, in Po's theme, and what keeps it in the theme as that changes: hold it
 /// as long as the view.
-pub fn view(root: Root, window: &mut Window, cx: &mut gpui::App) -> (Entity<AppView>, Subscription) {
+pub fn mount(root: Root, window: &mut Window, cx: &mut gpui::App) -> (Entity<AppView>, Subscription) {
     let view = cx.new(|cx| AppView::new(AppOptions::default(), window, cx));
     apply_theme(&view, cx);
     view.update(cx, |view, _| {
@@ -70,6 +72,8 @@ fn theme(palette: &Palette) -> nsh_platform_gpui::Theme {
         ("sidebar", palette.sidebar),
         ("warning", palette.warning),
         ("list-hover", palette.list_hover),
+        ("list-selected", palette.list_selected),
+        ("added", palette.added),
         ("input-background", palette.input_background),
         ("caret", palette.caret),
     ] {
@@ -114,6 +118,31 @@ impl Colors {
         Self::token("warning")
     }
 
+    pub fn selected() -> impl Fn() -> AdaptiveColor + Copy {
+        Self::token("list-selected")
+    }
+
+    pub fn added() -> impl Fn() -> AdaptiveColor + Copy {
+        Self::token("added")
+    }
+
+    pub fn primary() -> impl Fn() -> AdaptiveColor + Copy {
+        || nsh_base::theme().primary
+    }
+
+    pub fn primary_foreground() -> impl Fn() -> AdaptiveColor + Copy {
+        || nsh_base::theme().primary_foreground
+    }
+
+    pub fn sidebar() -> impl Fn() -> AdaptiveColor + Copy {
+        || nsh_base::theme().sidebar
+    }
+
+    /// `color` faded to Po's dimmed-text strength ([`crate::theme::tokens::DIM`]).
+    pub fn dim(color: impl Fn() -> AdaptiveColor + Copy) -> impl Fn() -> AdaptiveColor + Copy {
+        move || color().opacity(crate::theme::tokens::DIM)
+    }
+
     pub fn hover() -> impl Fn() -> AdaptiveColor + Copy {
         Self::token("list-hover")
     }
@@ -145,6 +174,16 @@ pub fn rems(n: f32) -> Points {
     Points(n * nsh_base::theme().number("rem").unwrap_or(14.))
 }
 
+/// The text of a row's label, GPUI's `text_base`.
+pub fn text_base() -> Points {
+    rems(1.)
+}
+
+/// A pane header's height, GPUI's `h_11`.
+pub fn header_height() -> Points {
+    rems(2.75)
+}
+
 /// Small text, GPUI's `text_xs`: dates and counts.
 pub fn text_xs() -> Points {
     rems(0.75)
@@ -172,4 +211,24 @@ pub fn tooltip(label: &'static str) -> Text {
         .rounded(Colors::radius())
         .px(Points(8.))
         .py(Points(4.))
+}
+
+/// A row's control that only shows while the pointer is on the row.
+pub fn on_hover(control: View) -> View {
+    control.opacity(0.).group_hover(|s| s.opacity(1.))
+}
+
+/// A small ghost button with an icon.
+pub fn icon_button(name: IconName, size: Points, label: &'static str, on_press: impl Fn() + 'static) -> View {
+    view()
+        .role(AccessibilityRole::Button)
+        .label(label)
+        .flex_none()
+        .p(rems(0.25))
+        .rounded(Colors::radius())
+        .cursor_pointer()
+        .hover(|s| s.bg(Colors::hover()))
+        .tooltip(tooltip(label))
+        .on_press(on_press)
+        .child(icon(name, size, Colors::muted()))
 }

@@ -1,0 +1,45 @@
+//! What the NSH screens ask of Po. A screen only draws a snapshot Po publishes (the way
+//! [`crate::todo`]'s store is read); everything the user does on it comes back here as a [`Cmd`],
+//! which the [`crate::Reader`] runs where it has the window and the agents.
+use std::sync::{LazyLock, Mutex};
+
+use tokio::sync::mpsc;
+
+/// Something the user did on a screen.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Cmd {
+    /// The sidebar's filter changed.
+    SideQuery(String),
+    /// A project row was pressed: fold or unfold its threads, and show it.
+    ToggleProject(u64),
+    StartThread(u64),
+    CloseProject(u64),
+    /// "N more" or "Show less" under a project.
+    ToggleMore(u64),
+    OpenThread(u64, u64),
+    CloseThread(u64, u64),
+    AddProject,
+    NewThread,
+    OpenSettings,
+    ToggleTodos,
+    /// An agent's suggestion, answered yes or no.
+    Answer(u64, bool),
+}
+
+/// The sending end, and the receiving end until the one listener takes it.
+type Channel = (mpsc::UnboundedSender<Cmd>, Mutex<Option<mpsc::UnboundedReceiver<Cmd>>>);
+
+static CHANNEL: LazyLock<Channel> = LazyLock::new(|| {
+    let (sender, receiver) = mpsc::unbounded_channel();
+    (sender, Mutex::new(Some(receiver)))
+});
+
+/// Asks Po to do `cmd`; any thread may.
+pub fn send(cmd: Cmd) {
+    let _ = CHANNEL.0.send(cmd);
+}
+
+/// The commands, for the one that runs them.
+pub fn commands() -> Option<mpsc::UnboundedReceiver<Cmd>> {
+    CHANNEL.1.lock().ok()?.take()
+}

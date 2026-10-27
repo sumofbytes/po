@@ -492,7 +492,7 @@ impl TodoPanel {
 
     /// Starts the screen and gives it the keyboard, as the window opens.
     pub fn open(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let (view, theme) = crate::nsh::view(Root::of::<crate::nsh::todos::Todos>(), window, cx);
+        let (view, theme) = crate::nsh::mount(Root::of::<crate::nsh::todos::Todos>(), window, cx);
         window.focus(&view.focus_handle(cx), cx);
         self.view = Some((view, theme));
         cx.notify();
