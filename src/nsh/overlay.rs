@@ -37,6 +37,8 @@ pub struct Overlay {
     /// Made as the window opens and dropped as it closes, which stops its engine.
     view: Option<(Entity<AppView>, Subscription)>,
     height: f32,
+    /// Fills the space it is given instead of floating over it, with the screen in a centered column.
+    page: bool,
     _follow: Task<()>,
 }
 
@@ -56,7 +58,12 @@ impl Overlay {
                 }
             }
         });
-        Self { root, width, margin, view: None, height: 0., _follow: follow }
+        Self { root, width, margin, view: None, height: 0., page: false, _follow: follow }
+    }
+
+    /// Shows the screen as a page of the app, `width` wide at most, rather than as a window over it.
+    pub fn page(width: f32, root: fn() -> Root, measured: &'static Height, cx: &mut Context<Self>) -> Self {
+        Self { page: true, ..Self::new(width, 0., root, measured, cx) }
     }
 
     /// Starts the screen and gives it the keyboard, as the window opens.
@@ -78,6 +85,15 @@ impl Render for Overlay {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.global::<Palette>();
         let (popover, border, radius) = (colors.popover, colors.border, colors.radius);
+        if self.page {
+            return div()
+                .size_full()
+                .flex()
+                .justify_center()
+                .bg(popover)
+                .child(div().h_full().w_full().max_w(px(self.width)).flex().flex_col().children(self.view.as_ref().map(|(view, _)| view.clone())))
+                .into_any_element();
+        }
         div()
             .absolute()
             .inset_0()
@@ -106,5 +122,6 @@ impl Render for Overlay {
                     .overflow_hidden()
                     .children(self.view.as_ref().map(|(view, _)| view.clone())),
             )
+            .into_any_element()
     }
 }

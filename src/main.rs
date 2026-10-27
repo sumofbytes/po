@@ -1192,7 +1192,7 @@ struct Reader {
     chat_reset: std::cell::Cell<u64>,
     /// What [`nsh::chat::Snapshot::focus`] carries next.
     chat_focus: std::cell::Cell<u64>,
-    /// The todos window, shown over everything while `todos_open`; the sidebar has a row for it.
+    /// The todos page, shown in place of the conversation while `todos_open`; the sidebar has a row for it.
     todos: Entity<nsh::overlay::Overlay>,
     todos_open: bool,
     /// Progress or failure of the last attempt to open a PR.
@@ -1292,7 +1292,7 @@ impl Reader {
         let (explorer_pane, explorer_theme) = nsh::mount(nsh_platform_gpui::Root::of::<nsh::explorer::Explorer>(), window, cx);
         let finder_window = cx.new(|cx| nsh::overlay::Overlay::new(560., 8., || nsh_platform_gpui::Root::of::<nsh::finder::Finder>(), &nsh::finder::HEIGHT, cx));
         let settings_window = cx.new(|cx| nsh::overlay::Overlay::new(680., 24., || nsh_platform_gpui::Root::of::<nsh::settings::Settings>(), &nsh::settings::HEIGHT, cx));
-        let todos = cx.new(|cx| nsh::overlay::Overlay::new(600., 24., || nsh_platform_gpui::Root::of::<nsh::todos::Todos>(), &nsh::todos::HEIGHT, cx));
+        let todos = cx.new(|cx| nsh::overlay::Overlay::page(760., || nsh_platform_gpui::Root::of::<nsh::todos::Todos>(), &nsh::todos::HEIGHT, cx));
         let sidebars = cx.new(|_| SidebarsState::new(px(280.0), px(560.0)));
         let tree_cols = cx.new(|_| SidebarsState::new(px(TREE_WIDTH), px(0.0)));
         let subscriptions = vec![
@@ -5967,7 +5967,9 @@ impl Render for Reader {
         // The viewer pane is only built where it shows: a pane nobody sees would publish over the
         // one that is.
         let hidden = || div().size_full().into_any_element();
-        let (middle, side) = if !side_open {
+        let (middle, side) = if self.todos_open {
+            (self.todos.clone().into_any_element(), hidden())
+        } else if !side_open {
             // Only the conversation shows, and the viewer's button waits on the side it opens.
             let chat_lead = vec![Control::Sidebar(left_open), Control::Viewer(side_open)];
             let chat_trail = vec![Control::Viewer(side_open)];
@@ -5987,7 +5989,7 @@ impl Render for Reader {
             controls(vec![], trail_all);
             (floating(self.chat_pane(vec![Control::Sidebar(left_open)], vec![], cx), cx), self.pane(cx))
         };
-        let right_open = side_open && !focus;
+        let right_open = side_open && !focus && !self.todos_open;
         div()
             .size_full()
             .flex()
@@ -6042,7 +6044,6 @@ impl Render for Reader {
                 ),
             )
             .when(self.finder_open, |this| this.child(self.finder.clone()))
-            .when(self.todos_open, |this| this.child(self.todos.clone()))
             .when(self.settings_open, |this| this.child(self.settings.clone()))
     }
 }
