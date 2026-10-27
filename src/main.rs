@@ -977,7 +977,7 @@ fn side_mark(activity: Activity, colors: &Palette) -> gpui::Div {
     let mark = match activity {
         Activity::Idle => div(),
         Activity::Asking => div().text_sm().font_weight(FontWeight::BOLD).text_color(tint).child(glyph),
-        Activity::Running | Activity::Unread => div().size(rems(0.4375)).rounded_full().bg(tint),
+        Activity::Running | Activity::Unread => div().size(rems(0.4375)).rounded(theme::tokens::RADIUS_FULL).bg(tint),
     };
     side_centered(mark)
 }
