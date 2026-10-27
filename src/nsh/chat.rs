@@ -11,7 +11,7 @@ use tokio::sync::watch;
 
 use super::header::{Control, pane_header};
 use super::source::Shared;
-use super::{Colors, icon, mono_size, rems, text_sm, text_xs, tooltip};
+use super::{Colors, icon, mono_size, rems, text_base, text_sm, text_xs, tooltip};
 use crate::ui::icon::IconName;
 
 /// Whether a step of the agent's is waiting, going, done or failed: a tool call, the plan's
@@ -441,6 +441,8 @@ fn user_row(text_: &str, pictures: &[Picture]) -> AnyElement {
     let mut bubble = view()
         .flex_col()
         .gap(rems(0.5))
+        .min_w_0()
+        .flex_shrink(1.)
         .max_w(px(700.))
         .px(rems(1.))
         .py(rems(0.75))
@@ -465,7 +467,7 @@ fn user_row(text_: &str, pictures: &[Picture]) -> AnyElement {
         // Typed text is shown as typed: its `*` and `#` are not markup.
         bubble = bubble.child(text(text_.to_string()).selectable(true).text_base().text_color(Colors::foreground()));
     }
-    view().flex_row().justify_end().child(bubble).into_element()
+    view().flex_row().w_full().min_w_0().justify_end().child(bubble).into_element()
 }
 
 /// The agent's reasoning: a quiet row that opens to it in italics.
@@ -790,7 +792,7 @@ fn block_row(message: usize, block: &Block) -> AnyElement {
 
 /// One message of the agent's: its blocks, a run's own row standing in for the tools it hides.
 fn agent_row(message: usize, blocks: &[Block]) -> AnyElement {
-    let mut column = view().flex_col().gap(rems(0.75));
+    let mut column = view().flex_col().min_w_0().gap(rems(0.75));
     let mut skip = 0;
     if blocks.is_empty() {
         column = column.child(text("Thinking…").text_sm().text_color(Colors::muted()));
@@ -811,7 +813,7 @@ fn agent_row(message: usize, blocks: &[Block]) -> AnyElement {
 
 /// The conversation: the messages, in order, as a center column.
 fn transcript(items: &[Item]) -> AnyElement {
-    let mut rows = view().w_full().max_w(px(760.)).flex_col().gap(rems(1.5)).py(rems(1.5));
+    let mut rows = view().w_full().min_w_0().max_w(px(760.)).flex_col().gap(rems(1.5)).px(rems(1.5)).py(rems(1.5));
     for (message, item) in items.iter().enumerate() {
         let row = match item {
             Item::User { text, pictures } => user_row(text, pictures),
@@ -825,7 +827,7 @@ fn transcript(items: &[Item]) -> AnyElement {
         .flex()
         .justify_center()
         .overflow_hidden()
-        .child(scroll().size_full().child(view().flex_col().items_center().w_full().child(rows.into_element())).element_ref(&transcript_slot()))
+        .child(scroll().size_full().child(view().flex_col().items_center().w_full().min_w_0().child(rows.into_element())).element_ref(&transcript_slot()))
         .into_element()
 }
 
@@ -1009,7 +1011,11 @@ fn picker(picking: &Picking) -> AnyElement {
 /// worktree of its own.
 fn setup(snap: &Snapshot) -> AnyElement {
     let mut column = view().flex_col().gap(rems(0.625)).pb(rems(0.625));
-    let name = snap.chosen.clone().unwrap_or_else(|| "Pick an agent".to_string());
+    let name = snap
+        .chosen
+        .as_ref()
+        .map(|id| snap.agents.iter().find(|(_, key)| key == id).map_or(id.clone(), |(name, _)| name.clone()))
+        .unwrap_or_else(|| "Pick an agent".to_string());
     let mut agents = menu().popup_class(MENU).trigger(menu_trigger(name, "Which agent the thread runs"));
     let pick = snap.chosen.clone();
     for (agent_name, id) in snap.agents.clone() {
@@ -1165,6 +1171,9 @@ fn draft_field(draft: &Signal<String>, field_ref: ElementRef) -> Input {
         .test_id("chat-draft")
         .element_ref(&field_ref)
         .flex_1()
+        .min_w_0()
+        .max_h(px(160.))
+        .text_size(text_base())
         .multiline(true)
         .value(move || held.get())
         .text_color(Colors::foreground())
@@ -1224,6 +1233,12 @@ fn bar(snap: Snapshot, draft: Signal<String>, field_ref: ElementRef) -> AnyEleme
             .flex_row()
             .items_end()
             .gap(rems(0.5))
+            .px(rems(0.75))
+            .py(rems(0.5))
+            .rounded(Colors::radius() * 2.)
+            .border_1()
+            .border_color(Colors::input_border())
+            .bg(Colors::input_background())
             .on_file_drop(move |drop: &FileDropEvent| tell(Cmd::Drop(drop.uris.clone())))
             .child(draft_field(&field, field_ref))
             .children(snap.busy.then(|| steer_button(snap.steer, low.clone(), has_pictures)))
@@ -1307,8 +1322,10 @@ pub fn Chat() -> impl IntoElement {
 
     let body = move || {
         let snap = state.get();
-        if snap.items.is_empty() && snap.blank {
-            return view()
+        // A thread that has not started says so where the transcript will be; its composer, and
+        // the choice of agent in it, are there all the same.
+        let top = if snap.items.is_empty() && snap.blank {
+            view()
                 .flex_1()
                 .min_h_0()
                 .flex_col()
@@ -1317,13 +1334,15 @@ pub fn Chat() -> impl IntoElement {
                 .gap(rems(0.75))
                 .px(rems(1.))
                 .children([text("What is this thread about?").text_base().text_color(Colors::muted()), text("Message an agent to begin.").text_sm().text_color(Colors::muted())])
-                .into_element();
-        }
+                .into_element()
+        } else {
+            transcript(&snap.items)
+        };
         view()
             .flex_1()
             .min_h_0()
             .flex_col()
-            .children([transcript(&snap.items), bar(snap, draft, field_ref)])
+            .children([top, bar(snap, draft, field_ref)])
             .into_element()
     };
 
@@ -1449,5 +1468,23 @@ mod tests {
         publish(Snapshot { settings, busy: true, items: vec![Item::Agent { index: 0, blocks: vec![] }], ..Snapshot::default() });
         app.wait(std::time::Duration::from_millis(100)).unwrap();
         assert!(app.shows("Smart"), "{:?}", app.screen().texts());
+    }
+
+    #[test]
+    fn a_thread_that_has_not_started_still_has_its_composer_and_agent_choice() {
+        let mut guard = crate::nsh::bus::lock();
+        let commands = guard.as_mut().expect("the channel");
+        let mut app = start(Snapshot {
+            blank: true,
+            agents: vec![("Claude".into(), "claude".into())],
+            chosen: Some("claude".into()),
+            ..Snapshot::default()
+        });
+        assert!(app.shows("Message an agent to begin."), "{:?}", app.screen().texts());
+        assert!(app.shows("Claude"), "{:?}", app.screen().texts());
+        app.type_text("id:chat-draft", "hello").unwrap();
+        app.press("label:Start the thread").unwrap();
+        let sent = drain(&mut app, commands);
+        assert!(sent.contains(&Bus::Chat(Cmd::Send { later: false })), "{sent:?}");
     }
 }
