@@ -122,6 +122,8 @@ front of you:
 | `show_view` | Shows a markdown document as a tab in the viewer |
 | `update_view` | Changes one of its views |
 | `close_view` | Closes one of its views |
+| `show_form` | Shows a form — text fields and choices it defines, with a submit button — as a tab |
+| `form_wait` | Waits for the user to submit one of its forms, and reads their answers |
 | `open_file` | Opens a file of the project, at a line |
 | `show_diff` | Shows the changes, at one file's diff |
 | `close_viewer` | Closes the viewer |
@@ -131,6 +133,11 @@ the server's environment, not the agent's, so programs the agent runs don't inhe
 thread on screen can move the viewer, and only files inside the project can be opened. While you are
 typing or scrolling, a move waits until you have been still for a few seconds and is dropped if
 you change the viewer yourself first; a new view is offered as a button rather than shown.
+
+A form works the other way round: the agent defines fields (text, or a choice among options),
+you fill it in at your pace, and the answers come back to the agent when you submit. A form
+stays open until you answer or close its tab; an agent that stops or ends its turn while waiting
+is told the wait was cancelled.
 
 #### Steering and follow-ups (dex daemon)
 

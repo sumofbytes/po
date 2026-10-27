@@ -626,6 +626,10 @@ struct Thread {
     views: command::Views,
     /// The rendered form of each view.
     docs: HashMap<String, Doc>,
+    /// Forms the agent put on screen through Po's MCP server, and the form of each.
+    forms: command::Forms,
+    form_uis: HashMap<String, Entity<ui::form::FormState>>,
+    form_subs: HashMap<String, Subscription>,
     /// The view the viewer shows in place of a file or the changes.
     shown: Option<String>,
     /// A view the agent added while the user was busy, waiting for a click.
@@ -1119,12 +1123,14 @@ impl Thread {
 }
 
 /// One `thread.wait`: who is waiting, on which threads (empty: its children), until a state in
-/// `until` (empty: any change), and where the answer goes.
+/// `until` (empty: any change), and where the answer goes. A `form.wait` instead carries the
+/// form's id and nothing else.
 struct Waiter {
     token: u64,
     caller: command::Caller,
     threads: Vec<u64>,
     until: Vec<&'static str>,
+    form: Option<String>,
     reply: std::sync::mpsc::Sender<command::Reply>,
 }
 
@@ -1472,6 +1478,9 @@ impl Reader {
         let thread = Thread {
             views: Default::default(),
             docs: HashMap::new(),
+            forms: Default::default(),
+            form_uis: HashMap::new(),
+            form_subs: HashMap::new(),
             shown: None,
             offered: None,
             id: 0,
@@ -2410,10 +2419,20 @@ impl Reader {
             })
             .unwrap_or_else(|| Err("that thread is gone".into()))
         } else {
-            let shows = matches!(command, Command::ViewShow { .. });
+            let shows = matches!(command, Command::ViewShow { .. } | Command::FormShow { .. });
             self.with_thread(id, |reader, visible| {
-                let reply = reader.thread.views.apply(command)?;
+                let reply = match &command {
+                    Command::FormShow { id, title, body, fields, submit } => {
+                        // A replaced form is filled in again from scratch, so its widgets go.
+                        if let Some(id) = id {
+                            reader.thread.form_uis.remove(id);
+                        }
+                        reader.thread.forms.show(id.clone(), title.clone(), body.clone(), fields.clone(), submit.clone())?
+                    }
+                    _ => reader.thread.views.apply(command.clone())?,
+                };
                 reader.sync_view_docs(cx);
+                reader.sync_forms(window, cx);
                 if let (true, Some(view)) = (shows, reply["id"].as_str()) {
                     let view = view.to_string();
                     if visible && reader.last_input.elapsed() >= QUIET {
@@ -3004,7 +3023,23 @@ impl Reader {
                     Some("done") | None => vec!["ready", "asking", "approval", "failed", "asleep", "closed"],
                     Some(state) => vec![crate::state::ThreadState::from_name(state).expect("checked").name()],
                 };
-                command::Answer::Later(command::Wait { threads: threads.unwrap_or_default(), until, deadline: wait_deadline })
+                command::Answer::Later(command::Wait { threads: threads.unwrap_or_default(), until, deadline: wait_deadline, form: None })
+            }
+            Command::FormWait { id: form, timeout: _ } => {
+                let waiters_of_caller = self.waiters.iter().filter(|waiter| waiter.caller == caller).count();
+                if waiters_of_caller >= 2 {
+                    return command::Answer::Now(Err("at most 2 waits at a time".into()));
+                }
+                if self.waiters.len() >= MAX_WAITS {
+                    return command::Answer::Now(Err("Po is already holding its share of waits".into()));
+                }
+                // A form the user has answered already answers now; one still open is waited on.
+                let state = self.with_thread(id, |reader, _| reader.thread.forms.get(&form).and_then(|form| form.answered.clone()));
+                match state {
+                    Some(Some(values)) => command::Answer::Now(Ok(values)),
+                    Some(None) => command::Answer::Later(command::Wait { threads: vec![], until: vec![], deadline: wait_deadline, form: Some(form) }),
+                    None => command::Answer::Now(Err(format!("no form `{form}`; show_form returns its id"))),
+                }
             }
             // The reads of threads (list, get, messages…) are answered from the state as it is.
             read => command::Answer::Now(self.run_read(caller, id, read)),
@@ -3016,7 +3051,7 @@ impl Reader {
         let (token, handle) = (self.next_waiter, self.window);
         self.next_waiter += 1;
         let left = wait.deadline.saturating_duration_since(std::time::Instant::now());
-        self.waiters.push(Waiter { token, caller, threads: wait.threads, until: wait.until, reply });
+        self.waiters.push(Waiter { token, caller, threads: wait.threads, until: wait.until, form: wait.form, reply });
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(left).await;
             let _ = handle.update(cx, |_, window, cx| this.update(cx, |reader, cx| reader.time_out(token, window, cx)));
@@ -3076,11 +3111,43 @@ impl Reader {
         let parent = self.threads_all().find(|thread| thread.id == id).and_then(|thread| thread.parent);
         let mut kept = Vec::new();
         for waiter in self.waiters.drain(..) {
+            // A form wait is answered by its user's submit, not by a thread's change of state.
+            if waiter.form.is_some() {
+                kept.push(waiter);
+                continue;
+            }
             let watched = matches!(waiter.caller, command::Caller::User)
                 || matches!(waiter.caller, command::Caller::Thread(caller) if parent == Some(caller));
             let hit = (waiter.threads.contains(&id) || (waiter.threads.is_empty() && watched))
                 && (waiter.until.is_empty() || waiter.until.contains(&after.name()));
             if hit && waiter.reply.send(Ok(serde_json::json!({ "thread": id, "state": after.name(), "timed_out": false }))).is_ok() {
+                continue;
+            }
+            kept.push(waiter);
+        }
+        self.waiters = kept;
+    }
+
+    /// Answers the waits on form `id` of thread `owner`, which the user just submitted.
+    fn wake_form(&mut self, owner: u64, id: &str, reply: Value) {
+        let mut kept = Vec::new();
+        for waiter in self.waiters.drain(..) {
+            let hit = waiter.form.as_deref() == Some(id) && waiter.caller == command::Caller::Thread(owner);
+            if hit && waiter.reply.send(Ok(reply.clone())).is_ok() {
+                continue;
+            }
+            kept.push(waiter);
+        }
+        self.waiters = kept;
+    }
+
+    /// Ends the waits on form `id` of thread `owner`, which was closed without an answer.
+    fn drop_form(&mut self, owner: u64, id: &str) {
+        let mut kept = Vec::new();
+        for waiter in self.waiters.drain(..) {
+            let hit = waiter.form.as_deref() == Some(id) && waiter.caller == command::Caller::Thread(owner);
+            if hit {
+                waiter.reply.send(Err("cancelled: the form was closed".into())).ok();
                 continue;
             }
             kept.push(waiter);
@@ -3262,19 +3329,57 @@ impl Reader {
         }
     }
 
-    /// Renders the thread's views again after they changed, and drops what belongs to views that are gone.
+    /// Renders the thread's views and forms again after they changed, and drops what belongs to
+    /// ones that are gone.
     fn sync_view_docs(&mut self, cx: &mut Context<Self>) {
-        let live: HashSet<String> = self.thread.views.list().iter().map(|view| view.id.clone()).collect();
+        let live: HashSet<String> = self
+            .thread
+            .views
+            .list()
+            .iter()
+            .map(|view| view.id.clone())
+            .chain(self.thread.forms.list().iter().map(|form| form.id.clone()))
+            .collect();
         self.thread.docs.retain(|id, _| live.contains(id));
         for view in self.thread.views.list().to_vec() {
             let chunks = Rc::new(ui::markdown::chunks(&view.body));
             let doc = Self::doc_for(self.thread.docs.remove(&view.id), chunks, cx);
             self.thread.docs.insert(view.id, doc);
         }
+        for form in self.thread.forms.list().to_vec() {
+            let chunks = Rc::new(ui::markdown::chunks(form.body.as_deref().unwrap_or_default()));
+            let doc = Self::doc_for(self.thread.docs.remove(&form.id), chunks, cx);
+            self.thread.docs.insert(form.id, doc);
+        }
         for slot in [&mut self.thread.shown, &mut self.thread.offered] {
             if slot.as_ref().is_some_and(|id| !live.contains(id)) {
                 *slot = None;
             }
+        }
+    }
+
+    /// Creates the form of each form the agent put on screen, and drops those that are gone.
+    fn sync_forms(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let live: HashSet<String> = self.thread.forms.list().iter().map(|form| form.id.clone()).collect();
+        self.thread.form_uis.retain(|id, _| live.contains(id));
+        self.thread.form_subs.retain(|id, _| live.contains(id));
+        for agent in self.thread.forms.list().to_vec() {
+            if self.thread.form_uis.contains_key(&agent.id) {
+                continue;
+            }
+            let fields = agent
+                .fields
+                .iter()
+                .map(|field| ui::form::Field { name: field.name.clone(), label: field.label.clone(), options: field.options.clone(), value: field.value.clone() })
+                .collect();
+            let id = agent.id.clone();
+            let form = cx.new(|cx| ui::form::FormState::new(fields, agent.submit.clone(), window, cx));
+            let events = cx.subscribe_in(&form, window, move |reader, _, event: &ui::form::FormEvent, _, cx| match event {
+                ui::form::FormEvent::Submit(values) => reader.form_submitted(&id, values.clone(), cx),
+                ui::form::FormEvent::Changed => cx.notify(),
+            });
+            self.thread.form_uis.insert(agent.id.clone(), form);
+            self.thread.form_subs.insert(agent.id, events);
         }
     }
 
@@ -4082,6 +4187,9 @@ impl Reader {
             focus: cx.focus_handle(),
             views: Default::default(),
             docs: HashMap::new(),
+            forms: Default::default(),
+            form_uis: HashMap::new(),
+            form_subs: HashMap::new(),
             shown: None,
             offered: None,
         }
@@ -5931,11 +6039,12 @@ impl Reader {
     fn pane(&self, lead: Option<AnyElement>, trail: Option<AnyElement>, cx: &mut Context<Self>) -> AnyElement {
         let tabs = self.view_tabs(cx);
         let has_tabs = tabs.is_some();
+        let shown_form = self.thread.shown.as_deref().and_then(|id| self.thread.forms.get(id));
         let shown = self.thread.shown.as_deref().and_then(|id| {
             let view = self.thread.views.list().iter().find(|view| view.id == id)?;
             Some((view, self.thread.docs.get(id)?))
         });
-        let with_tree = shown.is_none() && self.tree_visible();
+        let with_tree = shown.is_none() && shown_form.is_none() && self.tree_visible();
         // The window's own control goes in the leftmost header: the tree's, or the viewer's.
         // A pane too narrow for the tree beside the file takes turns: the explorer fills it until a
         // file is picked, then the file does, with a button back to the explorer.
@@ -5957,14 +6066,18 @@ impl Reader {
         } else {
             (None, lead)
         };
-        let body = match (shown, self.mode) {
+        let body = match (shown, shown_form, self.mode) {
             _ if explorer_only => {
                 let background = cx.global::<Palette>().background;
                 div().size_full().when(!has_tabs, |d| d.bg(background)).child(self.explorer(tree_lead.take(), trail, cx)).into_any_element()
             }
-            (Some((view, doc)), _) => self.agent_view(&view.title, doc, body_lead, trail, cx).into_any_element(),
-            (None, Mode::Source) => self.viewer(body_lead, trail, cx).into_any_element(),
-            (None, Mode::Diff) => self.diff_viewer(body_lead, trail, cx).into_any_element(),
+            (Some((view, doc)), _, _) => self.agent_view(&view.title, doc, body_lead, trail, cx).into_any_element(),
+            (_, Some(form), _) => {
+                let doc = self.thread.docs.get(&form.id);
+                self.form_view(form, doc, body_lead, trail, cx).into_any_element()
+            }
+            (None, None, Mode::Source) => self.viewer(body_lead, trail, cx).into_any_element(),
+            (None, None, Mode::Diff) => self.diff_viewer(body_lead, trail, cx).into_any_element(),
         };
         let background = cx.global::<Palette>().background;
         let body = if with_tree {
@@ -6004,10 +6117,43 @@ impl Reader {
             .child(div().flex_1().min_h_0().child(self.markdown_view(doc, cx)))
     }
 
+    /// A form the agent put on screen: what it is for, then the form itself, which is the
+    /// standard [`ui::form`] component the rest of the app's inputs and buttons are drawn with.
+    fn form_view(&self, form: &command::AgentForm, doc: Option<&Doc>, lead: Option<AnyElement>, trail: Option<AnyElement>, cx: &mut Context<Self>) -> impl IntoElement + Styled + use<> {
+        let background = cx.global::<Palette>().background;
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .bg(background)
+            .child(pane_header(&form.title, status_text("a form from the agent".into(), cx), lead, trail, cx))
+            .child(
+                div()
+                    .id(SharedString::from(format!("form-body-{}", form.id)))
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .py_4()
+                    .child(
+                        div()
+                            .w(px(640.))
+                            .flex()
+                            .flex_col()
+                            .gap_3()
+                            .px_4()
+                            .children(doc.map(|doc| self.markdown_view(doc, cx)))
+                            .children(self.thread.form_uis.get(&form.id).cloned()),
+                    ),
+            )
+    }
+
     /// Files (or changes) and the agent's views as tabs, with a prompt for one it added while
     /// the user was busy. None while the agent has made no views.
     fn view_tabs(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if self.thread.views.is_empty() {
+        if self.thread.views.is_empty() && self.thread.forms.is_empty() {
             return None;
         }
         let colors = cx.global::<Palette>();
@@ -6026,35 +6172,49 @@ impl Reader {
                     cx.notify();
                 }))
         };
-        let tabs = self.thread.views.list().iter().map(|view| {
-            let (open, close, id) = (this.clone(), this.clone(), view.id.clone());
-            let closing = id.clone();
+        let tab = |id: &str, title: &str| {
+            let (open, close) = (this.clone(), this.clone());
+            let (open_id, closing) = (id.to_string(), id.to_string());
             div()
                 .flex()
                 .items_center()
                 .child(
-                    Button::new(SharedString::from(format!("tab-{}", view.id)))
-                        .label(view.title.clone())
+                    Button::new(SharedString::from(format!("tab-{id}")))
+                        .label(title)
                         .ghost()
                         .small()
-                        .selected(shown == Some(view.id.as_str()))
-                        .on_click(move |_, _, cx| open.update(cx, |reader, cx| reader.show_agent_view(&id, cx))),
+                        .selected(shown == Some(id))
+                        .on_click(move |_, _, cx| open.update(cx, |reader, cx| reader.show_agent_view(&open_id, cx))),
                 )
                 .child(
-                    Button::new(SharedString::from(format!("close-{}", view.id)))
+                    Button::new(SharedString::from(format!("close-{id}")))
                         .icon(IconName::Close)
                         .ghost()
                         .xsmall()
                         .tooltip("Close this view")
                         .on_click(move |_, _, cx| close.update(cx, |reader, cx| reader.close_agent_view(&closing, cx))),
                 )
-        });
+        };
+        let tabs = self
+            .thread
+            .views
+            .list()
+            .iter()
+            .map(|view| tab(&view.id, &view.title))
+            .chain(self.thread.forms.list().iter().map(|form| tab(&form.id, &form.title)));
         let offer = self.thread.offered.as_ref().and_then(|id| {
-            let view = self.thread.views.list().iter().find(|view| view.id == *id)?;
+            let title = self
+                .thread
+                .views
+                .list()
+                .iter()
+                .find(|view| view.id == *id)
+                .map(|view| view.title.clone())
+                .or_else(|| self.thread.forms.list().iter().find(|form| form.id == *id).map(|form| form.title.clone()))?;
             let (this, id) = (this.clone(), id.clone());
             Some(
                 Button::new("offered-view")
-                    .label(format!("The agent wants to show “{}”", view.title))
+                    .label(format!("The agent wants to show “{}”", title))
                     .primary()
                     .small()
                     .on_click(move |_, _, cx| this.update(cx, |reader, cx| reader.show_agent_view(&id, cx))),
@@ -6078,8 +6238,25 @@ impl Reader {
     }
 
     fn close_agent_view(&mut self, id: &str, cx: &mut Context<Self>) {
-        self.thread.views.apply(command::Command::ViewClose { id: id.to_string() }).ok();
+        if self.thread.forms.remove(id) {
+            let owner = self.thread.id;
+            self.thread.form_uis.remove(id);
+            self.thread.form_subs.remove(id);
+            self.drop_form(owner, id);
+        } else {
+            self.thread.views.apply(command::Command::ViewClose { id: id.to_string() }).ok();
+        }
         self.sync_view_docs(cx);
+        cx.notify();
+    }
+
+    /// The user answered form `id`: keep the answers for waits that start later, and wake
+    /// whoever waits on it.
+    fn form_submitted(&mut self, id: &str, values: Value, cx: &mut Context<Self>) {
+        let reply = serde_json::json!({ "form": id, "values": values });
+        let owner = self.thread.id;
+        self.thread.forms.answered(id, reply.clone());
+        self.wake_form(owner, id, reply);
         cx.notify();
     }
 

@@ -9,7 +9,9 @@ use crate::command::{Command, Grant, Relation, Scope};
 const BASE: &str = "You are running inside Po, a desktop app that shows the user your \
 conversation next to a viewer of the project's files and changes. Use these tools to put in front \
 of the user what you are talking about: open the file or diff you refer to, or show a plan or \
-summary as a markdown view. The user decides what they look at: while they are typing or \
+summary as a markdown view. show_form goes further: a form of your own fields and choices the \
+user fills in, whose answers form_wait brings you — the form stays until they answer or close \
+it, so wait again after a timeout. The user decides what they look at: while they are typing or \
 scrolling, a move of the viewer waits for a pause (the reply says `deferred`) and a new view is \
 offered rather than shown. Don't fight that by asking again.";
 
@@ -122,6 +124,55 @@ fn tools() -> Vec<(&'static str, &'static str, &'static str, Value, Scope)> {
             "viewer.close",
             "Close Po's viewer, so the conversation has the window to itself.",
             json!({ "type": "object", "properties": {} }),
+            Scope::Viewer,
+        ),
+        (
+            "show_form",
+            "form.show",
+            "Put a form in front of the user in Po's viewer: text fields and choices you \
+             define, with a submit button. They answer at their pace; form_wait brings you \
+             their answers. Giving the `id` of one of your forms replaces it.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "title": string("A short title for the tab."),
+                    "body": string("What the form is for, in markdown, shown above the fields."),
+                    "fields": {
+                        "type": "array",
+                        "description": "The fields, in order. A text field is `{ \"name\", \"label\", \"kind\": \"text\", \"value\" }`; a choice adds `\"options\": [\"a\", \"b\"]`, and `value` is one of them picked to begin with.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": string("The field's name, as the answers come back keyed by it."),
+                                "label": string("What the user sees; the name, when left out."),
+                                "kind": { "type": "string", "description": "`text` by default, or `choice`." },
+                                "options": { "type": "array", "items": { "type": "string" }, "description": "A choice's options, in order." },
+                                "value": string("The initial text, or the choice picked to begin with."),
+                            },
+                            "required": ["name"],
+                        },
+                    },
+                    "submit": string("The submit button's label; `Submit` by default."),
+                    "id": string("The form to replace; leave out to add a new one."),
+                },
+                "required": ["title"],
+            }),
+            Scope::Viewer,
+        ),
+        (
+            "form_wait",
+            "form.wait",
+            "Wait for the user to submit one of your forms, at most 50 s; the reply carries \
+             their answers, keyed by each field's name. On a timeout, wait again — the form \
+             stays until they answer or close it.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "id": string("The form, as show_form returned it."),
+                    "timeout": { "type": "integer", "description": "Give up after this many seconds; at most 50." },
+                },
+                "required": ["id"],
+            }),
             Scope::Viewer,
         ),
         (
@@ -398,6 +449,12 @@ fn parse_command(command: &str) -> Option<Command> {
         }
         "view.close" => {
             request["id"] = json!("v");
+        }
+        "form.show" => {
+            request["title"] = json!("");
+        }
+        "form.wait" => {
+            request["id"] = json!("f");
         }
         "file.open" => {
             request["path"] = json!("a");
