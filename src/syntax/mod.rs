@@ -66,14 +66,6 @@ impl CodeColors {
     }
 }
 
-#[cfg(test)]
-impl CodeColors {
-    /// How many capture names the code uses, so tests can build a palette without a theme.
-    pub fn palette_len(&self) -> usize {
-        self.names.len()
-    }
-}
-
 /// Whether text in `language` (a name or file extension) gets colors, for tests outside.
 #[cfg(test)]
 pub fn highlights(text: &str, language: &str) -> bool {

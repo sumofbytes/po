@@ -1218,7 +1218,10 @@ struct Reader {
     next_thread: u64,
     /// The directory `po` was started in: where PRs are checked out from and where Close returns to.
     home: PathBuf,
-    pr_input: Entity<InputState>,
+    /// The strips above the file tree (a PR review's field, a worktree's finish line), drawn by
+    /// NSH, and what keeps it in Po's theme.
+    strip: Entity<nsh_platform_gpui::AppView>,
+    _strip_theme: Subscription,
     /// The sidebar's filter: threads and projects that don't match it are left out of its lists.
     /// What the sidebar's filter holds.
     side_query: String,
@@ -1245,6 +1248,9 @@ struct Reader {
     /// Progress or failure of the last attempt to open a PR.
     pr_status: Option<String>,
     opening: bool,
+    /// The number of times the strip's PR field was emptied: the screen empties its field on
+    /// seeing a new one.
+    pr_serial: u64,
     /// The last thing that happened to a worktree (made, merged, closed), or why it failed.
     worktree_status: Option<String>,
     /// A merge or discard is running; asking for either again waits.
@@ -1330,13 +1336,11 @@ impl Reader {
         };
         trace::mark("walk");
         syntax::prewarm(common_syntaxes(&files));
-        let pr_input = cx.new(|cx| {
-            InputState::new(window, cx).auto_grow(1, 1).submit_on_enter(true).placeholder("PR number or URL")
-        });
         let (diff_pane, diff_theme) = nsh::mount(nsh_platform_gpui::Root::of::<nsh::diff::Diff>(), window, cx);
         let (agent_pane, agent_pane_theme) = nsh::mount(nsh_platform_gpui::Root::of::<nsh::agent::Agent>(), window, cx);
         let (source, source_theme) = nsh::mount(nsh_platform_gpui::Root::of::<nsh::source::Source>(), window, cx);
         let (sidebar, sidebar_theme) = nsh::mount(nsh_platform_gpui::Root::of::<nsh::sidebar::Sidebar>(), window, cx);
+        let (strip, strip_theme) = nsh::mount(nsh_platform_gpui::Root::of::<nsh::strip::Strips>(), window, cx);
         let finder_window = cx.new(|cx| nsh::overlay::Overlay::new(560., 8., || nsh_platform_gpui::Root::of::<nsh::finder::Finder>(), &nsh::finder::HEIGHT, cx));
         let settings_window = cx.new(|cx| nsh::overlay::Overlay::new(680., 24., || nsh_platform_gpui::Root::of::<nsh::settings::Settings>(), &nsh::settings::HEIGHT, cx));
         let todos = cx.new(|cx| nsh::overlay::Overlay::new(600., 24., || nsh_platform_gpui::Root::of::<nsh::todos::Todos>(), &nsh::todos::HEIGHT, cx));
@@ -1366,11 +1370,6 @@ impl Reader {
             }),
             cx.subscribe_in(&todos, window, |reader, _, event: &nsh::overlay::OverlayEvent, window, cx| match event {
                 nsh::overlay::OverlayEvent::Close => reader.hide_todos(window, cx),
-            }),
-            cx.subscribe_in(&pr_input, window, |reader, _, event: &InputEvent, window, cx| {
-                if matches!(event, InputEvent::PressEnter { shift: false, alt: false }) {
-                    reader.open_pr(window, cx);
-                }
             }),
         ];
         let enter = Self::send_on_enter(&draft, window, cx);
@@ -1456,7 +1455,8 @@ impl Reader {
             parked: vec![],
             next_thread: 1,
             home,
-            pr_input,
+            strip,
+            _strip_theme: strip_theme,
             side_query: String::new(),
             source,
             _source_theme: source_theme,
@@ -1480,6 +1480,7 @@ impl Reader {
             finder_query: String::new(),
             finder_matches: Vec::new(),
             finder_open: false,
+            pr_serial: 0,
             settings: settings_window,
             settings_open: false,
             painted: false,
@@ -1841,9 +1842,10 @@ impl Reader {
         cx.notify();
     }
 
-    /// Starts checking out the PR typed into the strip; the window switches to it when that finishes.
-    fn open_pr(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let spec = self.pr_input.read(cx).value().trim().to_string();
+    /// Starts checking out the PR `spec` the strip asked for; the window switches to it when
+    /// that finishes.
+    fn open_pr(&mut self, spec: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let spec = spec.trim().to_string();
         if spec.is_empty() || self.opening {
             return;
         }
@@ -1862,7 +1864,8 @@ impl Reader {
                         match result {
                             Ok(pr) => {
                                 reader.pr_status = None;
-                                reader.pr_input.update(cx, |input, cx| input.set_value("", window, cx));
+                                // The strip's field clears itself on seeing a bumped serial.
+                                reader.pr_serial += 1;
                                 let root = pr.worktree.clone();
                                 reader.add_project(root, Some(pr), window, cx);
                             }
@@ -5123,124 +5126,6 @@ impl Reader {
             cx.notify();
         }
     }
-
-    /// The strip under the explorer header in Changes mode: an input to open a PR for
-    /// review, or the open PR's summary with a way out.
-    fn pr_strip(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let colors = cx.global::<Palette>();
-        let (border, muted, danger) = (colors.border, colors.muted_foreground, colors.danger);
-        let this = cx.entity();
-        let body: AnyElement = match &self.project.pr {
-            Some(pr) => div()
-                .flex()
-                .items_center()
-                .gap_2()
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .truncate()
-                        .text_xs()
-                        .text_color(muted)
-                        .child(format!("PR #{} · {} files", pr.number, self.project.changes.len())),
-                )
-                .child(
-                    Button::new("pr-close")
-                        .label("Close")
-                        .ghost()
-                        .small()
-                        .on_click(move |_, window, cx| this.update(cx, |reader, cx| reader.close_pr(window, cx))),
-                )
-                .into_any_element(),
-            None => {
-                let open = Button::new("pr-open")
-                    .label(if self.opening { "…" } else { "Open" })
-                    .small()
-                    .outline()
-                    .on_click(move |_, window, cx| this.update(cx, |reader, cx| reader.open_pr(window, cx)));
-                let status = self.pr_status.as_ref().map(|text| {
-                    let failed = !self.opening;
-                    div()
-                        .text_xs()
-                        .text_color(if failed { danger } else { muted })
-                        .max_h(rems(5.))
-                        .overflow_hidden()
-                        .child(text.clone())
-                });
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .child(Input::new(&self.pr_input)),
-                            )
-                            .child(open),
-                    )
-                    .children(status)
-                    .into_any_element()
-            }
-        };
-        div().flex_none().px_3().py_2().border_b_1().border_color(border).child(body)
-    }
-
-    /// For a worktree project: its branch, and the ways to finish it.
-    fn worktree_strip(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
-        let wt = self.project.worktree.as_ref()?;
-        let colors = cx.global::<Palette>();
-        let (border, muted) = (colors.border, colors.muted_foreground);
-        let (merge, discard) = (cx.entity(), cx.entity());
-        let busy = self.finishing;
-        Some(
-            div()
-                .flex_none()
-                .flex()
-                .flex_col()
-                .gap_1()
-                .px_3()
-                .py_2()
-                .border_b_1()
-                .border_color(border)
-                .child(div().truncate().text_xs().text_color(muted).child(format!("⎇ {}", wt.spec.branch)))
-                .child(
-                    div()
-                        .flex()
-                        .gap_2()
-                        .child(
-                            Button::new("worktree-merge")
-                                .label("Merge")
-                                .tooltip("Commit this branch's work and merge it into the checkout it came from")
-                                .small()
-                                .outline()
-                                .on_click(move |_, window, cx| {
-                                    if !busy {
-                                        merge.update(cx, |reader, cx| reader.finish_worktree(true, window, cx))
-                                    }
-                                }),
-                        )
-                        .child(
-                            Button::new("worktree-discard")
-                                .label(if self.confirm_discard { "Discard everything?" } else { "Discard" })
-                                .tooltip("Delete this branch and everything done in it")
-                                .small()
-                                .ghost()
-                                .on_click(move |_, window, cx| {
-                                    if !busy {
-                                        discard.update(cx, |reader, cx| reader.finish_worktree(false, window, cx))
-                                    }
-                                }),
-                        ),
-                ),
-        )
-    }
-
     /// The file tree beside the viewer: every file, or the changed ones in Changes mode, under a
     /// header with the mode switch. `lead` is the window's own control, when this is the
     /// leftmost pane.
@@ -5369,8 +5254,17 @@ impl Reader {
                 div().flex().items_center().gap_2().child(modes).children(trail),
                 cx,
             ))
-            .children(self.worktree_strip(cx))
-            .children((mode == Mode::Diff).then(|| self.pr_strip(cx)))
+            .children((mode == Mode::Diff || self.project.worktree.is_some()).then(|| {
+                nsh::strip::publish(nsh::strip::Snapshot {
+                    worktree: self.project.worktree.as_ref().map(|wt| nsh::strip::Worktree {
+                        branch: wt.spec.branch.clone(),
+                        confirm_discard: self.confirm_discard,
+                    }),
+                    pr: self.project.pr.as_ref().map(|pr| nsh::strip::Pr::Opened { label: format!("PR #{} · {} files", pr.number, self.project.changes.len()) }).or_else(|| (mode == Mode::Diff).then(|| nsh::strip::Pr::Asking { status: self.pr_status.clone(), opening: self.opening })),
+                    pr_reset: self.pr_serial,
+                });
+                self.strip.clone()
+            }))
             .child(div().flex_1().min_h_0().p_1().child(body))
             .into_any_element()
     }
@@ -5551,6 +5445,10 @@ impl Reader {
             Cmd::SettingsSaved => self.apply_settings(cx),
             Cmd::Answer(id, yes) => self.answer_suggestion(id, yes, window, cx),
             Cmd::SubmitForm(id, values) => self.form_submitted(&id, values, cx),
+            Cmd::OpenPr(spec) => self.open_pr(&spec, window, cx),
+            Cmd::ClosePr => self.close_pr(window, cx),
+            Cmd::MergeWorktree => self.finish_worktree(true, window, cx),
+            Cmd::DiscardWorktree => self.finish_worktree(false, window, cx),
         }
     }
 

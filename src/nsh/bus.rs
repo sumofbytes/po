@@ -46,6 +46,13 @@ pub enum Cmd {
     Answer(u64, bool),
     /// A form the agent put on screen, answered by the user.
     SubmitForm(String, serde_json::Value),
+    /// A PR to open for review, from the strip's field.
+    OpenPr(String),
+    /// The PR review on screen is closed.
+    ClosePr,
+    /// The worktree on screen is merged, or discarded with its branch.
+    MergeWorktree,
+    DiscardWorktree,
 }
 
 /// The sending end, and the receiving end until the one listener takes it.

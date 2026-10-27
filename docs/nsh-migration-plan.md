@@ -39,10 +39,15 @@ Look at `src/nsh/diff.rs` or `src/nsh/source.rs` as the template.
    (used by `ui/markdown.rs`), `viewer::prewarm`, `viewer::init`, `viewer::highlights` (a test). Cut it down to
    those, then move them somewhere small. Also unused: `ui::button::Button::text`, `ui::input::Input::{field,suffix}`,
    `Palette::editor_*`, `diff::Row.old/new`. Follow the build warnings to find the rest.
-2. **Agent / form panes.** `agent_view` and `form_view` (`main.rs` ~5740-5895) are small and use `pane_header`.
-   Move them next to the diff and source panes so `pane_header`, `status_text`, `centered` and `header_row` in
-   `main.rs` lose callers.
-3. **Strips.** `pr_strip`, `worktree_strip` (~5215-5300): small, self-contained.
+3. ~~**Strips.**~~ Done. `src/nsh/strip.rs` publishes the two strips under the explorer header:
+   what a PR-reviewed project shows (`Pr::Opened`, or `Pr::Asking` with the field's last
+   attempt's outcome) and what a worktree's shows (its branch, whether Discard waits for a
+   second click). A project with neither strip leaves the screen empty. The PR spec the user
+   goes back as `Cmd::OpenPr` (trimmed; empty is not sent), and the field empties itself when
+   the snapshot's `pr_reset` changes, which is what an opened PR does. `Cmd::ClosePr`,
+   `MergeWorktree` and `DiscardWorktree` go where they did before. Gone with this step:
+   `pr_strip`/`worktree_strip`, the `pr_input` field with its enter subscription, and
+   `ui::button`'s outline variant with the `outline` style it took from `Buttons`.
 4. **Thread panel (the big one).** `agent_panel` (~6198-6630) plus `tool_run`, `thought`, `session_picker`,
    `plan`, `permission`, `approval` (~6629-6950), and the composer built on `ui::input`. Split it:
    a. read-only transcript (messages, tool runs, thoughts, plan),

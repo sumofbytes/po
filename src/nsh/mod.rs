@@ -10,6 +10,7 @@ pub mod overlay;
 pub mod settings;
 pub mod source;
 pub mod sidebar;
+pub mod strip;
 pub mod todos;
 
 use base64::Engine as _;

@@ -15,7 +15,6 @@ use crate::theme::{ButtonStyle, Palette, tokens::RADIUS_FULL};
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Variant {
     Default,
-    Outline,
     Ghost,
     Primary,
 }
@@ -75,11 +74,6 @@ impl Button {
         self
     }
 
-    pub fn outline(mut self) -> Self {
-        self.variant = Variant::Outline;
-        self
-    }
-
     pub fn primary(mut self) -> Self {
         self.variant = Variant::Primary;
         self
@@ -126,7 +120,6 @@ impl Button {
 fn style(palette: &Palette, variant: Variant) -> ButtonStyle {
     match variant {
         Variant::Default => palette.buttons.default,
-        Variant::Outline => palette.buttons.outline,
         Variant::Ghost => palette.buttons.ghost,
         Variant::Primary => palette.buttons.primary,
     }
@@ -145,7 +138,7 @@ impl RenderOnce for Button {
         };
         let radius = self.rounded.unwrap_or(palette.radius);
         let icon_only = self.label.is_none();
-        let bordered = matches!(self.variant, Variant::Default | Variant::Outline);
+        let bordered = matches!(self.variant, Variant::Default);
         let icon_size = match self.size {
             Size::XSmall => IconSize::XSmall,
             Size::Small => IconSize::Small,

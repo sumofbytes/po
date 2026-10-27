@@ -102,8 +102,6 @@ pub struct ButtonStyle {
 pub struct Buttons {
     /// Filled, as the kit's default button.
     pub default: ButtonStyle,
-    /// The default button outlined.
-    pub outline: ButtonStyle,
     pub ghost: ButtonStyle,
     pub primary: ButtonStyle,
 }
@@ -118,14 +116,6 @@ impl Buttons {
             hover: col(c.button_hover, c.input, c.button_foreground),
             active: col(c.button_active, c.input, c.button_foreground),
             selected: col(c.button_active, c.input, c.button_foreground),
-            disabled: col(c.input_background.opacity(0.5), c.input.opacity(0.5), disabled_fg),
-        };
-        let outline_active = mix_oklab(c.input, t, 0.7);
-        let outline = ButtonStyle {
-            normal: col(c.input_background, c.input, c.button_foreground),
-            hover: col(mix_oklab(c.input, t, 0.5), c.input, c.button_foreground),
-            active: col(outline_active, c.input, c.button_foreground),
-            selected: col(outline_active, c.input, c.button_foreground),
             disabled: col(c.input_background.opacity(0.5), c.input.opacity(0.5), disabled_fg),
         };
         let ghost_hover = if c.dark { c.accent.opacity(0.5) } else { c.accent };
@@ -143,7 +133,7 @@ impl Buttons {
             selected: col(c.button_primary_active, c.primary, c.button_primary_foreground),
             disabled: col(c.button_primary.opacity(0.15), c.button_primary.opacity(0.15), disabled_fg),
         };
-        Self { default, outline, ghost, primary }
+        Self { default, ghost, primary }
     }
 }
 
