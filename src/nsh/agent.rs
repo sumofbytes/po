@@ -156,6 +156,8 @@ pub fn Agent() -> impl IntoElement {
     let drafts = signal(Vec::<String>::new());
     spawn(async move {
         let mut snapshot = SNAPSHOT.subscribe();
+        // What was published before this ran would otherwise never arrive.
+        snapshot.mark_changed();
         // The form the drafts were seeded from last, by id and fields.
         let mut seeded: Option<(String, Vec<Field>)> = None;
         while snapshot.changed().await.is_ok() {

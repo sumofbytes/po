@@ -59,6 +59,8 @@ pub fn Finder() -> impl IntoElement {
     let selected = signal(0_usize);
     spawn(async move {
         let mut snapshot = SNAPSHOT.subscribe();
+        // What was published before this ran would otherwise never arrive.
+        snapshot.mark_changed();
         while snapshot.changed().await.is_ok() {
             let now = snapshot.borrow_and_update().clone();
             // A refreshed walk keeps the pick where it was, as far as there are files.

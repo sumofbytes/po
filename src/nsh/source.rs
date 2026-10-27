@@ -76,6 +76,8 @@ pub fn Source() -> impl IntoElement {
     let state = signal(SNAPSHOT.borrow().clone());
     spawn(async move {
         let mut snapshot = SNAPSHOT.subscribe();
+        // What was published before this ran would otherwise never arrive.
+        snapshot.mark_changed();
         while snapshot.changed().await.is_ok() {
             let now = snapshot.borrow_and_update().clone();
             state.set(now);
