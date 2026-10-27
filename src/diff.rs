@@ -18,11 +18,9 @@ pub enum Kind {
     Removed,
 }
 
-/// One line of a unified diff, with its line numbers on each side.
+/// One line of a unified diff.
 pub struct Row {
     pub kind: Kind,
-    pub old: Option<u32>,
-    pub new: Option<u32>,
     pub text: String,
 }
 
@@ -108,22 +106,17 @@ pub fn versions(root: &Path, base: &str, change: &Change) -> (Option<String>, Op
 
 fn parse(text: &str) -> Vec<Row> {
     let mut rows = Vec::new();
-    let (mut old, mut new) = (0, 0);
     let mut inside = false;
     for line in text.lines() {
         if rows.len() >= MAX_ROWS {
             break;
         }
-        if let Some(header) = line.strip_prefix("@@ ") {
-            let mut numbers = header.split(' ').take(2).map(|side| {
-                side.trim_start_matches(['-', '+']).split(',').next().and_then(|n| n.parse::<u32>().ok())
-            });
-            (old, new) = (numbers.next().flatten().unwrap_or(1), numbers.next().flatten().unwrap_or(1));
-            inside = true;
-            rows.push(Row { kind: Kind::Hunk, old: None, new: None, text: line.to_string() });
-            continue;
+        let inside_now = line.strip_prefix("@@ ").is_some();
+        if inside_now {
+            rows.push(Row { kind: Kind::Hunk, text: line.to_string() });
         }
-        if !inside {
+        inside = inside || inside_now;
+        if !inside || inside_now {
             continue;
         }
         let (kind, text) = match line.chars().next() {
@@ -132,18 +125,7 @@ fn parse(text: &str) -> Vec<Row> {
             Some(' ') => (Kind::Context, &line[1..]),
             _ => continue, // "\ No newline at end of file"
         };
-        let row = match kind {
-            Kind::Added => Row { kind, old: None, new: Some(new), text: text.into() },
-            Kind::Removed => Row { kind, old: Some(old), new: None, text: text.into() },
-            _ => Row { kind, old: Some(old), new: Some(new), text: text.into() },
-        };
-        if kind != Kind::Added {
-            old += 1;
-        }
-        if kind != Kind::Removed {
-            new += 1;
-        }
-        rows.push(row);
+        rows.push(Row { kind, text: text.into() });
     }
     rows
 }

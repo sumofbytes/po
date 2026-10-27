@@ -21,7 +21,7 @@ mod todo;
 mod trace;
 mod ui;
 mod update;
-mod viewer;
+mod syntax;
 mod workspace;
 mod worktree;
 
@@ -1339,7 +1339,7 @@ impl Reader {
             }
         };
         trace::mark("walk");
-        viewer::prewarm(common_syntaxes(&files));
+        syntax::prewarm(common_syntaxes(&files));
         let pr_input = cx.new(|cx| {
             InputState::new(window, cx).auto_grow(1, 1).submit_on_enter(true).placeholder("PR number or URL")
         });
@@ -7314,7 +7314,6 @@ fn main() {
     let prefetch = Prefetch::start(pr.as_ref().map_or_else(|| root.clone(), |pr| pr.worktree.clone()));
     gpui_platform::application().run(move |cx: &mut App| {
         trace::mark("app running");
-        viewer::init(cx);
         ui::init(cx);
         cx.bind_keys([
             KeyBinding::new("ctrl-o", ToggleTools, None),
@@ -7541,11 +7540,11 @@ mod tests {
     fn elixir_files_highlight() {
         assert_eq!(language("lib/app.ex"), "Elixir");
         assert_eq!(language("lib/app.exs"), "Elixir");
-        // `.ex` resolves through the viewer's alias table, `.exs` through `syntax`.
+        // `.ex` resolves through the highlighter's alias table, `.exs` through `syntax`.
         assert_eq!(syntax("lib/app.ex"), "ex");
         assert_eq!(syntax("mix.exs"), "elixir");
-        assert!(super::viewer::highlights("defmodule A do\nend\n", "ex"));
-        assert!(super::viewer::highlights("defmodule A do\nend\n", &syntax("mix.exs")));
+        assert!(super::syntax::highlights("defmodule A do\nend\n", "ex"));
+        assert!(super::syntax::highlights("defmodule A do\nend\n", &syntax("mix.exs")));
     }
 
     fn option(name: &str, kind: &str) -> PermissionOption {

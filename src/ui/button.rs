@@ -18,8 +18,6 @@ pub enum Variant {
     Outline,
     Ghost,
     Primary,
-    /// Just the icon or label, with no padding: the kit's text variant.
-    Text,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -108,11 +106,6 @@ impl Button {
         self
     }
 
-    pub fn text(mut self) -> Self {
-        self.variant = Variant::Text;
-        self
-    }
-
     /// A chevron after the label, for a button that opens a menu.
     pub fn dropdown_caret(mut self, caret: bool) -> Self {
         self.caret = caret;
@@ -142,7 +135,6 @@ fn style(palette: &Palette, variant: Variant) -> ButtonStyle {
         Variant::Outline => palette.buttons.outline,
         Variant::Ghost => palette.buttons.ghost,
         Variant::Primary => palette.buttons.primary,
-        Variant::Text => palette.buttons.text,
     }
 }
 
@@ -195,7 +187,7 @@ impl RenderOnce for Button {
             .items_center()
             .justify_center()
             .cursor_default()
-            .when(self.variant != Variant::Text, |this| match (icon_only, self.size) {
+            .when(true, |this| match (icon_only, self.size) {
                 (true, Size::XSmall) => this.size_5(),
                 (true, Size::Small) => this.size_6(),
                 (false, Size::XSmall) => this.h_5().px_1(),

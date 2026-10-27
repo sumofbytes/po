@@ -11,7 +11,7 @@ use std::ops::Range;
 use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 
 use streaming_iterator::StreamingIterator;
-use tree_sitter::{InputEdit, Parser, Point, Query, QueryCursor, Tree};
+use tree_sitter::{Parser, Query, QueryCursor, Tree};
 
 /// Separate parses for injections that aren't combined, such as fenced code blocks; the kit's
 /// limit.
@@ -82,12 +82,8 @@ pub fn prewarm<'a>(languages: impl IntoIterator<Item = &'a str>) {
 #[derive(Default)]
 pub struct Highlights {
     pub names: Vec<String>,
-    /// Line ranges that can fold, by first line, with their last line.
-    pub folds: Vec<(usize, usize)>,
     starts: Vec<u32>,
     ids: Vec<u16>,
-    /// The parse, kept so the next version of the text reparses only what changed.
-    tree: Option<Tree>,
 }
 
 impl Highlights {
@@ -147,28 +143,17 @@ impl Canvas<'_> {
             starts.push(0);
             ids.push(0);
         }
-        Highlights { names: self.names, folds: Vec::new(), starts, ids, tree: None }
+        Highlights { names: self.names, starts, ids }
     }
 }
 
 /// Highlights `text` as `language` (a name or file extension the kit's registry knows), or
 /// `None` when there is no grammar for it.
 pub fn highlight(text: &str, language: &str) -> Option<Highlights> {
-    rehighlight(text, language, None)
-}
-
-/// Like [`highlight`], reusing `old`, the highlights of `old_text`, so only the parts of the
-/// tree the edit touched are parsed again.
-pub fn rehighlight(text: &str, language: &str, old: Option<(&str, &Highlights)>) -> Option<Highlights> {
     let grammar = grammar(language)?;
     let mut parser = Parser::new();
     parser.set_language(&grammar.language).ok()?;
-    let old_tree = old.and_then(|(old_text, old)| {
-        let mut tree = old.tree.clone()?;
-        tree.edit(&edit(old_text, text));
-        Some(tree)
-    });
-    let tree = parser.parse(text, old_tree.as_ref())?;
+    let tree = parser.parse(text, None)?;
 
     let mut canvas = Canvas { text, ids: vec![0; text.len()], names: Vec::new(), by_name: HashMap::new() };
     let query = &grammar.query;
@@ -192,68 +177,9 @@ pub fn rehighlight(text: &str, language: &str, old: Option<(&str, &Highlights)>)
             }
         }
     }
-    let mut highlights = canvas.finish();
-    highlights.folds = folds(&tree);
-    highlights.tree = Some(tree);
+    let highlights = canvas.finish();
     Some(highlights)
 }
-
-/// The one edit that turns `old` into `new`: everything between their common start and end.
-fn edit(old: &str, new: &str) -> InputEdit {
-    let mut start = old.bytes().zip(new.bytes()).take_while(|(a, b)| a == b).count();
-    while !old.is_char_boundary(start) || !new.is_char_boundary(start) {
-        start -= 1;
-    }
-    let room = old.len().min(new.len()) - start;
-    let suffix = old.bytes().rev().zip(new.bytes().rev()).take(room).take_while(|(a, b)| a == b).count();
-    let (mut old_end, mut new_end) = (old.len() - suffix, new.len() - suffix);
-    while !old.is_char_boundary(old_end) || !new.is_char_boundary(new_end) {
-        old_end += 1;
-        new_end += 1;
-    }
-    InputEdit {
-        start_byte: start,
-        old_end_byte: old_end,
-        new_end_byte: new_end,
-        start_position: point(old, start),
-        old_end_position: point(old, old_end),
-        new_end_position: point(new, new_end),
-    }
-}
-
-/// The row and byte column of `byte` in `text`.
-fn point(text: &str, byte: usize) -> Point {
-    let before = &text.as_bytes()[..byte];
-    let row = before.iter().filter(|&&b| b == b'\n').count();
-    let column = byte - before.iter().rposition(|&b| b == b'\n').map_or(0, |ix| ix + 1);
-    Point { row, column }
-}
-
-/// What can fold, as the kit decides: every named node spanning three or more lines, keeping
-/// the outermost where several start on one line.
-fn folds(tree: &Tree) -> Vec<(usize, usize)> {
-    fn collect(node: tree_sitter::Node, out: &mut Vec<(usize, usize)>) {
-        let (start, end) = (node.start_position().row, node.end_position().row);
-        if end.saturating_sub(start) < 2 {
-            return;
-        }
-        out.push((start, end));
-        let mut cursor = node.walk();
-        for child in node.named_children(&mut cursor) {
-            collect(child, out);
-        }
-    }
-    let mut out = Vec::new();
-    let root = tree.root_node();
-    let mut cursor = root.walk();
-    for child in root.named_children(&mut cursor) {
-        collect(child, &mut out);
-    }
-    out.sort_by_key(|&(start, _)| start);
-    out.dedup_by_key(|&mut (start, _)| start);
-    out
-}
-
 /// Within an injected language the first capture wins unless a pattern allows overlap.
 fn paint_layer(canvas: &mut Canvas, query: &Query, tree: &Tree) {
     let text = canvas.text;
@@ -359,31 +285,6 @@ mod tests {
         let text = "let x = 1;";
         let h = highlight(text, "js").unwrap();
         assert_eq!(h.runs(2..9).map(|(len, _)| len).sum::<usize>(), 7);
-    }
-
-    #[test]
-    fn blocks_of_three_or_more_lines_fold() {
-        let text = "fn a() {\n    if x {\n        y();\n    }\n}\nfn b() {}\n";
-        let h = highlight(text, "rs").unwrap();
-        assert_eq!(h.folds, [(0, 4), (1, 3)]);
-    }
-
-    #[test]
-    fn reparsing_an_edit_matches_a_fresh_parse() {
-        let old = "fn a() {\n    let x = 1;\n}\n";
-        let new = "fn a() {\n    let x = \"ü\";\n    if x {\n        y();\n    }\n}\n";
-        let fresh = highlight(new, "rs").unwrap();
-        let reused = super::rehighlight(new, "rs", Some((old, &highlight(old, "rs").unwrap()))).unwrap();
-        assert_eq!((&reused.names, &reused.starts, &reused.ids, &reused.folds), (&fresh.names, &fresh.starts, &fresh.ids, &fresh.folds));
-    }
-
-    #[test]
-    fn edits_cover_only_what_changed() {
-        let edit = super::edit("ab\ncd\nef", "ab\ncXd\nef");
-        assert_eq!((edit.start_byte, edit.old_end_byte, edit.new_end_byte), (4, 4, 5));
-        assert_eq!((edit.start_position.row, edit.start_position.column), (1, 1));
-        let edit = super::edit("aüb", "aöb");
-        assert_eq!((edit.start_byte, edit.old_end_byte, edit.new_end_byte), (1, 3, 3));
     }
 
     #[test]

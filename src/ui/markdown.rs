@@ -201,7 +201,7 @@ struct Parsed {
 }
 
 /// Code block colors by [`code_key`]; `None` for a language without a grammar.
-type CodeColorMap = HashMap<u64, Option<Rc<crate::viewer::CodeColors>>>;
+type CodeColorMap = HashMap<u64, Option<Rc<crate::syntax::CodeColors>>>;
 
 fn code_key(language: &str, code: &str) -> u64 {
     use std::hash::{Hash, Hasher};
@@ -506,7 +506,7 @@ fn render(id: ElementId, source: &str, selection: &Entity<Selection>, italic: bo
             each_code(&blocks, &mut |language, code| {
                 let key = code_key(language, code);
                 let reused = old.as_ref().and_then(|old| old.get(&key).cloned());
-                colors.entry(key).or_insert_with(|| reused.unwrap_or_else(|| crate::viewer::CodeColors::new(code, language).map(Rc::new)));
+                colors.entry(key).or_insert_with(|| reused.unwrap_or_else(|| crate::syntax::CodeColors::new(code, language).map(Rc::new)));
             });
             let colors = Rc::new(colors);
             s.parsed.insert(id.clone(), Parsed { source: source.to_string(), blocks: blocks.clone(), colors: colors.clone() });

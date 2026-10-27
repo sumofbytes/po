@@ -5,7 +5,7 @@ use std::ops::Range;
 use std::time::Duration;
 
 use gpui::{
-    AnyElement, App, Bounds, ClipboardItem, Context, Element, ElementId, ElementInputHandler, Entity,
+    App, Bounds, ClipboardItem, Context, Element, ElementId, ElementInputHandler, Entity,
     EntityInputHandler, EventEmitter, FocusHandle, GlobalElementId, Hitbox, HitboxBehavior, InspectorElementId,
     InteractiveElement as _, IntoElement, KeyBinding, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent,
     MouseUpEvent, ParentElement as _, Pixels, Point, RenderOnce, SharedString, Style, Styled as _, Subscription,
@@ -886,28 +886,19 @@ impl Element for TextElement {
     }
 }
 
-#[derive(Clone, Copy, PartialEq)]
-enum Look {
-    /// Just the text, as `Textarea::appearance(false)`.
-    Plain,
-    /// A small bordered field.
-    Field,
-}
 
-/// Draws an [`InputState`]: plain for the textareas, or as a small bordered field with an
-/// optional element after the text.
+/// Draws an [`InputState`]: plain for the textareas, text at body size where people write at
+/// length.
 #[derive(IntoElement)]
 pub struct Input {
     state: Entity<InputState>,
-    look: Look,
-    suffix: Option<AnyElement>,
     /// Text at the size of body text rather than the small size fields use.
     large: bool,
 }
 
 impl Input {
     pub fn new(state: &Entity<InputState>) -> Self {
-        Self { state: state.clone(), look: Look::Plain, suffix: None, large: false }
+        Self { state: state.clone(), large: false }
     }
 
     /// Text at the size of the surrounding body text, for an input people write in at length.
@@ -915,22 +906,10 @@ impl Input {
         self.large = true;
         self
     }
-
-    /// The kit's small input: background, border and radius.
-    pub fn field(mut self) -> Self {
-        self.look = Look::Field;
-        self
-    }
-
-    pub fn suffix(mut self, suffix: impl IntoElement) -> Self {
-        self.suffix = Some(suffix.into_any_element());
-        self
-    }
 }
 
 impl RenderOnce for Input {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let palette = cx.global::<Palette>();
         let focus = self.state.read(cx).focus.clone();
         let s = &self.state;
         div()
@@ -941,9 +920,6 @@ impl RenderOnce for Input {
             .w_full()
             .items_center()
             .map(|this| if self.large { this.line_height(rems(1.5)).text_base() } else { this.line_height(rems(1.25)).text_sm() })
-            .when(self.look == Look::Field, |this| {
-                this.h_6().px_2().py_0p5().gap_1().bg(palette.input_background).rounded(palette.radius).border_1().border_color(palette.input_border)
-            })
             .on_action(window.listener_for(s, InputState::backspace))
             .on_action(window.listener_for(s, InputState::delete))
             .on_action(window.listener_for(s, InputState::delete_word_left))
@@ -974,7 +950,6 @@ impl RenderOnce for Input {
             .on_action(window.listener_for(s, InputState::shift_enter))
             .on_action(window.listener_for(s, InputState::alt_enter))
             .child(div().flex_1().min_w_0().child(TextElement { state: self.state.clone() }))
-            .children(self.suffix)
     }
 }
 

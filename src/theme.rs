@@ -19,12 +19,10 @@ pub mod tokens {
     pub const RADIUS_FULL: Pixels = px(999.);
     /// Radius of tiny marks, like the dot beside a file.
     pub const RADIUS_MARK: Pixels = px(2.);
-    /// Alpha of a neutral tint (a diff hunk header).
-    pub const TINT_SUBTLE: f32 = 0.12;
     /// Alpha of a muted or de-emphasised foreground.
     pub const MUTED: f32 = 0.6;
-    /// Alpha of an indent guide line over the border colour.
-    pub const GUIDE: f32 = 0.85;
+    /// Alpha of a neutral tint (a diff hunk header).
+    pub const TINT_SUBTLE: f32 = 0.12;
     /// Alpha of dimmed content, like a model's reasoning.
     pub const DIM: f32 = 0.7;
 }
@@ -108,8 +106,6 @@ pub struct Buttons {
     pub outline: ButtonStyle,
     pub ghost: ButtonStyle,
     pub primary: ButtonStyle,
-    /// Bare text or icon, no background or padding.
-    pub text: ButtonStyle,
 }
 
 impl Buttons {
@@ -147,14 +143,7 @@ impl Buttons {
             selected: col(c.button_primary_active, c.primary, c.button_primary_foreground),
             disabled: col(c.button_primary.opacity(0.15), c.button_primary.opacity(0.15), disabled_fg),
         };
-        let text = ButtonStyle {
-            normal: col(t, t, c.foreground.opacity(0.9)),
-            hover: col(t, t, c.foreground),
-            active: col(t, t, c.foreground.opacity(0.7)),
-            selected: col(t, t, c.foreground.opacity(0.7)),
-            disabled: col(t, t, disabled_fg),
-        };
-        Self { default, outline, ghost, primary, text }
+        Self { default, outline, ghost, primary }
     }
 }
 
@@ -485,9 +474,6 @@ pub struct Palette {
     pub selection: Hsla,
     pub caret: Hsla,
     pub editor_background: Hsla,
-    pub editor_foreground: Hsla,
-    pub editor_active_line: Option<Hsla>,
-    pub editor_line_number: Hsla,
     /// The corner radius of small parts, like scrollbar thumbs.
     pub radius: Pixels,
     /// The largest: chat bubbles and the composer, twice `radius`.
@@ -598,9 +584,6 @@ impl Palette {
             selection: selection_tint(get("selection.background", primary.opacity(SELECTION_ALPHA))),
             caret: get("caret", primary),
             editor_background: editor("editor.background").unwrap_or(base.background),
-            editor_foreground: editor("editor.foreground").unwrap_or(base.foreground),
-            editor_active_line: editor("editor.active_line.background"),
-            editor_line_number: editor("editor.line_number").unwrap_or(base.muted_foreground),
             radius,
             radius_xl: radius * 2.,
             added: hsla(0.37, 0.5, 0.5, 1.0),
