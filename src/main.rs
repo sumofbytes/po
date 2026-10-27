@@ -1450,9 +1450,11 @@ impl Reader {
                 }
             }),
             cx.subscribe(&side_search, |_, _, _: &InputEvent, cx| cx.notify()),
-            // The sidebar's row counts what is left.
-            cx.observe(&todos, |_, _, cx| cx.notify()),
-            cx.subscribe_in(&todos, window, |reader, _, _: &todo::TodoEvent, window, cx| reader.hide_todos(window, cx)),
+            cx.subscribe_in(&todos, window, |reader, _, event: &todo::TodoEvent, window, cx| match event {
+                todo::TodoEvent::Close => reader.hide_todos(window, cx),
+                // The sidebar's row counts what is left.
+                todo::TodoEvent::Changed => cx.notify(),
+            }),
             cx.subscribe_in(&pr_input, window, |reader, _, event: &InputEvent, window, cx| {
                 if matches!(event, InputEvent::PressEnter { shift: false, alt: false }) {
                     reader.open_pr(window, cx);
@@ -4770,6 +4772,9 @@ impl Reader {
     }
 
     fn hide_todos(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.todos_open {
+            return;
+        }
         self.todos_open = false;
         self.focus.focus(window, cx);
         cx.notify();
@@ -7465,8 +7470,14 @@ impl Render for Reader {
             .on_key_down(cx.listener(|reader, _, _, _| reader.last_input = Instant::now()))
             .on_scroll_wheel(cx.listener(|reader, _, _, _| reader.last_input = Instant::now()))
             .on_mouse_down(gpui::MouseButton::Left, cx.listener(|reader, _, _, _| reader.last_input = Instant::now()))
-            .on_action(cx.listener(|reader, _: &ShowFinder, window, cx| reader.show_finder(window, cx)))
-            .on_action(cx.listener(|reader, _: &ShowSettings, window, cx| reader.toggle_settings(window, cx)))
+            .on_action(cx.listener(|reader, _: &ShowFinder, window, cx| {
+                reader.hide_todos(window, cx);
+                reader.show_finder(window, cx)
+            }))
+            .on_action(cx.listener(|reader, _: &ShowSettings, window, cx| {
+                reader.hide_todos(window, cx);
+                reader.toggle_settings(window, cx)
+            }))
             .on_action(cx.listener(|reader, _: &CloseSettings, window, cx| reader.hide_settings(window, cx)))
             .on_action(cx.listener(|reader, _: &ToggleTools, _, cx| reader.toggle_tools(cx)))
             .on_action(cx.listener(|reader, _: &ToggleThoughts, _, cx| reader.toggle_thoughts(cx)))
@@ -7480,8 +7491,12 @@ impl Render for Reader {
             .on_action(cx.listener(|reader, _: &ShowHistory, window, cx| reader.resume_thread(window, cx)))
             .on_action(cx.listener(|reader, _: &ToggleSplit, _, cx| reader.set_split(!reader.split, cx)))
             .on_action(cx.listener(|reader, _: &ToggleRendered, _, cx| reader.toggle_rendered(cx)))
-            .on_action(cx.listener(|reader, _: &OpenProject, window, cx| reader.pick_project(window, cx)))
+            .on_action(cx.listener(|reader, _: &OpenProject, window, cx| {
+                reader.hide_todos(window, cx);
+                reader.pick_project(window, cx)
+            }))
             .on_action(cx.listener(|reader, _: &NewThread, window, cx| {
+                reader.hide_todos(window, cx);
                 reader.new_blank_thread(window, cx);
             }))
             // macOS draws no titlebar of its own (see `main`): this strip clears the traffic lights

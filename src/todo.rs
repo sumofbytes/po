@@ -41,7 +41,7 @@ fn days_in_month(year: i64, month: u32) -> u32 {
 impl Date {
     /// The day, if there is one by that number in that month.
     pub fn from_ymd(year: i64, month: u32, day: u32) -> Option<Self> {
-        if !(1..=12).contains(&month) || day == 0 || day > days_in_month(year, month) {
+        if !(1..=9999).contains(&year) || !(1..=12).contains(&month) || day == 0 || day > days_in_month(year, month) {
             return None;
         }
         // Howard Hinnant's days_from_civil.
@@ -118,15 +118,28 @@ fn next_weekday(today: Date, weekday: usize) -> Date {
     today.plus(if ahead == 0 { 7 } else { ahead })
 }
 
-/// A day of `month` with no year given: this year's, or next year's once this year's has passed.
+/// A day of `month` with no year given: the first one from today on, which for Feb 29 may be years off.
 fn coming(today: Date, month: u32, day: u32) -> Option<Date> {
     let year = today.ymd().0;
-    let date = Date::from_ymd(year, month, day)?;
-    if date >= today { Some(date) } else { Date::from_ymd(year + 1, month, day) }
+    (year..=year + 8).filter_map(|year| Date::from_ymd(year, month, day)).find(|date| *date >= today)
+}
+
+/// `number` days or weeks from today. A span of more than a century is a typo.
+fn after(today: Date, number: &str, unit: &str) -> Option<Date> {
+    let number: i64 = number.trim_start_matches('+').parse().ok().filter(|n| *n <= 36_500)?;
+    match unit {
+        "d" | "day" | "days" => Some(today.plus(number)),
+        "w" | "wk" | "wks" | "week" | "weeks" => Some(today.plus(number * 7)),
+        _ => None,
+    }
+}
+
+fn is_span(unit: &str) -> bool {
+    matches!(unit, "d" | "day" | "days" | "w" | "wk" | "wks" | "week" | "weeks")
 }
 
 /// What the user typed for a due date, read the way people say it: `today`, `tomorrow`, a weekday
-/// (the next one), `next week` (its Monday), `+3d` or `2w` from today, `nov 2` or `2 nov`, or
+/// (the next one), `next week` (its Monday), `+3d`, `2w` or `in 3 days` from today, `nov 2` or `2 nov`, or
 /// `2026-11-02`. Nothing typed is no date, `Some(None)`; what can't be read is `None`.
 pub fn parse_due(text: &str, today: Date) -> Option<Option<Date>> {
     let text = text.trim().to_lowercase();
@@ -143,18 +156,18 @@ pub fn parse_due(text: &str, today: Date) -> Option<Option<Date>> {
         [word] => {
             let count = word.trim_start_matches('+');
             let (number, unit) = count.split_at(count.find(|c: char| !c.is_ascii_digit()).unwrap_or(count.len()));
-            let number: i64 = number.parse().ok()?;
-            match unit {
-                "d" | "day" | "days" => Some(today.plus(number)),
-                "w" | "wk" | "week" | "weeks" => Some(today.plus(number * 7)),
-                _ => None,
-            }
+            after(today, number, unit)
         }
+        [number, unit] | ["in", number, unit] if is_span(unit) => after(today, number, unit),
         [first, second] | [first, second, _] => {
             let (name, day) = if first.chars().all(|c| c.is_ascii_digit()) { (second, first) } else { (first, second) };
             let (month, day) = (month(name)?, day.parse().ok()?);
             match words.get(2) {
-                Some(year) => Date::from_ymd(year.parse().ok()?, month, day),
+                Some(year) => {
+                    let year: i64 = year.parse().ok()?;
+                    // Two digits are this century's.
+                    Date::from_ymd(if year < 100 { 2000 + year } else { year }, month, day)
+                }
                 None => coming(today, month, day),
             }
         }
@@ -261,10 +274,11 @@ fn remove(items: &mut Vec<Item>, id: u64) -> bool {
     items.iter_mut().any(|item| remove(&mut item.children, id))
 }
 
-/// Drops the done todos, and what is under them, from `items`.
+/// Drops the done todos from `items`. A done todo with subtasks still to do stays, so they aren't
+/// lost with it.
 fn clear_done(items: &mut Vec<Item>) {
-    items.retain(|item| item.header || !item.done);
     items.iter_mut().for_each(|item| clear_done(&mut item.children));
+    items.retain(|item| item.header || !item.done || !item.children.is_empty());
 }
 
 impl Todos {
@@ -361,6 +375,23 @@ fn file() -> PathBuf {
     crate::config::data_dir().join("todos.json")
 }
 
+/// The saved list. A file that can't be read is moved aside as `todos.json.bak` rather than
+/// written over by the first change.
+fn load() -> Todos {
+    let target = file();
+    let Ok(text) = std::fs::read_to_string(&target) else { return Todos::default() };
+    match serde_json::from_str::<Value>(&text) {
+        Ok(value) => Todos::from_json(&value),
+        Err(error) => {
+            log::error!("{}: {error}; kept as a .bak", target.display());
+            if let Err(error) = std::fs::rename(&target, target.with_extension("json.bak")) {
+                log::warn!("keeping {}: {error}", target.display());
+            }
+            Todos::default()
+        }
+    }
+}
+
 fn save(todos: &Todos) -> std::io::Result<()> {
     let target = file();
     std::fs::create_dir_all(target.parent().ok_or_else(|| std::io::Error::other("no directory"))?)?;
@@ -380,6 +411,8 @@ enum Target {
 
 pub enum TodoEvent {
     Close,
+    /// The list changed, which the sidebar's count follows.
+    Changed,
 }
 
 /// The todos window, laid out like a plain todo app: a field to add one at the top, the list with
@@ -423,7 +456,7 @@ impl TodoPanel {
             cx.subscribe_in(&text, window, commit),
             cx.subscribe_in(&due, window, commit),
         ];
-        let todos = crate::config::read_json(&file()).map(|value| Todos::from_json(&value)).unwrap_or_default();
+        let todos = load();
         Self { todos, focus: cx.focus_handle(), show: Show::All, new_text, new_due, text, due, composer: None, _subscriptions: subscriptions }
     }
 
@@ -441,6 +474,7 @@ impl TodoPanel {
         if let Err(error) = save(&self.todos) {
             log::warn!("saving {}: {error}", file().display());
         }
+        cx.emit(TodoEvent::Changed);
         cx.notify();
     }
 
@@ -474,6 +508,8 @@ impl TodoPanel {
             Target::Under(id) if self.todos.items.iter().any(|item| item.id == id && item.header) => "Todo",
             _ => "Subtask",
         };
+        // What it adds to or edits has to be on screen.
+        self.show = Show::All;
         if let Target::Under(id) = target
             && let Some(parent) = self.todos.get(id)
         {
@@ -784,6 +820,7 @@ impl TodoPanel {
         let tabs = [("todo-show-all", "All", Show::All), ("todo-show-active", "Active", Show::Active), ("todo-show-done", "Done", Show::Done)].map(|(id, label, show)| {
             link(id, label, self.show == show).on_click(cx.listener(move |panel, _, _, cx| {
                 panel.show = show;
+                panel.composer = None;
                 cx.notify();
             }))
         });
@@ -918,6 +955,42 @@ mod tests {
         assert_eq!(parse_due("2026-12-31", monday), Some(Some(day(2026, 12, 31))));
         assert_eq!(parse_due("soon", monday), None);
         assert_eq!(parse_due("feb 30", monday), None);
+    }
+
+    #[test]
+    fn spans_years_and_leap_days_are_read_sensibly() {
+        let monday = day(2026, 10, 26);
+        assert_eq!(parse_due("3 days", monday), Some(Some(day(2026, 10, 29))));
+        assert_eq!(parse_due("in 2 weeks", monday), Some(Some(day(2026, 11, 9))));
+        assert_eq!(parse_due("nov 2 27", monday), Some(Some(day(2027, 11, 2))));
+        // Feb 29 waits for the next leap year, 2028.
+        assert_eq!(parse_due("feb 29", monday), Some(Some(day(2028, 2, 29))));
+        // A typo that would overflow is unreadable, not a panic.
+        assert_eq!(parse_due("9000000000000000000d", monday), None);
+        assert_eq!(parse_due("9000000000000000000w", monday), None);
+        assert_eq!(parse_due("nov 2 99999999999999999", monday), None);
+        assert_eq!(parse_due("99999999999999999-01-01", monday), None);
+    }
+
+    #[test]
+    fn clearing_done_keeps_subtasks_still_to_do() {
+        let mut todos = Todos::default();
+        let ship = todos.add(None, "Ship".into(), None, false);
+        todos.add(Some(ship), "Notes".into(), None, false);
+        todos.add(None, "Milk".into(), None, false);
+        let milk = todos.items[1].id;
+        todos.toggle(milk);
+        // Checked off with its subtask, then the subtask is brought back.
+        todos.toggle(ship);
+        let notes = todos.items[0].children[0].id;
+        todos.toggle(notes);
+        todos.clear_done();
+        assert_eq!(todos.items.iter().map(|item| item.text.as_str()).collect::<Vec<_>>(), ["Ship"]);
+        assert_eq!(todos.items[0].children.len(), 1);
+        // With nothing under it, a done todo goes.
+        todos.toggle(notes);
+        todos.clear_done();
+        assert!(todos.items.is_empty());
     }
 
     #[test]
