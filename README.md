@@ -40,6 +40,11 @@ don't have them.
 cargo run --release
 ```
 
+Screens are moving to [NSH](https://nsh.dev): each runs as an NSH app (a Rust
+root, no JavaScript) inside Po's window through `nsh-platform-gpui`, which draws
+with the same GPUI. The Todos window is the first (`src/nsh/`); its headless
+test runs with `cargo test`.
+
 ## Usage
 
 ```sh

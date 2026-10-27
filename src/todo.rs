@@ -1,21 +1,15 @@
 //! The todos window, opened from the sidebar: a list of things to do, each with a date it is due by, nested under one
 //! another and grouped under headers. There is one list for all windows, kept in `todos.json`.
 use std::path::PathBuf;
+use std::sync::LazyLock;
 
-use gpui::{AnyElement, AppContext as _, Context, Entity, EventEmitter, FocusHandle, FontWeight, InteractiveElement as _, IntoElement, KeyDownEvent, ParentElement as _, Render, StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, prelude::FluentBuilder as _, px, rems};
+use futures::FutureExt as _;
+use gpui::{Context, Entity, EventEmitter, Focusable as _, InteractiveElement as _, IntoElement, ParentElement as _, Render, StatefulInteractiveElement as _, Styled as _, Subscription, Task, Window, div, prelude::FluentBuilder as _, px};
+use nsh_platform_gpui::{AppView, Root};
 use serde_json::{Value, json};
+use tokio::sync::{Notify, watch};
 
 use crate::theme::Palette;
-use crate::ui::button::Button;
-use crate::ui::icon::{Icon, IconName, IconSize};
-use crate::ui::input::{Input, InputEvent, InputState};
-use crate::{ROW_INSET, row_group, show_on_hover, side_centered, side_chevron, side_row};
-
-/// A row of the list: roomier than the sidebar's, as the window has the space.
-const TODO_ROW_HEIGHT: gpui::Rems = rems(2.0);
-/// How far a subtask sits in from its parent: the lead column and the gap after it, so its box
-/// lines up with the parent's text.
-const TODO_INDENT: gpui::Rems = rems(1.5);
 
 /// A day, as days since 1970-01-01.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
@@ -225,7 +219,7 @@ impl Item {
 
     /// Whether it shows: `show` takes it, or something under it. An empty header shows only while
     /// nothing is filtered, so it can be filled.
-    fn shows(&self, show: Show) -> bool {
+    pub fn shows(&self, show: Show) -> bool {
         let taken = match show {
             Show::All => true,
             _ if self.header => false,
@@ -251,7 +245,7 @@ fn ungrouped_end(items: &[Item]) -> usize {
     items.iter().position(|item| item.header).unwrap_or(items.len())
 }
 
-#[derive(Default, Debug, PartialEq)]
+#[derive(Clone, Default, Debug, PartialEq)]
 pub struct Todos {
     pub items: Vec<Item>,
     next: u64,
@@ -371,8 +365,15 @@ impl Todos {
     }
 }
 
+#[cfg(not(test))]
 fn file() -> PathBuf {
     crate::config::data_dir().join("todos.json")
+}
+
+/// Tests keep their list out of the user's.
+#[cfg(test)]
+pub(crate) fn file() -> PathBuf {
+    std::env::temp_dir().join(format!("po-test-{}", std::process::id())).join("todos.json")
 }
 
 /// The saved list. A file that can't be read is moved aside as `todos.json.bak` rather than
@@ -403,11 +404,41 @@ fn save(todos: &Todos) -> std::io::Result<()> {
 /// What the composer is writing: a subtask of this todo or a todo under this header, a header, or
 /// a change to a row. New todos at the top come from the add field instead.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Target {
+pub enum Target {
     Under(u64),
     Header,
     Edit(u64),
 }
+
+/// The list, shared by the window that edits it and the sidebar that counts it. Every change is
+/// saved as it is made.
+static STORE: LazyLock<watch::Sender<Todos>> = LazyLock::new(|| watch::Sender::new(load()));
+
+/// The list now and after every change.
+pub fn watch() -> watch::Receiver<Todos> {
+    STORE.subscribe()
+}
+
+/// How many todos are left, and how many of those are late, for the sidebar's row.
+pub fn summary() -> (usize, usize) {
+    let todos = STORE.borrow();
+    (todos.counts().0, todos.late(today()))
+}
+
+/// Changes the list with `f`, saves it, and tells whoever follows it.
+pub fn change<R>(f: impl FnOnce(&mut Todos) -> R) -> R {
+    let mut out = None;
+    STORE.send_modify(|todos| out = Some(f(todos)));
+    if let Err(error) = save(&STORE.borrow()) {
+        log::warn!("saving {}: {error}", file().display());
+    }
+    out.expect("send_modify runs its closure")
+}
+
+/// What the window's screen asks of the frame around it: to close, and the height its content
+/// needs, which the frame takes as far as the window has room.
+pub(crate) static CLOSE: Notify = Notify::const_new();
+pub(crate) static HEIGHT: LazyLock<watch::Sender<f32>> = LazyLock::new(|| watch::Sender::new(0.));
 
 pub enum TodoEvent {
     Close,
@@ -416,457 +447,67 @@ pub enum TodoEvent {
 }
 
 /// The todos window, laid out like a plain todo app: a field to add one at the top, the list with
-/// a box to check each off, and a footer with what is left and which to show. The sidebar only has
-/// a row that opens it.
+/// a box to check each off, and a footer with what is left and which to show. Its screen is NSH's
+/// ([`crate::nsh::todos`]); this is the frame Po puts it in, over the app, and closes it from. The
+/// sidebar only has a row that opens it.
 pub struct TodoPanel {
-    todos: Todos,
-    focus: FocusHandle,
-    show: Show,
-    /// The add field's inputs, always there.
-    new_text: Entity<InputState>,
-    new_due: Entity<InputState>,
-    /// The composer's, for a subtask, a header or an edit.
-    text: Entity<InputState>,
-    due: Entity<InputState>,
-    composer: Option<Target>,
-    _subscriptions: Vec<Subscription>,
+    /// Made as the window opens and dropped as it closes, which stops its engine.
+    view: Option<(Entity<AppView>, Subscription)>,
+    height: f32,
+    _follow: Task<()>,
 }
 
 impl EventEmitter<TodoEvent> for TodoPanel {}
 
-const DUE_HINT: &str = "Due: tomorrow, fri, nov 2…";
-
 impl TodoPanel {
-    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let new_text = cx.new(|cx| InputState::new(window, cx).placeholder("What needs to be done?"));
-        let new_due = cx.new(|cx| InputState::new(window, cx).placeholder(DUE_HINT));
-        let text = cx.new(|cx| InputState::new(window, cx));
-        let due = cx.new(|cx| InputState::new(window, cx).placeholder(DUE_HINT));
-        let add = |panel: &mut Self, _: &Entity<InputState>, event: &InputEvent, window: &mut Window, cx: &mut Context<Self>| match event {
-            InputEvent::PressEnter { .. } => panel.add(window, cx),
-            _ => cx.notify(),
-        };
-        let commit = |panel: &mut Self, _: &Entity<InputState>, event: &InputEvent, window: &mut Window, cx: &mut Context<Self>| match event {
-            InputEvent::PressEnter { .. } => panel.commit(window, cx),
-            _ => cx.notify(),
-        };
-        let subscriptions = vec![
-            cx.subscribe_in(&new_text, window, add),
-            cx.subscribe_in(&new_due, window, add),
-            cx.subscribe_in(&text, window, commit),
-            cx.subscribe_in(&due, window, commit),
-        ];
-        let todos = load();
-        Self { todos, focus: cx.focus_handle(), show: Show::All, new_text, new_due, text, due, composer: None, _subscriptions: subscriptions }
+    pub fn new(cx: &mut Context<Self>) -> Self {
+        let mut todos = watch();
+        let mut height = HEIGHT.subscribe();
+        let follow = cx.spawn(async move |panel, cx| {
+            loop {
+                let event = futures::select_biased! {
+                    _ = CLOSE.notified().fuse() => TodoEvent::Close,
+                    changed = todos.changed().fuse() => match changed {
+                        Ok(()) => TodoEvent::Changed,
+                        Err(_) => return,
+                    },
+                    changed = height.changed().fuse() => match changed {
+                        Ok(()) => {
+                            let now = *height.borrow_and_update();
+                            if panel.update(cx, |panel, cx| { panel.height = now; cx.notify() }).is_err() {
+                                return;
+                            }
+                            continue;
+                        }
+                        Err(_) => return,
+                    },
+                };
+                if panel.update(cx, |_, cx| cx.emit(event)).is_err() {
+                    return;
+                }
+            }
+        });
+        Self { view: None, height: 0., _follow: follow }
     }
 
-    /// Puts the cursor in the add field, as the window opens.
-    pub fn focus(&self, window: &mut Window, cx: &mut Context<Self>) {
-        self.new_text.update(cx, |input, cx| input.focus(window, cx));
-    }
-
-    /// How many todos are left, and how many of those are late, for the sidebar's row.
-    pub fn summary(&self) -> (usize, usize) {
-        (self.todos.counts().0, self.todos.late(today()))
-    }
-
-    fn changed(&mut self, cx: &mut Context<Self>) {
-        if let Err(error) = save(&self.todos) {
-            log::warn!("saving {}: {error}", file().display());
-        }
-        cx.emit(TodoEvent::Changed);
+    /// Starts the screen and gives it the keyboard, as the window opens.
+    pub fn open(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (view, theme) = crate::nsh::view(Root::of::<crate::nsh::todos::Todos>(), window, cx);
+        window.focus(&view.focus_handle(cx), cx);
+        self.view = Some((view, theme));
         cx.notify();
     }
 
-    /// Adds what the add field holds, and leaves it empty and focused for the next one.
-    fn add(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let text = self.new_text.read(cx).value().trim().to_string();
-        let Some(due) = parse_due(&self.new_due.read(cx).value(), today()) else { return };
-        if text.is_empty() {
-            return;
-        }
-        self.todos.add(None, text, due, false);
-        // A new todo is one to do, so it shouldn't land out of sight.
-        if self.show == Show::Done {
-            self.show = Show::All;
-        }
-        for input in [&self.new_text, &self.new_due] {
-            input.update(cx, |input, cx| input.set_value("", window, cx));
-        }
-        self.new_text.update(cx, |input, cx| input.focus(window, cx));
-        self.changed(cx);
-    }
-
-    /// Opens the composer for `target`, holding what is there already when it edits.
-    fn compose(&mut self, target: Target, window: &mut Window, cx: &mut Context<Self>) {
-        let (text, due) = match target {
-            Target::Edit(id) => self.todos.get(id).map_or_else(Default::default, |item| (item.text.clone(), item.due.map(Date::iso).unwrap_or_default())),
-            _ => Default::default(),
-        };
-        let placeholder = match target {
-            Target::Header => "Header",
-            Target::Under(id) if self.todos.items.iter().any(|item| item.id == id && item.header) => "Todo",
-            _ => "Subtask",
-        };
-        // What it adds to or edits has to be on screen.
-        self.show = Show::All;
-        if let Target::Under(id) = target
-            && let Some(parent) = self.todos.get(id)
-        {
-            parent.folded = false;
-        }
-        self.text.update(cx, |input, cx| {
-            input.set_placeholder(placeholder, cx);
-            input.set_value(text, window, cx);
-            input.select_all(window, cx);
-            input.focus(window, cx);
-        });
-        self.due.update(cx, |input, cx| input.set_value(due, window, cx));
-        self.composer = Some(target);
-        cx.notify();
-    }
-
-    fn close_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.composer = None;
-        self.focus(window, cx);
-        cx.notify();
-    }
-
-    /// Keeps what the composer holds. Adding leaves it open for the next one, under a new header for
-    /// the todos that go in it; an edit closes it. Nothing typed closes it as well.
-    fn commit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(target) = self.composer else { return };
-        let text = self.text.read(cx).value().trim().to_string();
-        if text.is_empty() {
-            return self.close_composer(window, cx);
-        }
-        let Some(due) = parse_due(&self.due.read(cx).value(), today()) else { return };
-        match target {
-            Target::Edit(id) => {
-                if let Some(item) = self.todos.get(id) {
-                    item.text = text;
-                    if !item.header {
-                        item.due = due;
-                    }
-                }
-                self.close_composer(window, cx);
-            }
-            Target::Under(parent) => {
-                self.todos.add(Some(parent), text, due, false);
-                for input in [&self.text, &self.due] {
-                    input.update(cx, |input, cx| input.set_value("", window, cx));
-                }
-            }
-            Target::Header => {
-                let id = self.todos.add(None, text, None, true);
-                self.changed(cx);
-                return self.compose(Target::Under(id), window, cx);
-            }
-        }
-        self.changed(cx);
-    }
-
-    /// A line to type a todo into: its lead icon, the text, then the due date with how it was read.
-    fn entry(lead: IconName, text: &Entity<InputState>, due: Option<&Entity<InputState>>, cx: &gpui::App) -> gpui::Div {
-        let colors = cx.global::<Palette>();
-        let (muted, danger) = (colors.muted_foreground, colors.danger);
-        let due = due.map(|due| {
-            let hint = match parse_due(&due.read(cx).value(), today()) {
-                Some(Some(date)) => div().flex_none().text_xs().text_color(muted).child(due_label(date, today())),
-                Some(None) => div(),
-                None => div().flex_none().text_xs().text_color(danger).child("?"),
-            };
-            div()
-                .flex_none()
-                .w(rems(13.))
-                .flex()
-                .items_center()
-                .gap_2()
-                .child(Icon::new(IconName::Calendar).size(IconSize::Small).color(muted))
-                .child(div().flex_1().min_w_0().child(Input::new(due)))
-                .child(hint)
-        });
-        div()
-            .flex_1()
-            .min_w_0()
-            .flex()
-            .items_center()
-            .gap_2()
-            .child(side_centered(Icon::new(lead).size(IconSize::Small).color(muted)))
-            .child(div().flex_1().min_w_0().child(Input::new(text)))
-            .children(due)
-    }
-
-    /// The field at the top: Enter adds what it holds, Esc empties it.
-    fn add_row(&self, cx: &mut Context<Self>) -> AnyElement {
-        let colors = cx.global::<Palette>();
-        let (radius, filled, border) = (colors.radius, colors.input_background, colors.input_border);
-        let focus = self.new_text.clone();
-        div()
-            .id("todo-new")
-            .h(TODO_ROW_HEIGHT + rems(0.5))
-            .flex()
-            .items_center()
-            .px(ROW_INSET)
-            .rounded(radius)
-            .border_1()
-            .border_color(border)
-            .bg(filled)
-            .cursor_text()
-            .on_click(move |_, window, cx| focus.update(cx, |input, cx| input.focus(window, cx)))
-            .on_key_down(cx.listener(|panel, event: &KeyDownEvent, window, cx| {
-                // An empty field lets Esc through to close the window.
-                let typed = [&panel.new_text, &panel.new_due].iter().any(|input| !input.read(cx).value().is_empty());
-                if event.keystroke.key == "escape" && typed {
-                    for input in [&panel.new_text, &panel.new_due] {
-                        input.update(cx, |input, cx| input.set_value("", window, cx));
-                    }
-                    cx.stop_propagation();
-                }
-            }))
-            .child(Self::entry(IconName::Plus, &self.new_text, Some(&self.new_due), cx))
-            .into_any_element()
-    }
-
-    /// The composer, at `depth`, in place of the row it edits or where what it adds will go.
-    fn composer(&self, target: Target, depth: usize, cx: &mut Context<Self>) -> AnyElement {
-        let colors = cx.global::<Palette>();
-        let (radius, filled) = (colors.radius, colors.input_background);
-        let header = match target {
-            Target::Header => true,
-            Target::Edit(id) => self.todos.items.iter().any(|item| item.id == id && item.header),
-            Target::Under(_) => false,
-        };
-        let lead = if header { IconName::Heading } else { IconName::Square };
-        div()
-            .id("todo-composer")
-            .h(TODO_ROW_HEIGHT)
-            .flex()
-            .items_center()
-            .gap_2()
-            .px(ROW_INSET)
-            .ml(TODO_INDENT * depth as f32)
-            .rounded(radius)
-            .bg(filled)
-            .on_key_down(cx.listener(|panel, event: &KeyDownEvent, window, cx| {
-                if event.keystroke.key == "escape" {
-                    panel.close_composer(window, cx);
-                    cx.stop_propagation();
-                }
-            }))
-            .child(Self::entry(lead, &self.text, (!header).then_some(&self.due), cx))
-            .child(
-                Button::new("todo-composer-close")
-                    .icon(IconName::Close)
-                    .ghost()
-                    .xsmall()
-                    .tooltip(if matches!(target, Target::Edit(_)) { "Cancel (Esc)" } else { "Done adding (Esc)" })
-                    .on_click(cx.listener(|panel, _, window, cx| panel.close_composer(window, cx))),
-            )
-            .into_any_element()
-    }
-
-    /// The rows for `items` at `depth`, each followed by its children unless it is folded, and the
-    /// composer where it goes. Only what [`Item::shows`] shows is there.
-    fn rows(&self, items: &[Item], depth: usize, out: &mut Vec<AnyElement>, cx: &mut Context<Self>) {
-        let today = today();
-        let filtering = self.show != Show::All;
-        for item in items.iter().filter(|item| item.shows(self.show)) {
-            let id = item.id;
-            if self.composer == Some(Target::Edit(id)) {
-                out.push(self.composer(Target::Edit(id), depth, cx));
-            } else if item.header {
-                out.push(self.header_row(item, !out.is_empty(), filtering, cx));
-            } else {
-                out.push(self.todo_row(item, depth, today, filtering, cx));
-            }
-            let adding = self.composer == Some(Target::Under(id));
-            if !item.folded || filtering || adding {
-                let below = if item.header { depth } else { depth + 1 };
-                self.rows(&item.children, below, out, cx);
-                if adding {
-                    out.push(self.composer(Target::Under(id), below, cx));
-                }
-            }
-        }
-    }
-
-    fn header_row(&self, item: &Item, spaced: bool, filtering: bool, cx: &mut Context<Self>) -> AnyElement {
-        let colors = cx.global::<Palette>();
-        let (hover, muted, foreground, radius) = (colors.list_hover, colors.muted_foreground, colors.foreground, colors.radius);
-        let id = item.id;
-        let (done, all) = item.progress();
-        let group = row_group("todo-header", id);
-        side_row(radius, None)
-            .id(("todo-header", id as usize))
-            .group(group.clone())
-            .h(TODO_ROW_HEIGHT)
-            .when(spaced, |row| row.mt(rems(0.75)))
-            .cursor_pointer()
-            .hover(move |row| row.bg(hover))
-            .on_click(cx.listener(move |panel, _, _, cx| {
-                if let Some(item) = panel.todos.get(id) {
-                    item.folded = !item.folded;
-                }
-                panel.changed(cx);
-            }))
-            .child(side_chevron(!item.folded || filtering, muted))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .flex()
-                    .items_baseline()
-                    .gap_2()
-                    .child(div().min_w_0().truncate().font_weight(FontWeight::SEMIBOLD).text_color(foreground).child(item.text.clone()))
-                    .when(all > 0, |row| row.child(div().flex_none().text_xs().text_color(muted).child(format!("{done}/{all}")))),
-            )
-            .child(show_on_hover(group.clone(), self.action(("todo-header-add", id), IconName::Plus, "Add a todo under this header", Target::Under(id), cx)))
-            .child(show_on_hover(group.clone(), self.action(("todo-header-edit", id), IconName::Pencil, "Rename header", Target::Edit(id), cx)))
-            .child(show_on_hover(group, self.delete(("todo-header-remove", id), "Remove header, keep its todos", cx)))
-            .into_any_element()
-    }
-
-    fn todo_row(&self, item: &Item, depth: usize, today: Date, filtering: bool, cx: &mut Context<Self>) -> AnyElement {
-        let colors = cx.global::<Palette>();
-        let (hover, muted, foreground, radius) = (colors.list_hover, colors.muted_foreground, colors.foreground, colors.radius);
-        let id = item.id;
-        let (done, all) = item.progress();
-        let group = row_group("todo", id);
-        // Late is loud, today is a warning, and anything once it is done is quiet.
-        let due = item.due.map(|due| {
-            let tint = match due.cmp(&today) {
-                _ if item.done => muted,
-                std::cmp::Ordering::Less => colors.danger,
-                std::cmp::Ordering::Equal => colors.warning,
-                std::cmp::Ordering::Greater => muted,
-            };
-            div().flex_none().text_xs().text_color(tint).child(due_label(due, today))
-        });
-        let check = if item.done { IconName::SquareCheck } else { IconName::Square };
-        // Folding a todo is on its count of subtasks, since its lead column is its box.
-        let count = (all > 0).then(|| {
-            div()
-                .id(("todo-fold", id as usize))
-                .flex_none()
-                .text_xs()
-                .text_color(muted)
-                .hover(move |count| count.text_color(foreground))
-                .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .on_click(cx.listener(move |panel, _, _, cx| {
-                    if let Some(item) = panel.todos.get(id) {
-                        item.folded = !item.folded;
-                    }
-                    panel.changed(cx);
-                }))
-                .child(format!("{}{done}/{all}", if item.folded && !filtering { "▸ " } else { "" }))
-        });
-        side_row(radius, None)
-            .id(("todo", id as usize))
-            .group(group.clone())
-            .h(TODO_ROW_HEIGHT)
-            .ml(TODO_INDENT * depth as f32)
-            .cursor_pointer()
-            .hover(move |row| row.bg(hover))
-            // A click on the row checks it off, as in any todo list; the pencil edits it.
-            .on_click(cx.listener(move |panel, _, _, cx| {
-                panel.todos.toggle(id);
-                panel.changed(cx);
-            }))
-            .child(side_centered(Icon::new(check).size(IconSize::Small).color(if item.done { muted } else { foreground })))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .when(item.done, |text| text.line_through().text_color(muted))
-                    .when(!item.done, |text| text.text_color(foreground))
-                    .child(item.text.clone()),
-            )
-            .children(count)
-            .children(due)
-            .child(show_on_hover(group.clone(), self.action(("todo-add", id), IconName::Plus, "Add a subtask", Target::Under(id), cx)))
-            .child(show_on_hover(group.clone(), self.action(("todo-edit", id), IconName::Pencil, "Edit, or set its due date", Target::Edit(id), cx)))
-            .child(show_on_hover(group, self.delete(("todo-remove", id), if all > 0 { "Delete, with its subtasks" } else { "Delete" }, cx)))
-            .into_any_element()
-    }
-
-    /// A small button that opens the composer for `target`.
-    fn action(&self, (name, id): (&'static str, u64), icon: IconName, tooltip: &'static str, target: Target, cx: &mut Context<Self>) -> Button {
-        Button::new((name, id as usize)).icon(icon).ghost().xsmall().tooltip(tooltip).on_click(cx.listener(move |panel, _, window, cx| panel.compose(target, window, cx)))
-    }
-
-    fn delete(&self, (name, id): (&'static str, u64), tooltip: &'static str, cx: &mut Context<Self>) -> Button {
-        Button::new((name, id as usize)).icon(IconName::Close).ghost().xsmall().tooltip(tooltip).on_click(cx.listener(move |panel, _, _, cx| {
-            panel.todos.remove(id);
-            panel.changed(cx);
-        }))
-    }
-
-    /// What is left, which todos to show, and a way to clear the done ones.
-    fn footer(&self, cx: &mut Context<Self>) -> AnyElement {
-        let colors = cx.global::<Palette>();
-        let (muted, foreground, border) = (colors.muted_foreground, colors.foreground, colors.border);
-        let (left, any_done) = self.todos.counts();
-        let link = |id: &'static str, label: &'static str, on: bool| {
-            div()
-                .id(id)
-                .cursor_pointer()
-                .text_color(if on { foreground } else { muted })
-                .when(on, |link| link.font_weight(FontWeight::MEDIUM))
-                .hover(move |link| link.text_color(foreground))
-                .child(label)
-        };
-        let tabs = [("todo-show-all", "All", Show::All), ("todo-show-active", "Active", Show::Active), ("todo-show-done", "Done", Show::Done)].map(|(id, label, show)| {
-            link(id, label, self.show == show).on_click(cx.listener(move |panel, _, _, cx| {
-                panel.show = show;
-                panel.composer = None;
-                cx.notify();
-            }))
-        });
-        div()
-            .flex_none()
-            .flex()
-            .items_center()
-            .gap_4()
-            .px_4()
-            .py_2()
-            .border_t_1()
-            .border_color(border)
-            .text_sm()
-            .text_color(muted)
-            .child(div().flex_1().min_w_0().truncate().child(if left == 1 { "1 item left".to_string() } else { format!("{left} items left") }))
-            .children(tabs)
-            .child(
-                div().w(rems(5.5)).flex().justify_end().when(any_done, |slot| {
-                    slot.child(link("todo-clear-done", "Clear done", false).on_click(cx.listener(|panel, _, _, cx| {
-                        panel.todos.clear_done();
-                        panel.changed(cx);
-                    })))
-                }),
-            )
-            .into_any_element()
+    /// Stops the screen, as the window closes.
+    pub fn close(&mut self) {
+        self.view = None;
     }
 }
 
 impl Render for TodoPanel {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut rows = vec![];
-        self.rows(&self.todos.items, 0, &mut rows, cx);
-        if self.composer == Some(Target::Header) {
-            rows.push(self.composer(Target::Header, 0, cx));
-        }
         let colors = cx.global::<Palette>();
-        let (popover, border, muted, radius) = (colors.popover, colors.border, colors.muted_foreground, colors.radius);
-        if rows.is_empty() {
-            let empty = match self.show {
-                _ if self.todos.items.is_empty() => "Nothing to do yet. Add a todo above, or a header to group them.",
-                Show::Done => "Nothing done yet",
-                _ => "All done",
-            };
-            rows.push(div().py_6().flex().justify_center().text_sm().text_color(muted).child(empty).into_any_element());
-        }
-        let has_todos = self.todos.counts() != (0, false);
+        let (popover, border, radius) = (colors.popover, colors.border, colors.radius);
         div()
             .absolute()
             .inset_0()
@@ -881,38 +522,19 @@ impl Render for TodoPanel {
                 div()
                     .id("todos")
                     .occlude()
-                    .track_focus(&self.focus)
-                    .on_key_down(cx.listener(|_, event: &KeyDownEvent, _, cx| {
-                        if event.keystroke.key == "escape" {
-                            cx.emit(TodoEvent::Close);
-                        }
-                    }))
+                    // A click inside is the screen's, not the backdrop's.
+                    .on_click(|_, _, cx| cx.stop_propagation())
                     .w(px(600.))
+                    // Until the screen has measured itself, it takes the room it has.
+                    .when(self.height > 0., |card| card.h(px(self.height + 2.)))
+                    .when(self.height <= 0., |card| card.h_full())
                     .max_h_full()
-                    .flex()
-                    .flex_col()
                     .rounded(radius)
                     .border_1()
                     .border_color(border)
                     .bg(popover)
                     .overflow_hidden()
-                    .child(
-                        div()
-                            .flex_none()
-                            .flex()
-                            .items_center()
-                            .gap_1()
-                            .px_4()
-                            .py_2()
-                            .border_b_1()
-                            .border_color(border)
-                            .child(div().flex_1().font_weight(FontWeight::SEMIBOLD).child("Todos"))
-                            .child(Button::new("todo-add-header").icon(IconName::Heading).ghost().small().tooltip("Add a header").on_click(cx.listener(|panel, _, window, cx| panel.compose(Target::Header, window, cx))))
-                            .child(Button::new("todos-close").icon(IconName::Close).ghost().small().tooltip("Close (Esc)").on_click(cx.listener(|_, _, _, cx| cx.emit(TodoEvent::Close)))),
-                    )
-                    .child(div().flex_none().px_4().pt_3().pb_2().child(self.add_row(cx)))
-                    .child(div().id("todo-list").flex_1().min_h_0().overflow_y_scroll().flex().flex_col().gap(rems(0.125)).px_3().pb_3().children(rows))
-                    .when(has_todos, |card| card.child(self.footer(cx))),
+                    .children(self.view.as_ref().map(|(view, _)| view.clone())),
             )
     }
 }

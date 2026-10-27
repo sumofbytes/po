@@ -11,6 +11,7 @@ mod dex;
 mod diff;
 mod fonts;
 mod mcp;
+mod nsh;
 mod pr;
 mod schemes;
 mod settings;
@@ -1436,7 +1437,7 @@ impl Reader {
             InputState::new(window, cx).auto_grow(1, 1).submit_on_enter(true).placeholder("PR number or URL")
         });
         let side_search = cx.new(|cx| InputState::new(window, cx).placeholder("Search"));
-        let todos = cx.new(|cx| todo::TodoPanel::new(window, cx));
+        let todos = cx.new(todo::TodoPanel::new);
         let draft = cx.new(|cx| {
             InputState::new(window, cx)
                 .auto_grow(1, 6)
@@ -4875,7 +4876,7 @@ impl Reader {
             return self.hide_todos(window, cx);
         }
         self.todos_open = true;
-        self.todos.update(cx, |todos, cx| todos.focus(window, cx));
+        self.todos.update(cx, |todos, cx| todos.open(window, cx));
         cx.notify();
     }
 
@@ -4884,6 +4885,7 @@ impl Reader {
             return;
         }
         self.todos_open = false;
+        self.todos.update(cx, |todos, _| todos.close());
         self.focus.focus(window, cx);
         cx.notify();
     }
@@ -6672,7 +6674,7 @@ impl Reader {
     fn todos_row(&self, cx: &Context<Self>) -> impl IntoElement {
         let colors = cx.global::<Palette>();
         let (hover, muted, foreground, danger, radius) = (colors.list_hover, colors.muted_foreground, colors.foreground, colors.danger, colors.radius);
-        let (left, late) = self.todos.read(cx).summary();
+        let (left, late) = todo::summary();
         let open = cx.entity();
         side_row(radius, Some(side_icon(IconName::SquareCheck, muted)))
             .id("sidebar-todos")
@@ -7900,6 +7902,7 @@ fn main() {
         })
         .detach();
         let bounds = Bounds::centered(None, size(px(1360.0), px(840.0)), cx);
+        nsh::init();
         cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),

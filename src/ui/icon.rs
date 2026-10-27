@@ -28,7 +28,7 @@ pub enum IconName {
 }
 
 impl IconName {
-    fn svg(self) -> (&'static str, &'static [u8]) {
+    pub(crate) fn svg(self) -> (&'static str, &'static [u8]) {
         macro_rules! icon {
             ($name:literal) => {
                 (concat!("po-icon-", $name), include_bytes!(concat!("../../assets/icons/", $name, ".svg")))

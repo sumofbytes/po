@@ -10,6 +10,10 @@ repository = "https://github.com/sumofbytes/po"
 [dependencies]
 gpui = { package = "gpui-fast", version = "=0.1.9", default-features = false, features = ["stacker", "font-kit", "wayland", "x11"] }
 gpui_platform = { package = "gpui-fast-platform", version = "=0.1.9", default-features = false, features = ["font-kit", "wayland", "x11"] }
+# NSH: screens drawn as NSH apps inside Po's window. Rust roots only, so no QuickJS or web views.
+nsh-platform-gpui = { version = "0.3.0", default-features = false }
+nsh-core = "0.3.0"
+nsh-base = { version = "0.3.0", default-features = false }
 env_logger = "0.11"
 log = "0.4"
 libc = "0.2"
@@ -62,7 +66,14 @@ tree-sitter-zig = "1.1.2"
 # TLS is only for `po update`: the daemon is plain HTTP to localhost.
 ureq = { version = "3", default-features = false, features = ["json", "rustls"] }
 base64 = "0.22"
+# The todos store the window's NSH screen and the sidebar share.
+tokio = { version = "1", default-features = false, features = ["sync"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif"] }
+
+[dev-dependencies]
+# Headless runs of the NSH screens.
+nsh-engine = { version = "0.3.0", default-features = false }
+nsh-testing = { version = "0.3.0", default-features = false }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }
