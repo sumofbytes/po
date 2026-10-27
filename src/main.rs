@@ -6504,7 +6504,8 @@ impl Reader {
             .child(div().flex_1().child("Todos"))
             .when(left > 0, |row| {
                 let tip = if late > 0 { format!("{left} left, {late} late") } else { format!("{left} left") };
-                row.child(div().id("sidebar-todos-count").text_sm().text_color(if late > 0 { danger } else { muted }).tooltip(move |_, cx| ui::button::tooltip(tip.clone().into(), cx)).child(left.to_string()))
+                // The width of the xsmall buttons on the project rows, so the count is centred under theirs.
+                row.child(div().id("sidebar-todos-count").min_w(rems(1.25)).flex_none().flex().justify_center().text_sm().text_color(if late > 0 { danger } else { muted }).tooltip(move |_, cx| ui::button::tooltip(tip.clone().into(), cx)).child(left.to_string()))
             })
     }
 
