@@ -25,7 +25,7 @@ ignore = "0.4"
 # TLS is only for `po update`: the daemon is plain HTTP to localhost.
 ureq = { version = "3", default-features = false, features = ["json", "rustls"] }
 base64 = "0.22"
-# The todos store the window's NSH screen and the sidebar share.
+# The tasks store the window's NSH screen and the sidebar share.
 tokio = { version = "1", default-features = false, features = ["sync"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif"] }
 

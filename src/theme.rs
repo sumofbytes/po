@@ -309,6 +309,9 @@ pub struct Palette {
     pub font_size: Pixels,
     pub mono_font_family: SharedString,
     pub mono_font_size: Pixels,
+    /// What the conversation is drawn in when set; the UI font and size otherwise.
+    pub transcript_font_family: Option<SharedString>,
+    pub transcript_font_size: Option<Pixels>,
 }
 
 impl Global for Palette {}
@@ -361,6 +364,8 @@ impl Palette {
             font_size: px(fonts.ui_size),
             mono_font_family: fonts.mono,
             mono_font_size: px(fonts.mono_size),
+            transcript_font_family: fonts.transcript,
+            transcript_font_size: fonts.transcript_size.map(px),
         }
     }
 

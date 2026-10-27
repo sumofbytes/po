@@ -14,7 +14,7 @@ pub mod source;
 pub mod sidebar;
 pub mod strip;
 pub mod tabs;
-pub mod todos;
+pub mod tasks;
 
 use base64::Engine as _;
 use gpui::{AppContext as _, Entity, Hsla, Subscription, Window};
@@ -96,6 +96,12 @@ fn theme(palette: &Palette) -> nsh_platform_gpui::Theme {
     theme.set_number("mono-size", f32::from(palette.mono_font_size));
     theme.set_font(nsh_core::element::FONT_SANS, palette.font_family.to_string());
     theme.set_font(nsh_core::element::FONT_MONO, palette.mono_font_family.to_string());
+    if let Some(family) = &palette.transcript_font_family {
+        theme.set_font("transcript", family.to_string());
+    }
+    if let Some(size) = palette.transcript_font_size {
+        theme.set_number("transcript-size", f32::from(size));
+    }
     theme
 }
 
@@ -200,6 +206,16 @@ pub fn mono_size() -> f32 {
     nsh_base::theme().number("mono-size").unwrap_or(13.)
 }
 
+/// The size of the conversation's text: its own setting, or the UI font's.
+pub fn transcript_size() -> Points {
+    Points(nsh_base::theme().number("transcript-size").unwrap_or_else(|| rems(1.).0))
+}
+
+/// The conversation's font family when it has one of its own.
+pub fn transcript_family() -> Option<nsh_core::element::SharedString> {
+    nsh_base::theme().font("transcript").map(|family| family.to_string().into())
+}
+
 /// The text of a row's label, GPUI's `text_base`.
 pub fn text_base() -> Points {
     rems(1.)
@@ -232,8 +248,8 @@ pub fn icon(name: IconName, size: Points, tint: impl Fn() -> AdaptiveColor + 'st
 }
 
 /// A tooltip in Po's look: a small popover with a line of text.
-pub fn tooltip(label: &'static str) -> Text {
-    text(label)
+pub fn tooltip(label: impl Into<String>) -> Text {
+    text(label.into())
         .text_size(text_xs())
         .text_color(Colors::foreground())
         .bg(Colors::popover())

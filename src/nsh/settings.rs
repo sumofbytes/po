@@ -33,6 +33,15 @@ fn section(title: &'static str) -> View {
     view().pt(rems(0.75)).pb(rems(0.25)).child(text(title.to_uppercase()).text_size(text_xs()).text_color(Colors::muted()))
 }
 
+/// A cell of a row of fields: `width` wide, or what the others leave. A fixed one doesn't also grow,
+/// since a growing view's basis would stay at nothing and the width be ignored.
+fn sized(width: Option<f32>) -> View {
+    match width {
+        Some(width) => view().w(Points(width)).flex_none(),
+        None => view().w(Points(0.)).flex_1(),
+    }
+}
+
 /// A label on the left and its control on the right.
 fn row(label: &'static str, hint: &'static str, control: impl IntoElement) -> View {
     view()
@@ -140,23 +149,32 @@ pub fn Settings() -> impl IntoElement {
     };
     let agent_row = move |agent: ReadSignal<Agent>, _: ReadSignal<usize>| {
         let key = agent.get_untracked().key;
-        let input = move |id: &str, placeholder: &'static str, value: fn(&AgentForm) -> String, change: fn(&mut AgentForm, String)| {
-            view().w(Points(0.)).flex_1().child(
-                nsh_core::element::input()
-                    .test_id(&format!("agent-{key}-{id}"))
-                    .value(move || value(&agent.get().form))
-                    .placeholder(placeholder)
-                    .placeholder_color(Colors::one(Colors::muted()))
-                    .selection_color(Colors::one(Colors::caret()))
-                    .text_color(Colors::foreground())
-                    .auto_correct(false)
-                    .on_change(edit(key, change))
+        let input = move |id: &str, width: Option<f32>, placeholder: &'static str, value: fn(&AgentForm) -> String, change: fn(&mut AgentForm, String)| {
+            // The box is a view and the input fills it, as in [`field`]: the box's width is what the
+            // row gives it, and what is typed stays inside.
+            sized(width).child(
+                view()
+                    .w_full()
                     .h(field_height())
+                    .flex_row()
+                    .items_center()
                     .px(rems(0.625))
                     .rounded(Colors::radius())
                     .border_1()
                     .border_color(Colors::input_border())
-                    .bg(Colors::input_background()),
+                    .bg(Colors::input_background())
+                    .child(
+                        nsh_core::element::input()
+                            .test_id(&format!("agent-{key}-{id}"))
+                            .value(move || value(&agent.get().form))
+                            .placeholder(placeholder)
+                            .placeholder_color(Colors::one(Colors::muted()))
+                            .selection_color(Colors::one(Colors::caret()))
+                            .text_color(Colors::foreground())
+                            .auto_correct(false)
+                            .on_change(edit(key, change))
+                            .flex_1(),
+                    ),
             )
         };
         view()
@@ -164,9 +182,9 @@ pub fn Settings() -> impl IntoElement {
             .items_center()
             .gap(rems(0.5))
             .py(rems(0.25))
-            .child(input("id", "id", |a| a.id.clone(), |a, t| a.id = t).flex_none().w(Points(90.)))
-            .child(input("name", "Name", |a| a.name.clone(), |a, t| a.name = t).flex_none().w(Points(120.)))
-            .child(input("command", "command --acp", |a| a.command.clone(), |a, t| a.command = t))
+            .child(input("id", Some(90.), "id", |a| a.id.clone(), |a, t| a.id = t))
+            .child(input("name", Some(120.), "Name", |a| a.name.clone(), |a, t| a.name = t))
+            .child(input("command", None, "command --acp", |a| a.command.clone(), |a, t| a.command = t))
             .child(
                 super::icon_button(crate::ui::icon::IconName::Close, rems(0.75), "Remove", move || agents.update(|list| list.retain(|a| a.key != key))),
             )
