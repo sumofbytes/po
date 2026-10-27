@@ -395,7 +395,7 @@ fn pane(title: String, snap: &Snapshot) -> View {
         );
     }
     // The Control menu, once the thread's agent may do more than talk.
-    if let Some(grant) = snap.grant {
+    if let Some(grant) = snap.grant.filter(|grant| *grant != Grant::default()) {
         right = right.child(grant_menu(grant));
     }
     pane_header(title, right, &snap.lead, &snap.trail, snap.glass)
@@ -435,6 +435,13 @@ fn grant_menu(grant: Grant) -> AnyElement {
 // ============ the transcript ============
 
 // ============ the transcript ============
+
+/// The widths the conversation and the composer share, so the text of each starts and ends on
+/// the same lines: the column's, the space outside it, and from the composer card's edge to its
+/// text (the card's 1px border, its 0.5rem padding and the field's 0.5rem).
+const COLUMN: f32 = 860.;
+const EDGE: f32 = 0.75;
+const TEXT_INSET: f32 = 1.0625;
 
 /// A message the user sent, in a rounded column at the right: its pictures, then its text.
 fn user_row(text_: &str, pictures: &[Picture]) -> AnyElement {
@@ -812,8 +819,10 @@ fn agent_row(message: usize, blocks: &[Block]) -> AnyElement {
 }
 
 /// The conversation: the messages, in order, as a center column.
-fn transcript(items: &[Item]) -> AnyElement {
-    let mut rows = view().w_full().min_w_0().max_w(px(760.)).flex_col().gap(rems(1.5)).px(rems(1.5)).py(rems(1.5));
+fn transcript(items: &[Item], slot: ElementRef) -> AnyElement {
+    // The transcript's column is the composer card's width, and its text starts where the
+    // composer's does: the card's border, its padding and the field's padding in (see [`bar`]).
+    let mut rows = view().w_full().min_w_0().max_w(px(COLUMN)).flex_col().gap(rems(1.5)).px(rems(TEXT_INSET)).py(rems(1.5));
     for (message, item) in items.iter().enumerate() {
         let row = match item {
             Item::User { text, pictures } => user_row(text, pictures),
@@ -827,13 +836,8 @@ fn transcript(items: &[Item]) -> AnyElement {
         .flex()
         .justify_center()
         .overflow_hidden()
-        .child(scroll().size_full().child(view().flex_col().items_center().w_full().min_w_0().child(rows.into_element())).element_ref(&transcript_slot()))
+        .child(scroll().size_full().child(view().flex_col().items_center().w_full().min_w_0().px(rems(EDGE)).child(rows.into_element())).element_ref(&slot))
         .into_element()
-}
-
-/// The ref the transcript's scroll is found by, to follow its end.
-fn transcript_slot() -> ElementRef {
-    element_ref()
 }
 
 // ============ the composer ============
@@ -890,16 +894,16 @@ fn pictures_row(pictures: &[Picture]) -> AnyElement {
 fn queue_row(queued: Queued) -> AnyElement {
     let mut row = view()
         .flex_row()
-        .items_start()
+        .items_center()
         .gap(rems(0.5))
         .px(rems(0.75))
         .py(rems(0.375))
         .rounded(Colors::radius())
         .bg(Colors::selected());
     row = if queued.kind.is_empty() {
-        row.child(text("Queued").flex_none().pt(rems(0.0625)).text_xs().font_weight(FontWeight::MEDIUM).text_color(Colors::muted()))
+        row.child(text("Queued").flex_none().text_xs().font_weight(FontWeight::MEDIUM).text_color(Colors::muted()))
     } else {
-        row.child(text(queued.kind.clone()).flex_none().pt(rems(0.0625)).text_xs().font_weight(FontWeight::MEDIUM).text_color(Colors::muted()))
+        row.child(text(queued.kind.clone()).flex_none().text_xs().font_weight(FontWeight::MEDIUM).text_color(Colors::muted()))
     };
     row = if queued.text.is_empty() {
         let word = if queued.pictures == 1 { "1 picture".to_string() } else { format!("{} pictures", queued.pictures) };
@@ -1048,6 +1052,7 @@ fn setup(snap: &Snapshot) -> AnyElement {
                 .flex_row()
                 .items_center()
                 .gap(rems(0.5))
+                .px(rems(0.5))
                 .cursor_pointer()
                 .hover(|s| s.bg(Colors::hover()))
                 .tooltip(tooltip(tip))
@@ -1099,25 +1104,31 @@ fn send_row(draft: &Signal<String>, state: &Signal<Snapshot>, later: bool) {
     tell(Cmd::Send { later });
 }
 
-/// While a turn runs, what is typed is sent into it (steered) or queued for its end.
+/// While a turn runs, what is typed is sent into it (steered) or queued for its end: a small
+/// round icon beside Stop.
 fn steer_button(steer: bool, draft: Signal<String>, has_pictures: bool) -> AnyElement {
-    let (label, tip) = if steer {
-        ("Steer", "Steer: the agent reads it before its next step (Alt+Enter: after this turn)")
+    let (name, tip) = if steer {
+        (IconName::CornerDownRight, "Steer: the agent reads it before its next step (Alt+Enter: after this turn)")
     } else {
-        ("Queue", "Queue: sent when this turn is over")
+        (IconName::ListPlus, "Queue: sent when this turn is over")
     };
     let typed = draft.clone();
     view()
         .role(AccessibilityRole::Button)
         .label(tip)
-        .px(rems(0.75))
-        .py(rems(0.375))
-        .rounded(Colors::radius())
+        .flex_none()
+        .flex_row()
+        .items_center()
+        .justify_center()
+        .w(rems(1.75))
+        .h(rems(1.75))
+        .rounded_full()
         .border_1()
         .border_color(Colors::input_border())
         .cursor_pointer()
         .style_when(move || typed.get().trim().is_empty() && !has_pictures, |s| s.opacity(0.4))
         .hover(|s| s.bg(Colors::hover()))
+        .tooltip(tooltip(tip))
         .on_press(move || {
             let text = draft.get_untracked();
             if !text.trim().is_empty() || has_pictures {
@@ -1125,26 +1136,31 @@ fn steer_button(steer: bool, draft: Signal<String>, has_pictures: bool) -> AnyEl
                 tell(Cmd::Send { later: false });
             }
         })
-        .child(text(label).text_sm().font_weight(FontWeight::MEDIUM).text_color(Colors::foreground()))
+        .child(icon(name, rems(0.875), Colors::foreground()))
         .into_element()
 }
 
-/// The send button: says what it does now, and does it.
+/// The send button: a small round icon that says what it does now (start, send, or stop the
+/// turn), and does it.
 fn send_button(snap: Snapshot, draft: Signal<String>) -> AnyElement {
-    let (label, tip) = if snap.blank {
-        ("Start", "Start the thread")
+    let (name, tip) = if snap.blank {
+        (IconName::ArrowUp, "Start the thread")
     } else if snap.busy {
-        ("Stop", "Stop the agent")
+        (IconName::Square, "Stop the agent")
     } else {
-        ("Send", "Send now")
+        (IconName::ArrowUp, "Send now")
     };
     let busy = snap.busy;
     view()
         .role(AccessibilityRole::Button)
         .label(tip)
-        .px(rems(0.75))
-        .py(rems(0.375))
-        .rounded(Colors::radius())
+        .flex_none()
+        .flex_row()
+        .items_center()
+        .justify_center()
+        .w(rems(1.75))
+        .h(rems(1.75))
+        .rounded_full()
         .cursor_pointer()
         .style_when(
             move || !busy && draft.get_untracked().trim().is_empty(),
@@ -1152,6 +1168,7 @@ fn send_button(snap: Snapshot, draft: Signal<String>) -> AnyElement {
         )
         .hover(|s| s.opacity(0.85))
         .bg(Colors::primary())
+        .tooltip(tooltip(tip))
         .on_press(move || {
             if busy {
                 tell(Cmd::Stop);
@@ -1159,7 +1176,7 @@ fn send_button(snap: Snapshot, draft: Signal<String>) -> AnyElement {
                 pressed_send(&draft);
             }
         })
-        .child(text(label).text_sm().font_weight(FontWeight::MEDIUM).text_color(Colors::primary_foreground()))
+        .child(icon(name, rems(0.875), Colors::primary_foreground()))
         .into_element()
 }
 
@@ -1204,46 +1221,75 @@ fn draft_field(draft: &Signal<String>, field_ref: ElementRef) -> Input {
         .on_file_drop(move |drop: &FileDropEvent| tell(Cmd::Drop(drop.uris.clone())))
 }
 
+/// The field in its row. A value the app writes to a field the user has typed in is dropped as
+/// stale, so each reset of the draft (a send, a taken-back queue row) builds the field again, from
+/// the draft it now holds: the row is one level deeper on every other reset, which makes it a new
+/// view rather than the one the user typed in.
+fn fresh_field(reset: u64, field: Input) -> AnyElement {
+    let row = view().px(rems(0.5)).py(rems(0.25)).flex_row().child(field);
+    if reset % 2 == 0 {
+        row.into_element()
+    } else {
+        view().flex_col().child(row).into_element()
+    }
+}
+
 /// The composer: the note, the strip of pictures, the setup of a thread that waits to start,
 /// the field, and the send.
 fn bar(snap: Snapshot, draft: Signal<String>, field_ref: ElementRef) -> AnyElement {
     let field = draft.clone();
     let low = draft.clone();
     let has_pictures = !snap.pictures.is_empty();
-    let mut column = view().flex_none().flex_col().gap(rems(0.375)).px(rems(0.75)).py(rems(0.625)).border_t_1().border_color(Colors::border());
-    if let Some(note) = &snap.note {
-        column = column.children([note_row(note.as_str())]);
+    // The chips under the field: before the thread starts its agent is chosen here, after it the
+    // agent is named; the settings and the Control menu follow, and the action ends the row.
+    let mut chips = view().flex_row().flex_wrap().items_center().gap(rems(0.5)).flex_1().min_w_0();
+    if snap.blank {
+        chips = chips.child(setup(&snap));
+    } else {
+        let name = snap
+            .chosen
+            .as_ref()
+            .map(|id| snap.agents.iter().find(|(_, key)| key == id).map_or(id.clone(), |(name, _)| name.clone()))
+            .unwrap_or_else(|| "Agent".to_string());
+        chips = chips.child(text(name).px(rems(0.5)).text_sm().text_color(Colors::muted()));
     }
-    if !snap.pictures.is_empty() {
-        column = column.children([pictures_row(&snap.pictures)]);
+    if !snap.settings.is_empty() {
+        chips = chips.child(settings_rows(&snap.settings, snap.busy));
+    }
+    if !snap.blank {
+        chips = chips.child(grant_menu(snap.grant.unwrap_or_default()));
+    }
+    let card = view()
+        .flex_col()
+        .gap(rems(0.5))
+        .w_full()
+        .max_w(px(COLUMN))
+        .p(rems(0.5))
+        .rounded(Colors::radius() * 3.)
+        .border_1()
+        .border_color(Colors::border())
+        .bg(Colors::sidebar())
+        .on_file_drop(move |drop: &FileDropEvent| tell(Cmd::Drop(drop.uris.clone())))
+        .children(snap.note.as_deref().map(note_row))
+        .children((!snap.pictures.is_empty()).then(|| pictures_row(&snap.pictures)))
+        .child(fresh_field(snap.draft_reset, draft_field(&field, field_ref)))
+        .child(
+            view()
+                .flex_row()
+                .items_center()
+                .justify_between()
+                .gap(rems(0.5))
+                .child(chips)
+                .child(view().flex_row().flex_none().gap(rems(0.5)).children(snap.busy.then(|| steer_button(snap.steer, low.clone(), has_pictures))).child(send_button(snap.clone(), low))),
+        );
+    let mut column = view().flex_none().flex_col().items_center().gap(rems(0.375)).px(rems(EDGE)).pt(rems(0.5)).pb(rems(0.75));
+    if let Some(picking) = &snap.picking {
+        column = column.child(view().w_full().max_w(px(COLUMN)).child(picker(picking)));
     }
     if !snap.queue.is_empty() {
-        column = column.child(view().flex_col().gap(rems(0.25)).child(snap.queue.iter().cloned().map(queue_row).collect::<Vec<_>>()));
+        column = column.child(view().w_full().max_w(px(COLUMN)).flex_col().gap(rems(0.25)).child(snap.queue.iter().cloned().map(queue_row).collect::<Vec<_>>()));
     }
-    if let Some(picking) = &snap.picking {
-        column = column.children([picker(picking)]);
-    }
-    if snap.blank {
-        column = column.children([setup(&snap), settings_rows(&snap.settings, snap.busy)]);
-    } else if !snap.settings.is_empty() {
-        column = column.child(settings_rows(&snap.settings, snap.busy));
-    }
-    column = column.child(
-        view()
-            .flex_row()
-            .items_end()
-            .gap(rems(0.5))
-            .px(rems(0.75))
-            .py(rems(0.5))
-            .rounded(Colors::radius() * 2.)
-            .border_1()
-            .border_color(Colors::input_border())
-            .bg(Colors::input_background())
-            .on_file_drop(move |drop: &FileDropEvent| tell(Cmd::Drop(drop.uris.clone())))
-            .child(draft_field(&field, field_ref))
-            .children(snap.busy.then(|| steer_button(snap.steer, low.clone(), has_pictures)))
-            .child(send_button(snap, low)),
-    );
+    column = column.child(card);
     column.into_element()
 }
 
@@ -1270,17 +1316,21 @@ pub fn Chat() -> impl IntoElement {
 
     // What the draft field holds: the user's typing, taken over by the app's own writes (a
     // cleared draft after a send, a taken-back queue row), which the sentinel marks.
+    // The field is built again then (see [`fresh_field`]), so it takes the keyboard back.
+    let field_ref = element_ref();
     let draft = signal(state.with_untracked(|s| s.draft.clone()));
     let taken = stored(u64::MAX);
     effect(move || {
         let (sentinel, text) = state.with(|s| (s.draft_reset, s.draft.clone()));
-        if taken.replace(sentinel) != sentinel && text != draft.get_untracked() {
-            draft.set(text);
+        if taken.replace(sentinel) != sentinel {
+            if text != draft.get_untracked() {
+                draft.set(text);
+            }
+            spawn(async move { field_ref.focus() });
         }
     });
 
     // The field takes the keyboard whenever the app asks it to.
-    let field_ref = element_ref();
     let focused = stored(0_u64);
     effect(move || {
         let bump = state.with(|s| s.focus);
@@ -1311,7 +1361,11 @@ pub fn Chat() -> impl IntoElement {
     effect(move || {
         let bump = state.with(|s| s.follow);
         if bump > 0 && seen.replace(bump) != bump {
-            scrolled.scroll_to_end(false);
+            // After the rows are laid out: scrolling now would stop short of the new end, and
+            // leave the last lines below the edge of the transcript.
+            spawn(async move {
+                scrolled.scroll_to_end(false);
+            });
         }
     });
 
@@ -1336,7 +1390,7 @@ pub fn Chat() -> impl IntoElement {
                 .children([text("What is this thread about?").text_base().text_color(Colors::muted()), text("Message an agent to begin.").text_sm().text_color(Colors::muted())])
                 .into_element()
         } else {
-            transcript(&snap.items)
+            transcript(&snap.items, scrolled.clone())
         };
         view()
             .flex_1()
@@ -1486,5 +1540,40 @@ mod tests {
         app.press("label:Start the thread").unwrap();
         let sent = drain(&mut app, commands);
         assert!(sent.contains(&Bus::Chat(Cmd::Send { later: false })), "{sent:?}");
+    }
+
+    #[test]
+    fn a_started_thread_names_its_agent_and_offers_control_before_any_grant() {
+        let mut guard = crate::nsh::bus::lock();
+        let commands = guard.as_mut().expect("the channel");
+        let mut app = start(Snapshot {
+            agents: vec![("Claude".into(), "claude".into())],
+            chosen: Some("claude".into()),
+            grant: Some(Grant::default()),
+            items: vec![Item::Agent { index: 0, blocks: vec![] }],
+            ..Snapshot::default()
+        });
+        assert!(app.shows("Claude"), "{:?}", app.screen().texts());
+        let texts = app.screen().texts();
+        assert_eq!(texts.iter().filter(|t| **t == "Control").count(), 1, "only the composer's menu, not the header's: {texts:?}");
+        app.press("label:What this thread's agent may do through Po").unwrap();
+        app.settle();
+        app.press("text:Orchestrate").unwrap();
+        let sent = drain(&mut app, commands);
+        let set = Grant { scope: Scope::Orchestrate, ..Grant::default() };
+        assert!(sent.contains(&Bus::Chat(Cmd::Grant(GrantChange::Set(set)))), "{sent:?}");
+    }
+
+    #[test]
+    fn the_field_empties_when_the_app_clears_the_draft() {
+        let mut guard = crate::nsh::bus::lock();
+        let commands = guard.as_mut().expect("the channel");
+        let mut app = start(Snapshot { items: vec![Item::Agent { index: 0, blocks: vec![] }], ..Snapshot::default() });
+        app.type_text("id:chat-draft", "hello there").unwrap();
+        drain(&mut app, commands);
+        assert_eq!(app.screen().input_text("id:chat-draft").unwrap().as_deref(), Some("hello there"));
+        publish(Snapshot { draft: String::new(), draft_reset: 1, items: vec![Item::Agent { index: 0, blocks: vec![] }], ..Snapshot::default() });
+        app.wait(std::time::Duration::from_millis(100)).unwrap();
+        assert_eq!(app.screen().input_text("id:chat-draft").unwrap().as_deref().unwrap_or(""), "");
     }
 }

@@ -5252,7 +5252,7 @@ impl Reader {
             Some(_) if !thread.loading => chat::Picking::Note(format!("No sessions to resume in {}", self.project.root.display())),
             _ => chat::Picking::Note(thread.status.clone()),
         });
-        let grant = self.grants.get(&thread.id).copied().filter(|g| *g != command::Grant::default());
+        let grant = self.grants.get(&thread.id).copied().unwrap_or_default();
         chat::Snapshot {
             glass: cx.global::<Palette>().glass.is_some(),
             title: thread.title(),
@@ -5271,7 +5271,7 @@ impl Reader {
                 choices: option.choices.clone(),
             }).collect(),
             isolate: worktree::in_repo(&self.project.root).then(|| thread.isolate),
-            grant: grant.map(|g| chat::Grant {
+            grant: Some(grant).map(|g| chat::Grant {
                 scope: match g.scope {
                     command::Scope::Viewer => chat::Scope::Viewer,
                     command::Scope::Orchestrate => chat::Scope::Orchestrate,

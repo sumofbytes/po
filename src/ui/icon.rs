@@ -1,16 +1,19 @@
 //! The Lucide icons po uses (ISC license, `assets/icons/LICENSE-LUCIDE`), drawn by NSH.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum IconName {
+    ArrowUp,
     Calendar,
     CaseSensitive,
     ChevronDown,
     ChevronLeft,
     ChevronRight,
     Close,
+    CornerDownRight,
     FileText,
     Folder,
     FolderTree,
     Heading,
+    ListPlus,
     Maximize,
     Minimize,
     PanelLeft,
@@ -31,16 +34,19 @@ impl IconName {
             };
         }
         match self {
+            Self::ArrowUp => icon!("arrow-up"),
             Self::Calendar => icon!("calendar"),
             Self::CaseSensitive => icon!("case-sensitive"),
             Self::ChevronDown => icon!("chevron-down"),
             Self::ChevronLeft => icon!("chevron-left"),
             Self::ChevronRight => icon!("chevron-right"),
             Self::Close => icon!("close"),
+            Self::CornerDownRight => icon!("corner-down-right"),
             Self::FileText => icon!("file-text"),
             Self::Folder => icon!("folder"),
             Self::FolderTree => icon!("folder-tree"),
             Self::Heading => icon!("heading"),
+            Self::ListPlus => icon!("list-plus"),
             Self::Maximize => icon!("maximize-2"),
             Self::Minimize => icon!("minimize-2"),
             Self::PanelLeft => icon!("panel-left"),
