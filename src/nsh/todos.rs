@@ -306,7 +306,7 @@ fn entry(name: &'static str, lead_icon: IconName, value: Signal<String>, placeho
             .on_submit(move |_: &str| on_submit())
             .flex_1()
     };
-    let mut text_input = input(format!("{name}-text"), value, placeholder).auto_focus(true);
+    let mut text_input = input(format!("{name}-text"), value, placeholder).auto_focus(true).multiline(true).min_w_0().max_h(rems(10.));
     if let Some(field) = field {
         text_input = text_input.element_ref(&field);
     }
@@ -344,7 +344,7 @@ fn entry(name: &'static str, lead_icon: IconName, value: Signal<String>, placeho
 /// The field at the top: Enter adds what it holds.
 fn add_row(state: State) -> View {
     view()
-        .h(row_height() + rems(0.5))
+        .min_h(row_height() + rems(0.5))
         .flex_row()
         .items_center()
         .px(rems(0.625))
@@ -369,7 +369,7 @@ fn composer(state: State, target: Target, depth: usize) -> View {
     };
     let label = if matches!(target, Target::Edit(_)) { "Cancel (Esc)" } else { "Done adding (Esc)" };
     view()
-        .h(row_height())
+        .min_h(row_height())
         .flex_row()
         .items_center()
         .gap(rems(0.5))

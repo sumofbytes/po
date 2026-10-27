@@ -215,6 +215,8 @@ pub struct Snapshot {
     pub focus: u64,
     /// Bumped when the transcript should follow its end (the user sent something).
     pub follow: u64,
+    /// Bumped as the turn goes on; the transcript follows it only when it is already at its end.
+    pub follow_soft: u64,
 }
 
 static SNAPSHOT: LazyLock<watch::Sender<Snapshot>> = LazyLock::new(|| watch::Sender::new(Snapshot::default()));
@@ -314,8 +316,9 @@ fn separator() -> AnyElement {
 }
 
 /// The glyph that walks with it, in its tone.
-fn step_glyph(phase: Phase) -> Text {
-    text(phase.glyph().to_string()).text_color(phase_tint(phase))
+fn step_glyph(phase: Phase) -> View {
+    // A fixed width, so the text beside it stays put as the glyph changes from one phase to the next.
+    view().flex_none().w(rems(1.)).flex_row().justify_center().child(text(phase.glyph().to_string()).text_color(phase_tint(phase)))
 }
 
 /// The popovers of the menus: the theme's own surface, with a shadow.
@@ -535,12 +538,12 @@ fn tool_row(message: usize, at: usize, tool: &Tool) -> AnyElement {
         .child(
             view()
                 .flex_row()
-                .items_start()
+                .items_center()
                 .gap(rems(0.5))
                 .child(
                     view()
                         .flex_row()
-                        .items_start()
+                        .items_center()
                         .gap(rems(0.5))
                         .flex_1()
                         .min_w_0()
@@ -819,7 +822,7 @@ fn agent_row(message: usize, blocks: &[Block]) -> AnyElement {
 }
 
 /// The conversation: the messages, in order, as a center column.
-fn transcript(items: &[Item], slot: ElementRef) -> AnyElement {
+fn transcript(items: &[Item], slot: ElementRef, at_end: Signal<bool>) -> AnyElement {
     // The transcript's column is the composer card's width, and its text starts where the
     // composer's does: the card's border, its padding and the field's padding in (see [`bar`]).
     let mut rows = view().w_full().min_w_0().max_w(px(COLUMN)).flex_col().gap(rems(1.5)).px(rems(TEXT_INSET)).py(rems(1.5));
@@ -836,7 +839,13 @@ fn transcript(items: &[Item], slot: ElementRef) -> AnyElement {
         .flex()
         .justify_center()
         .overflow_hidden()
-        .child(scroll().size_full().child(view().flex_col().items_center().w_full().min_w_0().px(rems(EDGE)).child(rows.into_element())).element_ref(&slot))
+        .child(
+            scroll()
+                .size_full()
+                .on_scroll(move |event: &ScrollEvent| at_end.set(event.offset.y + event.size.height >= event.content_size.height - px(24.)))
+                .child(view().flex_col().items_center().w_full().min_w_0().px(rems(EDGE)).child(rows.into_element()))
+                .element_ref(&slot),
+        )
         .into_element()
 }
 
@@ -1361,9 +1370,12 @@ pub fn Chat() -> impl IntoElement {
     // The transcript follows its end whenever the app asks it to (a message sent, a turn going).
     let scrolled = element_ref();
     let seen = stored(u64::MAX);
+    let seen_soft = stored(u64::MAX);
+    let at_end = signal(true);
     effect(move || {
-        let bump = state.with(|s| s.follow);
-        if bump > 0 && seen.replace(bump) != bump {
+        let (bump, soft) = state.with(|s| (s.follow, s.follow_soft));
+        let grown = seen_soft.replace(soft) != soft && at_end.get_untracked();
+        if (bump > 0 && seen.replace(bump) != bump) || grown {
             // After the rows are laid out: scrolling now would stop short of the new end, and
             // leave the last lines below the edge of the transcript.
             spawn(async move {
@@ -1393,7 +1405,7 @@ pub fn Chat() -> impl IntoElement {
                 .children([text("What is this thread about?").text_base().text_color(Colors::muted()), text("Message an agent to begin.").text_sm().text_color(Colors::muted())])
                 .into_element()
         } else {
-            transcript(&snap.items, scrolled.clone())
+            transcript(&snap.items, scrolled.clone(), at_end)
         };
         view()
             .flex_1()
