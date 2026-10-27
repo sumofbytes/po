@@ -1,6 +1,6 @@
 # po
 
-A native desktop GUI (built on [GPUI](https://crates.io/crates/gpui-pre)) for
+A native desktop GUI (built on [GPUI](https://crates.io/crates/gpui-fast)) for
 coding agents that speak the [Agent Client Protocol](https://agentclientprotocol.com).
 Chat with an agent, browse the project's files with a syntax-highlighted viewer,
 and review the agent's plans and edit diffs side by side.
@@ -306,8 +306,8 @@ bullets from `punctuation`, links from `colors.link`. An optional top-level
 ## License
 
 Dual-licensed under [MIT](LICENSE) or [Apache-2.0](LICENSE-APACHE), at your
-option. Bundled third-party material keeps its own license: `vendor/gpui-pre-wgpu`,
-`vendor/gpui-pre-apple`, and `vendor/gpui-pre-windows` (Apache-2.0), `src/viewer/languages`
+option. Bundled third-party material keeps its own license: `vendor/gpui-fast-wgpu`,
+`vendor/gpui-fast-apple`, and `vendor/gpui-fast-windows` (Apache-2.0), `src/viewer/languages`
 queries (Apache-2.0), and the Lucide icons in `assets/icons` (ISC).
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md).
