@@ -1183,7 +1183,9 @@ struct Reader {
     _chat_theme: Subscription,
     /// What the conversation was last published as, one row for how many messages the transcript
     /// showed and whether a turn went on the thread it shows; a change bumps [`Self::chat_follow`].
-    chat_marks: std::cell::Cell<(usize, usize, bool)>,
+    chat_marks: std::cell::Cell<((u64, u64), usize, usize, bool, usize)>,
+    /// The project and thread the conversation showed last.
+    chat_shown: std::cell::Cell<(u64, u64)>,
     /// What the transcript's next publishing carries as [`Snapshot::follow`], bumped when the thread gets louder.
     chat_follow: std::cell::Cell<u64>,
     /// What [`Snapshot::draft_reset`] carries next, bumped whenever the app writes the draft itself.
@@ -1409,7 +1411,8 @@ impl Reader {
             _sidebar_theme: sidebar_theme,
             chat: chat_pane,
             _chat_theme: chat_theme,
-            chat_marks: std::cell::Cell::new((0, 0, false)),
+            chat_marks: std::cell::Cell::new(((0, 0), 0, 0, false, 0)),
+            chat_shown: std::cell::Cell::new((u64::MAX, u64::MAX)),
             chat_follow: std::cell::Cell::new(0),
             chat_reset: std::cell::Cell::new(0),
             chat_focus: std::cell::Cell::new(0),
@@ -3767,7 +3770,7 @@ impl Reader {
 
     /// Asks the agent to change a setting of the thread's session. Once it accepts, the choice is
     /// remembered for the agent's next threads.
-    fn choose_option(&mut self, id: &str, value: &str) {
+    fn choose_option(&mut self, id: &str, value: &str, cx: &mut Context<Self>) {
         let thread = &mut self.thread;
         if let Some(client) = &thread.client
             && client.set_option(id, value)
@@ -3776,6 +3779,7 @@ impl Reader {
             // What is chosen here isn't then undone by carrying over an earlier choice.
             applying.settled.insert(id.to_string());
         }
+        cx.notify();
     }
 
     /// Lists an agent's sessions in a new thread, to resume one: those of the agent the thread on
@@ -5213,7 +5217,19 @@ impl Reader {
             Some(Msg::Agent(blocks)) => blocks.len(),
             _ => 0,
         };
-        let louder = (thread.messages.len(), blocks, busy);
+        // A thread other than the one last shown starts from its own draft and its own end.
+        let shown = (self.project_id, thread.id);
+        if self.chat_shown.replace(shown) != shown {
+            self.chat_reset.set(self.chat_reset.get() + 1);
+        }
+        let growth = match thread.messages.last() {
+            Some(Msg::Agent(blocks)) => match blocks.last() {
+                Some(Block::Text(text)) | Some(Block::Thought(text, _)) => text.len(),
+                _ => 0,
+            },
+            _ => 0,
+        };
+        let louder = (shown, thread.messages.len(), blocks, busy, growth);
         let follow = if louder == self.chat_marks.get() { self.chat_follow.get() } else {
             let follow = self.chat_follow.get() + 1;
             self.chat_follow.set(follow);
@@ -5310,7 +5326,15 @@ impl Reader {
             Chat::Resume(id) => self.resume_session(&id, window, cx),
             Chat::History => self.resume_thread(window, cx),
             Chat::PickAgent(id) => self.pick_agent(id, window, cx),
-            Chat::Setting { id, value } => self.choose_option(&id, &value),
+            Chat::Setting { id, value } => self.choose_option(&id, &value, cx),
+            Chat::ClosePicker => {
+                self.thread.drop_agent();
+                cx.notify();
+            }
+            Chat::DismissNote => {
+                self.thread.attach_note = None;
+                cx.notify();
+            }
             Chat::Isolate(isolate) => {
                 self.thread.isolate = isolate;
                 cx.notify();

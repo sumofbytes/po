@@ -89,6 +89,13 @@ pub struct Queued {
     pub pictures: usize,
 }
 
+impl Setting {
+    /// The name of the choice in effect, or its value when the agent gave no name for it.
+    pub fn current_name(&self) -> String {
+        self.choices.iter().find(|(value, _)| *value == self.current).map_or(self.current.clone(), |(_, name)| name.clone())
+    }
+}
+
 /// A session of the agent's, offered to resume.
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct Session {
@@ -240,6 +247,10 @@ pub enum Cmd {
     Detach(usize),
     /// A queued message goes back into the draft, to edit.
     Recall(usize),
+    /// The sessions on offer are put away.
+    ClosePicker,
+    /// The note under the composer about what was left out is dismissed.
+    DismissNote,
     /// The user gave the agent one of the ways of answering a permission request.
     Answer { message: usize, block: usize, at: usize },
     /// Po's command was approved (`yes`) or refused.
@@ -451,12 +462,8 @@ fn user_row(text_: &str, pictures: &[Picture]) -> AnyElement {
                 .collect::<Vec<_>>(),
         );
     if !text_.is_empty() {
-        bubble = bubble.child(
-            text_view()
-                .markdown(text_.to_string())
-                .text_base()
-                .text_color(Colors::foreground()),
-        );
+        // Typed text is shown as typed: its `*` and `#` are not markup.
+        bubble = bubble.child(text(text_.to_string()).selectable(true).text_base().text_color(Colors::foreground()));
     }
     view().flex_row().justify_end().child(bubble).into_element()
 }
@@ -562,17 +569,16 @@ fn tool_row(message: usize, at: usize, tool: &Tool) -> AnyElement {
             card = card.child(
                 view()
                     .max_h(px(448.))
-                    .overflow_hidden()
                     .border_l_1()
                     .border_color(Colors::border())
                     .pl(rems(0.75))
-                    .child(
+                    .child(scroll().max_h(px(448.)).child(
                         text(piece.clone())
                             .text_color(Colors::muted())
                             .text_size(px(mono_size()))
                             .line_height(px(mono_size() * 1.5))
                             .font_family(mono_family()),
-                    ),
+                    )),
             );
         }
     }
@@ -584,6 +590,8 @@ fn tool_row(message: usize, at: usize, tool: &Tool) -> AnyElement {
 fn run_row(message: usize, at: usize, count: usize, phase: Phase, folded: bool) -> AnyElement {
     let label = format!("{count} tool calls");
     view()
+        .role(AccessibilityRole::Button)
+        .label(label.clone())
         .flex_row()
         .items_center()
         .gap(rems(0.5))
@@ -761,20 +769,22 @@ fn approve_row(message: usize, at: usize, question: &str, lines: &[String], answ
     card.into_element()
 }
 
-/// One block of the agent's message.
-fn block_row(message: usize, at: usize, block: &Block) -> AnyElement {
+/// One block of the agent's message. What it reports is its own place in the message
+/// ([`Block`]'s `index`), not its place among the rows drawn: a folded run adds a row of its own.
+fn block_row(message: usize, block: &Block) -> AnyElement {
     match block {
         Block::Markdown(markdown) => text_view()
             .markdown(markdown.0.to_string())
+            .selectable(true)
             .text_base()
             .text_color(Colors::foreground())
             .into_element(),
-        Block::Thought { text: thought, open, .. } => thought_row(message, at, thought, *open),
-        Block::Tool(tool) => tool_row(message, at, tool),
-        Block::Run { count, phase, folded, .. } => run_row(message, at, *count, *phase, *folded),
+        Block::Thought { index, text: thought, open } => thought_row(message, *index, thought, *open),
+        Block::Tool(tool) => tool_row(message, tool.index, tool),
+        Block::Run { index, count, phase, folded } => run_row(message, *index, *count, *phase, *folded),
         Block::Plan(entries) => plan_rows(entries),
-        Block::Ask { title, options, answered, .. } => ask_row(message, at, title, options, answered),
-        Block::Approve { question, lines, answered, .. } => approve_row(message, at, question, lines, answered),
+        Block::Ask { index, title, options, answered } => ask_row(message, *index, title, options, answered),
+        Block::Approve { index, question, lines, answered } => approve_row(message, *index, question, lines, answered),
     }
 }
 
@@ -782,7 +792,10 @@ fn block_row(message: usize, at: usize, block: &Block) -> AnyElement {
 fn agent_row(message: usize, blocks: &[Block]) -> AnyElement {
     let mut column = view().flex_col().gap(rems(0.75));
     let mut skip = 0;
-    for (at, block) in blocks.iter().enumerate() {
+    if blocks.is_empty() {
+        column = column.child(text("Thinking…").text_sm().text_color(Colors::muted()));
+    }
+    for block in blocks {
         if skip > 0 {
             skip -= 1;
             continue;
@@ -791,7 +804,7 @@ fn agent_row(message: usize, blocks: &[Block]) -> AnyElement {
             // The tools the run hides; its own row takes their place.
             skip = *count;
         }
-        column = column.child(block_row(message, at, block));
+        column = column.child(block_row(message, block));
     }
     column.into_element()
 }
@@ -924,7 +937,7 @@ fn note_row(note: &str) -> AnyElement {
                 .rounded_full()
                 .cursor_pointer()
                 .hover(|s| s.bg(Colors::hover()))
-                .on_press(|| tell(Cmd::Drop(vec![])))
+                .on_press(|| tell(Cmd::DismissNote))
                 .child(icon(IconName::Close, rems(0.625), Colors::muted())),
         )
         .into_element()
@@ -957,7 +970,7 @@ fn picker(picking: &Picking) -> AnyElement {
             }
             column.into_element()
         }),
-        Picking::Note(note) => (note.clone(), view().child(text("No sessions to resume").text_sm().text_color(Colors::muted())).into_element()),
+        Picking::Note(note) => (note.clone(), view().into_element()),
     };
     view()
         .flex_col()
@@ -984,7 +997,7 @@ fn picker(picking: &Picking) -> AnyElement {
                         .rounded_full()
                         .cursor_pointer()
                         .hover(|s| s.bg(Colors::hover()))
-                        .on_press(|| tell(Cmd::Stop))
+                        .on_press(|| tell(Cmd::ClosePicker))
                         .child(icon(IconName::Close, rems(0.625), Colors::muted())),
                 ),
         )
@@ -1041,7 +1054,9 @@ fn setup(snap: &Snapshot) -> AnyElement {
 }
 
 /// The settings of the session, as menus named for each.
-fn settings_rows(settings: &[Setting]) -> AnyElement {
+/// A menu for each of the session's settings. While a turn runs they wait: agents differ on
+/// changing them mid-turn.
+fn settings_rows(settings: &[Setting], busy: bool) -> AnyElement {
     view()
         .flex_row()
         .flex_wrap()
@@ -1050,7 +1065,10 @@ fn settings_rows(settings: &[Setting]) -> AnyElement {
             settings
                 .iter()
                 .map(|setting| {
-                    let mut menu = menu().popup_class(MENU).trigger(menu_trigger(format!("{} · {}", setting.name, setting.current), "What the session uses"));
+                    if busy {
+                        return menu_trigger(setting.current_name(), "Available when the agent is idle").opacity(0.5).into_element();
+                    }
+                    let mut menu = menu().popup_class(MENU).trigger(menu_trigger(setting.current_name(), "What the session uses"));
                     for (value, name) in &setting.choices {
                         let on = *value == setting.current;
                         let (decided, id) = (value.clone(), setting.id.clone());
@@ -1197,7 +1215,9 @@ fn bar(snap: Snapshot, draft: Signal<String>, field_ref: ElementRef) -> AnyEleme
         column = column.children([picker(picking)]);
     }
     if snap.blank {
-        column = column.children([setup(&snap), settings_rows(&snap.settings)]);
+        column = column.children([setup(&snap), settings_rows(&snap.settings, snap.busy)]);
+    } else if !snap.settings.is_empty() {
+        column = column.child(settings_rows(&snap.settings, snap.busy));
     }
     column = column.child(
         view()
@@ -1359,5 +1379,75 @@ mod tests {
         app.press("label:Steer: the agent reads it before its next step (Alt+Enter: after this turn)").unwrap();
         let sent = drain(&mut app);
         assert!(sent.contains(&Bus::Chat(Cmd::Send { later: false })), "{sent:?}");
+    }
+
+    fn start(snapshot: Snapshot) -> Headless {
+        publish(snapshot);
+        let mut config = EngineConfig::new(nsh_platform_gpui::Root::of::<Chat>());
+        config.ui_sets = vec![nsh_base::registry()];
+        config.viewport = Size::new(Points(700.), Points(700.));
+        config.environment.idiom = nsh_core::platform::Idiom::Desktop;
+        config.environment.os = nsh_core::platform::Os::Linux;
+        let mut app = Headless::start(config).expect("engine");
+        app.first_render().expect("first render");
+        app.settle();
+        app
+    }
+
+    fn tool(index: usize) -> Block {
+        Block::Tool(Tool { index, title: format!("call {index}"), phase: Phase::Done, open: false, arguments: String::new(), result: String::new(), path: None })
+    }
+
+    fn drain(app: &mut Headless, commands: &mut tokio::sync::mpsc::UnboundedReceiver<Bus>) -> Vec<Bus> {
+        app.settle();
+        std::iter::from_fn(|| commands.try_recv().ok()).collect()
+    }
+
+    #[test]
+    fn presses_name_the_block_of_the_message_not_the_row_drawn() {
+        let mut guard = crate::nsh::bus::lock();
+        let commands = guard.as_mut().expect("the channel");
+        // Four calls in one run (the run's row stands before them), then a permission request at
+        // the message's block 4, then a second run of three calls at 5..8.
+        let mut blocks = vec![Block::Run { index: 0, count: 4, phase: Phase::Done, folded: false }];
+        blocks.extend((0..4).map(tool));
+        blocks.push(Block::Ask { index: 4, title: "Run rm?".into(), options: vec![AskOption { at: 0, label: "Allow once".into(), primary: true }], answered: None });
+        blocks.push(Block::Run { index: 5, count: 3, phase: Phase::Done, folded: false });
+        blocks.extend((5..8).map(tool));
+        let mut app = start(Snapshot { items: vec![Item::Agent { index: 0, blocks }], ..Snapshot::default() });
+        app.press("label:Allow once").unwrap();
+        assert_eq!(drain(&mut app, commands), [Bus::Chat(Cmd::Answer { message: 0, block: 4, at: 0 })]);
+        // Two runs say "tool calls": the first is four, the second three.
+        app.press("label:3 tool calls").unwrap();
+        assert_eq!(drain(&mut app, commands), [Bus::Chat(Cmd::Fold { message: 0, block: 5, folded: true })]);
+    }
+
+    #[test]
+    fn the_picker_closes_without_stopping_and_a_note_is_dismissed_on_its_own() {
+        let mut guard = crate::nsh::bus::lock();
+        let commands = guard.as_mut().expect("the channel");
+        let mut app = start(Snapshot {
+            picking: Some(Picking::Note("Loading sessions…".into())),
+            note: Some("Left out a big file".into()),
+            ..Snapshot::default()
+        });
+        assert!(app.shows("Loading sessions…") && !app.shows("No sessions to resume"), "{:?}", app.screen().texts());
+        app.press("label:Close").unwrap();
+        assert_eq!(drain(&mut app, commands), [Bus::Chat(Cmd::ClosePicker)]);
+        app.press("label:Dismiss").unwrap();
+        assert_eq!(drain(&mut app, commands), [Bus::Chat(Cmd::DismissNote)]);
+    }
+
+    #[test]
+    fn settings_stay_after_the_thread_starts_wait_while_it_is_busy_and_a_new_turn_says_it_is_thinking() {
+        let mut guard = crate::nsh::bus::lock();
+        let _commands = guard.as_mut().expect("the channel");
+        let settings = vec![Setting { id: "model".into(), name: "Model".into(), current: "b".into(), choices: vec![("a".into(), "Fast".into()), ("b".into(), "Smart".into())] }];
+        let mut app = start(Snapshot { settings: settings.clone(), items: vec![Item::Agent { index: 0, blocks: vec![] }], ..Snapshot::default() });
+        assert!(app.shows("Smart"), "{:?}", app.screen().texts());
+        assert!(app.shows("Thinking…"), "{:?}", app.screen().texts());
+        publish(Snapshot { settings, busy: true, items: vec![Item::Agent { index: 0, blocks: vec![] }], ..Snapshot::default() });
+        app.wait(std::time::Duration::from_millis(100)).unwrap();
+        assert!(app.shows("Smart"), "{:?}", app.screen().texts());
     }
 }
