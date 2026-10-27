@@ -586,7 +586,7 @@ struct Project {
     diff_list: ListState,
     current: Option<String>,
     stamp: Option<Stamp>,
-    code: Option<Entity<viewer::CodeViewState>>,
+    code: Option<nsh::source::Shared>,
     /// The current file rendered, when it is markdown.
     doc: Option<Doc>,
     notice: Option<String>,
@@ -1237,6 +1237,14 @@ struct Reader {
     /// The sidebar's filter: threads and projects that don't match it are left out of its lists.
     /// What the sidebar's filter holds.
     side_query: String,
+    /// The viewer's source pane, drawn by NSH, and what keeps it in Po's theme.
+    source: Entity<nsh_platform_gpui::AppView>,
+    _source_theme: Subscription,
+    /// The window's controls the pane being built carries: its lead, then its trail.
+    pane_controls: std::cell::RefCell<(Vec<nsh::header::Control>, Vec<nsh::header::Control>)>,
+    /// A line the viewer was asked to scroll to, and a number that changes with each ask.
+    reveal: Option<(u32, u64)>,
+    reveal_serial: u64,
     /// The sidebar, drawn by NSH, and what keeps it in Po's theme.
     sidebar: Entity<nsh_platform_gpui::AppView>,
     _sidebar_theme: Subscription,
@@ -1334,6 +1342,7 @@ impl Reader {
         let pr_input = cx.new(|cx| {
             InputState::new(window, cx).auto_grow(1, 1).submit_on_enter(true).placeholder("PR number or URL")
         });
+        let (source, source_theme) = nsh::mount(nsh_platform_gpui::Root::of::<nsh::source::Source>(), window, cx);
         let (sidebar, sidebar_theme) = nsh::mount(nsh_platform_gpui::Root::of::<nsh::sidebar::Sidebar>(), window, cx);
         let finder_window = cx.new(|cx| nsh::overlay::Overlay::new(560., 8., || nsh_platform_gpui::Root::of::<nsh::finder::Finder>(), &nsh::finder::HEIGHT, cx));
         let settings_window = cx.new(|cx| nsh::overlay::Overlay::new(680., 24., || nsh_platform_gpui::Root::of::<nsh::settings::Settings>(), &nsh::settings::HEIGHT, cx));
@@ -1459,6 +1468,11 @@ impl Reader {
             home,
             pr_input,
             side_query: String::new(),
+            source,
+            _source_theme: source_theme,
+            pane_controls: Default::default(),
+            reveal: None,
+            reveal_serial: 0,
             sidebar,
             _sidebar_theme: sidebar_theme,
             todos,
@@ -3360,8 +3374,9 @@ impl Reader {
             Command::FileOpen { path, line } => {
                 self.show_viewer(Mode::Source, cx);
                 self.open(&path, window, cx);
-                if let (Some(line), Some(code)) = (line, &self.project.code) {
-                    code.update(cx, |code, cx| code.go_to_line(line - 1, cx));
+                if let (Some(line), Some(_)) = (line, &self.project.code) {
+                    self.reveal_serial += 1;
+                    self.reveal = Some((line.saturating_sub(1) as u32, self.reveal_serial));
                 }
             }
             Command::DiffShow { path } => {
@@ -4864,13 +4879,9 @@ impl Reader {
             }
             Ok(Some(text)) => {
                 self.project.doc = self.markdown_doc(path, &text, cx);
-                match &self.project.code {
-                    // Same file: swap the text in place so the scroll position and caret survive.
-                    Some(code) if self.project.current.as_deref() == Some(path) => {
-                        code.update(cx, |state, cx| state.set_text(text, cx));
-                    }
-                    _ => self.project.code = Some(cx.new(|cx| viewer::CodeViewState::new(text, syntax(path), window, cx))),
-                }
+                // The same file keeps its place: the editor swaps the text in, and the scroll position
+                // and caret survive.
+                self.project.code = Some(nsh::source::Shared(Arc::from(text)));
                 self.project.notice = None;
             }
             Err(error) => {
@@ -5612,6 +5623,12 @@ impl Reader {
             Cmd::OpenSettings => self.toggle_settings(window, cx),
             Cmd::ToggleTodos => self.toggle_todos(window, cx),
             Cmd::CloseTodos => self.hide_todos(window, cx),
+            Cmd::ToggleLeft => self.toggle_left(cx),
+            Cmd::ToggleRight => self.toggle_right(cx),
+            Cmd::ToggleFocus => self.toggle_focus(cx),
+            Cmd::Browse(browse) => self.set_browsing(browse, cx),
+            Cmd::ToggleRendered => self.toggle_rendered(cx),
+            Cmd::OpenUrl(url) => cx.open_url(&url),
             Cmd::FinderQuery(query) => {
                 if query != self.finder_query {
                     self.finder_query = query;
@@ -5675,6 +5692,9 @@ impl Reader {
         } else {
             (None, lead)
         };
+        // The same split of the window's controls, as descriptors, for a body NSH draws.
+        let (lead_controls, trail_controls) = self.pane_controls.borrow().clone();
+        let body_controls = |lead: Vec<nsh::header::Control>| if with_tree || explorer_only { (vec![], trail_controls.clone()) } else if stacked { ([lead, vec![nsh::header::Control::Explorer]].concat(), trail_controls.clone()) } else { (lead, trail_controls.clone()) };
         let body = match (shown, shown_form, self.mode) {
             _ if explorer_only => {
                 let background = cx.global::<Palette>().background;
@@ -5685,7 +5705,10 @@ impl Reader {
                 let doc = self.thread.docs.get(&form.id);
                 self.form_view(form, doc, body_lead, trail, cx).into_any_element()
             }
-            (None, None, Mode::Source) => self.viewer(body_lead, trail, cx).into_any_element(),
+            (None, None, Mode::Source) => {
+                let (lead, trail) = body_controls(lead_controls);
+                self.viewer(lead, trail, cx).into_any_element()
+            }
             (None, None, Mode::Diff) => self.diff_viewer(body_lead, trail, cx).into_any_element(),
         };
         let background = cx.global::<Palette>().background;
@@ -5998,43 +6021,33 @@ impl Reader {
             .child(div().flex_1().min_h_0().border_color(border).child(body))
     }
 
-    fn viewer(&self, lead: Option<AnyElement>, trail: Option<AnyElement>, cx: &mut Context<Self>) -> impl IntoElement + Styled + use<> {
-        let background = cx.global::<Palette>().background;
-        let title = self.project.current.clone().unwrap_or_else(|| "No file open".into());
-        let doc = self.project.doc.as_ref().filter(|_| self.rendered);
-        let body: AnyElement = match (&self.project.code, &self.project.notice) {
-            (_, Some(notice)) => centered(notice.clone(), cx),
-            (_, None) if let Some(doc) = doc => self.markdown_view(doc, cx),
-            // Cached: the viewer redraws when it changes, not with every agent update or caret blink elsewhere.
-            (Some(code), None) => code.clone().cached(StyleRefinement::default().size_full()).into_any_element(),
-            (None, None) => centered(self.pick_hint("a file"), cx),
+    /// The open file in the viewer, drawn by NSH from what [`Self::source_snapshot`] publishes.
+    fn viewer(&self, lead: Vec<nsh::header::Control>, trail: Vec<nsh::header::Control>, cx: &mut Context<Self>) -> impl IntoElement + Styled + use<> {
+        nsh::source::publish(self.source_snapshot(lead, trail, cx));
+        div().size_full().child(self.source.clone())
+    }
+
+    fn source_snapshot(&self, lead: Vec<nsh::header::Control>, trail: Vec<nsh::header::Control>, cx: &App) -> nsh::source::Snapshot {
+        use nsh::source::{Body, Snapshot};
+        let current = self.project.current.as_deref();
+        let markdown = self.project.doc.is_some();
+        let rendered = markdown && self.rendered;
+        let body = match (&self.project.code, &self.project.notice) {
+            (_, Some(notice)) => Body::Notice(notice.clone()),
+            (Some(code), None) if rendered => Body::Markdown(code.clone()),
+            (Some(code), None) => Body::Code { path: current.unwrap_or_default().to_string(), text: code.clone() },
+            (None, None) => Body::Hint(self.pick_hint("a file")),
         };
-        div()
-            .size_full()
-            .flex()
-            .flex_col()
-            .bg(background)
-            .child(pane_header(
-                &title,
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .child(status_text(self.project.current.as_deref().map(language).unwrap_or("").to_string(), cx))
-                    .children(self.project.doc.as_ref().map(|_| {
-                        let this = cx.entity();
-                        Button::new("toggle-rendered")
-                            .label(if self.rendered { "Source" } else { "Preview" })
-                            .tooltip(if self.rendered { "Show the markdown source (Ctrl+Shift+M)" } else { "Show the rendered markdown (Ctrl+Shift+M)" })
-                            .ghost()
-                            .small()
-                            .on_click(move |_, _, cx| this.update(cx, |reader, cx| reader.toggle_rendered(cx)))
-                    })),
-                lead,
-                trail,
-                cx,
-            ))
-            .child(div().flex_1().min_h_0().child(body))
+        Snapshot {
+            glass: cx.global::<Palette>().glass.is_some(),
+            title: current.map_or_else(|| "No file open".to_string(), str::to_string),
+            lead,
+            trail,
+            language: current.map(language).unwrap_or("").to_string(),
+            preview: markdown.then_some(self.rendered),
+            body,
+            reveal: self.reveal,
+        }
     }
 
     fn toggle_rendered(&mut self, cx: &mut Context<Self>) {
@@ -7162,20 +7175,29 @@ impl Render for Reader {
             .on_click(move |_, _, cx| focus_viewer.update(cx, |reader, cx| reader.toggle_focus(cx)))
             .into_any_element();
         let viewer_trail = div().flex().items_center().gap_1().child(focus_button).child(viewer_toggle(right.clone())).into_any_element();
+        use nsh::header::Control;
+        let controls = |lead: Vec<Control>, trail: Vec<Control>| *self.pane_controls.borrow_mut() = (lead, trail);
+        let trail_all = vec![Control::Focus(focus), Control::Viewer(side_open)];
+        // The viewer pane is only built where it shows: a pane nobody sees would publish over the
+        // one that is.
+        let hidden = || div().size_full().into_any_element();
         let (middle, side) = if !side_open {
             // Only the conversation shows, and the viewer's button waits on the side it opens.
             let button = viewer_toggle(right);
             if swapped {
                 let lead = div().flex().items_center().gap_1().child(sidebar_toggle).child(button).into_any_element();
-                (floating(self.agent_panel(Some(lead), None, cx), cx), self.pane(None, None, cx))
+                (floating(self.agent_panel(Some(lead), None, cx), cx), hidden())
             } else {
-                (floating(self.agent_panel(Some(sidebar_toggle), Some(button), cx), cx), self.pane(None, None, cx))
+                (floating(self.agent_panel(Some(sidebar_toggle), Some(button), cx), cx), hidden())
             }
         } else if focus {
-            (self.pane(Some(sidebar_toggle), Some(viewer_trail), cx), self.pane(None, None, cx))
+            controls(vec![Control::Sidebar(left_open)], trail_all);
+            (self.pane(Some(sidebar_toggle), Some(viewer_trail), cx), hidden())
         } else if swapped {
+            controls(vec![Control::Sidebar(left_open)], trail_all);
             (self.pane(Some(sidebar_toggle), Some(viewer_trail), cx), floating(self.agent_panel(None, None, cx), cx))
         } else {
+            controls(vec![], trail_all);
             (floating(self.agent_panel(Some(sidebar_toggle), None, cx), cx), self.pane(None, Some(viewer_trail), cx))
         };
         let right_open = side_open && !focus;

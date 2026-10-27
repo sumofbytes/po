@@ -3,8 +3,10 @@
 //! Po's [`Palette`], Po's icons, and the views themselves.
 pub mod bus;
 pub mod finder;
+pub mod header;
 pub mod overlay;
 pub mod settings;
+pub mod source;
 pub mod sidebar;
 pub mod todos;
 
@@ -84,6 +86,7 @@ fn theme(palette: &Palette) -> nsh_platform_gpui::Theme {
     }
     theme.set_number("radius", f32::from(palette.radius));
     theme.set_number("rem", f32::from(palette.font_size));
+    theme.set_number("mono-size", f32::from(palette.mono_font_size));
     theme.set_font(nsh_core::element::FONT_SANS, palette.font_family.to_string());
     theme.set_font(nsh_core::element::FONT_MONO, palette.mono_font_family.to_string());
     theme
@@ -111,6 +114,10 @@ impl Colors {
 
     pub fn danger() -> impl Fn() -> AdaptiveColor + Copy {
         || nsh_base::theme().destructive
+    }
+
+    pub fn background() -> impl Fn() -> AdaptiveColor + Copy {
+        || nsh_base::theme().background
     }
 
     pub fn popover() -> impl Fn() -> AdaptiveColor + Copy {
@@ -175,6 +182,11 @@ impl Colors {
 /// `n` rems, a rem being Po's UI font size, as GPUI's `rems` are in the rest of the window.
 pub fn rems(n: f32) -> Points {
     Points(n * nsh_base::theme().number("rem").unwrap_or(14.))
+}
+
+/// The monospace font's size, in points.
+pub fn mono_size() -> f32 {
+    nsh_base::theme().number("mono-size").unwrap_or(13.)
 }
 
 /// The text of a row's label, GPUI's `text_base`.

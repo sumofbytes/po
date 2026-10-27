@@ -13,7 +13,7 @@ gpui_platform = { package = "gpui-fast-platform", version = "=0.1.9", default-fe
 # NSH: screens drawn as NSH apps inside Po's window. Rust roots only, so no QuickJS or web views.
 nsh-platform-gpui = { version = "0.3.0", default-features = false }
 nsh-core = "0.3.0"
-nsh-base = { version = "0.3.0", default-features = false }
+nsh-base = { version = "0.3.0" }
 env_logger = "0.11"
 log = "0.4"
 libc = "0.2"
