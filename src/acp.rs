@@ -42,13 +42,6 @@ pub struct ConfigOption {
     pub choices: Vec<(String, String)>,
 }
 
-impl ConfigOption {
-    /// The name of the current choice.
-    pub fn current_name(&self) -> &str {
-        self.choices.iter().find(|(value, _)| *value == self.current).map_or(self.current.as_str(), |(_, name)| name.as_str())
-    }
-}
-
 /// The `select` options in an agent's `configOptions`, in the agent's order. Choices may be
 /// flat or grouped; groups are flattened.
 fn parse_options(list: &Value) -> Vec<ConfigOption> {
@@ -500,7 +493,7 @@ mod tests {
         ]);
         let options = parse_options(&list);
         assert_eq!(options.len(), 2);
-        assert_eq!(options[0].current_name(), "B");
+        assert_eq!(options[0].current, "b");
         assert_eq!(options[1].id, "effort");
         assert_eq!(options[1].choices, vec![("x".to_string(), "X".to_string())]);
     }

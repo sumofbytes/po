@@ -1,18 +1,4 @@
-//! po's own components, drawn directly with gpui.
-pub mod button;
-pub mod file_tree;
+//! What the window itself is made of, drawn directly with gpui: the icons NSH draws and the
+//! resizable columns that hold the panes NSH draws.
 pub mod icon;
-pub mod input;
-pub mod list_item;
-pub mod markdown;
-pub mod menu;
 pub mod resizable;
-pub mod scrollbar;
-pub mod tree;
-
-pub fn init(cx: &mut gpui::App) {
-    tree::init(cx);
-    menu::init(cx);
-    markdown::init(cx);
-    input::init(cx);
-}

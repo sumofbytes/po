@@ -5,6 +5,7 @@ pub mod agent;
 pub mod chat;
 pub mod bus;
 pub mod diff;
+pub mod explorer;
 pub mod finder;
 pub mod header;
 pub mod overlay;
@@ -12,6 +13,7 @@ pub mod settings;
 pub mod source;
 pub mod sidebar;
 pub mod strip;
+pub mod tabs;
 pub mod todos;
 
 use base64::Engine as _;
@@ -83,6 +85,7 @@ fn theme(palette: &Palette) -> nsh_platform_gpui::Theme {
         ("list-hover", palette.list_hover),
         ("list-selected", palette.list_selected),
         ("added", palette.added),
+        ("info", palette.info),
         ("input-background", palette.input_background),
         ("caret", palette.caret),
     ] {
@@ -138,6 +141,10 @@ impl Colors {
 
     pub fn added() -> impl Fn() -> AdaptiveColor + Copy {
         Self::token("added")
+    }
+
+    pub fn info() -> impl Fn() -> AdaptiveColor + Copy {
+        Self::token("info")
     }
 
     pub fn primary() -> impl Fn() -> AdaptiveColor + Copy {

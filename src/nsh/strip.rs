@@ -145,6 +145,11 @@ fn worktree_strip(wt: Worktree) -> View {
 
 #[component]
 pub fn Strips() -> impl IntoElement {
+    strips_view()
+}
+
+/// The strips themselves, for a screen that has them under its header.
+pub fn strips_view() -> View {
     let state = signal(SNAPSHOT.borrow().clone());
     // What the PR field holds, the screen's own; emptied when Po says it emptied the PR field,
     // which a PR opening does.

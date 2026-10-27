@@ -44,16 +44,6 @@ pub enum Scope {
     Global,
 }
 
-impl Scope {
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::Viewer => "Viewer",
-            Self::Orchestrate => "Orchestrate",
-            Self::Global => "Global",
-        }
-    }
-}
-
 /// What the thread's agent may do through Po's API: its scope, and the reach it has beyond
 /// seeing this project's threads and answering their asks.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -214,6 +204,8 @@ pub struct Snapshot {
     /// Bumped when the app wrote the draft itself (taking a queued message back, clearing it),
     /// so the screen takes that text over.
     pub draft_reset: u64,
+    /// Bumped when the field should take the keyboard (a new thread opened for a message).
+    pub focus: u64,
     /// Bumped when the transcript should follow its end (the user sent something).
     pub follow: u64,
 }
@@ -912,18 +904,6 @@ fn queue_row(queued: Queued) -> AnyElement {
                 .hover(|s| s.bg(Colors::hover()))
                 .on_press(move || tell(Cmd::Recall(queued.at)))
                 .child(icon(IconName::Pencil, rems(0.625), Colors::muted())),
-        )
-        .child(
-            view()
-                .role(AccessibilityRole::Button)
-                .label("Drop")
-                .flex_none()
-                .p(rems(0.125))
-                .rounded_full()
-                .cursor_pointer()
-                .hover(|s| s.bg(Colors::hover()))
-                .on_press(move || tell(Cmd::Drop(vec![])))
-                .child(icon(IconName::Close, rems(0.625), Colors::muted())),
         );
     row.into_element()
 }
@@ -1095,6 +1075,36 @@ fn send_row(draft: &Signal<String>, state: &Signal<Snapshot>, later: bool) {
     tell(Cmd::Send { later });
 }
 
+/// While a turn runs, what is typed is sent into it (steered) or queued for its end.
+fn steer_button(steer: bool, draft: Signal<String>, has_pictures: bool) -> AnyElement {
+    let (label, tip) = if steer {
+        ("Steer", "Steer: the agent reads it before its next step (Alt+Enter: after this turn)")
+    } else {
+        ("Queue", "Queue: sent when this turn is over")
+    };
+    let typed = draft.clone();
+    view()
+        .role(AccessibilityRole::Button)
+        .label(tip)
+        .px(rems(0.75))
+        .py(rems(0.375))
+        .rounded(Colors::radius())
+        .border_1()
+        .border_color(Colors::input_border())
+        .cursor_pointer()
+        .style_when(move || typed.get().trim().is_empty() && !has_pictures, |s| s.opacity(0.4))
+        .hover(|s| s.bg(Colors::hover()))
+        .on_press(move || {
+            let text = draft.get_untracked();
+            if !text.trim().is_empty() || has_pictures {
+                tell(Cmd::Draft(text));
+                tell(Cmd::Send { later: false });
+            }
+        })
+        .child(text(label).text_sm().font_weight(FontWeight::MEDIUM).text_color(Colors::foreground()))
+        .into_element()
+}
+
 /// The send button: says what it does now, and does it.
 fn send_button(snap: Snapshot, draft: Signal<String>) -> AnyElement {
     let (label, tip) = if snap.blank {
@@ -1131,10 +1141,11 @@ fn send_button(snap: Snapshot, draft: Signal<String>) -> AnyElement {
 
 /// The field the draft is typed in, reporting what the user pasted:
 /// the pictures and files it came with, and the text it says.
-fn draft_field(draft: &Signal<String>) -> Input {
+fn draft_field(draft: &Signal<String>, field_ref: ElementRef) -> Input {
     let held = draft.clone();
     input()
         .test_id("chat-draft")
+        .element_ref(&field_ref)
         .flex_1()
         .multiline(true)
         .value(move || held.get())
@@ -1168,15 +1179,19 @@ fn draft_field(draft: &Signal<String>) -> Input {
 
 /// The composer: the note, the strip of pictures, the setup of a thread that waits to start,
 /// the field, and the send.
-fn bar(snap: Snapshot, draft: Signal<String>) -> AnyElement {
+fn bar(snap: Snapshot, draft: Signal<String>, field_ref: ElementRef) -> AnyElement {
     let field = draft.clone();
     let low = draft.clone();
+    let has_pictures = !snap.pictures.is_empty();
     let mut column = view().flex_none().flex_col().gap(rems(0.375)).px(rems(0.75)).py(rems(0.625)).border_t_1().border_color(Colors::border());
     if let Some(note) = &snap.note {
         column = column.children([note_row(note.as_str())]);
     }
     if !snap.pictures.is_empty() {
         column = column.children([pictures_row(&snap.pictures)]);
+    }
+    if !snap.queue.is_empty() {
+        column = column.child(view().flex_col().gap(rems(0.25)).child(snap.queue.iter().cloned().map(queue_row).collect::<Vec<_>>()));
     }
     if let Some(picking) = &snap.picking {
         column = column.children([picker(picking)]);
@@ -1190,7 +1205,8 @@ fn bar(snap: Snapshot, draft: Signal<String>) -> AnyElement {
             .items_end()
             .gap(rems(0.5))
             .on_file_drop(move |drop: &FileDropEvent| tell(Cmd::Drop(drop.uris.clone())))
-            .child(draft_field(&field))
+            .child(draft_field(&field, field_ref))
+            .children(snap.busy.then(|| steer_button(snap.steer, low.clone(), has_pictures)))
             .child(send_button(snap, low)),
     );
     column.into_element()
@@ -1225,6 +1241,25 @@ pub fn Chat() -> impl IntoElement {
         let (sentinel, text) = state.with(|s| (s.draft_reset, s.draft.clone()));
         if taken.replace(sentinel) != sentinel && text != draft.get_untracked() {
             draft.set(text);
+        }
+    });
+
+    // The field takes the keyboard whenever the app asks it to.
+    let field_ref = element_ref();
+    let focused = stored(0_u64);
+    effect(move || {
+        let bump = state.with(|s| s.focus);
+        if bump > 0 && focused.replace(bump) != bump {
+            field_ref.focus();
+        }
+    });
+
+    // Alt+Enter sends the draft after the turn rather than into it.
+    on_key_with("alt+enter", KeyOptions { when: nsh_core::keymap::When::Always, repeat: false }, move |_| {
+        if state.with_untracked(|s| s.busy) {
+            let text = draft.get_untracked();
+            tell(Cmd::Draft(text));
+            send_row(&draft, &state, true);
         }
     });
 
@@ -1268,7 +1303,7 @@ pub fn Chat() -> impl IntoElement {
             .flex_1()
             .min_h_0()
             .flex_col()
-            .children([transcript(&snap.items), bar(snap, draft)])
+            .children([transcript(&snap.items), bar(snap, draft, field_ref)])
             .into_element()
     };
 
@@ -1279,4 +1314,50 @@ pub fn Chat() -> impl IntoElement {
         .bg(Colors::background())
         .child(dynamic(header))
         .child(dynamic(body))
+}
+
+#[cfg(test)]
+mod tests {
+    use nsh_engine::EngineConfig;
+    use nsh_testing::Headless;
+
+    use super::*;
+    use crate::nsh::bus::Cmd as Bus;
+
+    #[test]
+    fn queued_messages_can_be_taken_back_and_a_busy_turn_offers_steer_and_stop() {
+        let mut guard = crate::nsh::bus::lock();
+        let commands = guard.as_mut().expect("the channel");
+        publish(Snapshot {
+            title: "thread".into(),
+            busy: true,
+            steer: true,
+            queue: vec![Queued { at: 0, kind: "Follow-up".into(), text: "then run the tests".into(), pictures: 0 }],
+            ..Snapshot::default()
+        });
+        let mut config = EngineConfig::new(nsh_platform_gpui::Root::of::<Chat>());
+        config.ui_sets = vec![nsh_base::registry()];
+        config.viewport = Size::new(Points(700.), Points(600.));
+        config.environment.idiom = nsh_core::platform::Idiom::Desktop;
+        config.environment.os = nsh_core::platform::Os::Linux;
+        let mut app = Headless::start(config).expect("engine");
+        app.first_render().expect("first render");
+        app.settle();
+        assert!(app.shows("Follow-up"), "{:?}", app.screen().texts());
+        let mut drain = |app: &mut Headless| {
+            app.settle();
+            std::iter::from_fn(|| commands.try_recv().ok()).collect::<Vec<_>>()
+        };
+        app.press("label:Take back into the draft").unwrap();
+        assert_eq!(drain(&mut app), [Bus::Chat(Cmd::Recall(0))]);
+        app.press("label:Stop the agent").unwrap();
+        assert_eq!(drain(&mut app), [Bus::Chat(Cmd::Stop)]);
+        // Nothing typed: Steer does nothing. Typed, it sends into the turn.
+        app.press("label:Steer: the agent reads it before its next step (Alt+Enter: after this turn)").unwrap();
+        assert!(drain(&mut app).is_empty());
+        app.type_text("id:chat-draft", "also fix the typo").unwrap();
+        app.press("label:Steer: the agent reads it before its next step (Alt+Enter: after this turn)").unwrap();
+        let sent = drain(&mut app);
+        assert!(sent.contains(&Bus::Chat(Cmd::Send { later: false })), "{sent:?}");
+    }
 }

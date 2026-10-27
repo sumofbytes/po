@@ -35,7 +35,7 @@ fn git(root: &Path, args: &[&str]) -> Option<String> {
 /// `base` is `HEAD` for local work, or a PR's merge-base when reviewing.
 pub fn changes(root: &Path, base: &str) -> Vec<Change> {
     let mut out = if base == "HEAD" { status(root) } else { against(root, base) };
-    out.sort_by_cached_key(|change| crate::ui::file_tree::order(&change.path));
+    out.sort_by_cached_key(|change| crate::explorer::order(&change.path));
     out
 }
 

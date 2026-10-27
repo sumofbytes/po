@@ -1,4 +1,4 @@
-# NSH migration: remaining work
+# NSH migration
 
 Goal: draw Po's UI with [NSH](https://github.com/longbridge/nsh) instead of the hand-built gpui widgets in `src/ui/`
 and `src/main.rs`.
@@ -48,28 +48,18 @@ Look at `src/nsh/diff.rs` or `src/nsh/source.rs` as the template.
    `MergeWorktree` and `DiscardWorktree` go where they did before. Gone with this step:
    `pr_strip`/`worktree_strip`, the `pr_input` field with its enter subscription, and
    `ui::button`'s outline variant with the `outline` style it took from `Buttons`.
-4. **Thread panel (the big one).** `agent_panel` (~6198-6630) plus `tool_run`, `thought`, `session_picker`,
-   `plan`, `permission`, `approval` (~6629-6950), and the composer built on `ui::input`. Split it:
-   a. read-only transcript (messages, tool runs, thoughts, plan),
-   b. permission/approval cards,
-   c. composer and attachments,
-   d. session picker and config dropdowns (`ui::menu`).
-   Needs check against NSH: text selection across messages (today `ui::markdown::Selection`), virtualised long
-   lists (today a gpui `ListState`), and streaming updates without re-publishing the whole transcript. Decide the
-   snapshot shape (per-block ids, so only changed blocks diff) before starting.
-5. **Markdown.** Replace `ui/markdown.rs` (978 lines) with NSH's markdown if it has one with code highlighting and
-   link handling; the source pane already shows rendered markdown, so check how `nsh/source.rs` does it first.
-6. **Remaining `ui/` widgets.** Once nothing calls them: `menu`, `tree`/`file_tree`, `list_item`, `resizable`
-   (`sidebars`), `scrollbar`, `input`, `icon`, `button`. The window-level layout (`sidebars`, `body`) in
-   `Reader::render` goes last; it may stay gpui if NSH can't own window chrome.
-7. **Final.** Remove unused deps and `vendor/` bits, update `README`/`docs`, run `cargo build` with zero warnings.
+4. ~~**Thread panel.**~~ Done (`src/nsh/chat.rs`): transcript, cards, composer, session picker and menus. A queued
+   message shows with a take-back button, a running turn offers Steer/Queue next to Stop (Alt+Enter sends after the
+   turn), and `Snapshot::focus` lets the app put the keyboard in the message field.
+5. ~~**Markdown.**~~ Done: `ui/markdown.rs` and the `markdown` crate are gone; NSH's `text_view` draws it.
+6. ~~**Remaining `ui/` widgets.**~~ Done. The explorer tree and mode switch are `src/nsh/explorer.rs` over the plain
+   data model in `src/explorer.rs` (open folders, selection, arrow keys); the viewer's tab row is `src/nsh/tabs.rs`.
+   `src/ui/` is down to `icon.rs` (the icon names NSH draws) and `resizable.rs`: the columns that hold the NSH
+   panes. Every pane is its own NSH view, so the columns that arrange them stay gpui.
+7. ~~**Final.**~~ Done: the tree-sitter grammars and `src/syntax/` are gone (NSH highlights code itself), as are the
+   unused `unicode-*`, `aho-corasick`, `markdown` and `streaming-iterator` dependencies. `cargo build` and
+   `cargo test` have no warnings.
 
-## Checks for every step
-- `cargo build` (no new warnings) and `cargo test` (192 tests plus the update e2e at the time of writing).
-- Run the app and look at the view in light and dark themes and with the glass palette (`Palette.glass`); the
-  headless tests don't cover appearance.
-- Keyboard shortcuts that used to belong to the legacy widget still work (e.g. Ctrl+\ for inline/split).
-
-## Open questions
-- Does NSH provide text selection across multiple blocks, and virtual lists, for the thread?
-- Can the window layout and resize handles live in NSH, or does gpui keep them?
+## Known differences from before the migration
+- Code is colored by NSH's own fixed palette; the theme's `highlight.syntax` colors no longer apply.
+- Right-clicking an explorer row no longer marks it.

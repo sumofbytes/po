@@ -9,6 +9,7 @@ mod control;
 mod ctl;
 mod dex;
 mod diff;
+mod explorer;
 mod fonts;
 mod mcp;
 mod nsh;
@@ -21,7 +22,6 @@ mod todo;
 mod trace;
 mod ui;
 mod update;
-mod syntax;
 mod workspace;
 mod worktree;
 
@@ -38,19 +38,14 @@ use attach::Attachment;
 use dex::Queue;
 use diff::{Change, Kind, Row};
 use theme::Palette;
-use ui::button::Button;
-use ui::icon::{Icon, IconName, IconSize};
-use ui::input::InputState;
-use ui::list_item::ListItem;
 use ui::resizable::{SidebarsState, sidebars};
-use ui::file_tree::{FileKind, FileTree, file_kind};
-use ui::tree::{TreeEvent, tree};
+use explorer::FileTree;
 use futures::StreamExt;
 use serde_json::Value;
 
 use gpui::{
-    AnyElement, App, Pixels, TitlebarOptions, WindowControlArea, point, Bounds, Context, Entity, FontWeight, IntoElement, ParentElement,
-    Render, SharedString, Styled, Subscription, Task, Window, WindowBackgroundAppearance, WindowBounds, WindowOptions, div,
+    AnyElement, App, Pixels, TitlebarOptions, WindowControlArea, point, Bounds, Context, Entity, IntoElement, ParentElement,
+    Render, Styled, Subscription, Task, Window, WindowBackgroundAppearance, WindowBounds, WindowOptions, div,
     prelude::*, px, rems, size, KeyBinding,
 };
 
@@ -167,31 +162,6 @@ fn language(path: &str) -> &'static str {
         "sh" => "Shell",
         _ => "Plain text",
     }
-}
-
-/// The highlighter's name for a file: its extension, which the viewer maps to a grammar.
-/// `.exs` is Elixir too; the viewer only knows that grammar as "elixir".
-fn syntax(path: &str) -> SharedString {
-    let ext = path.rsplit_once('.').map_or("", |(_, ext)| ext).to_lowercase();
-    match ext.as_str() {
-        "exs" => "elixir",
-        _ => &ext,
-    }
-    .into()
-}
-
-/// The syntaxes of the most common file kinds in `files`, plus Markdown for the agent's
-/// replies, to compile ahead of the first file that needs them.
-fn common_syntaxes(files: &[String]) -> Vec<String> {
-    let mut counts: HashMap<SharedString, usize> = HashMap::new();
-    for file in files.iter().filter(|file| file.contains('.')) {
-        *counts.entry(syntax(file)).or_default() += 1;
-    }
-    let mut counts: Vec<_> = counts.into_iter().collect();
-    counts.sort_by_key(|&(_, count)| std::cmp::Reverse(count));
-    let mut out: Vec<String> = counts.into_iter().take(4).map(|(name, _)| name.to_string()).collect();
-    out.push("md".into());
-    out
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -582,8 +552,6 @@ struct Project {
     files_tree: FileTree,
     /// Set when this is a thread's own checkout, made from another project's repository.
     worktree: Option<worktree::Worktree>,
-    /// Keep the explorer and changes list wired to this project.
-    _subscriptions: Vec<Subscription>,
 }
 
 impl Project {
@@ -684,7 +652,7 @@ struct Thread {
     client: Option<Client>,
     agent: Option<String>,
     generation: u64,
-    draft: Entity<InputState>,
+    draft: String,
     /// Pictures attached to the draft, sent with it.
     attachments: Vec<Arc<Attachment>>,
     /// Why some of what was pasted or dropped was left out, until the draft changes.
@@ -1186,8 +1154,10 @@ struct Reader {
     home: PathBuf,
     /// The strips above the file tree (a PR review's field, a worktree's finish line), drawn by
     /// NSH, and what keeps it in Po's theme.
-    strip: Entity<nsh_platform_gpui::AppView>,
-    _strip_theme: Subscription,
+    explorer_pane: Entity<nsh_platform_gpui::AppView>,
+    tabs: Entity<nsh_platform_gpui::AppView>,
+    _tabs_theme: Subscription,
+    _explorer_theme: Subscription,
     /// The sidebar's filter: threads and projects that don't match it are left out of its lists.
     /// What the sidebar's filter holds.
     side_query: String,
@@ -1218,6 +1188,8 @@ struct Reader {
     chat_follow: std::cell::Cell<u64>,
     /// What [`Snapshot::draft_reset`] carries next, bumped whenever the app writes the draft itself.
     chat_reset: std::cell::Cell<u64>,
+    /// What [`nsh::chat::Snapshot::focus`] carries next.
+    chat_focus: std::cell::Cell<u64>,
     /// The todos window, shown over everything while `todos_open`; the sidebar has a row for it.
     todos: Entity<nsh::overlay::Overlay>,
     todos_open: bool,
@@ -1309,22 +1281,16 @@ impl Reader {
             }
         };
         trace::mark("walk");
-        syntax::prewarm(common_syntaxes(&files));
         let (diff_pane, diff_theme) = nsh::mount(nsh_platform_gpui::Root::of::<nsh::diff::Diff>(), window, cx);
         let (agent_pane, agent_pane_theme) = nsh::mount(nsh_platform_gpui::Root::of::<nsh::agent::Agent>(), window, cx);
         let (source, source_theme) = nsh::mount(nsh_platform_gpui::Root::of::<nsh::source::Source>(), window, cx);
         let (sidebar, sidebar_theme) = nsh::mount(nsh_platform_gpui::Root::of::<nsh::sidebar::Sidebar>(), window, cx);
         let (chat_pane, chat_theme) = nsh::mount(nsh_platform_gpui::Root::of::<nsh::chat::Chat>(), window, cx);
-        let (strip, strip_theme) = nsh::mount(nsh_platform_gpui::Root::of::<nsh::strip::Strips>(), window, cx);
+        let (tabs, tabs_theme) = nsh::mount(nsh_platform_gpui::Root::of::<nsh::tabs::Tabs>(), window, cx);
+        let (explorer_pane, explorer_theme) = nsh::mount(nsh_platform_gpui::Root::of::<nsh::explorer::Explorer>(), window, cx);
         let finder_window = cx.new(|cx| nsh::overlay::Overlay::new(560., 8., || nsh_platform_gpui::Root::of::<nsh::finder::Finder>(), &nsh::finder::HEIGHT, cx));
         let settings_window = cx.new(|cx| nsh::overlay::Overlay::new(680., 24., || nsh_platform_gpui::Root::of::<nsh::settings::Settings>(), &nsh::settings::HEIGHT, cx));
         let todos = cx.new(|cx| nsh::overlay::Overlay::new(600., 24., || nsh_platform_gpui::Root::of::<nsh::todos::Todos>(), &nsh::todos::HEIGHT, cx));
-        let draft = cx.new(|cx| {
-            InputState::new(window, cx)
-                .auto_grow(1, 6)
-                .submit_on_enter(true)
-                .placeholder("Message the agent")
-        });
         let sidebars = cx.new(|_| SidebarsState::new(px(280.0), px(560.0)));
         let tree_cols = cx.new(|_| SidebarsState::new(px(TREE_WIDTH), px(0.0)));
         let subscriptions = vec![
@@ -1353,7 +1319,7 @@ impl Reader {
         if let Some(command) = command.as_ref().filter(|c| !agents.iter().any(|agent| agent.id == **c)) {
             agents.push(config::Agent { id: command.clone(), name: "Custom".into(), command: command.clone(), daemon: None, vouched: true });
         }
-        let project = Self::build_project(root, pr, files, window, cx);
+        let project = Self::build_project(root, pr, files);
             let thread = Thread {
             views: Default::default(),
             forms: Default::default(),
@@ -1391,7 +1357,7 @@ impl Reader {
             client: None,
             agent: None,
             generation: 0,
-            draft,
+            draft: String::new(),
             attachments: vec![],
             attach_note: None,
         };
@@ -1425,8 +1391,10 @@ impl Reader {
             parked: vec![],
             next_thread: 1,
             home,
-            strip,
-            _strip_theme: strip_theme,
+            explorer_pane,
+            tabs,
+            _tabs_theme: tabs_theme,
+            _explorer_theme: explorer_theme,
             side_query: String::new(),
             source,
             _source_theme: source_theme,
@@ -1444,6 +1412,7 @@ impl Reader {
             chat_marks: std::cell::Cell::new((0, 0, false)),
             chat_follow: std::cell::Cell::new(0),
             chat_reset: std::cell::Cell::new(0),
+            chat_focus: std::cell::Cell::new(0),
             todos,
             todos_open: false,
             pr_status: None,
@@ -1545,9 +1514,9 @@ impl Reader {
         .detach();
         reader.focus.focus(window, cx);
         trace::mark("reader built");
-        reader.refresh_tree(cx);
+        reader.refresh_tree();
         trace::mark("tree");
-        let resumed = workspace::Workspace::load(&reader.home).is_some_and(|saved| reader.restore(saved, window, cx));
+        let resumed = workspace::Workspace::load(&reader.home).is_some_and(|saved| reader.restore(saved, cx));
         reader.known_projects = reader.workspace(cx).known();
         trace::mark("restore");
         match command.filter(|_| !resumed) {
@@ -1618,46 +1587,9 @@ impl Reader {
     }
 
     /// A project over `root`, showing `files` in its explorer until the next walk.
-    fn build_project(root: PathBuf, pr: Option<pr::Pr>, files: Vec<String>, window: &mut Window, cx: &mut Context<Self>) -> Project {
-        let files_tree = FileTree::new(false, cx);
-        let changes_tree = FileTree::new(true, cx);
-        // Only the project on screen has its trees touched, so these act on `reader.project`;
-        // the check keeps a stray event from another project's tree off it.
-        let subscriptions = vec![
-            cx.subscribe(&files_tree.state, |reader, tree, event: &TreeEvent, _| {
-                if reader.project.files_tree.state == tree {
-                    reader.project.files_tree.note(event);
-                }
-            }),
-            cx.subscribe(&changes_tree.state, |reader, tree, event: &TreeEvent, _| {
-                if reader.project.changes_tree.state == tree {
-                    reader.project.changes_tree.note(event);
-                }
-            }),
-            // Moving the selection with the keyboard opens the file too, like a click.
-            cx.observe_in(&files_tree.state, window, |reader, tree, window, cx| {
-                if reader.project.files_tree.state != tree {
-                    return;
-                }
-                let path = tree.read(cx).selected_entry().filter(|e| !e.folder).map(|e| e.id.to_string());
-                // Only when the user just pressed something: the agent opening a file selects it too.
-                if path.is_some() && reader.last_input.elapsed() < Duration::from_secs(1) {
-                    reader.thread.shown = None;
-                }
-                if let Some(path) = path.filter(|p| reader.mode == Mode::Source && reader.project.current.as_deref() != Some(p)) {
-                    reader.open(&path, window, cx);
-                }
-            }),
-            cx.observe(&changes_tree.state, |reader, tree, cx| {
-                if reader.project.changes_tree.state != tree {
-                    return;
-                }
-                let path = tree.read(cx).selected_entry().filter(|e| !e.folder).map(|e| e.id.to_string());
-                if let Some(path) = path.filter(|p| reader.mode == Mode::Diff && reader.project.picked.as_deref() != Some(p)) {
-                    reader.pick(&path, cx);
-                }
-            }),
-        ];
+    fn build_project(root: PathBuf, pr: Option<pr::Pr>, files: Vec<String>) -> Project {
+        let files_tree = FileTree::new(false);
+        let changes_tree = FileTree::new(true);
         Project {
             root,
             base: pr.as_ref().map_or_else(|| "HEAD".to_string(), |pr| pr.base.clone()),
@@ -1681,13 +1613,12 @@ impl Reader {
             notice: None,
             files_tree,
             worktree: None,
-            _subscriptions: subscriptions,
         }
     }
 
     /// Rebuilds the explorer from `files`, keeping folders open and the current file selected.
-    fn refresh_tree(&mut self, cx: &mut Context<Self>) {
-        self.project.files_tree.set_paths(&self.project.files, self.project.current.as_deref(), cx);
+    fn refresh_tree(&mut self) {
+        self.project.files_tree.set_paths(&self.project.files, self.project.current.as_deref());
     }
 
     /// Takes a fresh list of changed files. In diff mode it picks a file if none is, and
@@ -1703,7 +1634,7 @@ impl Reader {
         }
         if listed {
             let paths: Vec<String> = self.project.changes.iter().map(|c| c.path.clone()).collect();
-            self.project.changes_tree.set_paths(&paths, None, cx);
+            self.project.changes_tree.set_paths(&paths, None);
         }
         let keep = self.project.picked.clone().filter(|path| self.project.changes.iter().any(|c| &c.path == path));
         match keep {
@@ -1762,7 +1693,7 @@ impl Reader {
             return;
         }
         self.project.files = files;
-        self.refresh_tree(cx);
+        self.refresh_tree();
         if self.finder_open {
             self.refind();
         }
@@ -1788,7 +1719,7 @@ impl Reader {
             self.project.picked = Some(path.to_string());
             // The last file's diff isn't shown under this one's name while this one loads.
             self.set_rows(vec![], None);
-            self.project.changes_tree.select(path, cx);
+            self.project.changes_tree.select(path);
         }
         let (root, base, path) = (self.project.root.clone(), self.project.base.clone(), path.to_string());
         self.project.diffing = Some(cx.spawn(async move |this, cx| {
@@ -1894,7 +1825,7 @@ impl Reader {
 
     /// Brings a project that was swapped in up to date with the disk, and starts watching it.
     fn resume_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.refresh_tree(cx);
+        self.refresh_tree();
         self.rescan(cx);
         self.watch(None, window, cx);
         if self.mode == Mode::Diff {
@@ -1952,14 +1883,14 @@ impl Reader {
         }
         let agent = self.thread.agent.clone();
         let review = pr.is_some();
-        let project = Self::build_project(root, pr, vec![], window, cx);
+        let project = Self::build_project(root, pr, vec![]);
         self.open_project(project, if review { Mode::Diff } else { Mode::Source }, agent, window, cx);
     }
 
     /// Shows `project` in `mode`, with a thread of its own that runs `agent`, if any. The
     /// project on screen goes on running in the background.
     fn open_project(&mut self, project: Project, mode: Mode, agent: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
-        let thread = self.blank_thread(window, cx);
+        let thread = self.blank_thread();
         self.suspend_project();
         let id = self.next_project;
         self.next_project += 1;
@@ -2021,7 +1952,7 @@ impl Reader {
 
     fn open_worktree(&mut self, wt: worktree::Worktree, agent: String, first: Option<(Outgoing, (u64, u64))>, window: &mut Window, cx: &mut Context<Self>) {
         log::info!("worktree: {} for {agent}", wt.spec.branch);
-        let mut project = Self::build_project(wt.spec.path.clone(), None, vec![], window, cx);
+        let mut project = Self::build_project(wt.spec.path.clone(), None, vec![]);
         project.base = wt.spec.base.clone();
         project.worktree = Some(wt);
         self.confirm_discard = false;
@@ -2668,10 +2599,10 @@ impl Reader {
     /// project. If the parent went away meanwhile the project goes too, keeping its branch.
     #[allow(clippy::too_many_arguments)]
     fn start_isolated(&mut self, parent: u64, wt: worktree::Worktree, key: String, prompt: String, options: Vec<(String, String)>, notify: Option<String>, window: &mut Window, cx: &mut Context<Self>) -> Result<(u64, u64), String> {
-        let mut project = Self::build_project(wt.spec.path.clone(), None, vec![], window, cx);
+        let mut project = Self::build_project(wt.spec.path.clone(), None, vec![]);
         project.base = wt.spec.base.clone();
         project.worktree = Some(wt);
-        let pid = self.add_slot(project, Mode::Diff, window, cx);
+        let pid = self.add_slot(project, Mode::Diff, cx);
         match self.start_child(parent, pid, key, prompt, options, notify, window, cx) {
             Ok(reply) => Ok((reply["thread"].as_u64().unwrap_or_default(), pid)),
             Err(error) => {
@@ -2723,7 +2654,7 @@ impl Reader {
             }
             (Proposal::Go(_), false) => None,
             (Proposal::Open(root), true) => {
-                let project = self.open_in_background(root.clone(), window, cx);
+                let project = self.open_in_background(root.clone(), cx);
                 Some(format!("The user opened {}: project {project}.", root.display()))
             }
             (Proposal::Open(root), false) => Some(format!("The user declined to open {}.", root.display())),
@@ -2740,8 +2671,8 @@ impl Reader {
                                 let text = match result {
                                     Ok(pr) => {
                                         let root = pr.worktree.clone();
-                                        let project = Self::build_project(root, Some(pr), vec![], window, cx);
-                                        let id = reader.add_slot(project, Mode::Diff, window, cx);
+                                        let project = Self::build_project(root, Some(pr), vec![]);
+                                        let id = reader.add_slot(project, Mode::Diff, cx);
                                         format!("The user opened PR {spec}: project {id}.")
                                     }
                                     Err(error) => format!("PR {spec} could not be checked out: {error}"),
@@ -2769,18 +2700,18 @@ impl Reader {
 
     /// Adds a project over `root` as a slot, with a blank thread, leaving the screen where it is.
     /// If it is already open, that one is returned.
-    fn open_in_background(&mut self, root: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> u64 {
+    fn open_in_background(&mut self, root: PathBuf, cx: &mut Context<Self>) -> u64 {
         if let Some(view) = self.views().iter().find(|view| view.project.pr.is_none() && view.project.root == root) {
             return view.id;
         }
-        let project = Self::build_project(root, None, vec![], window, cx);
-        self.add_slot(project, Mode::Source, window, cx)
+        let project = Self::build_project(root, None, vec![]);
+        self.add_slot(project, Mode::Source, cx)
     }
 
     /// Adds `project` as a slot with a blank thread, leaving the screen where it is, and marks
     /// it as the API's.
-    fn add_slot(&mut self, project: Project, mode: Mode, window: &mut Window, cx: &mut Context<Self>) -> u64 {
-        let thread = self.blank_thread(window, cx);
+    fn add_slot(&mut self, project: Project, mode: Mode, cx: &mut Context<Self>) -> u64 {
+        let thread = self.blank_thread();
         let id = self.next_project;
         self.next_project += 1;
         self.slots.push(Slot { id, mode, project, thread, parked: vec![] });
@@ -2849,7 +2780,7 @@ impl Reader {
                     return command::Answer::Now(Err("cancel a thread you started, not yourself".into()));
                 }
                 let stopped = self.with_thread(target, |reader, _| {
-                    reader.stop(window, cx);
+                    reader.stop(cx);
                     let dropped: Vec<Value> = reader.thread.dropped.drain(..).map(serde_json::Value::String).collect();
                     Ok(serde_json::json!({ "dropped": dropped }))
                 });
@@ -3651,14 +3582,14 @@ impl Reader {
                     cx.spawn(async move |cx| {
                         cx.background_executor().timer(Duration::from_secs(20)).await;
                         handle
-                            .update(cx, |_, window, cx| {
+                            .update(cx, |_, _, cx| {
                                 watchdog.update(cx, |reader, cx| {
                                     reader.with_thread(id, |reader, _| {
                                         let thread = &reader.thread;
                                         if thread.generation == generation && !thread.ready && thread.client.is_some() {
                                             // What was typed goes back to the draft rather than wait for an agent that is gone.
                                             reader.return_pending();
-                                            reader.restore_queue(window, cx);
+                                            reader.restore_queue(cx);
                                             reader.thread.status = "not responding".into();
                                             reader.thread.fail("The agent did not answer the handshake. Check that its command speaks ACP.".into());
                                             reader.unstart();
@@ -3708,15 +3639,16 @@ impl Reader {
     /// itself still blank it is used instead.
     fn new_blank_thread(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.thread.blank {
-            self.add_thread(window, cx);
+            self.add_thread();
         }
         self.start_blank(window, cx);
         self.focus_draft(window, cx);
         cx.notify();
     }
 
-    fn focus_draft(&self, window: &mut Window, cx: &mut Context<Self>) {
-        self.thread.draft.update(cx, |input, cx| input.focus(window, cx));
+    /// Asks the conversation to put the keyboard in its message field.
+    fn focus_draft(&self, _window: &mut Window, _cx: &mut Context<Self>) {
+        self.chat_focus.set(self.chat_focus.get() + 1);
     }
 
     /// The agent a new thread would start with.
@@ -3735,7 +3667,7 @@ impl Reader {
     /// choices of earlier threads; when the session has none to take, the waiting message goes.
     fn apply_overrides(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.thread.overrides.is_empty() {
-            return self.send_pending(window, cx);
+            return self.send_pending(cx);
         }
         self.thread.applying = Some(Applying::default());
         self.apply_next(window, cx);
@@ -3749,7 +3681,7 @@ impl Reader {
         let thread = &mut self.thread;
         let (Some(applying), Some(key), Some(client)) = (thread.applying.as_mut(), &thread.agent, &thread.client) else {
             thread.applying = None;
-            return self.send_pending(window, cx);
+            return self.send_pending(cx);
         };
         let chosen = self.choices.get(key);
         let options: Vec<&ConfigOption> = thread.options.iter().filter(|option| !applying.settled.contains(&option.id)).collect();
@@ -3792,13 +3724,13 @@ impl Reader {
             }
         }
         thread.applying = None;
-        self.send_pending(window, cx);
+        self.send_pending(cx);
         // The queued messages waited for the settings; they go now.
-        self.send_next(window, cx);
+        self.send_next(cx);
     }
 
     /// Sends the first message, once the agent is ready and has the settings it starts with.
-    fn send_pending(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn send_pending(&mut self, cx: &mut Context<Self>) {
         if !self.thread.ready || self.thread.applying.is_some() {
             return;
         }
@@ -3808,7 +3740,7 @@ impl Reader {
             self.thread.pending = Some(out);
             self.return_pending();
             self.thread.fail("The agent has no session yet.".into());
-            self.restore_queue(window, cx);
+            self.restore_queue(cx);
         }
     }
 
@@ -3851,7 +3783,7 @@ impl Reader {
     fn resume_thread(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(key) = self.thread.agent.clone().or_else(|| self.chosen().map(|agent| agent.id.clone())) else { return };
         log::info!("agent: resuming with {key}");
-        self.add_thread(window, cx);
+        self.add_thread();
         self.connect(&key, true, window, cx);
     }
 
@@ -3938,7 +3870,7 @@ impl Reader {
         }
         let level = notify.as_deref().and_then(Notify::from_name).unwrap_or_default();
         let out = Outgoing { text: prompt, origin: Origin::Thread { id, title }, images: vec![] };
-        let mut fresh = self.blank_thread(window, cx);
+        let mut fresh = self.blank_thread();
         fresh.blank = false;
         fresh.parent = Some(id);
         fresh.notify = level;
@@ -3989,10 +3921,7 @@ impl Reader {
     }
 
     /// Makes a thread with no agent yet.
-    fn blank_thread(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Thread {
-        let draft = cx.new(|cx| {
-            InputState::new(window, cx).auto_grow(1, 6).submit_on_enter(true).placeholder("Message the agent")
-        });
+    fn blank_thread(&mut self) -> Thread {
         let id = self.next_thread;
         self.next_thread += 1;
         Thread {
@@ -4028,7 +3957,7 @@ impl Reader {
             client: None,
             agent: None,
             generation: 0,
-            draft,
+            draft: String::new(),
             attachments: vec![],
             attach_note: None,
             views: Default::default(),
@@ -4039,8 +3968,8 @@ impl Reader {
     }
 
     /// Puts a blank thread on screen, parking the one that was, unless that is still blank.
-    fn add_thread(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let fresh = self.blank_thread(window, cx);
+    fn add_thread(&mut self) {
+        let fresh = self.blank_thread();
         let old = std::mem::replace(&mut self.thread, fresh);
         // A blank thread, or a session listing nothing was picked from, isn't kept.
         if old.worth_keeping() {
@@ -4125,8 +4054,8 @@ impl Reader {
     }
 
     /// A thread with no agent running, to be resumed from `saved`'s session when it is shown.
-    fn sleeping_thread(&mut self, saved: workspace::ThreadState, window: &mut Window, cx: &mut Context<Self>) -> Thread {
-        let mut thread = self.blank_thread(window, cx);
+    fn sleeping_thread(&mut self, saved: workspace::ThreadState) -> Thread {
+        let mut thread = self.blank_thread();
         thread.agent = Some(saved.agent);
         thread.session = Some(saved.session);
         thread.saved_title = Some(saved.title).filter(|title| !title.is_empty());
@@ -4139,7 +4068,7 @@ impl Reader {
     /// Brings back the projects and threads the last window started here left. The project on
     /// screen is the one `po` was started on; the others wait in the background and the
     /// threads sleep until shown. True if the project on screen got its threads back.
-    fn restore(&mut self, saved: workspace::Workspace, window: &mut Window, cx: &mut Context<Self>) -> bool {
+    fn restore(&mut self, saved: workspace::Workspace, cx: &mut Context<Self>) -> bool {
         let mut resumed = false;
         let mut seen = HashSet::new();
         // Children of threads that came back with them, by the parent's session.
@@ -4180,7 +4109,7 @@ impl Reader {
                         t.active_at = ix as u64 + 1;
                     }
                     let parent = t.parent_session.clone();
-                    let thread = self.sleeping_thread(t, window, cx);
+                    let thread = self.sleeping_thread(t);
                     linked.extend(parent.map(|parent| (thread.id, parent)));
                     thread
                 })
@@ -4194,14 +4123,14 @@ impl Reader {
                 }
                 continue;
             }
-            let mut project = Self::build_project(state.root, None, vec![], window, cx);
+            let mut project = Self::build_project(state.root, None, vec![]);
             if let Some(wt) = worktree {
                 project.base = wt.spec.base.clone();
                 project.worktree = Some(wt);
             }
             let thread = match shown {
                 Some(thread) => thread,
-                None => self.blank_thread(window, cx),
+                None => self.blank_thread(),
             };
             let id = self.next_project;
             self.next_project += 1;
@@ -4371,7 +4300,7 @@ impl Reader {
             self.changed(tid, crate::state::ThreadState::Closed, window, cx);
         }
         let last = self.slots.iter().find(|slot| slot.id == pid).is_some_and(|slot| slot.thread.id == tid && slot.parked.is_empty());
-        let blank = last.then(|| self.blank_thread(window, cx));
+        let blank = last.then(|| self.blank_thread());
         let Some(slot) = self.slots.iter_mut().find(|slot| slot.id == pid) else { return };
         if let Some(at) = slot.parked.iter().position(|thread| thread.id == tid) {
             slot.parked.remove(at);
@@ -4405,7 +4334,7 @@ impl Reader {
         } else if self.thread.id == id {
             let next = match self.parked.pop() {
                 Some(next) => next,
-                None => self.blank_thread(window, cx),
+                None => self.blank_thread(),
             };
             self.thread = next;
             self.thread.unread = false;
@@ -4536,7 +4465,7 @@ impl Reader {
                 if self.thread.client.is_some() && !self.thread.overrides.is_empty() {
                     self.apply_overrides(window, cx);
                 } else {
-                    self.send_next(window, cx);
+                    self.send_next(cx);
                 }
                 // The order of the thread list is saved with the time the turn ended.
                 self.request_save(cx);
@@ -4553,7 +4482,7 @@ impl Reader {
                 if let Some(item) = self.thread.queue.iter_mut().find(|q| q.kind == Some(queue) && q.out.queued_text() == content) {
                     item.kind = None;
                 }
-                self.send_next(window, cx);
+                self.send_next(cx);
             }
             Event::Failed(error) => {
                 if !self.thread.ready {
@@ -4561,7 +4490,7 @@ impl Reader {
                 }
                 self.return_pending();
                 self.thread.fail(error);
-                self.restore_queue(window, cx);
+                self.restore_queue(cx);
                 self.thread.applying = None;
                 self.unstart();
                 self.drop_waiters(command::Caller::Thread(self.thread.id), "the turn failed");
@@ -4573,7 +4502,7 @@ impl Reader {
                 if self.thread.busy {
                     self.return_pending();
                     self.thread.fail(format!("the agent exited ({status})"));
-                    self.restore_queue(window, cx);
+                    self.restore_queue(cx);
                 }
                 self.thread.applying = None;
                 self.unstart();
@@ -4749,14 +4678,14 @@ impl Reader {
         }
         self.project.current = Some(path.to_string());
         self.project.stamp = stamp(&full);
-        self.project.files_tree.select(path, cx);
+        self.project.files_tree.select(path);
         cx.notify();
     }
 
     /// Sends the draft: as a new turn, or, while the agent is working, into the queue
     /// (`later` for after the turn rather than into it).
     fn send(&mut self, later: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let prompt = self.thread.draft.read(cx).value().trim().to_string();
+        let prompt = self.thread.draft.trim().to_string();
         if prompt.is_empty() && self.thread.attachments.is_empty() {
             return;
         }
@@ -4788,7 +4717,7 @@ impl Reader {
                     self.wake_thread(window, cx);
                 }
                 if from_user {
-                    self.clear_draft(window, cx);
+                    self.clear_draft();
                 }
                 self.begin_turn(&out);
                 self.thread.pending = Some(out);
@@ -4797,13 +4726,13 @@ impl Reader {
             }
             Where::Dispatch => {
                 if self.dispatch(out, cx) && from_user {
-                    self.clear_draft(window, cx);
+                    self.clear_draft();
                 }
                 Where::Dispatch
             }
             Where::Take(kind) => {
                 if from_user {
-                    self.clear_draft(window, cx);
+                    self.clear_draft();
                 }
                 self.thread.client.as_ref().unwrap().enqueue(&out.queued_text(), kind);
                 self.thread.queue.push(Queued { out, kind: Some(kind) });
@@ -4812,7 +4741,7 @@ impl Reader {
             }
             Where::Queue => {
                 if from_user {
-                    self.clear_draft(window, cx);
+                    self.clear_draft();
                 }
                 self.thread.queue.push(Queued { out, kind: None });
                 cx.notify();
@@ -4872,21 +4801,20 @@ impl Reader {
 
     /// Sets the draft to `text` from the app itself (a cleared draft after a send, a taken-back
     /// queue row), marking the change so the screen the conversation draws picks the text up.
-    fn update_draft(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+    fn update_draft(&mut self, text: &str) {
         self.chat_reset.set(self.chat_reset.get() + 1);
-        let text = text.to_string();
-        self.thread.draft.update(cx, |input, cx| input.set_value(text, window, cx));
+        self.thread.draft = text.to_string();
     }
 
     /// Clears the draft, and the pictures attached to it.
-    fn clear_draft(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn clear_draft(&mut self) {
         self.thread.attachments.clear();
         self.thread.attach_note = None;
-        self.update_draft("", window, cx);
+        self.update_draft("");
     }
 
     /// Takes a queued message back into the draft to edit.
-    fn recall(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+    fn recall(&mut self, ix: usize, cx: &mut Context<Self>) {
         if ix >= self.thread.queue.len() {
             return;
         }
@@ -4894,17 +4822,17 @@ impl Reader {
         if let (Some(kind), Some(client)) = (item.kind, &self.thread.client) {
             client.recall(&item.out.queued_text(), kind);
         }
-        let draft = self.thread.draft.read(cx).value().to_string();
+        let draft = self.thread.draft.clone();
         self.thread.attachments.splice(0..0, item.out.images.iter().cloned());
         self.thread.attachments.truncate(attach::MAX_PER_MESSAGE);
         let text = if draft.trim().is_empty() { item.out.text } else { format!("{}\n{draft}", item.out.text) };
-        self.update_draft(&text, window, cx);
+        self.update_draft(&text);
         cx.notify();
     }
 
     /// If no turn is running, sends the oldest queued message that waits here rather than in
     /// the daemon. A message that can't be sent goes back to the draft with the rest.
-    fn send_next(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn send_next(&mut self, cx: &mut Context<Self>) {
         if self.thread.busy {
             return;
         }
@@ -4912,14 +4840,14 @@ impl Reader {
         let mut next = self.thread.queue.remove(at);
         if !self.dispatch(std::mem::replace(&mut next.out, Outgoing::user(String::new(), vec![])), cx) {
             self.thread.queue.insert(0, next);
-            self.restore_queue(window, cx);
+            self.restore_queue(cx);
         }
     }
 
     /// Moves everything queued back into the draft, taking back what the daemon still holds.
     /// The user's own queued messages are theirs to edit again; text sent through the API is
     /// dropped, and reported to its sender (phase 2's notifications) rather than typed over.
-    fn restore_queue(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn restore_queue(&mut self, cx: &mut Context<Self>) {
         if self.thread.queue.is_empty() {
             return;
         }
@@ -4942,12 +4870,12 @@ impl Reader {
                 }
             }
         }
-        let draft = self.thread.draft.read(cx).value().to_string();
+        let draft = self.thread.draft.clone();
         if !draft.trim().is_empty() {
             text.push(draft);
         }
         let joined = text.join("\n\n");
-        self.update_draft(&joined, window, cx);
+        self.update_draft(&joined);
         cx.notify();
     }
 
@@ -4995,7 +4923,7 @@ impl Reader {
         self.thread.relist(was_last);
     }
 
-    fn stop(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn stop(&mut self, cx: &mut Context<Self>) {
         let Some(client) = &self.thread.client else { return };
         client.cancel();
         for msg in &mut self.thread.messages {
@@ -5010,7 +4938,7 @@ impl Reader {
         }
         self.thread.relist(0);
         // What was waiting goes back to the draft rather than being sent into a stopped turn.
-        self.restore_queue(window, cx);
+        self.restore_queue(cx);
         cx.notify();
     }
 
@@ -5078,147 +5006,65 @@ impl Reader {
             cx.notify();
         }
     }
-    /// The file tree beside the viewer: every file, or the changed ones in Changes mode, under a
-    /// header with the mode switch. `lead` is the window's own control, when this is the
-    /// leftmost pane.
-    fn explorer(&self, lead: Option<AnyElement>, trail: Option<AnyElement>, cx: &mut Context<Self>) -> AnyElement {
-        let colors = cx.global::<Palette>();
-        let this = cx.entity();
-        let mode = self.mode;
-        let (source, changes) = (cx.entity(), cx.entity());
-        let modes = div()
-            .flex_none()
-            .flex()
-            .items_center()
-            .gap_1()
-            .child(
-                Button::new("mode-source")
-                    .icon(IconName::Folder)
-                    .ghost()
-                    .small()
-                    .tooltip("Source (Ctrl+1)")
-                    .selected(mode == Mode::Source)
-                    .on_click(move |_, _, cx| source.update(cx, |reader, cx| reader.set_mode(Mode::Source, cx))),
-            )
-            .child(
-                Button::new("mode-diff")
-                    .icon(IconName::Replace)
-                    .ghost()
-                    .small()
-                    .tooltip("Changes (Ctrl+2)")
-                    .selected(mode == Mode::Diff)
-                    .on_click(move |_, _, cx| changes.update(cx, |reader, cx| reader.set_mode(Mode::Diff, cx))),
-            );
-        let title = match mode {
-            Mode::Source => "Explorer",
-            Mode::Diff => "Changes",
-        };
-        let state = &if mode == Mode::Diff { &self.project.changes_tree } else { &self.project.files_tree }.state;
-        let marks = if mode == Mode::Diff { self.project.marks.clone() } else { Rc::default() };
-        let (muted, danger) = (colors.muted_foreground, colors.danger);
-        let kinds = [colors.primary, colors.warning, colors.info, colors.added];
-        let body: AnyElement = if mode == Mode::Diff && self.project.changes.is_empty() {
-            centered("No changes".into(), cx)
+    /// The file tree beside the viewer, drawn by NSH from what it publishes. `lead` and `trail` are
+    /// the window's own controls, when this is the leftmost or rightmost pane.
+    fn explorer(&self, lead: Vec<nsh::header::Control>, trail: Vec<nsh::header::Control>, cx: &mut Context<Self>) -> AnyElement {
+        let diff = self.mode == Mode::Diff;
+        let tree = if diff { &self.project.changes_tree } else { &self.project.files_tree };
+        let body = if diff && self.project.changes.is_empty() {
+            nsh::explorer::Body::Empty("No changes".into())
         } else {
-            tree(state, move |ix, entry, selected, right_clicked, _, _| {
-                let path = entry.id.clone();
-                let name = entry.label.to_string();
-                let lead: AnyElement = if entry.folder {
-                    div()
-                        .w(IconSize::XSmall.rems())
-                        .flex_none()
-                        .flex()
-                        .items_center()
-                        .child(
-                            Icon::new(if entry.expanded { IconName::ChevronDown } else { IconName::ChevronRight })
-                                .size(IconSize::XSmall)
-                                .color(muted),
-                        )
-                        .into_any_element()
-                } else {
-                    let tint = match file_kind(&name) {
-                        FileKind::Code => kinds[0],
-                        FileKind::Data => kinds[1],
-                        FileKind::Doc => muted,
-                        FileKind::Web => kinds[2],
-                        FileKind::Image => kinds[3],
-                        FileKind::Other => muted.opacity(theme::tokens::MUTED),
-                    };
-                    div().size(rems(0.5)).flex_none().rounded(theme::tokens::RADIUS_MARK).bg(tint).into_any_element()
-                };
-                let mark = marks.get(path.as_ref()).map(|status| {
-                    let color = match status {
-                        'A' | 'U' => kinds[3],
-                        'D' => danger,
-                        _ => kinds[1],
-                    };
-                    div().w(rems(0.75)).flex_none().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(color).child(status.to_string())
-                });
-                let label = div()
-                    .flex()
-                    .items_center()
-                    // The chevron svg carries ~4px of padding on its right, so folders take
-                    // a smaller gap to sit the name as far from the glyph as files do.
-                    .when(entry.folder, |d| d.gap_1())
-                    .when(!entry.folder, |d| d.gap_2())
-                    .child(lead)
-                    .child(div().flex_1().min_w_0().truncate().child(name))
-                    .children(mark);
-                let folder = entry.folder;
-                let this = this.clone();
-                ListItem::new(ix)
-                    .selected(selected)
-                    .secondary_selected(right_clicked)
-                    .pl(rems(0.5 + entry.depth as f32))
-                    .text_sm()
-                    .child(label)
-                    .on_click(move |_, window, cx| {
-                        if folder {
-                            return;
-                        }
-                        this.update(cx, |reader, cx| {
-                            // A file picked in the tree is what the viewer shows, not an agent's view.
-                            reader.thread.shown = None;
-                            match mode {
-                                Mode::Source => reader.open(&path, window, cx),
-                                Mode::Diff => reader.pick(&path, cx),
-                            }
-                            reader.reveal_side(cx);
-                        });
-                    })
-                    .into_any_element()
-            })
-            .into_any_element()
+            let marks = &self.project.marks;
+            nsh::explorer::Body::Rows(
+                tree.rows()
+                    .into_iter()
+                    .map(|row| nsh::explorer::Entry { mark: diff.then(|| marks.get(row.id.as_str()).copied()).flatten(), row })
+                    .collect(),
+            )
         };
-        let foreground = colors.foreground;
-        div()
-            .size_full()
-            .flex()
-            .flex_col()
-            .child(header_row(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_1()
-                    .min_w_0()
-                    .children(lead)
-                    .child(div().min_w_0().truncate().text_sm().font_weight(FontWeight::MEDIUM).text_color(foreground).child(title.to_string())),
-                div().flex().items_center().gap_2().child(modes).children(trail),
-                cx,
-            ))
-            .children((mode == Mode::Diff || self.project.worktree.is_some()).then(|| {
-                nsh::strip::publish(nsh::strip::Snapshot {
-                    worktree: self.project.worktree.as_ref().map(|wt| nsh::strip::Worktree {
-                        branch: wt.spec.branch.clone(),
-                        confirm_discard: self.confirm_discard,
-                    }),
-                    pr: self.project.pr.as_ref().map(|pr| nsh::strip::Pr::Opened { label: format!("PR #{} · {} files", pr.number, self.project.changes.len()) }).or_else(|| (mode == Mode::Diff).then(|| nsh::strip::Pr::Asking { status: self.pr_status.clone(), opening: self.opening })),
-                    pr_reset: self.pr_serial,
-                });
-                self.strip.clone()
-            }))
-            .child(div().flex_1().min_h_0().p_1().child(body))
-            .into_any_element()
+        nsh::strip::publish(nsh::strip::Snapshot {
+            worktree: self.project.worktree.as_ref().map(|wt| nsh::strip::Worktree {
+                branch: wt.spec.branch.clone(),
+                confirm_discard: self.confirm_discard,
+            }),
+            pr: self
+                .project
+                .pr
+                .as_ref()
+                .map(|pr| nsh::strip::Pr::Opened { label: format!("PR #{} · {} files", pr.number, self.project.changes.len()) })
+                .or_else(|| diff.then(|| nsh::strip::Pr::Asking { status: self.pr_status.clone(), opening: self.opening })),
+            pr_reset: self.pr_serial,
+        });
+        nsh::explorer::publish(nsh::explorer::Snapshot { glass: cx.global::<Palette>().glass.is_some(), changes: diff, lead, trail, body });
+        div().size_full().child(self.explorer_pane.clone()).into_any_element()
+    }
+
+    /// Opens, or shows the diff of, the file selected in the explorer's tree, as clicking it does.
+    fn open_selected(&mut self, by_user: bool, window: &mut Window, cx: &mut Context<Self>) {
+        match self.mode {
+            Mode::Source => {
+                let Some(path) = self.project.files_tree.selected_file().map(str::to_string) else { return };
+                // A file picked in the tree is what the viewer shows, not an agent's view.
+                if by_user {
+                    self.thread.shown = None;
+                }
+                if self.project.current.as_deref() != Some(&path) {
+                    self.open(&path, window, cx);
+                }
+            }
+            Mode::Diff => {
+                let Some(path) = self.project.changes_tree.selected_file().map(str::to_string) else { return };
+                if by_user {
+                    self.thread.shown = None;
+                }
+                if self.project.picked.as_deref() != Some(&path) {
+                    self.pick(&path, cx);
+                }
+            }
+        }
+        if by_user {
+            self.reveal_side(cx);
+        }
     }
 
     /// Switches a narrow viewer pane between the explorer and the file.
@@ -5432,8 +5278,9 @@ impl Reader {
             note: thread.attach_note.clone(),
             items: chat_items(&thread.messages),
             picking,
-            draft: thread.draft.read(cx).value().to_string(),
+            draft: thread.draft.clone(),
             draft_reset: self.chat_reset.get(),
+            focus: self.chat_focus.get(),
             follow,
         }
     }
@@ -5442,9 +5289,9 @@ impl Reader {
     fn chat_cmd(&mut self, cmd: nsh::chat::Cmd, window: &mut Window, cx: &mut Context<Self>) {
         use nsh::chat::{Cmd as Chat, GrantChange, Scope as ChatScope};
         match cmd {
-            Chat::Draft(text) => self.thread.draft.update(cx, |input, cx| input.set_value(text, window, cx)),
+            Chat::Draft(text) => self.thread.draft = text,
             Chat::Send { later } => self.send(later, window, cx),
-            Chat::Stop => self.stop(window, cx),
+            Chat::Stop => self.stop(cx),
             Chat::Drop(uris) => self.attach(uris.iter().filter_map(|uri| file_of(uri)).map(|path| Source::Path(PathBuf::from(path))).collect(), cx),
             Chat::Paste(pictures) => self.attach(pictures.into_iter().map(Source::Bytes).collect(), cx),
             Chat::Detach(at) => {
@@ -5453,7 +5300,7 @@ impl Reader {
                 }
                 cx.notify();
             }
-            Chat::Recall(at) => self.recall(at, window, cx),
+            Chat::Recall(at) => self.recall(at, cx),
             Chat::Answer { message, block, at } => self.answer(message, block, at, cx),
             Chat::Approve { message, block, yes } => self.answer_approval(message, block, yes, window, cx),
             Chat::ToggleTool { message, block } => self.toggle_tool(message, block, cx),
@@ -5523,6 +5370,26 @@ impl Reader {
             Cmd::Browse(browse) => self.set_browsing(browse, cx),
             Cmd::ToggleRendered => self.toggle_rendered(cx),
             Cmd::SetSplit(split) => self.set_split(split, cx),
+            Cmd::ShowHome => {
+                self.thread.shown = None;
+                cx.notify();
+            }
+            Cmd::ShowView(id) => self.show_agent_view(&id, cx),
+            Cmd::CloseView(id) => self.close_agent_view(&id, cx),
+            Cmd::SetMode(diff) => self.set_mode(if diff { Mode::Diff } else { Mode::Source }, cx),
+            Cmd::TreeClick(id) => {
+                let tree = if self.mode == Mode::Diff { &mut self.project.changes_tree } else { &mut self.project.files_tree };
+                tree.click(&id);
+                self.open_selected(true, window, cx);
+                cx.notify();
+            }
+            Cmd::TreeStep(step) => {
+                let tree = if self.mode == Mode::Diff { &mut self.project.changes_tree } else { &mut self.project.files_tree };
+                tree.step(step);
+                // Moving the selection with the keyboard opens the file too, like a click.
+                self.open_selected(true, window, cx);
+                cx.notify();
+            }
             Cmd::OpenUrl(url) => cx.open_url(&url),
             Cmd::FinderQuery(query) => {
                 if query != self.finder_query {
@@ -5563,8 +5430,8 @@ impl Reader {
 
     /// The viewer or the diff viewer, as the project's mode says, with the file tree beside it
     /// unless that is hidden or the agent's own view is shown, which has no files to pick.
-    fn pane(&self, lead: Option<AnyElement>, trail: Option<AnyElement>, cx: &mut Context<Self>) -> AnyElement {
-        let tabs = self.view_tabs(cx);
+    fn pane(&self, cx: &mut Context<Self>) -> AnyElement {
+        let tabs = self.view_tabs();
         let has_tabs = tabs.is_some();
         let shown_form = self.thread.shown.as_deref().and_then(|id| self.thread.forms.get(id));
         let shown = self
@@ -5583,14 +5450,14 @@ impl Reader {
         // A pane wide enough shows the explorer beside what it shows, with the lead controls in
         // the file's header; stacked, the file's alone gets them, with a way back to the explorer
         // tacked on.
-        let mut tree_lead = if with_tree || explorer_only { lead } else { None };
         // The same split of the window's controls, as descriptors, for a body NSH draws.
         let (lead_controls, trail_controls) = self.pane_controls.borrow().clone();
+        let tree_lead = if with_tree || explorer_only { lead_controls.clone() } else { vec![] };
         let body_controls = |lead: Vec<nsh::header::Control>| if with_tree || explorer_only { (vec![], trail_controls.clone()) } else if stacked { ([lead, vec![nsh::header::Control::Explorer]].concat(), trail_controls.clone()) } else { (lead, trail_controls.clone()) };
         let body = match (shown, shown_form, self.mode) {
             _ if explorer_only => {
                 let background = cx.global::<Palette>().background;
-                div().size_full().when(!has_tabs, |d| d.bg(background)).child(self.explorer(tree_lead.take(), trail, cx)).into_any_element()
+                div().size_full().when(!has_tabs, |d| d.bg(background)).child(self.explorer(tree_lead.clone(), trail_controls.clone(), cx)).into_any_element()
             }
             (Some(view), _, _) => self.agent_view(view, body_controls(lead_controls), cx).into_any_element(),
             (_, Some(form), _) => self.form_view(form, body_controls(lead_controls), cx).into_any_element(),
@@ -5607,7 +5474,7 @@ impl Reader {
         let body = if with_tree {
             // The viewers paint their own background; the column paints its own too, unless the
             // pane does for both, which would lay a second translucent layer under glass.
-            let column = div().size_full().when(!has_tabs, |d| d.bg(background)).child(self.explorer(tree_lead, None, cx));
+            let column = div().size_full().when(!has_tabs, |d| d.bg(background)).child(self.explorer(tree_lead, vec![], cx));
             sidebars(&self.tree_cols).id("tree").left(true, TREE_RANGE, column).center(div().size_full().child(body)).into_any_element()
         } else {
             body
@@ -5672,89 +5539,34 @@ impl Reader {
 
     /// Files (or changes) and the agent's views as tabs, with a prompt for one it added while
     /// the user was busy. None while the agent has made no views.
-    fn view_tabs(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    fn view_tabs(&self) -> Option<AnyElement> {
         if self.thread.views.is_empty() && self.thread.forms.is_empty() {
             return None;
         }
-        let colors = cx.global::<Palette>();
-        let border = colors.border;
-        let this = cx.entity();
-        let shown = self.thread.shown.as_deref();
-        let home = {
-            let this = this.clone();
-            Button::new("tab-files")
-                .label(if self.mode == Mode::Diff { "Changes" } else { "Files" })
-                .ghost()
-                .small()
-                .selected(shown.is_none())
-                .on_click(move |_, _, cx| this.update(cx, |reader, cx| {
-                    reader.thread.shown = None;
-                    cx.notify();
-                }))
-        };
-        let tab = |id: &str, title: &str| {
-            let (open, close) = (this.clone(), this.clone());
-            let (open_id, closing) = (id.to_string(), id.to_string());
-            div()
-                .flex()
-                .items_center()
-                .child(
-                    Button::new(SharedString::from(format!("tab-{id}")))
-                        .label(title)
-                        .ghost()
-                        .small()
-                        .selected(shown == Some(id))
-                        .on_click(move |_, _, cx| open.update(cx, |reader, cx| reader.show_agent_view(&open_id, cx))),
-                )
-                .child(
-                    Button::new(SharedString::from(format!("close-{id}")))
-                        .icon(IconName::Close)
-                        .ghost()
-                        .xsmall()
-                        .tooltip("Close this view")
-                        .on_click(move |_, _, cx| close.update(cx, |reader, cx| reader.close_agent_view(&closing, cx))),
-                )
-        };
-        let tabs = self
-            .thread
-            .views
-            .list()
-            .iter()
-            .map(|view| tab(&view.id, &view.title))
-            .chain(self.thread.forms.list().iter().map(|form| tab(&form.id, &form.title)));
-        let offer = self.thread.offered.as_ref().and_then(|id| {
-            let title = self
-                .thread
+        use nsh::tabs::{Snapshot, Tab};
+        let titled = |id: &String| {
+            self.thread
                 .views
                 .list()
                 .iter()
                 .find(|view| view.id == *id)
-                .map(|view| view.title.clone())
-                .or_else(|| self.thread.forms.list().iter().find(|form| form.id == *id).map(|form| form.title.clone()))?;
-            let (this, id) = (this.clone(), id.clone());
-            Some(
-                Button::new("offered-view")
-                    .label(format!("The agent wants to show “{}”", title))
-                    .primary()
-                    .small()
-                    .on_click(move |_, _, cx| this.update(cx, |reader, cx| reader.show_agent_view(&id, cx))),
-            )
+                .map(|view| Tab { id: view.id.clone(), title: view.title.clone() })
+                .or_else(|| self.thread.forms.list().iter().find(|form| form.id == *id).map(|form| Tab { id: form.id.clone(), title: form.title.clone() }))
+        };
+        nsh::tabs::publish(Snapshot {
+            home: if self.mode == Mode::Diff { "Changes" } else { "Files" }.into(),
+            shown: self.thread.shown.clone(),
+            tabs: self
+                .thread
+                .views
+                .list()
+                .iter()
+                .map(|view| Tab { id: view.id.clone(), title: view.title.clone() })
+                .chain(self.thread.forms.list().iter().map(|form| Tab { id: form.id.clone(), title: form.title.clone() }))
+                .collect(),
+            offer: self.thread.offered.as_ref().and_then(titled),
         });
-        Some(
-            div()
-                .flex_none()
-                .flex()
-                .items_center()
-                .gap_1()
-                .px_2()
-                .py_1()
-                .border_b_1()
-                .border_color(border)
-                .child(home)
-                .children(tabs)
-                .children(offer)
-                .into_any_element(),
-        )
+        Some(div().flex_none().h(rems(2.5)).child(self.tabs.clone()).into_any_element())
     }
 
     fn close_agent_view(&mut self, id: &str, cx: &mut Context<Self>) {
@@ -5977,24 +5789,6 @@ fn floating(pane: impl IntoElement + Styled, cx: &App) -> AnyElement {
     }
 }
 
-/// A pane header: `left` and `right` on a bar with a line under it.
-fn header_row(left: impl IntoElement, right: impl IntoElement, cx: &App) -> gpui::Div {
-    let colors = cx.global::<Palette>();
-    div()
-        .h_11()
-        .flex_none()
-        .flex()
-        .items_center()
-        .justify_between()
-        .gap_3()
-        .px_3()
-        // On glass the headers' titles set the sections apart; no line is drawn under them.
-        .when(colors.glass.is_none(), |row| row.border_b_1().border_color(colors.border))
-        .text_color(colors.foreground)
-        .child(left)
-        .child(right)
-}
-
 /// Where the file of a `file:` URL pasted in, dropped on it, is.
 fn file_of(uri: &str) -> Option<&str> {
     let path = uri.strip_prefix("file://")?;
@@ -6123,20 +5917,6 @@ fn approval_text(agent: &config::Agent, new_agent: bool, mcp: &[config::McpServe
     (question, lines)
 }
 
-fn centered(text: String, cx: &App) -> AnyElement {
-    div()
-        .size_full()
-        .flex()
-        .items_center()
-        .justify_center()
-        .px_4()
-        .text_center()
-        .text_sm()
-        .text_color(cx.global::<Palette>().muted_foreground)
-        .child(div().max_w_full().child(text))
-        .into_any_element()
-}
-
 impl Render for Reader {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.settle_agent_changes();
@@ -6157,33 +5937,6 @@ impl Render for Reader {
         // conversation's, on the side the viewer opens), and, with the viewer open, a button that
         // gives it the room by hiding the conversation.
         let focus = side_open && !agent_open;
-        let (left, right, focus_viewer) = (cx.entity(), cx.entity(), cx.entity());
-        let sidebar_toggle = Button::new("toggle-left")
-            .icon(IconName::PanelLeft)
-            .ghost()
-            .small()
-            .selected(left_open)
-            .tooltip("Sidebar (Ctrl+B)")
-            .on_click(move |_, _, cx| left.update(cx, |reader, cx| reader.toggle_left(cx)))
-            .into_any_element();
-        let viewer_toggle = move |right: Entity<Reader>| {
-            Button::new("toggle-right")
-                .icon(IconName::FileText)
-                .ghost()
-                .small()
-                .selected(side_open)
-                .tooltip("Viewer (Ctrl+Shift+B)")
-                .on_click(move |_, _, cx| right.update(cx, |reader, cx| reader.toggle_right(cx)))
-                .into_any_element()
-        };
-        let focus_button = Button::new("focus-viewer")
-            .icon(if focus { IconName::Minimize } else { IconName::Maximize })
-            .ghost()
-            .small()
-            .tooltip(if focus { "Show the conversation (Ctrl+Shift+F)" } else { "Focus the viewer (Ctrl+Shift+F)" })
-            .on_click(move |_, _, cx| focus_viewer.update(cx, |reader, cx| reader.toggle_focus(cx)))
-            .into_any_element();
-        let viewer_trail = div().flex().items_center().gap_1().child(focus_button).child(viewer_toggle(right.clone())).into_any_element();
         use nsh::header::Control;
         let controls = |lead: Vec<Control>, trail: Vec<Control>| *self.pane_controls.borrow_mut() = (lead, trail);
         let trail_all = vec![Control::Focus(focus), Control::Viewer(side_open)];
@@ -6202,13 +5955,13 @@ impl Render for Reader {
             }
         } else if focus {
             controls(vec![Control::Sidebar(left_open)], trail_all);
-            (self.pane(Some(sidebar_toggle), Some(viewer_trail), cx), hidden())
+            (self.pane(cx), hidden())
         } else if swapped {
             controls(vec![Control::Sidebar(left_open)], trail_all);
-            (self.pane(Some(sidebar_toggle), Some(viewer_trail), cx), floating(self.chat_pane(vec![], vec![], cx), cx))
+            (self.pane(cx), floating(self.chat_pane(vec![], vec![], cx), cx))
         } else {
             controls(vec![], trail_all);
-            (floating(self.chat_pane(vec![Control::Sidebar(left_open)], vec![], cx), cx), self.pane(None, Some(viewer_trail), cx))
+            (floating(self.chat_pane(vec![Control::Sidebar(left_open)], vec![], cx), cx), self.pane(cx))
         };
         let right_open = side_open && !focus;
         div()
@@ -6436,7 +6189,6 @@ fn main() {
     let prefetch = Prefetch::start(pr.as_ref().map_or_else(|| root.clone(), |pr| pr.worktree.clone()));
     gpui_platform::application().run(move |cx: &mut App| {
         trace::mark("app running");
-        ui::init(cx);
         cx.bind_keys([
             KeyBinding::new("ctrl-o", ToggleTools, None),
             KeyBinding::new("ctrl-t", ToggleThoughts, None),
@@ -6637,7 +6389,7 @@ mod tests {
         assert_eq!(toggle_all(&mut vec![Msg::User("x".into(), vec![])], thought_flag), None);
     }
 
-    use super::{NOTICE_RATE, notice_wait, Activity, Block, Msg, PermissionOption, Step, ToolBlock, folded_runs, preview_of, language, run_folded, toggle_all, match_files, primary_option, syntax};
+    use super::{NOTICE_RATE, notice_wait, Activity, Block, Msg, PermissionOption, Step, ToolBlock, folded_runs, preview_of, language, run_folded, toggle_all, match_files, primary_option};
 
     #[test]
     fn file_matches_rank_names_before_paths() {
@@ -6659,14 +6411,9 @@ mod tests {
     }
 
     #[test]
-    fn elixir_files_highlight() {
+    fn elixir_files_are_named() {
         assert_eq!(language("lib/app.ex"), "Elixir");
         assert_eq!(language("lib/app.exs"), "Elixir");
-        // `.ex` resolves through the highlighter's alias table, `.exs` through `syntax`.
-        assert_eq!(syntax("lib/app.ex"), "ex");
-        assert_eq!(syntax("mix.exs"), "elixir");
-        assert!(super::syntax::highlights("defmodule A do\nend\n", "ex"));
-        assert!(super::syntax::highlights("defmodule A do\nend\n", &syntax("mix.exs")));
     }
 
     fn option(name: &str, kind: &str) -> PermissionOption {
