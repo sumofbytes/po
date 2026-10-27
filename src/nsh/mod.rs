@@ -2,6 +2,8 @@
 //! Po's window like any other. This module is what they share: the theme and fonts they take from
 //! Po's [`Palette`], Po's icons, and the views themselves.
 pub mod bus;
+pub mod overlay;
+pub mod settings;
 pub mod sidebar;
 pub mod todos;
 
@@ -179,6 +181,11 @@ pub fn text_base() -> Points {
     rems(1.)
 }
 
+/// A field's height.
+pub fn field_height() -> Points {
+    rems(2.)
+}
+
 /// A pane header's height, GPUI's `h_11`.
 pub fn header_height() -> Points {
     rems(2.75)
@@ -231,4 +238,45 @@ pub fn icon_button(name: IconName, size: Points, label: &'static str, on_press: 
         .tooltip(tooltip(label))
         .on_press(on_press)
         .child(icon(name, size, Colors::muted()))
+}
+
+/// A text button: filled with the primary color, or an outline.
+pub fn button(label: &'static str, primary: bool, on_press: impl Fn() + 'static) -> View {
+    let b = view()
+        .role(AccessibilityRole::Button)
+        .label(label)
+        .flex_none()
+        .px(rems(0.75))
+        .py(rems(0.375))
+        .rounded(Colors::radius())
+        .cursor_pointer()
+        .on_press(on_press)
+        .child(text(label).text_size(text_sm()).text_color(move || if primary { Colors::primary_foreground()() } else { Colors::foreground()() }));
+    if primary { b.bg(Colors::primary()) } else { b.border_1().border_color(Colors::input_border()).hover(|s| s.bg(Colors::hover())) }
+}
+
+/// A line of text in a bordered box, as the settings page has them. `id` names it for tests.
+pub fn field(id: &str, value: Signal<String>, placeholder: &'static str, on_submit: impl Fn() + 'static) -> View {
+    let input = nsh_core::element::input()
+        .test_id(id)
+        .value(move || value.get())
+        .placeholder(placeholder)
+        .placeholder_color(Colors::one(Colors::muted()))
+        .selection_color(Colors::one(Colors::caret()))
+        .text_color(Colors::foreground())
+        .auto_correct(false)
+        .submit_behavior(nsh_core::element::SubmitBehavior::Submit)
+        .on_change(move |text: &str| value.set(text.to_string()))
+        .on_submit(move |_: &str| on_submit())
+        .flex_1();
+    view()
+        .h(field_height())
+        .flex_row()
+        .items_center()
+        .px(rems(0.625))
+        .rounded(Colors::radius())
+        .border_1()
+        .border_color(Colors::input_border())
+        .bg(Colors::input_background())
+        .child(input)
 }

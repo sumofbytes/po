@@ -4,8 +4,13 @@
 use nsh_core::prelude::*;
 
 use super::{Colors, icon, icon_button, on_hover, rems, text_sm, text_xs};
-use crate::todo::{self, CLOSE, Date, HEIGHT, Item, Show, Target, due_label, parse_due, today};
+use super::bus::{Cmd, send};
+use super::overlay::{self, Height};
+use crate::todo::{self, Date, Item, Show, Target, due_label, parse_due, today};
 use crate::ui::icon::IconName;
+
+/// The height the screen needs, which the overlay around it takes.
+pub static HEIGHT: Height = overlay::height();
 
 const DUE_HINT: &str = "Due: tomorrow, fri, nov 2…";
 
@@ -191,7 +196,7 @@ impl State {
             self.new_text.set(String::new());
             self.new_due.set(String::new());
         } else {
-            CLOSE.notify_one();
+            send(Cmd::CloseTodos);
         }
     }
 
@@ -267,7 +272,7 @@ pub fn Todos() -> impl IntoElement {
                 .on_layout(measure(0))
                 .child(text("Todos").flex_1().font_weight(FontWeight::SEMIBOLD).text_color(Colors::foreground()))
                 .child(icon_button(IconName::Heading, rems(0.875), "Add a header", move || state.compose(Target::Header)))
-                .child(icon_button(IconName::Close, rems(0.875), "Close (Esc)", || CLOSE.notify_one())),
+                .child(icon_button(IconName::Close, rems(0.875), "Close (Esc)", || send(Cmd::CloseTodos))),
         )
         .child(view().px(rems(1.)).pt(rems(0.75)).pb(rems(0.5)).on_layout(measure(1)).child(add_row(state)))
         .child(
@@ -544,7 +549,6 @@ fn footer(state: State) -> View {
 mod tests {
     use std::time::Duration;
 
-    use futures::FutureExt as _;
     use nsh_engine::EngineConfig;
     use nsh_testing::Headless;
 
@@ -571,6 +575,8 @@ mod tests {
     /// The one test of the screen: the list is the store's, which is shared, so its steps run in order.
     #[test]
     fn the_screen_adds_checks_off_nests_filters_and_clears_todos() {
+        let mut commands = super::super::bus::lock();
+        let commands = commands.as_mut().expect("the channel");
         todo::change(|todos| *todos = todo::Todos::default());
         let mut app = start();
         assert!(app.shows("Nothing to do yet. Add a todo above, or a header to group them."));
@@ -643,7 +649,7 @@ mod tests {
         // With nothing typed and nothing open, Esc asks the frame to close.
         app.press_key("escape").unwrap();
         app.wait(Duration::from_millis(50)).unwrap();
-        assert!(todo::CLOSE.notified().now_or_never().is_some());
+        assert_eq!(commands.try_recv().ok(), Some(Cmd::CloseTodos));
         drop(app);
         let _ = std::fs::remove_dir_all(todo::file().parent().unwrap());
     }

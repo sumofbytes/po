@@ -470,7 +470,8 @@ mod tests {
 
     #[test]
     fn the_sidebar_draws_its_snapshot_and_reports_what_is_pressed() {
-        let mut commands = super::super::bus::commands().expect("the one listener");
+        let mut guard = super::super::bus::lock();
+        let commands = guard.as_mut().expect("the channel");
         publish(Snapshot {
             waiting: vec![Waiting { thread: thread(2, 20, "Fix the build", Mark::Asking, false), project: "other".into() }],
             projects: vec![

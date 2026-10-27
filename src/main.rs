@@ -1241,7 +1241,7 @@ struct Reader {
     sidebar: Entity<nsh_platform_gpui::AppView>,
     _sidebar_theme: Subscription,
     /// The todos window, shown over everything while `todos_open`; the sidebar has a row for it.
-    todos: Entity<todo::TodoPanel>,
+    todos: Entity<nsh::overlay::Overlay>,
     todos_open: bool,
     /// Progress or failure of the last attempt to open a PR.
     pr_status: Option<String>,
@@ -1261,7 +1261,8 @@ struct Reader {
     /// Keeps the finder input's event subscription alive for the reader's lifetime.
     finder_events: Option<Subscription>,
     /// The settings page (Ctrl+,), while it is open.
-    settings_page: Option<(Entity<settings::SettingsView>, Subscription)>,
+    settings: Entity<nsh::overlay::Overlay>,
+    settings_open: bool,
     painted: bool,
     agents: Vec<config::Agent>,
     /// Tell the desktop when a thread finishes or asks while it isn't being looked at.
@@ -1337,7 +1338,8 @@ impl Reader {
             InputState::new(window, cx).auto_grow(1, 1).submit_on_enter(true).placeholder("PR number or URL")
         });
         let (sidebar, sidebar_theme) = nsh::mount(nsh_platform_gpui::Root::of::<nsh::sidebar::Sidebar>(), window, cx);
-        let todos = cx.new(todo::TodoPanel::new);
+        let settings_window = cx.new(|cx| nsh::overlay::Overlay::new(680., || nsh_platform_gpui::Root::of::<nsh::settings::Settings>(), &nsh::settings::HEIGHT, cx));
+        let todos = cx.new(|cx| nsh::overlay::Overlay::new(600., || nsh_platform_gpui::Root::of::<nsh::todos::Todos>(), &nsh::todos::HEIGHT, cx));
         let draft = cx.new(|cx| {
             InputState::new(window, cx)
                 .auto_grow(1, 6)
@@ -1356,10 +1358,11 @@ impl Reader {
                     reader.request_save(cx);
                 }
             }),
-            cx.subscribe_in(&todos, window, |reader, _, event: &todo::TodoEvent, window, cx| match event {
-                todo::TodoEvent::Close => reader.hide_todos(window, cx),
-                // The sidebar's row counts what is left.
-                todo::TodoEvent::Changed => cx.notify(),
+            cx.subscribe_in(&settings_window, window, |reader, _, event: &nsh::overlay::OverlayEvent, window, cx| match event {
+                nsh::overlay::OverlayEvent::Close => reader.hide_settings(window, cx),
+            }),
+            cx.subscribe_in(&todos, window, |reader, _, event: &nsh::overlay::OverlayEvent, window, cx| match event {
+                nsh::overlay::OverlayEvent::Close => reader.hide_todos(window, cx),
             }),
             cx.subscribe_in(&pr_input, window, |reader, _, event: &InputEvent, window, cx| {
                 if matches!(event, InputEvent::PressEnter { shift: false, alt: false }) {
@@ -1470,7 +1473,8 @@ impl Reader {
             finder_list: ListState::new(0, ListAlignment::Top, px(400.)),
             finder_open: false,
             finder_events: None,
-            settings_page: None,
+            settings: settings_window,
+            settings_open: false,
             painted: false,
             agents,
             notifications: settings["notifications"].as_bool().unwrap_or(true),
@@ -1547,6 +1551,16 @@ impl Reader {
             })
             .detach();
         }
+        // The sidebar's count of todos follows the list, whoever changes it.
+        let mut todo_changes = todo::watch();
+        cx.spawn(async move |this, cx| {
+            while todo_changes.changed().await.is_ok() {
+                if this.update(cx, |_, cx| cx.notify()).is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
         reader.focus.focus(window, cx);
         trace::mark("reader built");
         reader.refresh_tree(cx);
@@ -4772,16 +4786,12 @@ impl Reader {
 
     /// Ctrl+,: opens the settings page, or closes it when it is already open.
     fn toggle_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.settings_page.is_some() {
+        if self.settings_open {
             return self.hide_settings(window, cx);
         }
-        let page = cx.new(|cx| settings::SettingsView::new(self.swapped, window, cx));
-        let subscription = cx.subscribe_in(&page, window, |reader, _, event: &settings::SettingsEvent, window, cx| match event {
-            settings::SettingsEvent::Close => reader.hide_settings(window, cx),
-            settings::SettingsEvent::Saved => reader.apply_settings(cx),
-        });
-        page.update(cx, |page, cx| page.focus(window, cx));
-        self.settings_page = Some((page, subscription));
+        nsh::settings::start(self.swapped);
+        self.settings_open = true;
+        self.settings.update(cx, |settings, cx| settings.open(window, cx));
         cx.notify();
     }
 
@@ -4805,7 +4815,8 @@ impl Reader {
     }
 
     fn hide_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.settings_page = None;
+        self.settings_open = false;
+        self.settings.update(cx, |settings, _| settings.close());
         self.focus.focus(window, cx);
         cx.notify();
     }
@@ -5705,6 +5716,9 @@ impl Reader {
             Cmd::NewThread => self.new_blank_thread(window, cx),
             Cmd::OpenSettings => self.toggle_settings(window, cx),
             Cmd::ToggleTodos => self.toggle_todos(window, cx),
+            Cmd::CloseTodos => self.hide_todos(window, cx),
+            Cmd::CloseSettings => self.hide_settings(window, cx),
+            Cmd::SettingsSaved => self.apply_settings(cx),
             Cmd::Answer(id, yes) => self.answer_suggestion(id, yes, window, cx),
         }
     }
@@ -7317,7 +7331,7 @@ impl Render for Reader {
             )
             .when(self.finder_open, |this| this.child(self.finder(cx)))
             .when(self.todos_open, |this| this.child(self.todos.clone()))
-            .children(self.settings_page.as_ref().map(|(page, _)| page.clone()))
+            .when(self.settings_open, |this| this.child(self.settings.clone()))
     }
 }
 

@@ -22,6 +22,10 @@ pub enum Cmd {
     NewThread,
     OpenSettings,
     ToggleTodos,
+    CloseTodos,
+    CloseSettings,
+    /// The settings were written to config.json.
+    SettingsSaved,
     /// An agent's suggestion, answered yes or no.
     Answer(u64, bool),
 }
@@ -42,4 +46,13 @@ pub fn send(cmd: Cmd) {
 /// The commands, for the one that runs them.
 pub fn commands() -> Option<mpsc::UnboundedReceiver<Cmd>> {
     CHANNEL.1.lock().ok()?.take()
+}
+
+/// Held by a test of a screen for as long as it runs: the screens share this one channel, so they
+/// take turns. Starts with nothing waiting in it.
+#[cfg(test)]
+pub fn lock() -> std::sync::MutexGuard<'static, Option<mpsc::UnboundedReceiver<Cmd>>> {
+    let mut commands = CHANNEL.1.lock().unwrap_or_else(|e| e.into_inner());
+    while commands.as_mut().is_some_and(|c| c.try_recv().is_ok()) {}
+    commands
 }

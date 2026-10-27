@@ -3,13 +3,9 @@
 use std::path::PathBuf;
 use std::sync::LazyLock;
 
-use futures::FutureExt as _;
-use gpui::{Context, Entity, EventEmitter, Focusable as _, InteractiveElement as _, IntoElement, ParentElement as _, Render, StatefulInteractiveElement as _, Styled as _, Subscription, Task, Window, div, prelude::FluentBuilder as _, px};
-use nsh_platform_gpui::{AppView, Root};
 use serde_json::{Value, json};
-use tokio::sync::{Notify, watch};
+use tokio::sync::watch;
 
-use crate::theme::Palette;
 
 /// A day, as days since 1970-01-01.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
@@ -433,110 +429,6 @@ pub fn change<R>(f: impl FnOnce(&mut Todos) -> R) -> R {
         log::warn!("saving {}: {error}", file().display());
     }
     out.expect("send_modify runs its closure")
-}
-
-/// What the window's screen asks of the frame around it: to close, and the height its content
-/// needs, which the frame takes as far as the window has room.
-pub(crate) static CLOSE: Notify = Notify::const_new();
-pub(crate) static HEIGHT: LazyLock<watch::Sender<f32>> = LazyLock::new(|| watch::Sender::new(0.));
-
-pub enum TodoEvent {
-    Close,
-    /// The list changed, which the sidebar's count follows.
-    Changed,
-}
-
-/// The todos window, laid out like a plain todo app: a field to add one at the top, the list with
-/// a box to check each off, and a footer with what is left and which to show. Its screen is NSH's
-/// ([`crate::nsh::todos`]); this is the frame Po puts it in, over the app, and closes it from. The
-/// sidebar only has a row that opens it.
-pub struct TodoPanel {
-    /// Made as the window opens and dropped as it closes, which stops its engine.
-    view: Option<(Entity<AppView>, Subscription)>,
-    height: f32,
-    _follow: Task<()>,
-}
-
-impl EventEmitter<TodoEvent> for TodoPanel {}
-
-impl TodoPanel {
-    pub fn new(cx: &mut Context<Self>) -> Self {
-        let mut todos = watch();
-        let mut height = HEIGHT.subscribe();
-        let follow = cx.spawn(async move |panel, cx| {
-            loop {
-                let event = futures::select_biased! {
-                    _ = CLOSE.notified().fuse() => TodoEvent::Close,
-                    changed = todos.changed().fuse() => match changed {
-                        Ok(()) => TodoEvent::Changed,
-                        Err(_) => return,
-                    },
-                    changed = height.changed().fuse() => match changed {
-                        Ok(()) => {
-                            let now = *height.borrow_and_update();
-                            if panel.update(cx, |panel, cx| { panel.height = now; cx.notify() }).is_err() {
-                                return;
-                            }
-                            continue;
-                        }
-                        Err(_) => return,
-                    },
-                };
-                if panel.update(cx, |_, cx| cx.emit(event)).is_err() {
-                    return;
-                }
-            }
-        });
-        Self { view: None, height: 0., _follow: follow }
-    }
-
-    /// Starts the screen and gives it the keyboard, as the window opens.
-    pub fn open(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let (view, theme) = crate::nsh::mount(Root::of::<crate::nsh::todos::Todos>(), window, cx);
-        window.focus(&view.focus_handle(cx), cx);
-        self.view = Some((view, theme));
-        cx.notify();
-    }
-
-    /// Stops the screen, as the window closes.
-    pub fn close(&mut self) {
-        self.view = None;
-    }
-}
-
-impl Render for TodoPanel {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let colors = cx.global::<Palette>();
-        let (popover, border, radius) = (colors.popover, colors.border, colors.radius);
-        div()
-            .absolute()
-            .inset_0()
-            .id("todos-backdrop")
-            .occlude()
-            .on_click(cx.listener(|_, _: &gpui::ClickEvent, _, cx| cx.emit(TodoEvent::Close)))
-            .flex()
-            .justify_center()
-            .items_start()
-            .py_6()
-            .child(
-                div()
-                    .id("todos")
-                    .occlude()
-                    // A click inside is the screen's, not the backdrop's.
-                    .on_click(|_, _, cx| cx.stop_propagation())
-                    .w(px(600.))
-                    // Until the screen has measured itself, it takes the room it has.
-                    .when(self.height > 0., |card| card.h(px(self.height + 2.)))
-                    .when(self.height <= 0., |card| card.h_full())
-                    .max_h_full()
-                    .rounded(radius)
-                    .border_1()
-                    .border_color(border)
-                    .bg(popover)
-                    .overflow_hidden()
-                    .children(self.view.as_ref().map(|(view, _)| view.clone())),
-            )
-    }
 }
 
 #[cfg(test)]
