@@ -32,6 +32,8 @@ pub enum Cmd {
     /// Markdown shown rendered, or as its source.
     ToggleRendered,
     OpenUrl(String),
+    /// The diff shown side by side (true) or inline.
+    SetSplit(bool),
     /// The finder's query changed.
     FinderQuery(String),
     /// A file picked in the finder.

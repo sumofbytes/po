@@ -36,7 +36,7 @@ use acp::{ConfigOption, Event, PermissionOption, SessionInfo};
 use agent::Client;
 use attach::Attachment;
 use dex::Queue;
-use diff::{Change, Kind, Pair, Row};
+use diff::{Change, Kind, Row};
 use theme::Palette;
 use ui::button::Button;
 use ui::icon::{Icon, IconName, IconSize};
@@ -51,7 +51,7 @@ use serde_json::Value;
 
 use gpui::{
     AnyElement, App, Pixels, TitlebarOptions, WindowControlArea, point, Bounds, Context, Entity, FontWeight, IntoElement, ListAlignment, ListState, ParentElement,
-    Render, SharedString, StyleRefinement, Styled, StyledText, Subscription, Task, Window, WindowBackgroundAppearance, WindowBounds, WindowOptions, div, list,
+    Render, SharedString, Styled, Subscription, Task, Window, WindowBackgroundAppearance, WindowBounds, WindowOptions, div, list,
     prelude::*, px, rems, size, KeyBinding,
 };
 
@@ -576,14 +576,12 @@ struct Project {
     /// The changed files, folders open until the user closes them.
     changes_tree: FileTree,
     picked: Option<String>,
-    /// The picked file's diff, its side-by-side pairs and how many lines it adds and removes.
+    /// The picked file's diff as rows, which say whether it has textual changes and how many lines
+    /// it adds and removes.
     rows: Rc<Vec<Row>>,
-    pairs: Rc<Vec<Pair>>,
-    /// Syntax colors for the picked file's old and new versions.
-    colors: Rc<diff::Colors>,
     counts: (usize, usize),
-    /// The diff's rows as laid out, inline or split; only those in view are drawn.
-    diff_list: ListState,
+    /// The picked file's old and new versions, which the diff view compares.
+    versions: Option<(nsh::source::Shared, nsh::source::Shared)>,
     current: Option<String>,
     stamp: Option<Stamp>,
     code: Option<nsh::source::Shared>,
@@ -1240,6 +1238,9 @@ struct Reader {
     /// The viewer's source pane, drawn by NSH, and what keeps it in Po's theme.
     source: Entity<nsh_platform_gpui::AppView>,
     _source_theme: Subscription,
+    /// The viewer's diff pane, drawn by NSH, and what keeps it in Po's theme.
+    diff: Entity<nsh_platform_gpui::AppView>,
+    _diff_theme: Subscription,
     /// The window's controls the pane being built carries: its lead, then its trail.
     pane_controls: std::cell::RefCell<(Vec<nsh::header::Control>, Vec<nsh::header::Control>)>,
     /// A line the viewer was asked to scroll to, and a number that changes with each ask.
@@ -1342,6 +1343,7 @@ impl Reader {
         let pr_input = cx.new(|cx| {
             InputState::new(window, cx).auto_grow(1, 1).submit_on_enter(true).placeholder("PR number or URL")
         });
+        let (diff_pane, diff_theme) = nsh::mount(nsh_platform_gpui::Root::of::<nsh::diff::Diff>(), window, cx);
         let (source, source_theme) = nsh::mount(nsh_platform_gpui::Root::of::<nsh::source::Source>(), window, cx);
         let (sidebar, sidebar_theme) = nsh::mount(nsh_platform_gpui::Root::of::<nsh::sidebar::Sidebar>(), window, cx);
         let finder_window = cx.new(|cx| nsh::overlay::Overlay::new(560., 8., || nsh_platform_gpui::Root::of::<nsh::finder::Finder>(), &nsh::finder::HEIGHT, cx));
@@ -1470,6 +1472,8 @@ impl Reader {
             side_query: String::new(),
             source,
             _source_theme: source_theme,
+            diff: diff_pane,
+            _diff_theme: diff_theme,
             pane_controls: Default::default(),
             reveal: None,
             reveal_serial: 0,
@@ -1703,10 +1707,8 @@ impl Reader {
             changes_tree,
             picked: None,
             rows: Rc::new(vec![]),
-            pairs: Rc::new(vec![]),
-            colors: Rc::default(),
+            versions: None,
             counts: (0, 0),
-            diff_list: ListState::new(0, ListAlignment::Top, px(400.)),
             current: None,
             stamp: None,
             code: None,
@@ -1747,7 +1749,7 @@ impl Reader {
                 None => {
                     self.project.picked = None;
                     self.project.diffing = None;
-                    self.set_rows(vec![], diff::Colors::default());
+                    self.set_rows(vec![], None);
                 }
             },
         }
@@ -1803,20 +1805,14 @@ impl Reader {
     }
 
     /// Shows the diff `rows` colored by `colors`, and works out their side-by-side pairs and counts once.
-    fn set_rows(&mut self, rows: Vec<Row>, colors: diff::Colors) {
+    fn set_rows(&mut self, rows: Vec<Row>, versions: Option<(String, String)>) {
         self.project.counts = rows.iter().fold((0, 0), |(a, r), row| match row.kind {
             Kind::Added => (a + 1, r),
             Kind::Removed => (a, r + 1),
             _ => (a, r),
         });
-        self.project.pairs = Rc::new(diff::split(&rows));
         self.project.rows = Rc::new(rows);
-        self.project.colors = Rc::new(colors);
-        self.relist_diff();
-    }
-
-    fn relist_diff(&mut self) {
-        self.project.diff_list.reset(if self.split { self.project.pairs.len() } else { self.project.rows.len() });
+        self.project.versions = versions.map(|(old, new)| (nsh::source::Shared(Arc::from(old)), nsh::source::Shared(Arc::from(new))));
     }
 
     /// Shows `path`'s diff in the viewer, once `git` has produced it off the UI thread.
@@ -1826,24 +1822,26 @@ impl Reader {
         if self.project.picked.as_deref() != Some(path) {
             self.project.picked = Some(path.to_string());
             // The last file's diff isn't shown under this one's name while this one loads.
-            self.set_rows(vec![], diff::Colors::default());
+            self.set_rows(vec![], None);
             self.project.changes_tree.select(path, cx);
         }
         let (root, base, path) = (self.project.root.clone(), self.project.base.clone(), path.to_string());
         self.project.diffing = Some(cx.spawn(async move |this, cx| {
-            let language = syntax(&path);
-            let (rows, colors) = cx
+            let (rows, versions) = cx
                 .background_executor()
                 .spawn(async move {
                     let rows = diff::file_diff(&root, &base, &change);
-                    // Only files with changed lines are worth parsing.
-                    let colors = if rows.is_empty() { diff::Colors::default() } else { diff::colors(&root, &base, &change, &language) };
-                    (rows, colors)
+                    // Only files with changed lines need their versions.
+                    let versions = (!rows.is_empty()).then(|| {
+                        let (old, new) = diff::versions(&root, &base, &change);
+                        (old.unwrap_or_default(), new.unwrap_or_default())
+                    });
+                    (rows, versions)
                 })
                 .await;
             this.update(cx, |reader, cx| {
                 if reader.project.picked.as_deref() == Some(&path) {
-                    reader.set_rows(rows, colors);
+                    reader.set_rows(rows, versions);
                     reader.project.diffing = None;
                     cx.notify();
                 }
@@ -3528,10 +3526,7 @@ impl Reader {
     }
 
     fn set_split(&mut self, split: bool, cx: &mut Context<Self>) {
-        if self.split != split {
-            self.split = split;
-            self.relist_diff();
-        }
+        self.split = split;
         cx.notify();
     }
 
@@ -4866,7 +4861,7 @@ impl Reader {
         }
     }
 
-    fn open(&mut self, path: &str, window: &mut Window, cx: &mut Context<Self>) {
+    fn open(&mut self, path: &str, _window: &mut Window, cx: &mut Context<Self>) {
         self.browse = false;
         let full = self.project.root.join(path);
         let too_big = std::fs::metadata(&full).is_ok_and(|m| m.len() > 4 * 1024 * 1024);
@@ -5628,6 +5623,7 @@ impl Reader {
             Cmd::ToggleFocus => self.toggle_focus(cx),
             Cmd::Browse(browse) => self.set_browsing(browse, cx),
             Cmd::ToggleRendered => self.toggle_rendered(cx),
+            Cmd::SetSplit(split) => self.set_split(split, cx),
             Cmd::OpenUrl(url) => cx.open_url(&url),
             Cmd::FinderQuery(query) => {
                 if query != self.finder_query {
@@ -5709,7 +5705,10 @@ impl Reader {
                 let (lead, trail) = body_controls(lead_controls);
                 self.viewer(lead, trail, cx).into_any_element()
             }
-            (None, None, Mode::Diff) => self.diff_viewer(body_lead, trail, cx).into_any_element(),
+            (None, None, Mode::Diff) => {
+                let (lead, trail) = body_controls(lead_controls);
+                self.diff_viewer(lead, trail, cx).into_any_element()
+            }
         };
         let background = cx.global::<Palette>().background;
         let body = if with_tree {
@@ -5892,133 +5891,22 @@ impl Reader {
         cx.notify();
     }
 
-    fn diff_viewer(&self, lead: Option<AnyElement>, trail: Option<AnyElement>, cx: &mut Context<Self>) -> impl IntoElement + Styled + use<> {
-        let colors = cx.global::<Palette>();
-        let Some(path) = self.project.picked.clone() else {
-            return div()
-                .size_full()
-                .flex()
-                .flex_col()
-                .bg(colors.background)
-                .child(pane_header("Changes", status_text(String::new(), cx), lead, trail, cx))
-                .child(div().flex_1().min_h_0().child(centered(self.pick_hint("a changed file"), cx)));
+    /// The picked file's changes, drawn by NSH from what [`Self::diff_snapshot`] publishes.
+    fn diff_viewer(&self, lead: Vec<nsh::header::Control>, trail: Vec<nsh::header::Control>, cx: &mut Context<Self>) -> impl IntoElement + Styled + use<> {
+        nsh::diff::publish(self.diff_snapshot(lead, trail, cx));
+        div().size_full().child(self.diff.clone())
+    }
+
+    fn diff_snapshot(&self, lead: Vec<nsh::header::Control>, trail: Vec<nsh::header::Control>, cx: &App) -> nsh::diff::Snapshot {
+        use nsh::diff::{Body, Snapshot};
+        let project = &self.project;
+        let (title, body) = match (&project.picked, &project.versions) {
+            (None, _) => ("Changes".to_string(), Body::Hint(self.pick_hint("a changed file"))),
+            (Some(path), _) if project.rows.is_empty() && project.diffing.is_some() => (path.clone(), Body::Loading),
+            (Some(path), None) => (path.clone(), Body::NoChanges),
+            (Some(path), Some((old, new))) => (path.clone(), Body::Versions { path: path.clone(), old: old.clone(), new: new.clone() }),
         };
-        let (rows, pairs, syntax) = (self.project.rows.clone(), self.project.pairs.clone(), self.project.colors.clone());
-        let palettes = syntax.palettes(cx);
-        let (added, removed) = self.project.counts;
-        let (success, danger, muted, border) =
-            (colors.added, colors.danger, colors.muted_foreground, colors.border);
-        let font = cx.global::<Palette>().mono_font_family.clone();
-        let split = self.split;
-        // Only the rows in view are built, so a long diff costs no more than a short one.
-        let body: AnyElement = if rows.is_empty() && self.project.diffing.is_some() {
-            div().into_any_element()
-        } else if rows.is_empty() {
-            centered("No textual changes".into(), cx)
-        } else {
-            let code = |text: &str, styles: Vec<(std::ops::Range<usize>, gpui::HighlightStyle)>| {
-                StyledText::new(SharedString::from(text.to_string())).with_highlights(styles)
-            };
-            list(self.project.diff_list.clone(), move |ix, _, _| {
-                let line = div().flex().w_full().min_h(rems(1.5)).items_start().font_family(font.clone()).text_sm();
-                if split {
-                    let cell = |cell: &Option<diff::Cell>, first: bool| {
-                        let half = div().flex_1().min_w_0().self_stretch().flex().items_start().gap_2();
-                        let half = if first { half.border_r_1().border_color(border) } else { half };
-                        let Some(cell) = cell else { return half.bg(muted.opacity(theme::tokens::TINT_FAINT)) };
-                        let tint = match cell.kind {
-                            Kind::Added => Some(success.opacity(theme::tokens::TINT)),
-                            Kind::Removed => Some(danger.opacity(theme::tokens::TINT)),
-                            _ => None,
-                        };
-                        let half = match tint {
-                            Some(tint) => half.bg(tint),
-                            None => half,
-                        };
-                        let styles = syntax.line(first, cell.number, &cell.text, &palettes);
-                        half.child(div().w(rems(3.)).flex_none().text_right().text_color(muted).child(cell.number.to_string()))
-                            .child(div().flex_1().min_w_0().child(code(&cell.text, styles)))
-                    };
-                    return match &pairs[ix] {
-                        Pair::Hunk(text) => line.px_2().bg(muted.opacity(theme::tokens::TINT_SUBTLE)).text_color(muted).child(text.clone()),
-                        Pair::Line(old, new) => line.child(cell(old, true)).child(cell(new, false)),
-                    }
-                    .into_any_element();
-                }
-                let row = &rows[ix];
-                let number = |n: Option<u32>| {
-                    div().w(rems(3.)).flex_none().text_right().text_color(muted).child(n.map_or(String::new(), |n| n.to_string()))
-                };
-                let (tint, sign) = match row.kind {
-                    Kind::Added => (Some(success.opacity(theme::tokens::TINT)), "+"),
-                    Kind::Removed => (Some(danger.opacity(theme::tokens::TINT)), "-"),
-                    Kind::Hunk => (Some(muted.opacity(theme::tokens::TINT_SUBTLE)), ""),
-                    Kind::Context => (None, " "),
-                };
-                let line = line.gap_2();
-                let line = match tint {
-                    Some(tint) => line.bg(tint),
-                    None => line,
-                };
-                if row.kind == Kind::Hunk {
-                    return line.px_2().text_color(muted).child(row.text.clone()).into_any_element();
-                }
-                // Removed lines read as the old version had them, the rest as the new one does.
-                let styles = match (row.kind, row.old, row.new) {
-                    (Kind::Removed, Some(n), _) => syntax.line(true, n, &row.text, &palettes),
-                    (_, _, Some(n)) => syntax.line(false, n, &row.text, &palettes),
-                    _ => vec![],
-                };
-                line.child(number(row.old))
-                    .child(number(row.new))
-                    .child(div().w(rems(0.75)).flex_none().text_color(muted).child(sign))
-                    .child(div().flex_1().min_w_0().child(code(&row.text, styles)))
-                    .into_any_element()
-            })
-            .size_full()
-            .into_any_element()
-        };
-        let right = div()
-            .flex()
-            .gap_2()
-            .text_xs()
-            .child(div().text_color(success).child(format!("+{added}")))
-            .child(div().text_color(danger).child(format!("-{removed}")));
-        let (inline_view, split_view) = (cx.entity(), cx.entity());
-        let right = div()
-            .flex()
-            .items_center()
-            .gap_3()
-            .child(right)
-            .child(
-                div()
-                    .flex()
-                    .child(
-                        Button::new("view-inline")
-                            .label("Inline")
-                            .tooltip("Toggle inline/split (Ctrl+\\)")
-                            .ghost()
-                            .xsmall()
-                            .selected(!self.split)
-                            .on_click(move |_, _, cx| inline_view.update(cx, |reader, cx| reader.set_split(false, cx))),
-                    )
-                    .child(
-                        Button::new("view-split")
-                            .label("Split")
-                            .tooltip("Toggle inline/split (Ctrl+\\)")
-                            .ghost()
-                            .xsmall()
-                            .selected(self.split)
-                            .on_click(move |_, _, cx| split_view.update(cx, |reader, cx| reader.set_split(true, cx))),
-                    ),
-            );
-        div()
-            .size_full()
-            .flex()
-            .flex_col()
-            .bg(colors.background)
-            .child(pane_header(&path, right, lead, trail, cx))
-            .child(div().flex_1().min_h_0().border_color(border).child(body))
+        Snapshot { glass: cx.global::<Palette>().glass.is_some(), title, lead, trail, split: self.split, counts: project.counts, body }
     }
 
     /// The open file in the viewer, drawn by NSH from what [`Self::source_snapshot`] publishes.
