@@ -5849,14 +5849,32 @@ fn floating(pane: impl IntoElement + Styled, cx: &App) -> AnyElement {
     }
 }
 
-/// Where the file of a `file:` URL pasted in, dropped on it, is.
-fn file_of(uri: &str) -> Option<&str> {
-    let path = uri.strip_prefix("file://")?;
-    let path = match path.split_once('/') {
-        Some((host, path)) if host.is_empty() || host == "localhost" => path,
-        _ => path,
+/// Where the file of a `file:` URL pasted in, dropped on it, is: the absolute path, its `%XX`
+/// escapes decoded.
+fn file_of(uri: &str) -> Option<String> {
+    let rest = uri.strip_prefix("file://")?;
+    // What follows the host (empty or `localhost`) is the path, with its leading slash.
+    let path = match rest.find('/') {
+        Some(at) if rest[..at].is_empty() || rest[..at].eq_ignore_ascii_case("localhost") => &rest[at..],
+        _ => return None,
     };
-    Some(path)
+    let bytes = path.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut at = 0;
+    while at < bytes.len() {
+        let decoded = (bytes[at] == b'%').then(|| bytes.get(at + 1..at + 3)).flatten().and_then(|hex| u8::from_str_radix(std::str::from_utf8(hex).ok()?, 16).ok());
+        match decoded {
+            Some(byte) => {
+                out.push(byte);
+                at += 3;
+            }
+            None => {
+                out.push(bytes[at]);
+                at += 1;
+            }
+        }
+    }
+    String::from_utf8(out).ok()
 }
 
 /// The message of the conversation as the screen drawn by NSH shows it: the user's text with its
@@ -6587,5 +6605,18 @@ mod tests {
         assert!(!Activity::Running.needs_you(false) && !Activity::Idle.needs_you(false));
         // A child's parent picks up its finished turn; a question is still the user's.
         assert!(!Activity::Unread.needs_you(true) && Activity::Asking.needs_you(true));
+    }
+}
+
+#[cfg(test)]
+mod file_url_tests {
+    use super::file_of;
+
+    #[test]
+    fn file_urls_become_absolute_paths() {
+        assert_eq!(file_of("file:///home/aks/a.png").as_deref(), Some("/home/aks/a.png"));
+        assert_eq!(file_of("file://localhost/tmp/a%20b.png").as_deref(), Some("/tmp/a b.png"));
+        assert_eq!(file_of("file://other/tmp/a.png"), None);
+        assert_eq!(file_of("https://example.com/a.png"), None);
     }
 }
