@@ -1,6 +1,6 @@
 # po
 
-A native desktop GUI (built on [GPUI](https://crates.io/crates/gpui-pre)) for
+A native desktop GUI (built on [GPUI](https://crates.io/crates/gpui-fast)) for
 coding agents that speak the [Agent Client Protocol](https://agentclientprotocol.com).
 Chat with an agent, browse the project's files with a syntax-highlighted viewer,
 and review the agent's plans and edit diffs side by side.
@@ -39,6 +39,11 @@ don't have them.
 ```sh
 cargo run --release
 ```
+
+Screens are moving to [NSH](https://nsh.dev): each runs as an NSH app (a Rust
+root, no JavaScript) inside Po's window through `nsh-platform-gpui`, which draws
+with the same GPUI. The Todos window is the first (`src/nsh/`); its headless
+test runs with `cargo test`.
 
 ## Usage
 
@@ -122,6 +127,8 @@ front of you:
 | `show_view` | Shows a markdown document as a tab in the viewer |
 | `update_view` | Changes one of its views |
 | `close_view` | Closes one of its views |
+| `show_form` | Shows a form — text fields and choices it defines, with a submit button — as a tab |
+| `form_wait` | Waits for the user to submit one of its forms, and reads their answers |
 | `open_file` | Opens a file of the project, at a line |
 | `show_diff` | Shows the changes, at one file's diff |
 | `close_viewer` | Closes the viewer |
@@ -131,6 +138,11 @@ the server's environment, not the agent's, so programs the agent runs don't inhe
 thread on screen can move the viewer, and only files inside the project can be opened. While you are
 typing or scrolling, a move waits until you have been still for a few seconds and is dropped if
 you change the viewer yourself first; a new view is offered as a button rather than shown.
+
+A form works the other way round: the agent defines fields (text, or a choice among options),
+you fill it in at your pace, and the answers come back to the agent when you submit. A form
+stays open until you answer or close its tab; an agent that stops or ends its turn while waiting
+is told the wait was cancelled.
 
 #### Steering and follow-ups (dex daemon)
 
@@ -289,18 +301,14 @@ and Wayland compositors with KDE's blur protocol. Other Wayland compositors, and
 X11 with a compositor running, show the window see-through without blur.
 
 Markdown, in the agent's replies and in `.md` files (which open rendered; the
-**Source** button or Ctrl+Shift+M switches to the text), is coloured from the
-theme: headings from the `title` syntax colour, inline code from `string`,
-bullets from `punctuation`, links from `colors.link`. An optional top-level
-`"markdown"` object overrides any of these with `#rrggbb` colours: `heading`,
-`code`, `code_background`, `inline_code_background`, `quote`, `quote_border`,
-`rule`, `marker`, `strong`, `emphasis`.
+**Source** button or Ctrl+Shift+M switches to the text), is drawn by NSH in the
+theme's colours. Code is coloured by NSH's own fixed palette.
 
 ## License
 
 Dual-licensed under [MIT](LICENSE) or [Apache-2.0](LICENSE-APACHE), at your
-option. Bundled third-party material keeps its own license: `vendor/gpui-pre-wgpu`,
-`vendor/gpui-pre-apple`, and `vendor/gpui-pre-windows` (Apache-2.0), `src/viewer/languages`
-queries (Apache-2.0), and the Lucide icons in `assets/icons` (ISC).
+option. Bundled third-party material keeps its own license: `vendor/gpui-fast-wgpu`,
+`vendor/gpui-fast-apple`, and `vendor/gpui-fast-windows` (Apache-2.0),
+and the Lucide icons in `assets/icons` (ISC).
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md).

@@ -8,8 +8,12 @@ readme = "README.md"
 repository = "https://github.com/sumofbytes/po"
 
 [dependencies]
-gpui = { package = "gpui-pre", version = "=0.3.9", default-features = false, features = ["stacker"] }
-gpui_platform = { package = "gpui-pre-platform", version = "=0.3.9", features = ["font-kit", "wayland", "x11"] }
+gpui = { package = "gpui-fast", version = "=0.1.9", default-features = false, features = ["stacker", "font-kit", "wayland", "x11"] }
+gpui_platform = { package = "gpui-fast-platform", version = "=0.1.9", default-features = false, features = ["font-kit", "wayland", "x11"] }
+# NSH: screens drawn as NSH apps inside Po's window. Rust roots only, so no QuickJS or web views.
+nsh-platform-gpui = { version = "0.3.0", default-features = false }
+nsh-core = "0.3.0"
+nsh-base = { version = "0.3.0" }
 env_logger = "0.11"
 log = "0.4"
 libc = "0.2"
@@ -18,51 +22,17 @@ serde_json = "1"
 anyhow = "1"
 notify = "8"
 ignore = "0.4"
-tree-sitter = "0.26"
-streaming-iterator = "0.1"
-unicode-linebreak = "0.1"
-unicode-segmentation = "1"
-aho-corasick = "1"
-markdown = "1"
-# The viewer's grammars: the versions gpui-kit's `tree-sitter-languages` uses.
-tree-sitter-astro-next = "0.1.1"
-tree-sitter-bash = "0.23.3"
-tree-sitter-c = "0.24.1"
-tree-sitter-c-sharp = "0.23.1"
-tree-sitter-cmake = "0.7.1"
-tree-sitter-cpp = "0.23.4"
-tree-sitter-css = "0.23.2"
-tree-sitter-diff = "0.1.0"
-tree-sitter-elixir = "0.3"
-tree-sitter-embedded-template = "0.23.0"
-tree-sitter-go = "0.23.4"
-tree-sitter-graphql = "0.1.0"
-tree-sitter-html = "0.23.2"
-tree-sitter-java = "0.23.5"
-tree-sitter-javascript = "0.23.1"
-tree-sitter-jsdoc = "0.23.2"
-tree-sitter-json = "0.24.8"
-tree-sitter-kotlin-sg = "0.4.0"
-tree-sitter-lua = "0.4.1"
-tree-sitter-make = "1.1.1"
-tree-sitter-md = "0.5.1"
-tree-sitter-php = "0.24.2"
-tree-sitter-proto = "0.2.0"
-tree-sitter-python = "0.23.6"
-tree-sitter-ruby = "0.23.1"
-tree-sitter-rust = "0.24.0"
-tree-sitter-scala = "0.23.4"
-tree-sitter-sequel = "0.3.8"
-tree-sitter-svelte-next = "0.1.1"
-tree-sitter-swift = "0.7.0"
-tree-sitter-toml-ng = "0.7.0"
-tree-sitter-typescript = "0.23.2"
-tree-sitter-yaml = "0.7.1"
-tree-sitter-zig = "1.1.2"
 # TLS is only for `po update`: the daemon is plain HTTP to localhost.
 ureq = { version = "3", default-features = false, features = ["json", "rustls"] }
 base64 = "0.22"
+# The todos store the window's NSH screen and the sidebar share.
+tokio = { version = "1", default-features = false, features = ["sync"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif"] }
+
+[dev-dependencies]
+# Headless runs of the NSH screens.
+nsh-engine = { version = "0.3.0", default-features = false }
+nsh-testing = { version = "0.3.0", default-features = false }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }
@@ -72,8 +42,8 @@ debug = "line-tables-only"
 
 # Tries Vulkan alone before probing GL/EGL, which costs ~75 ms at launch. The apple copy carries
 # zed #65571's blend fix (destination alpha was `One`, so a translucent fill over a translucent
-# window background turned opaque — the glass look) ahead of the next gpui-pre release.
+# window background turned opaque — the glass look) ahead of a gpui-fast release with it.
 [patch.crates-io]
-gpui-pre-wgpu = { path = "vendor/gpui-pre-wgpu" }
-gpui-pre-apple = { path = "vendor/gpui-pre-apple" }
-gpui-pre-windows = { path = "vendor/gpui-pre-windows" }
+gpui-fast-wgpu = { path = "vendor/gpui-fast-wgpu" }
+gpui-fast-apple = { path = "vendor/gpui-fast-apple" }
+gpui-fast-windows = { path = "vendor/gpui-fast-windows" }

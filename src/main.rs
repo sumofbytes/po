@@ -9,17 +9,19 @@ mod control;
 mod ctl;
 mod dex;
 mod diff;
+mod explorer;
 mod fonts;
 mod mcp;
+mod nsh;
 mod pr;
 mod schemes;
 mod settings;
 mod theme;
 mod state;
+mod todo;
 mod trace;
 mod ui;
 mod update;
-mod viewer;
 mod workspace;
 mod worktree;
 
@@ -34,26 +36,20 @@ use acp::{ConfigOption, Event, PermissionOption, SessionInfo};
 use agent::Client;
 use attach::Attachment;
 use dex::Queue;
-use diff::{Change, Kind, Pair, Row};
+use diff::{Change, Kind, Row};
 use theme::Palette;
-use ui::button::Button;
-use ui::icon::{Icon, IconName, IconSize};
-use ui::input::{Input, InputEvent, InputState};
-use ui::list_item::ListItem;
-use ui::menu::{CHECKED, MenuItem, MenuState, dropdown};
 use ui::resizable::{SidebarsState, sidebars};
-use ui::file_tree::{FileKind, FileTree, file_kind};
-use ui::tree::{TreeEvent, tree};
+use explorer::FileTree;
 use futures::StreamExt;
 use serde_json::Value;
 
 use gpui::{
-    AnyElement, App, Pixels, TitlebarOptions, WindowControlArea, point, Bounds, Context, Entity, FontWeight, IntoElement, ListAlignment, ListState, ParentElement,
-    Render, SharedString, StyleRefinement, Styled, StyledText, Subscription, Task, Window, WindowBackgroundAppearance, WindowBounds, WindowOptions, div, list,
+    AnyElement, App, Pixels, TitlebarOptions, WindowControlArea, point, Bounds, Context, Entity, IntoElement, ParentElement,
+    Render, Styled, Subscription, Task, Window, WindowBackgroundAppearance, WindowBounds, WindowOptions, div,
     prelude::*, px, rems, size, KeyBinding,
 };
 
-gpui::actions!(po, [ToggleTools, ToggleThoughts, ToggleLeft, ToggleRight, ShowSource, ShowChanges, ShowChat, SwapPanes, ShowHistory, ToggleSplit, ToggleRendered, NewThread, OpenProject, ShowFinder, ToggleFocus, ShowSettings, CloseSettings, CloseWindow, CloseFinder, FinderUp, FinderDown]);
+gpui::actions!(po, [ToggleTools, ToggleThoughts, ToggleLeft, ToggleRight, ShowSource, ShowChanges, ShowChat, SwapPanes, ShowHistory, ToggleSplit, ToggleRendered, NewThread, OpenProject, ShowFinder, ToggleFocus, ShowSettings, CloseSettings, CloseWindow]);
 
 const SKIP: [&str; 5] = ["target", "node_modules", "dist", "build", "__pycache__"];
 const MAX_FILES: usize = 5000;
@@ -166,31 +162,6 @@ fn language(path: &str) -> &'static str {
         "sh" => "Shell",
         _ => "Plain text",
     }
-}
-
-/// The highlighter's name for a file: its extension, which the viewer maps to a grammar.
-/// `.exs` is Elixir too; the viewer only knows that grammar as "elixir".
-fn syntax(path: &str) -> SharedString {
-    let ext = path.rsplit_once('.').map_or("", |(_, ext)| ext).to_lowercase();
-    match ext.as_str() {
-        "exs" => "elixir",
-        _ => &ext,
-    }
-    .into()
-}
-
-/// The syntaxes of the most common file kinds in `files`, plus Markdown for the agent's
-/// replies, to compile ahead of the first file that needs them.
-fn common_syntaxes(files: &[String]) -> Vec<String> {
-    let mut counts: HashMap<SharedString, usize> = HashMap::new();
-    for file in files.iter().filter(|file| file.contains('.')) {
-        *counts.entry(syntax(file)).or_default() += 1;
-    }
-    let mut counts: Vec<_> = counts.into_iter().collect();
-    counts.sort_by_key(|&(_, count)| std::cmp::Reverse(count));
-    let mut out: Vec<String> = counts.into_iter().take(4).map(|(name, _)| name.to_string()).collect();
-    out.push("md".into());
-    out
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -541,15 +512,6 @@ enum Mode {
     Diff,
 }
 
-/// A markdown file as the viewer shows it rendered: cut into pieces so that only those in view
-/// are laid out, with a selection and focus of its own.
-struct Doc {
-    chunks: Rc<Vec<String>>,
-    list: ListState,
-    selection: Entity<ui::markdown::Selection>,
-    focus: gpui::FocusHandle,
-}
-
 fn is_markdown(path: &str) -> bool {
     path.rsplit_once('.').is_some_and(|(_, ext)| ext.eq_ignore_ascii_case("md") || ext.eq_ignore_ascii_case("markdown"))
 }
@@ -574,26 +536,22 @@ struct Project {
     /// The changed files, folders open until the user closes them.
     changes_tree: FileTree,
     picked: Option<String>,
-    /// The picked file's diff, its side-by-side pairs and how many lines it adds and removes.
+    /// The picked file's diff as rows, which say whether it has textual changes and how many lines
+    /// it adds and removes.
     rows: Rc<Vec<Row>>,
-    pairs: Rc<Vec<Pair>>,
-    /// Syntax colors for the picked file's old and new versions.
-    colors: Rc<diff::Colors>,
     counts: (usize, usize),
-    /// The diff's rows as laid out, inline or split; only those in view are drawn.
-    diff_list: ListState,
+    /// The picked file's old and new versions, which the diff view compares.
+    versions: Option<(nsh::source::Shared, nsh::source::Shared)>,
     current: Option<String>,
     stamp: Option<Stamp>,
-    code: Option<Entity<viewer::CodeViewState>>,
-    /// The current file rendered, when it is markdown.
-    doc: Option<Doc>,
+    code: Option<nsh::source::Shared>,
+    /// What the current file is: the markdown flag of it, loaded elsewhere.
+    is_markdown: bool,
     notice: Option<String>,
     /// Every file, folders closed until the user opens them.
     files_tree: FileTree,
     /// Set when this is a thread's own checkout, made from another project's repository.
     worktree: Option<worktree::Worktree>,
-    /// Keep the explorer and changes list wired to this project.
-    _subscriptions: Vec<Subscription>,
 }
 
 impl Project {
@@ -623,8 +581,8 @@ impl Project {
 struct Thread {
     /// Documents the agent put on screen through Po's MCP server.
     views: command::Views,
-    /// The rendered form of each view.
-    docs: HashMap<String, Doc>,
+    /// Forms the agent put on screen through Po's MCP server, and the form of each.
+    forms: command::Forms,
     /// The view the viewer shows in place of a file or the changes.
     shown: Option<String>,
     /// A view the agent added while the user was busy, waiting for a click.
@@ -694,43 +652,14 @@ struct Thread {
     client: Option<Client>,
     agent: Option<String>,
     generation: u64,
-    draft: Entity<InputState>,
+    draft: String,
     /// Pictures attached to the draft, sent with it.
     attachments: Vec<Arc<Attachment>>,
     /// Why some of what was pasted or dropped was left out, until the draft changes.
     attach_note: Option<String>,
-    /// The messages as laid out; only those in view are drawn.
-    list: ListState,
-    /// The selection across the agent's replies.
-    selection: Entity<ui::markdown::Selection>,
-    focus: gpui::FocusHandle,
-    /// Sends the draft on Enter; goes with the thread.
-    _enter: Subscription,
 }
 
 impl Thread {
-    /// What Select All copies, in reading order: each text with whether it is plain (drawn by
-    /// `markdown::plain`) rather than markdown. Includes replies scrolled out of view.
-    fn selectable_sources(&self) -> Vec<(&str, bool)> {
-        let mut sources = Vec::new();
-        for msg in &self.messages {
-            match msg {
-                Msg::User(text, _) => sources.push((text.as_str(), true)),
-                Msg::Agent(blocks) => {
-                    for block in blocks {
-                        match block {
-                            Block::Text(text) | Block::Thought(text, true) => sources.push((text.as_str(), false)),
-                            Block::Tool(tool) if tool.open => {
-                                sources.extend([&tool.arguments, &tool.result].into_iter().filter(|t| !t.is_empty()).map(|t| (t.as_str(), true)));
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-            }
-        }
-        sources
-    }
 
     fn fail(&mut self, text: String) {
         self.busy = false;
@@ -757,13 +686,9 @@ impl Thread {
         crate::state::Facts { approval, asking, failed: self.failed, asleep: self.asleep(), started: self.client.is_some(), ready: self.ready, busy: self.busy }
     }
 
-    /// Tells the thread's list that messages from `from` on were added or changed, so it lays
-    /// them out again.
-    fn relist(&mut self, from: usize) {
-        let listed = self.list.item_count();
-        let from = from.min(listed).min(self.messages.len());
-        self.list.splice(from..listed, self.messages.len() - from);
-    }
+    /// The conversation the screen draws takes the whole list of messages in every
+    /// publish, so there is nothing to tell a list piecewise.
+    fn relist(&mut self, _from: usize) {}
 
     fn blocks(&mut self) -> &mut Vec<Block> {
         if !matches!(self.messages.last(), Some(Msg::Agent(_))) {
@@ -895,110 +820,6 @@ impl Activity {
     fn needs_you(self, parent_hears: bool) -> bool {
         self == Activity::Asking || (self == Activity::Unread && !parent_hears)
     }
-
-    /// The mark the thread and project lists draw, and its colour.
-    fn mark(self, colors: &Palette) -> (&'static str, gpui::Hsla) {
-        match self {
-            Activity::Idle => ("○", colors.muted_foreground),
-            Activity::Running => ("●", colors.primary),
-            Activity::Asking => ("!", colors.warning),
-            Activity::Unread => ("●", colors.added),
-        }
-    }
-}
-
-/// The sidebar's layout, one grid for every row and header in it:
-///
-/// ```text
-/// | gutter | inset | [LEAD | gap] | label ............ | actions | inset | gutter |
-/// ```
-///
-/// Rows sit `SIDEBAR_GUTTER` in from the pane's edges so their highlight floats clear of them, and
-/// their content `ROW_INSET` further in. A row with an icon puts it in the lead column; a row
-/// without one has no lead column, so its text starts where an icon would, not after it. Headers
-/// use the same inset, so a title sits over the icons. A thread's state mark goes in the lead
-/// column, under its project's chevron; hover actions go at the end.
-const SIDEBAR_GUTTER: gpui::Rems = rems(0.5);
-const ROW_INSET: gpui::Rems = rems(0.625);
-/// The lead column is as wide as its icon, so the gap after it is the only space between icon and
-/// label.
-const SIDE_LEAD: gpui::Rems = rems(1.);
-
-/// The sidebar's spacing, on a 4px grid and ordered by what belongs together: rows of one list sit
-/// close, a project's name sits close over its threads, and projects are set apart by more than
-/// anything inside one. Actions such as New and Settings take full-height rows.
-const SIDE_ROW_HEIGHT: gpui::Rems = rems(2.0);
-/// Projects and their threads: a tree of short rows, denser than the actions above it.
-const SIDE_TREE_HEIGHT: gpui::Rems = rems(1.75);
-/// Quiet rows, such as "3 more", that only reveal what is folded away.
-const SIDE_MORE_HEIGHT: gpui::Rems = rems(1.5);
-/// Between neighbouring rows of one list.
-const SIDE_ITEM_GAP: gpui::Rems = rems(0.125);
-/// Between one project and the next.
-const SIDE_GROUP_GAP: gpui::Rems = rems(1.0);
-/// Above and below the rows of a list, so every list starts and ends the same distance from its edges.
-const SIDE_LIST_TOP: gpui::Rems = rems(0.25);
-const SIDE_LIST_BOTTOM: gpui::Rems = rems(0.75);
-/// Between New and the search box, which belong together.
-const SIDE_ACTION_GAP: gpui::Rems = rems(0.25);
-/// Above New, so the space between the title bar and New's text matches the space between New's
-/// text and Search's, which have the rows' own padding as well as `SIDE_ACTION_GAP`.
-const SIDE_ACTIONS_TOP: gpui::Rems = rems(0.75);
-/// Space above a section's title, so it sits closer to its own rows than to the section above.
-const SIDE_SECTION_GAP: gpui::Rems = rems(0.5);
-/// The most rows NEEDS YOU shows before it scrolls, so a pile of them leaves room for the projects.
-const NEEDS_YOU_ROWS: usize = 5;
-/// Section titles (NEEDS YOU, PROJECTS) are small labels, shorter than the pane header above them.
-const SIDE_SECTION_HEIGHT: gpui::Rems = rems(2.0);
-
-/// A row of the sidebar, with its icon in the lead column if it has one, then whatever is added,
-/// which is the label and the trail column. Give it an `id` and a height as the row needs.
-fn side_row(radius: gpui::Pixels, icon: Option<Icon>) -> gpui::Div {
-    div().flex().items_center().gap_2().px(ROW_INSET).rounded(radius).children(icon.map(side_lead))
-}
-
-/// The lead column: its content hugs the left edge, where a header's title starts.
-fn side_lead(content: impl IntoElement) -> gpui::Div {
-    div().w(SIDE_LEAD).flex_none().flex().items_center().justify_start().child(content)
-}
-
-/// A project's chevron in the lead column: pointing down while its threads show, right when it
-/// is folded.
-fn side_chevron(open: bool, color: gpui::Hsla) -> gpui::Div {
-    let name = if open { IconName::ChevronDown } else { IconName::ChevronRight };
-    side_centered(Icon::new(name).size(IconSize::Small).color(color))
-}
-
-/// A thread's state in the lead column, under its project's chevron, so its title lines up with
-/// the project's name: a dot while it runs or has news, a ! when it asks, nothing when idle.
-fn side_mark(activity: Activity, colors: &Palette) -> gpui::Div {
-    let (glyph, tint) = activity.mark(colors);
-    let mark = match activity {
-        Activity::Idle => div(),
-        Activity::Asking => div().text_sm().font_weight(FontWeight::BOLD).text_color(tint).child(glyph),
-        Activity::Running | Activity::Unread => div().size(rems(0.4375)).rounded_full().bg(tint),
-    };
-    side_centered(mark)
-}
-
-/// The lead column with its content centred, so a chevron and the marks under it share an axis.
-fn side_centered(content: impl IntoElement) -> gpui::Div {
-    div().w(SIDE_LEAD).flex_none().flex().items_center().justify_center().child(content)
-}
-
-/// A sidebar section's title: a quiet label in sentence case, the size of the rows' own text.
-fn side_title(text: impl Into<SharedString>, colors: &Palette) -> gpui::Div {
-    div().text_sm().font_weight(FontWeight::MEDIUM).text_color(colors.muted_foreground).child(text.into())
-}
-
-/// An icon for the lead column.
-fn side_icon(name: IconName, color: gpui::Hsla) -> Icon {
-    Icon::new(name).size(IconSize::Medium).color(color)
-}
-
-/// A sidebar header, its title inset like the rows below it.
-fn side_header(header: gpui::Div) -> gpui::Div {
-    header.px(SIDEBAR_GUTTER + ROW_INSET)
 }
 
 /// The time now in milliseconds since the Unix epoch.
@@ -1118,12 +939,14 @@ impl Thread {
 }
 
 /// One `thread.wait`: who is waiting, on which threads (empty: its children), until a state in
-/// `until` (empty: any change), and where the answer goes.
+/// `until` (empty: any change), and where the answer goes. A `form.wait` instead carries the
+/// form's id and nothing else.
 struct Waiter {
     token: u64,
     caller: command::Caller,
     threads: Vec<u64>,
     until: Vec<&'static str>,
+    form: Option<String>,
     reply: std::sync::mpsc::Sender<command::Reply>,
 }
 
@@ -1329,28 +1152,72 @@ struct Reader {
     next_thread: u64,
     /// The directory `po` was started in: where PRs are checked out from and where Close returns to.
     home: PathBuf,
-    pr_input: Entity<InputState>,
+    /// The strips above the file tree (a PR review's field, a worktree's finish line), drawn by
+    /// NSH, and what keeps it in Po's theme.
+    explorer_pane: Entity<nsh_platform_gpui::AppView>,
+    tabs: Entity<nsh_platform_gpui::AppView>,
+    _tabs_theme: Subscription,
+    _explorer_theme: Subscription,
     /// The sidebar's filter: threads and projects that don't match it are left out of its lists.
-    side_search: Entity<InputState>,
+    /// What the sidebar's filter holds.
+    side_query: String,
+    /// The viewer's source pane, drawn by NSH, and what keeps it in Po's theme.
+    source: Entity<nsh_platform_gpui::AppView>,
+    _source_theme: Subscription,
+    /// The viewer's diff pane, drawn by NSH, and what keeps it in Po's theme.
+    diff: Entity<nsh_platform_gpui::AppView>,
+    _diff_theme: Subscription,
+    /// The agent's own view or form shown in the viewer, drawn by NSH.
+    agent_pane: Entity<nsh_platform_gpui::AppView>,
+    _agent_pane_theme: Subscription,
+    /// The window's controls the pane being built carries: its lead, then its trail.
+    pane_controls: std::cell::RefCell<(Vec<nsh::header::Control>, Vec<nsh::header::Control>)>,
+    /// A line the viewer was asked to scroll to, and a number that changes with each ask.
+    reveal: Option<(u32, u64)>,
+    reveal_serial: u64,
+    /// The sidebar, drawn by NSH, and what keeps it in Po's theme.
+    sidebar: Entity<nsh_platform_gpui::AppView>,
+    _sidebar_theme: Subscription,
+    /// The conversation pane, drawn by NSH from [`Self::chat_snapshot`], and what keeps it in Po's theme.
+    chat: Entity<nsh_platform_gpui::AppView>,
+    _chat_theme: Subscription,
+    /// What the conversation was last published as, one row for how many messages the transcript
+    /// showed and whether a turn went on the thread it shows; a change bumps [`Self::chat_follow`].
+    chat_marks: std::cell::Cell<((u64, u64), usize, usize, bool, usize)>,
+    /// The project and thread the conversation showed last.
+    chat_shown: std::cell::Cell<(u64, u64)>,
+    /// What the transcript's next publishing carries as [`Snapshot::follow`], bumped when the thread gets louder.
+    chat_follow: std::cell::Cell<u64>,
+    /// Like [`Self::chat_follow`], for the thread growing under the reader's eyes: the transcript
+    /// follows it only while it is at its end.
+    chat_follow_soft: std::cell::Cell<u64>,
+    /// What [`Snapshot::draft_reset`] carries next, bumped whenever the app writes the draft itself.
+    chat_reset: std::cell::Cell<u64>,
+    /// What [`nsh::chat::Snapshot::focus`] carries next.
+    chat_focus: std::cell::Cell<u64>,
+    /// The todos page, shown in place of the conversation while `todos_open`; the sidebar has a row for it.
+    todos: Entity<nsh::overlay::Overlay>,
+    todos_open: bool,
     /// Progress or failure of the last attempt to open a PR.
     pr_status: Option<String>,
     opening: bool,
+    /// The number of times the strip's PR field was emptied: the screen empties its field on
+    /// seeing a new one.
+    pr_serial: u64,
     /// The last thing that happened to a worktree (made, merged, closed), or why it failed.
     worktree_status: Option<String>,
     /// A merge or discard is running; asking for either again waits.
     finishing: bool,
     /// Discard was asked for once and waits for a second click, since it can't be undone.
     confirm_discard: bool,
-    /// The Ctrl+P finder, when open: its query field, the matching files and which is picked.
-    finder: Option<Entity<InputState>>,
-    finder_matches: Rc<Vec<String>>,
-    finder_selected: usize,
-    finder_list: ListState,
+    /// The Ctrl+P finder, drawn by NSH: what its field holds, and the files that match it.
+    finder: Entity<nsh::overlay::Overlay>,
+    finder_query: String,
+    finder_matches: Vec<String>,
     finder_open: bool,
-    /// Keeps the finder input's event subscription alive for the reader's lifetime.
-    finder_events: Option<Subscription>,
     /// The settings page (Ctrl+,), while it is open.
-    settings_page: Option<(Entity<settings::SettingsView>, Subscription)>,
+    settings: Entity<nsh::overlay::Overlay>,
+    settings_open: bool,
     painted: bool,
     agents: Vec<config::Agent>,
     /// Tell the desktop when a thread finishes or asks while it isn't being looked at.
@@ -1382,8 +1249,6 @@ struct Reader {
     /// The conversation pane is shown while it sits on the right, rather than collapsed. Only
     /// matters while it is there (`side_open` and `swapped`); in the middle it is always shown.
     agent_open: bool,
-    /// The agent picker in the input box.
-    agent_menu: Entity<MenuState>,
     /// What was chosen for each agent's settings, such as its model.
     choices: config::Choices,
     /// The agent new threads start with: the one last chosen.
@@ -1421,17 +1286,16 @@ impl Reader {
             }
         };
         trace::mark("walk");
-        viewer::prewarm(common_syntaxes(&files));
-        let pr_input = cx.new(|cx| {
-            InputState::new(window, cx).auto_grow(1, 1).submit_on_enter(true).placeholder("PR number or URL")
-        });
-        let side_search = cx.new(|cx| InputState::new(window, cx).placeholder("Search"));
-        let draft = cx.new(|cx| {
-            InputState::new(window, cx)
-                .auto_grow(1, 6)
-                .submit_on_enter(true)
-                .placeholder("Message the agent")
-        });
+        let (diff_pane, diff_theme) = nsh::mount(nsh_platform_gpui::Root::of::<nsh::diff::Diff>(), window, cx);
+        let (agent_pane, agent_pane_theme) = nsh::mount(nsh_platform_gpui::Root::of::<nsh::agent::Agent>(), window, cx);
+        let (source, source_theme) = nsh::mount(nsh_platform_gpui::Root::of::<nsh::source::Source>(), window, cx);
+        let (sidebar, sidebar_theme) = nsh::mount(nsh_platform_gpui::Root::of::<nsh::sidebar::Sidebar>(), window, cx);
+        let (chat_pane, chat_theme) = nsh::mount(nsh_platform_gpui::Root::of::<nsh::chat::Chat>(), window, cx);
+        let (tabs, tabs_theme) = nsh::mount(nsh_platform_gpui::Root::of::<nsh::tabs::Tabs>(), window, cx);
+        let (explorer_pane, explorer_theme) = nsh::mount(nsh_platform_gpui::Root::of::<nsh::explorer::Explorer>(), window, cx);
+        let finder_window = cx.new(|cx| nsh::overlay::Overlay::new(560., 8., || nsh_platform_gpui::Root::of::<nsh::finder::Finder>(), &nsh::finder::HEIGHT, cx));
+        let settings_window = cx.new(|cx| nsh::overlay::Overlay::new(680., 24., || nsh_platform_gpui::Root::of::<nsh::settings::Settings>(), &nsh::settings::HEIGHT, cx));
+        let todos = cx.new(|cx| nsh::overlay::Overlay::page(760., || nsh_platform_gpui::Root::of::<nsh::todos::Todos>(), &nsh::todos::HEIGHT, cx));
         let sidebars = cx.new(|_| SidebarsState::new(px(280.0), px(560.0)));
         let tree_cols = cx.new(|_| SidebarsState::new(px(TREE_WIDTH), px(0.0)));
         let subscriptions = vec![
@@ -1444,24 +1308,26 @@ impl Reader {
                     reader.request_save(cx);
                 }
             }),
-            cx.subscribe(&side_search, |_, _, _: &InputEvent, cx| cx.notify()),
-            cx.subscribe_in(&pr_input, window, |reader, _, event: &InputEvent, window, cx| {
-                if matches!(event, InputEvent::PressEnter { shift: false, alt: false }) {
-                    reader.open_pr(window, cx);
-                }
+            cx.subscribe_in(&finder_window, window, |reader, _, event: &nsh::overlay::OverlayEvent, window, cx| match event {
+                nsh::overlay::OverlayEvent::Close => reader.hide_finder(window, cx),
+            }),
+            cx.subscribe_in(&settings_window, window, |reader, _, event: &nsh::overlay::OverlayEvent, window, cx| match event {
+                nsh::overlay::OverlayEvent::Close => reader.hide_settings(window, cx),
+            }),
+            cx.subscribe_in(&todos, window, |reader, _, event: &nsh::overlay::OverlayEvent, window, cx| match event {
+                nsh::overlay::OverlayEvent::Close => reader.hide_todos(window, cx),
             }),
         ];
-        let enter = Self::send_on_enter(&draft, window, cx);
         let settings = config::load();
         let mut agents = config::agents(&settings);
         let idle_minutes = settings["idle_minutes"].as_u64().unwrap_or(15);
         if let Some(command) = command.as_ref().filter(|c| !agents.iter().any(|agent| agent.id == **c)) {
             agents.push(config::Agent { id: command.clone(), name: "Custom".into(), command: command.clone(), daemon: None, vouched: true });
         }
-        let project = Self::build_project(root, pr, files, window, cx);
-        let thread = Thread {
+        let project = Self::build_project(root, pr, files);
+            let thread = Thread {
             views: Default::default(),
-            docs: HashMap::new(),
+            forms: Default::default(),
             shown: None,
             offered: None,
             id: 0,
@@ -1484,7 +1350,6 @@ impl Reader {
             blank: true,
             applying: None,
             unanswered: HashSet::new(),
-            _enter: enter,
             messages: vec![],
             busy: false,
             queue: vec![],
@@ -1497,12 +1362,9 @@ impl Reader {
             client: None,
             agent: None,
             generation: 0,
-            draft,
+            draft: String::new(),
             attachments: vec![],
             attach_note: None,
-            list: ListState::new(0, ListAlignment::Top, px(400.)),
-            selection: cx.new(|_| ui::markdown::Selection::default()),
-            focus: cx.focus_handle(),
         };
         let (control, requests) = control::start().unzip();
         let mut reader = Self {
@@ -1534,20 +1396,44 @@ impl Reader {
             parked: vec![],
             next_thread: 1,
             home,
-            pr_input,
-            side_search,
+            explorer_pane,
+            tabs,
+            _tabs_theme: tabs_theme,
+            _explorer_theme: explorer_theme,
+            side_query: String::new(),
+            source,
+            _source_theme: source_theme,
+            diff: diff_pane,
+            _diff_theme: diff_theme,
+            agent_pane,
+            _agent_pane_theme: agent_pane_theme,
+            pane_controls: Default::default(),
+            reveal: None,
+            reveal_serial: 0,
+            sidebar,
+            _sidebar_theme: sidebar_theme,
+            chat: chat_pane,
+            _chat_theme: chat_theme,
+            chat_marks: std::cell::Cell::new(((0, 0), 0, 0, false, 0)),
+            chat_shown: std::cell::Cell::new((u64::MAX, u64::MAX)),
+            chat_follow: std::cell::Cell::new(0),
+            chat_follow_soft: std::cell::Cell::new(0),
+            chat_reset: std::cell::Cell::new(0),
+            chat_focus: std::cell::Cell::new(0),
+            todos,
+            todos_open: false,
             pr_status: None,
             opening: false,
             worktree_status: None,
             finishing: false,
             confirm_discard: false,
-            finder: None,
-            finder_matches: Rc::new(vec![]),
-            finder_selected: 0,
-            finder_list: ListState::new(0, ListAlignment::Top, px(400.)),
+            finder: finder_window,
+            finder_query: String::new(),
+            finder_matches: Vec::new(),
             finder_open: false,
-            finder_events: None,
-            settings_page: None,
+            pr_serial: 0,
+            settings: settings_window,
+            settings_open: false,
             painted: false,
             agents,
             notifications: settings["notifications"].as_bool().unwrap_or(true),
@@ -1564,7 +1450,6 @@ impl Reader {
             side_open: true,
             swapped: config::viewer_left(&settings).unwrap_or(false),
             agent_open: true,
-            agent_menu: cx.new(MenuState::new),
             choices: config::load_choices(),
             chosen_agent: command.clone(),
             split: false,
@@ -1611,11 +1496,34 @@ impl Reader {
             })
             .detach();
         }
+        // What the user does on a screen drawn by NSH, run here where the window and the agents are.
+        if let Some(mut commands) = nsh::bus::commands() {
+            let handle = window.window_handle();
+            cx.spawn(async move |this, cx| {
+                while let Some(cmd) = commands.recv().await {
+                    let ran = handle.update(cx, |_, window, cx| this.update(cx, |reader, cx| reader.run(cmd, window, cx)));
+                    if !matches!(ran, Ok(Ok(()))) {
+                        break;
+                    }
+                }
+            })
+            .detach();
+        }
+        // The sidebar's count of todos follows the list, whoever changes it.
+        let mut todo_changes = todo::watch();
+        cx.spawn(async move |this, cx| {
+            while todo_changes.changed().await.is_ok() {
+                if this.update(cx, |_, cx| cx.notify()).is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
         reader.focus.focus(window, cx);
         trace::mark("reader built");
-        reader.refresh_tree(cx);
+        reader.refresh_tree();
         trace::mark("tree");
-        let resumed = workspace::Workspace::load(&reader.home).is_some_and(|saved| reader.restore(saved, window, cx));
+        let resumed = workspace::Workspace::load(&reader.home).is_some_and(|saved| reader.restore(saved, cx));
         reader.known_projects = reader.workspace(cx).known();
         trace::mark("restore");
         match command.filter(|_| !resumed) {
@@ -1686,46 +1594,9 @@ impl Reader {
     }
 
     /// A project over `root`, showing `files` in its explorer until the next walk.
-    fn build_project(root: PathBuf, pr: Option<pr::Pr>, files: Vec<String>, window: &mut Window, cx: &mut Context<Self>) -> Project {
-        let files_tree = FileTree::new(false, cx);
-        let changes_tree = FileTree::new(true, cx);
-        // Only the project on screen has its trees touched, so these act on `reader.project`;
-        // the check keeps a stray event from another project's tree off it.
-        let subscriptions = vec![
-            cx.subscribe(&files_tree.state, |reader, tree, event: &TreeEvent, _| {
-                if reader.project.files_tree.state == tree {
-                    reader.project.files_tree.note(event);
-                }
-            }),
-            cx.subscribe(&changes_tree.state, |reader, tree, event: &TreeEvent, _| {
-                if reader.project.changes_tree.state == tree {
-                    reader.project.changes_tree.note(event);
-                }
-            }),
-            // Moving the selection with the keyboard opens the file too, like a click.
-            cx.observe_in(&files_tree.state, window, |reader, tree, window, cx| {
-                if reader.project.files_tree.state != tree {
-                    return;
-                }
-                let path = tree.read(cx).selected_entry().filter(|e| !e.folder).map(|e| e.id.to_string());
-                // Only when the user just pressed something: the agent opening a file selects it too.
-                if path.is_some() && reader.last_input.elapsed() < Duration::from_secs(1) {
-                    reader.thread.shown = None;
-                }
-                if let Some(path) = path.filter(|p| reader.mode == Mode::Source && reader.project.current.as_deref() != Some(p)) {
-                    reader.open(&path, window, cx);
-                }
-            }),
-            cx.observe(&changes_tree.state, |reader, tree, cx| {
-                if reader.project.changes_tree.state != tree {
-                    return;
-                }
-                let path = tree.read(cx).selected_entry().filter(|e| !e.folder).map(|e| e.id.to_string());
-                if let Some(path) = path.filter(|p| reader.mode == Mode::Diff && reader.project.picked.as_deref() != Some(p)) {
-                    reader.pick(&path, cx);
-                }
-            }),
-        ];
+    fn build_project(root: PathBuf, pr: Option<pr::Pr>, files: Vec<String>) -> Project {
+        let files_tree = FileTree::new(false);
+        let changes_tree = FileTree::new(true);
         Project {
             root,
             base: pr.as_ref().map_or_else(|| "HEAD".to_string(), |pr| pr.base.clone()),
@@ -1740,24 +1611,21 @@ impl Reader {
             changes_tree,
             picked: None,
             rows: Rc::new(vec![]),
-            pairs: Rc::new(vec![]),
-            colors: Rc::default(),
+            versions: None,
             counts: (0, 0),
-            diff_list: ListState::new(0, ListAlignment::Top, px(400.)),
             current: None,
             stamp: None,
             code: None,
-            doc: None,
+            is_markdown: false,
             notice: None,
             files_tree,
             worktree: None,
-            _subscriptions: subscriptions,
         }
     }
 
     /// Rebuilds the explorer from `files`, keeping folders open and the current file selected.
-    fn refresh_tree(&mut self, cx: &mut Context<Self>) {
-        self.project.files_tree.set_paths(&self.project.files, self.project.current.as_deref(), cx);
+    fn refresh_tree(&mut self) {
+        self.project.files_tree.set_paths(&self.project.files, self.project.current.as_deref());
     }
 
     /// Takes a fresh list of changed files. In diff mode it picks a file if none is, and
@@ -1773,7 +1641,7 @@ impl Reader {
         }
         if listed {
             let paths: Vec<String> = self.project.changes.iter().map(|c| c.path.clone()).collect();
-            self.project.changes_tree.set_paths(&paths, None, cx);
+            self.project.changes_tree.set_paths(&paths, None);
         }
         let keep = self.project.picked.clone().filter(|path| self.project.changes.iter().any(|c| &c.path == path));
         match keep {
@@ -1784,7 +1652,7 @@ impl Reader {
                 None => {
                     self.project.picked = None;
                     self.project.diffing = None;
-                    self.set_rows(vec![], diff::Colors::default());
+                    self.set_rows(vec![], None);
                 }
             },
         }
@@ -1832,30 +1700,22 @@ impl Reader {
             return;
         }
         self.project.files = files;
-        self.refresh_tree(cx);
+        self.refresh_tree();
         if self.finder_open {
-            let picked = self.finder_selected;
-            self.refind(cx);
-            self.finder_selected = picked.min(self.finder_matches.len().saturating_sub(1));
+            self.refind();
         }
         cx.notify();
     }
 
     /// Shows the diff `rows` colored by `colors`, and works out their side-by-side pairs and counts once.
-    fn set_rows(&mut self, rows: Vec<Row>, colors: diff::Colors) {
+    fn set_rows(&mut self, rows: Vec<Row>, versions: Option<(String, String)>) {
         self.project.counts = rows.iter().fold((0, 0), |(a, r), row| match row.kind {
             Kind::Added => (a + 1, r),
             Kind::Removed => (a, r + 1),
             _ => (a, r),
         });
-        self.project.pairs = Rc::new(diff::split(&rows));
         self.project.rows = Rc::new(rows);
-        self.project.colors = Rc::new(colors);
-        self.relist_diff();
-    }
-
-    fn relist_diff(&mut self) {
-        self.project.diff_list.reset(if self.split { self.project.pairs.len() } else { self.project.rows.len() });
+        self.project.versions = versions.map(|(old, new)| (nsh::source::Shared(Arc::from(old)), nsh::source::Shared(Arc::from(new))));
     }
 
     /// Shows `path`'s diff in the viewer, once `git` has produced it off the UI thread.
@@ -1865,24 +1725,26 @@ impl Reader {
         if self.project.picked.as_deref() != Some(path) {
             self.project.picked = Some(path.to_string());
             // The last file's diff isn't shown under this one's name while this one loads.
-            self.set_rows(vec![], diff::Colors::default());
-            self.project.changes_tree.select(path, cx);
+            self.set_rows(vec![], None);
+            self.project.changes_tree.select(path);
         }
         let (root, base, path) = (self.project.root.clone(), self.project.base.clone(), path.to_string());
         self.project.diffing = Some(cx.spawn(async move |this, cx| {
-            let language = syntax(&path);
-            let (rows, colors) = cx
+            let (rows, versions) = cx
                 .background_executor()
                 .spawn(async move {
                     let rows = diff::file_diff(&root, &base, &change);
-                    // Only files with changed lines are worth parsing.
-                    let colors = if rows.is_empty() { diff::Colors::default() } else { diff::colors(&root, &base, &change, &language) };
-                    (rows, colors)
+                    // Only files with changed lines need their versions.
+                    let versions = (!rows.is_empty()).then(|| {
+                        let (old, new) = diff::versions(&root, &base, &change);
+                        (old.unwrap_or_default(), new.unwrap_or_default())
+                    });
+                    (rows, versions)
                 })
                 .await;
             this.update(cx, |reader, cx| {
                 if reader.project.picked.as_deref() == Some(&path) {
-                    reader.set_rows(rows, colors);
+                    reader.set_rows(rows, versions);
                     reader.project.diffing = None;
                     cx.notify();
                 }
@@ -1892,9 +1754,10 @@ impl Reader {
         cx.notify();
     }
 
-    /// Starts checking out the PR typed into the strip; the window switches to it when that finishes.
-    fn open_pr(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let spec = self.pr_input.read(cx).value().trim().to_string();
+    /// Starts checking out the PR `spec` the strip asked for; the window switches to it when
+    /// that finishes.
+    fn open_pr(&mut self, spec: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let spec = spec.trim().to_string();
         if spec.is_empty() || self.opening {
             return;
         }
@@ -1913,7 +1776,8 @@ impl Reader {
                         match result {
                             Ok(pr) => {
                                 reader.pr_status = None;
-                                reader.pr_input.update(cx, |input, cx| input.set_value("", window, cx));
+                                // The strip's field clears itself on seeing a bumped serial.
+                                reader.pr_serial += 1;
                                 let root = pr.worktree.clone();
                                 reader.add_project(root, Some(pr), window, cx);
                             }
@@ -1968,7 +1832,7 @@ impl Reader {
 
     /// Brings a project that was swapped in up to date with the disk, and starts watching it.
     fn resume_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.refresh_tree(cx);
+        self.refresh_tree();
         self.rescan(cx);
         self.watch(None, window, cx);
         if self.mode == Mode::Diff {
@@ -2026,14 +1890,14 @@ impl Reader {
         }
         let agent = self.thread.agent.clone();
         let review = pr.is_some();
-        let project = Self::build_project(root, pr, vec![], window, cx);
+        let project = Self::build_project(root, pr, vec![]);
         self.open_project(project, if review { Mode::Diff } else { Mode::Source }, agent, window, cx);
     }
 
     /// Shows `project` in `mode`, with a thread of its own that runs `agent`, if any. The
     /// project on screen goes on running in the background.
     fn open_project(&mut self, project: Project, mode: Mode, agent: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
-        let thread = self.blank_thread(window, cx);
+        let thread = self.blank_thread();
         self.suspend_project();
         let id = self.next_project;
         self.next_project += 1;
@@ -2095,7 +1959,7 @@ impl Reader {
 
     fn open_worktree(&mut self, wt: worktree::Worktree, agent: String, first: Option<(Outgoing, (u64, u64))>, window: &mut Window, cx: &mut Context<Self>) {
         log::info!("worktree: {} for {agent}", wt.spec.branch);
-        let mut project = Self::build_project(wt.spec.path.clone(), None, vec![], window, cx);
+        let mut project = Self::build_project(wt.spec.path.clone(), None, vec![]);
         project.base = wt.spec.base.clone();
         project.worktree = Some(wt);
         self.confirm_discard = false;
@@ -2398,9 +2262,17 @@ impl Reader {
             })
             .unwrap_or_else(|| Err("that thread is gone".into()))
         } else {
-            let shows = matches!(command, Command::ViewShow { .. });
+            let shows = matches!(command, Command::ViewShow { .. } | Command::FormShow { .. });
             self.with_thread(id, |reader, visible| {
-                let reply = reader.thread.views.apply(command)?;
+                let reply = match &command {
+                    Command::FormShow { id, title, body, fields, submit } => {
+                        // A replaced form is filled in again from scratch; the screen seeds its
+                        // answers anew wherever the fields (which carry the starting values)
+                        // changed.
+                        reader.thread.forms.show(id.clone(), title.clone(), body.clone(), fields.clone(), submit.clone())?
+                    }
+                    _ => reader.thread.views.apply(command.clone())?,
+                };
                 reader.sync_view_docs(cx);
                 if let (true, Some(view)) = (shows, reply["id"].as_str()) {
                     let view = view.to_string();
@@ -2734,10 +2606,10 @@ impl Reader {
     /// project. If the parent went away meanwhile the project goes too, keeping its branch.
     #[allow(clippy::too_many_arguments)]
     fn start_isolated(&mut self, parent: u64, wt: worktree::Worktree, key: String, prompt: String, options: Vec<(String, String)>, notify: Option<String>, window: &mut Window, cx: &mut Context<Self>) -> Result<(u64, u64), String> {
-        let mut project = Self::build_project(wt.spec.path.clone(), None, vec![], window, cx);
+        let mut project = Self::build_project(wt.spec.path.clone(), None, vec![]);
         project.base = wt.spec.base.clone();
         project.worktree = Some(wt);
-        let pid = self.add_slot(project, Mode::Diff, window, cx);
+        let pid = self.add_slot(project, Mode::Diff, cx);
         match self.start_child(parent, pid, key, prompt, options, notify, window, cx) {
             Ok(reply) => Ok((reply["thread"].as_u64().unwrap_or_default(), pid)),
             Err(error) => {
@@ -2789,7 +2661,7 @@ impl Reader {
             }
             (Proposal::Go(_), false) => None,
             (Proposal::Open(root), true) => {
-                let project = self.open_in_background(root.clone(), window, cx);
+                let project = self.open_in_background(root.clone(), cx);
                 Some(format!("The user opened {}: project {project}.", root.display()))
             }
             (Proposal::Open(root), false) => Some(format!("The user declined to open {}.", root.display())),
@@ -2806,8 +2678,8 @@ impl Reader {
                                 let text = match result {
                                     Ok(pr) => {
                                         let root = pr.worktree.clone();
-                                        let project = Self::build_project(root, Some(pr), vec![], window, cx);
-                                        let id = reader.add_slot(project, Mode::Diff, window, cx);
+                                        let project = Self::build_project(root, Some(pr), vec![]);
+                                        let id = reader.add_slot(project, Mode::Diff, cx);
                                         format!("The user opened PR {spec}: project {id}.")
                                     }
                                     Err(error) => format!("PR {spec} could not be checked out: {error}"),
@@ -2835,18 +2707,18 @@ impl Reader {
 
     /// Adds a project over `root` as a slot, with a blank thread, leaving the screen where it is.
     /// If it is already open, that one is returned.
-    fn open_in_background(&mut self, root: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> u64 {
+    fn open_in_background(&mut self, root: PathBuf, cx: &mut Context<Self>) -> u64 {
         if let Some(view) = self.views().iter().find(|view| view.project.pr.is_none() && view.project.root == root) {
             return view.id;
         }
-        let project = Self::build_project(root, None, vec![], window, cx);
-        self.add_slot(project, Mode::Source, window, cx)
+        let project = Self::build_project(root, None, vec![]);
+        self.add_slot(project, Mode::Source, cx)
     }
 
     /// Adds `project` as a slot with a blank thread, leaving the screen where it is, and marks
     /// it as the API's.
-    fn add_slot(&mut self, project: Project, mode: Mode, window: &mut Window, cx: &mut Context<Self>) -> u64 {
-        let thread = self.blank_thread(window, cx);
+    fn add_slot(&mut self, project: Project, mode: Mode, cx: &mut Context<Self>) -> u64 {
+        let thread = self.blank_thread();
         let id = self.next_project;
         self.next_project += 1;
         self.slots.push(Slot { id, mode, project, thread, parked: vec![] });
@@ -2915,7 +2787,7 @@ impl Reader {
                     return command::Answer::Now(Err("cancel a thread you started, not yourself".into()));
                 }
                 let stopped = self.with_thread(target, |reader, _| {
-                    reader.stop(window, cx);
+                    reader.stop(cx);
                     let dropped: Vec<Value> = reader.thread.dropped.drain(..).map(serde_json::Value::String).collect();
                     Ok(serde_json::json!({ "dropped": dropped }))
                 });
@@ -2992,7 +2864,23 @@ impl Reader {
                     Some("done") | None => vec!["ready", "asking", "approval", "failed", "asleep", "closed"],
                     Some(state) => vec![crate::state::ThreadState::from_name(state).expect("checked").name()],
                 };
-                command::Answer::Later(command::Wait { threads: threads.unwrap_or_default(), until, deadline: wait_deadline })
+                command::Answer::Later(command::Wait { threads: threads.unwrap_or_default(), until, deadline: wait_deadline, form: None })
+            }
+            Command::FormWait { id: form, timeout: _ } => {
+                let waiters_of_caller = self.waiters.iter().filter(|waiter| waiter.caller == caller).count();
+                if waiters_of_caller >= 2 {
+                    return command::Answer::Now(Err("at most 2 waits at a time".into()));
+                }
+                if self.waiters.len() >= MAX_WAITS {
+                    return command::Answer::Now(Err("Po is already holding its share of waits".into()));
+                }
+                // A form the user has answered already answers now; one still open is waited on.
+                let state = self.with_thread(id, |reader, _| reader.thread.forms.get(&form).and_then(|form| form.answered.clone()));
+                match state {
+                    Some(Some(values)) => command::Answer::Now(Ok(values)),
+                    Some(None) => command::Answer::Later(command::Wait { threads: vec![], until: vec![], deadline: wait_deadline, form: Some(form) }),
+                    None => command::Answer::Now(Err(format!("no form `{form}`; show_form returns its id"))),
+                }
             }
             // The reads of threads (list, get, messages…) are answered from the state as it is.
             read => command::Answer::Now(self.run_read(caller, id, read)),
@@ -3004,7 +2892,7 @@ impl Reader {
         let (token, handle) = (self.next_waiter, self.window);
         self.next_waiter += 1;
         let left = wait.deadline.saturating_duration_since(std::time::Instant::now());
-        self.waiters.push(Waiter { token, caller, threads: wait.threads, until: wait.until, reply });
+        self.waiters.push(Waiter { token, caller, threads: wait.threads, until: wait.until, form: wait.form, reply });
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(left).await;
             let _ = handle.update(cx, |_, window, cx| this.update(cx, |reader, cx| reader.time_out(token, window, cx)));
@@ -3064,11 +2952,43 @@ impl Reader {
         let parent = self.threads_all().find(|thread| thread.id == id).and_then(|thread| thread.parent);
         let mut kept = Vec::new();
         for waiter in self.waiters.drain(..) {
+            // A form wait is answered by its user's submit, not by a thread's change of state.
+            if waiter.form.is_some() {
+                kept.push(waiter);
+                continue;
+            }
             let watched = matches!(waiter.caller, command::Caller::User)
                 || matches!(waiter.caller, command::Caller::Thread(caller) if parent == Some(caller));
             let hit = (waiter.threads.contains(&id) || (waiter.threads.is_empty() && watched))
                 && (waiter.until.is_empty() || waiter.until.contains(&after.name()));
             if hit && waiter.reply.send(Ok(serde_json::json!({ "thread": id, "state": after.name(), "timed_out": false }))).is_ok() {
+                continue;
+            }
+            kept.push(waiter);
+        }
+        self.waiters = kept;
+    }
+
+    /// Answers the waits on form `id` of thread `owner`, which the user just submitted.
+    fn wake_form(&mut self, owner: u64, id: &str, reply: Value) {
+        let mut kept = Vec::new();
+        for waiter in self.waiters.drain(..) {
+            let hit = waiter.form.as_deref() == Some(id) && waiter.caller == command::Caller::Thread(owner);
+            if hit && waiter.reply.send(Ok(reply.clone())).is_ok() {
+                continue;
+            }
+            kept.push(waiter);
+        }
+        self.waiters = kept;
+    }
+
+    /// Ends the waits on form `id` of thread `owner`, which was closed without an answer.
+    fn drop_form(&mut self, owner: u64, id: &str) {
+        let mut kept = Vec::new();
+        for waiter in self.waiters.drain(..) {
+            let hit = waiter.form.as_deref() == Some(id) && waiter.caller == command::Caller::Thread(owner);
+            if hit {
+                waiter.reply.send(Err("cancelled: the form was closed".into())).ok();
                 continue;
             }
             kept.push(waiter);
@@ -3250,18 +3170,21 @@ impl Reader {
         }
     }
 
-    /// Renders the thread's views again after they changed, and drops what belongs to views that are gone.
+    /// Tells what the viewer is showing about views and forms that are gone, since the pane the
+    /// NSH screen draws picks its view by id.
     fn sync_view_docs(&mut self, cx: &mut Context<Self>) {
-        let live: HashSet<String> = self.thread.views.list().iter().map(|view| view.id.clone()).collect();
-        self.thread.docs.retain(|id, _| live.contains(id));
-        for view in self.thread.views.list().to_vec() {
-            let chunks = Rc::new(ui::markdown::chunks(&view.body));
-            let doc = Self::doc_for(self.thread.docs.remove(&view.id), chunks, cx);
-            self.thread.docs.insert(view.id, doc);
-        }
+        let live: HashSet<String> = self
+            .thread
+            .views
+            .list()
+            .iter()
+            .map(|view| view.id.clone())
+            .chain(self.thread.forms.list().iter().map(|form| form.id.clone()))
+            .collect();
         for slot in [&mut self.thread.shown, &mut self.thread.offered] {
             if slot.as_ref().is_some_and(|id| !live.contains(id)) {
                 *slot = None;
+                cx.notify();
             }
         }
     }
@@ -3317,8 +3240,9 @@ impl Reader {
             Command::FileOpen { path, line } => {
                 self.show_viewer(Mode::Source, cx);
                 self.open(&path, window, cx);
-                if let (Some(line), Some(code)) = (line, &self.project.code) {
-                    code.update(cx, |code, cx| code.go_to_line(line - 1, cx));
+                if let (Some(line), Some(_)) = (line, &self.project.code) {
+                    self.reveal_serial += 1;
+                    self.reveal = Some((line.saturating_sub(1) as u32, self.reveal_serial));
                 }
             }
             Command::DiffShow { path } => {
@@ -3470,10 +3394,7 @@ impl Reader {
     }
 
     fn set_split(&mut self, split: bool, cx: &mut Context<Self>) {
-        if self.split != split {
-            self.split = split;
-            self.relist_diff();
-        }
+        self.split = split;
         cx.notify();
     }
 
@@ -3624,7 +3545,6 @@ impl Reader {
         self.thread.agent = Some(key.to_string());
         self.thread.messages.clear();
         self.thread.relist(0);
-        self.thread.selection.update(cx, |s, _| s.clear());
         self.thread.busy = false;
         self.thread.queue.clear();
         self.thread.ready = false;
@@ -3669,14 +3589,14 @@ impl Reader {
                     cx.spawn(async move |cx| {
                         cx.background_executor().timer(Duration::from_secs(20)).await;
                         handle
-                            .update(cx, |_, window, cx| {
+                            .update(cx, |_, _, cx| {
                                 watchdog.update(cx, |reader, cx| {
                                     reader.with_thread(id, |reader, _| {
                                         let thread = &reader.thread;
                                         if thread.generation == generation && !thread.ready && thread.client.is_some() {
                                             // What was typed goes back to the draft rather than wait for an agent that is gone.
                                             reader.return_pending();
-                                            reader.restore_queue(window, cx);
+                                            reader.restore_queue(cx);
                                             reader.thread.status = "not responding".into();
                                             reader.thread.fail("The agent did not answer the handshake. Check that its command speaks ACP.".into());
                                             reader.unstart();
@@ -3726,15 +3646,16 @@ impl Reader {
     /// itself still blank it is used instead.
     fn new_blank_thread(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.thread.blank {
-            self.add_thread(window, cx);
+            self.add_thread();
         }
         self.start_blank(window, cx);
         self.focus_draft(window, cx);
         cx.notify();
     }
 
-    fn focus_draft(&self, window: &mut Window, cx: &mut Context<Self>) {
-        self.thread.draft.update(cx, |input, cx| input.focus(window, cx));
+    /// Asks the conversation to put the keyboard in its message field.
+    fn focus_draft(&self, _window: &mut Window, _cx: &mut Context<Self>) {
+        self.chat_focus.set(self.chat_focus.get() + 1);
     }
 
     /// The agent a new thread would start with.
@@ -3753,7 +3674,7 @@ impl Reader {
     /// choices of earlier threads; when the session has none to take, the waiting message goes.
     fn apply_overrides(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.thread.overrides.is_empty() {
-            return self.send_pending(window, cx);
+            return self.send_pending(cx);
         }
         self.thread.applying = Some(Applying::default());
         self.apply_next(window, cx);
@@ -3767,7 +3688,7 @@ impl Reader {
         let thread = &mut self.thread;
         let (Some(applying), Some(key), Some(client)) = (thread.applying.as_mut(), &thread.agent, &thread.client) else {
             thread.applying = None;
-            return self.send_pending(window, cx);
+            return self.send_pending(cx);
         };
         let chosen = self.choices.get(key);
         let options: Vec<&ConfigOption> = thread.options.iter().filter(|option| !applying.settled.contains(&option.id)).collect();
@@ -3810,13 +3731,13 @@ impl Reader {
             }
         }
         thread.applying = None;
-        self.send_pending(window, cx);
+        self.send_pending(cx);
         // The queued messages waited for the settings; they go now.
-        self.send_next(window, cx);
+        self.send_next(cx);
     }
 
     /// Sends the first message, once the agent is ready and has the settings it starts with.
-    fn send_pending(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn send_pending(&mut self, cx: &mut Context<Self>) {
         if !self.thread.ready || self.thread.applying.is_some() {
             return;
         }
@@ -3826,7 +3747,7 @@ impl Reader {
             self.thread.pending = Some(out);
             self.return_pending();
             self.thread.fail("The agent has no session yet.".into());
-            self.restore_queue(window, cx);
+            self.restore_queue(cx);
         }
     }
 
@@ -3853,7 +3774,7 @@ impl Reader {
 
     /// Asks the agent to change a setting of the thread's session. Once it accepts, the choice is
     /// remembered for the agent's next threads.
-    fn choose_option(&mut self, id: &str, value: &str) {
+    fn choose_option(&mut self, id: &str, value: &str, cx: &mut Context<Self>) {
         let thread = &mut self.thread;
         if let Some(client) = &thread.client
             && client.set_option(id, value)
@@ -3862,6 +3783,7 @@ impl Reader {
             // What is chosen here isn't then undone by carrying over an earlier choice.
             applying.settled.insert(id.to_string());
         }
+        cx.notify();
     }
 
     /// Lists an agent's sessions in a new thread, to resume one: those of the agent the thread on
@@ -3869,7 +3791,7 @@ impl Reader {
     fn resume_thread(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(key) = self.thread.agent.clone().or_else(|| self.chosen().map(|agent| agent.id.clone())) else { return };
         log::info!("agent: resuming with {key}");
-        self.add_thread(window, cx);
+        self.add_thread();
         self.connect(&key, true, window, cx);
     }
 
@@ -3956,7 +3878,7 @@ impl Reader {
         }
         let level = notify.as_deref().and_then(Notify::from_name).unwrap_or_default();
         let out = Outgoing { text: prompt, origin: Origin::Thread { id, title }, images: vec![] };
-        let mut fresh = self.blank_thread(window, cx);
+        let mut fresh = self.blank_thread();
         fresh.blank = false;
         fresh.parent = Some(id);
         fresh.notify = level;
@@ -4006,26 +3928,8 @@ impl Reader {
         self.thread.queue.insert(0, Queued { out, kind: None });
     }
 
-    /// Sends the draft on Enter, while its thread is the one on screen.
-    fn send_on_enter(draft: &Entity<InputState>, window: &mut Window, cx: &mut Context<Self>) -> Subscription {
-        cx.subscribe_in(draft, window, |reader, input, event: &InputEvent, window, cx| {
-            if reader.thread.draft != *input {
-                return;
-            }
-            match event {
-                InputEvent::PressEnter { shift: false, alt } => reader.send(*alt, window, cx),
-                InputEvent::PasteImage(image) => reader.attach(vec![Source::Bytes(image.bytes.clone())], cx),
-                InputEvent::PasteFiles(paths) => reader.attach(paths.iter().cloned().map(Source::Path).collect(), cx),
-                _ => {}
-            }
-        })
-    }
-
     /// Makes a thread with no agent yet.
-    fn blank_thread(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Thread {
-        let draft = cx.new(|cx| {
-            InputState::new(window, cx).auto_grow(1, 6).submit_on_enter(true).placeholder("Message the agent")
-        });
+    fn blank_thread(&mut self) -> Thread {
         let id = self.next_thread;
         self.next_thread += 1;
         Thread {
@@ -4049,7 +3953,6 @@ impl Reader {
             blank: true,
             applying: None,
             unanswered: HashSet::new(),
-            _enter: Self::send_on_enter(&draft, window, cx),
             messages: vec![],
             busy: false,
             queue: vec![],
@@ -4062,22 +3965,19 @@ impl Reader {
             client: None,
             agent: None,
             generation: 0,
-            draft,
+            draft: String::new(),
             attachments: vec![],
             attach_note: None,
-            list: ListState::new(0, ListAlignment::Top, px(400.)),
-            selection: cx.new(|_| ui::markdown::Selection::default()),
-            focus: cx.focus_handle(),
             views: Default::default(),
-            docs: HashMap::new(),
+            forms: Default::default(),
             shown: None,
             offered: None,
         }
     }
 
     /// Puts a blank thread on screen, parking the one that was, unless that is still blank.
-    fn add_thread(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let fresh = self.blank_thread(window, cx);
+    fn add_thread(&mut self) {
+        let fresh = self.blank_thread();
         let old = std::mem::replace(&mut self.thread, fresh);
         // A blank thread, or a session listing nothing was picked from, isn't kept.
         if old.worth_keeping() {
@@ -4162,8 +4062,8 @@ impl Reader {
     }
 
     /// A thread with no agent running, to be resumed from `saved`'s session when it is shown.
-    fn sleeping_thread(&mut self, saved: workspace::ThreadState, window: &mut Window, cx: &mut Context<Self>) -> Thread {
-        let mut thread = self.blank_thread(window, cx);
+    fn sleeping_thread(&mut self, saved: workspace::ThreadState) -> Thread {
+        let mut thread = self.blank_thread();
         thread.agent = Some(saved.agent);
         thread.session = Some(saved.session);
         thread.saved_title = Some(saved.title).filter(|title| !title.is_empty());
@@ -4176,7 +4076,7 @@ impl Reader {
     /// Brings back the projects and threads the last window started here left. The project on
     /// screen is the one `po` was started on; the others wait in the background and the
     /// threads sleep until shown. True if the project on screen got its threads back.
-    fn restore(&mut self, saved: workspace::Workspace, window: &mut Window, cx: &mut Context<Self>) -> bool {
+    fn restore(&mut self, saved: workspace::Workspace, cx: &mut Context<Self>) -> bool {
         let mut resumed = false;
         let mut seen = HashSet::new();
         // Children of threads that came back with them, by the parent's session.
@@ -4217,7 +4117,7 @@ impl Reader {
                         t.active_at = ix as u64 + 1;
                     }
                     let parent = t.parent_session.clone();
-                    let thread = self.sleeping_thread(t, window, cx);
+                    let thread = self.sleeping_thread(t);
                     linked.extend(parent.map(|parent| (thread.id, parent)));
                     thread
                 })
@@ -4231,14 +4131,14 @@ impl Reader {
                 }
                 continue;
             }
-            let mut project = Self::build_project(state.root, None, vec![], window, cx);
+            let mut project = Self::build_project(state.root, None, vec![]);
             if let Some(wt) = worktree {
                 project.base = wt.spec.base.clone();
                 project.worktree = Some(wt);
             }
             let thread = match shown {
                 Some(thread) => thread,
-                None => self.blank_thread(window, cx),
+                None => self.blank_thread(),
             };
             let id = self.next_project;
             self.next_project += 1;
@@ -4408,7 +4308,7 @@ impl Reader {
             self.changed(tid, crate::state::ThreadState::Closed, window, cx);
         }
         let last = self.slots.iter().find(|slot| slot.id == pid).is_some_and(|slot| slot.thread.id == tid && slot.parked.is_empty());
-        let blank = last.then(|| self.blank_thread(window, cx));
+        let blank = last.then(|| self.blank_thread());
         let Some(slot) = self.slots.iter_mut().find(|slot| slot.id == pid) else { return };
         if let Some(at) = slot.parked.iter().position(|thread| thread.id == tid) {
             slot.parked.remove(at);
@@ -4442,7 +4342,7 @@ impl Reader {
         } else if self.thread.id == id {
             let next = match self.parked.pop() {
                 Some(next) => next,
-                None => self.blank_thread(window, cx),
+                None => self.blank_thread(),
             };
             self.thread = next;
             self.thread.unread = false;
@@ -4477,13 +4377,6 @@ impl Reader {
         self.thread.status = "loading session…".into();
         cx.notify();
     }
-
-    fn agent_label(&self) -> Option<&str> {
-        let key = self.thread.agent.as_ref()?;
-        self.agents.iter().find(|agent| agent.id == *key).map(|agent| agent.name.as_str())
-    }
-
-
 
 
     /// `visible`: this thread is the one on screen, so its edits may move the viewer.
@@ -4580,7 +4473,7 @@ impl Reader {
                 if self.thread.client.is_some() && !self.thread.overrides.is_empty() {
                     self.apply_overrides(window, cx);
                 } else {
-                    self.send_next(window, cx);
+                    self.send_next(cx);
                 }
                 // The order of the thread list is saved with the time the turn ended.
                 self.request_save(cx);
@@ -4597,7 +4490,7 @@ impl Reader {
                 if let Some(item) = self.thread.queue.iter_mut().find(|q| q.kind == Some(queue) && q.out.queued_text() == content) {
                     item.kind = None;
                 }
-                self.send_next(window, cx);
+                self.send_next(cx);
             }
             Event::Failed(error) => {
                 if !self.thread.ready {
@@ -4605,7 +4498,7 @@ impl Reader {
                 }
                 self.return_pending();
                 self.thread.fail(error);
-                self.restore_queue(window, cx);
+                self.restore_queue(cx);
                 self.thread.applying = None;
                 self.unstart();
                 self.drop_waiters(command::Caller::Thread(self.thread.id), "the turn failed");
@@ -4617,7 +4510,7 @@ impl Reader {
                 if self.thread.busy {
                     self.return_pending();
                     self.thread.fail(format!("the agent exited ({status})"));
-                    self.restore_queue(window, cx);
+                    self.restore_queue(cx);
                 }
                 self.thread.applying = None;
                 self.unstart();
@@ -4625,11 +4518,8 @@ impl Reader {
             }
         }
         self.thread.relist(changed);
-        self.thread.list.scroll_to_end();
         cx.notify();
     }
-
-
 
     /// After its agent failed or exited: a blank thread, or one whose first message never got
     /// a session, starts its agent again when it is next asked for. That includes one whose
@@ -4673,54 +4563,22 @@ impl Reader {
         cx.notify();
     }
 
-    /// Ctrl+P: shows the finder over the workspace's files, query and selection preserved.
+    /// Ctrl+P: shows the finder over the workspace's files, with the last query selected.
     fn show_finder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.finder.is_none() {
-            let input = cx.new(|cx| InputState::new(window, cx).placeholder("Search files…"));
-            // Every keystroke refilters the matches; Enter picks the selected file.
-            self.finder_events = Some(cx.subscribe_in(&input, window, |this, _, event: &InputEvent, window, cx| match event {
-                InputEvent::Change => {
-                    this.refind(cx);
-                    cx.notify();
-                }
-                InputEvent::PressEnter { alt: false, .. } => this.accept_picked(window, cx),
-                _ => {}
-            }));
-            self.finder = Some(input);
-        }
         self.finder_open = true;
-        self.refind(cx);
-        self.finder.as_ref().unwrap().update(cx, |input, cx| {
-            input.select_all(window, cx);
-            input.focus(window, cx);
+        self.refind();
+        nsh::finder::start(&self.finder_query);
+        self.finder.update(cx, |finder, cx| finder.open(window, cx));
+        cx.notify();
+    }
+
+    /// Refilters the finder's matches for its query, and shows them.
+    fn refind(&mut self) {
+        self.finder_matches = match_files(&self.project.files, &self.finder_query);
+        nsh::finder::publish(nsh::finder::Snapshot {
+            matches: self.finder_matches.clone(),
+            capped: (self.project.files.len() >= MAX_FILES).then_some(MAX_FILES),
         });
-        cx.notify();
-    }
-
-    /// Refilters the finder's matches for its query and rewinds the selection to the first.
-    fn refind(&mut self, cx: &mut Context<Self>) {
-        let query = self.finder.as_ref().map_or_else(String::new, |input| input.read(cx).value().to_string());
-        self.finder_matches = Rc::new(match_files(&self.project.files, &query));
-        self.finder_selected = 0;
-        self.finder_list.reset(self.finder_matches.len());
-        self.finder_list.scroll_to(gpui::ListOffset { item_ix: 0, offset_in_item: px(0.) });
-    }
-
-    /// Moves the finder's selection by `delta` rows, wrapping, and keeps it in view.
-    fn step_finder(&mut self, delta: isize, cx: &mut Context<Self>) {
-        if self.finder_matches.is_empty() {
-            return;
-        }
-        let len = self.finder_matches.len() as isize;
-        self.finder_selected = (self.finder_selected as isize + delta).rem_euclid(len) as usize;
-        self.finder_list.scroll_to_reveal_item(self.finder_selected);
-        cx.notify();
-    }
-
-    /// Opens the file under the finder's selection and closes the finder.
-    fn accept_picked(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(path) = self.finder_matches.get(self.finder_selected).cloned() else { return };
-        self.accept_path(&path, window, cx);
     }
 
     /// Opens `path` in the viewer and closes the finder.
@@ -4737,21 +4595,37 @@ impl Reader {
 
     /// Ctrl+,: opens the settings page, or closes it when it is already open.
     fn toggle_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.settings_page.is_some() {
+        if self.settings_open {
             return self.hide_settings(window, cx);
         }
-        let page = cx.new(|cx| settings::SettingsView::new(self.swapped, window, cx));
-        let subscription = cx.subscribe_in(&page, window, |reader, _, event: &settings::SettingsEvent, window, cx| match event {
-            settings::SettingsEvent::Close => reader.hide_settings(window, cx),
-            settings::SettingsEvent::Saved => reader.apply_settings(cx),
-        });
-        page.update(cx, |page, cx| page.focus(window, cx));
-        self.settings_page = Some((page, subscription));
+        nsh::settings::start(self.swapped);
+        self.settings_open = true;
+        self.settings.update(cx, |settings, cx| settings.open(window, cx));
+        cx.notify();
+    }
+
+    fn toggle_todos(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.todos_open {
+            return self.hide_todos(window, cx);
+        }
+        self.todos_open = true;
+        self.todos.update(cx, |todos, cx| todos.open(window, cx));
+        cx.notify();
+    }
+
+    fn hide_todos(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.todos_open {
+            return;
+        }
+        self.todos_open = false;
+        self.todos.update(cx, |todos, _| todos.close());
+        self.focus.focus(window, cx);
         cx.notify();
     }
 
     fn hide_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.settings_page = None;
+        self.settings_open = false;
+        self.settings.update(cx, |settings, _| settings.close());
         self.focus.focus(window, cx);
         cx.notify();
     }
@@ -4779,119 +4653,12 @@ impl Reader {
     /// Hides the finder and gives the keys back to the reader.
     fn hide_finder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.finder_open = false;
+        self.finder.update(cx, |finder, _| finder.close());
         self.focus.focus(window, cx);
         cx.notify();
     }
 
-    /// The finder overlay, while Ctrl+P is open: a query field over the matching files.
-    fn finder(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let palette = cx.global::<Palette>();
-        let (popover, border, muted, radius) = (palette.popover, palette.border, palette.muted_foreground, palette.radius);
-        let Some(input) = self.finder.clone() else { return div().into_any_element() };
-        let matches = self.finder_matches.clone();
-        let this = cx.entity();
-        div()
-            .absolute()
-            .inset_0()
-            .id("finder-backdrop")
-            .occlude()
-            .on_click(cx.listener(|reader, _: &gpui::ClickEvent, window, cx| reader.hide_finder(window, cx)))
-            .flex()
-            .justify_center()
-            .pt_2()
-            .child(
-                div()
-                    .id("finder")
-                    .occlude()
-                    .w(px(560.0))
-                    .flex()
-                    .flex_col()
-                    .key_context("Finder")
-                    .on_action(cx.listener(|reader, _: &CloseFinder, window, cx| reader.hide_finder(window, cx)))
-                    .on_action(cx.listener(|reader, _: &FinderUp, _, cx| reader.step_finder(-1, cx)))
-                    .on_action(cx.listener(|reader, _: &FinderDown, _, cx| reader.step_finder(1, cx)))
-                    .rounded(radius)
-                    .border_1()
-                    .border_color(border)
-                    .bg(popover)
-                    .overflow_hidden()
-                    .child(Input::new(&input).field())
-                    .child(if matches.is_empty() {
-                        div().h(px(380.0)).flex().justify_center().pt_3().text_color(muted).child("No matching files").into_any_element()
-                    } else {
-                        div().h(px(380.0)).border_t_1().border_color(border).child(list(
-                            self.finder_list.clone(),
-                            cx.processor(move |reader: &mut Reader, ix, _, _| {
-                                let Some(path): Option<&String> = matches.get(ix) else { return div().into_any_element() };
-                                let name = path.rsplit('/').next().unwrap_or(path).to_string();
-                                let dir = path.strip_suffix(name.as_str()).unwrap_or("").to_string();
-                                let path = path.clone();
-                                let this = this.clone();
-                                ListItem::new(("file", ix))
-                                    .selected(ix == reader.finder_selected)
-                                    .on_click(move |_, window, cx| this.update(cx, |reader, cx| reader.accept_path(&path, window, cx)))
-                                    .child(name)
-                                    .when(!dir.is_empty(), |row| row.child(div().text_color(muted).child(dir)))
-                                    .into_any_element()
-                            }),
-                        )
-                        .size_full())
-                        .into_any_element()
-                    })
-                    .child(
-                        div()
-                            .flex()
-                            .justify_between()
-                            .px_3()
-                            .py_1()
-                            .border_t_1()
-                            .border_color(border)
-                            .text_color(muted)
-                            .child(if self.project.files.len() >= MAX_FILES { format!("first {MAX_FILES} files only") } else { "↑↓ navigate".to_string() })
-                            .child("↵ open · esc close"),
-                    ),
-            )
-            .into_any_element()
-    }
-
-    /// The rendered form of `text` if `path` is markdown, keeping the scroll position and
-    /// selection when it's the file already open being read again.
-    fn markdown_doc(&mut self, path: &str, text: &str, cx: &mut Context<Self>) -> Option<Doc> {
-        if !is_markdown(path) {
-            return None;
-        }
-        let chunks = Rc::new(ui::markdown::chunks(text));
-        let doc = self.project.doc.take().filter(|_| self.project.current.as_deref() == Some(path));
-        Some(Self::doc_for(doc, chunks, cx))
-    }
-
-    /// `doc` showing `chunks`, or a new one: reading the same document again keeps its scroll
-    /// position and its selection, as far as they still make sense.
-    fn doc_for(doc: Option<Doc>, chunks: Rc<Vec<String>>, cx: &mut Context<Self>) -> Doc {
-        match doc {
-            Some(doc) if *doc.chunks == *chunks => doc,
-            Some(doc) => {
-                // Splicing resets the scroll to the top, so put it back, and drop a selection
-                // that may now point at different text.
-                let mut top = doc.list.logical_scroll_top();
-                doc.list.splice(0..doc.list.item_count(), chunks.len());
-                if top.item_ix >= chunks.len() {
-                    top = gpui::ListOffset { item_ix: chunks.len().saturating_sub(1), offset_in_item: px(0.) };
-                }
-                doc.list.scroll_to(top);
-                doc.selection.update(cx, |s, _| s.clear());
-                Doc { chunks, ..doc }
-            }
-            None => Doc {
-                list: ListState::new(chunks.len(), ListAlignment::Top, px(400.)),
-                chunks,
-                selection: cx.new(|_| ui::markdown::Selection::default()),
-                focus: cx.focus_handle(),
-            },
-        }
-    }
-
-    fn open(&mut self, path: &str, window: &mut Window, cx: &mut Context<Self>) {
+    fn open(&mut self, path: &str, _window: &mut Window, cx: &mut Context<Self>) {
         self.browse = false;
         let full = self.project.root.join(path);
         let too_big = std::fs::metadata(&full).is_ok_and(|m| m.len() > 4 * 1024 * 1024);
@@ -4899,37 +4666,34 @@ impl Reader {
         let read = if too_big { Ok(None) } else { std::fs::read_to_string(&full).map(Some) };
         match read {
             Ok(None) => {
-                self.project.doc = None;
+                self.project.code = None;
+                self.project.is_markdown = false;
                 self.project.notice = Some(format!("{path} is too large to show"));
             }
             Ok(Some(text)) => {
-                self.project.doc = self.markdown_doc(path, &text, cx);
-                match &self.project.code {
-                    // Same file: swap the text in place so the scroll position and caret survive.
-                    Some(code) if self.project.current.as_deref() == Some(path) => {
-                        code.update(cx, |state, cx| state.set_text(text, cx));
-                    }
-                    _ => self.project.code = Some(cx.new(|cx| viewer::CodeViewState::new(text, syntax(path), window, cx))),
-                }
+                self.project.is_markdown = is_markdown(path);
+                // The same file keeps its place: the editor swaps the text in, and the scroll position
+                // and caret survive.
+                self.project.code = Some(nsh::source::Shared(Arc::from(text)));
                 self.project.notice = None;
             }
             Err(error) => {
                 log::warn!("open {path}: {error}");
                 self.project.code = None;
-                self.project.doc = None;
+                self.project.is_markdown = false;
                 self.project.notice = Some(format!("{path} is not a text file"));
             }
         }
         self.project.current = Some(path.to_string());
         self.project.stamp = stamp(&full);
-        self.project.files_tree.select(path, cx);
+        self.project.files_tree.select(path);
         cx.notify();
     }
 
     /// Sends the draft: as a new turn, or, while the agent is working, into the queue
     /// (`later` for after the turn rather than into it).
     fn send(&mut self, later: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let prompt = self.thread.draft.read(cx).value().trim().to_string();
+        let prompt = self.thread.draft.trim().to_string();
         if prompt.is_empty() && self.thread.attachments.is_empty() {
             return;
         }
@@ -4961,7 +4725,7 @@ impl Reader {
                     self.wake_thread(window, cx);
                 }
                 if from_user {
-                    self.clear_draft(window, cx);
+                    self.clear_draft();
                 }
                 self.begin_turn(&out);
                 self.thread.pending = Some(out);
@@ -4970,13 +4734,13 @@ impl Reader {
             }
             Where::Dispatch => {
                 if self.dispatch(out, cx) && from_user {
-                    self.clear_draft(window, cx);
+                    self.clear_draft();
                 }
                 Where::Dispatch
             }
             Where::Take(kind) => {
                 if from_user {
-                    self.clear_draft(window, cx);
+                    self.clear_draft();
                 }
                 self.thread.client.as_ref().unwrap().enqueue(&out.queued_text(), kind);
                 self.thread.queue.push(Queued { out, kind: Some(kind) });
@@ -4985,7 +4749,7 @@ impl Reader {
             }
             Where::Queue => {
                 if from_user {
-                    self.clear_draft(window, cx);
+                    self.clear_draft();
                 }
                 self.thread.queue.push(Queued { out, kind: None });
                 cx.notify();
@@ -5043,15 +4807,22 @@ impl Reader {
         .detach();
     }
 
-    /// Empties the draft, and the pictures attached to it.
-    fn clear_draft(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// Sets the draft to `text` from the app itself (a cleared draft after a send, a taken-back
+    /// queue row), marking the change so the screen the conversation draws picks the text up.
+    fn update_draft(&mut self, text: &str) {
+        self.chat_reset.set(self.chat_reset.get() + 1);
+        self.thread.draft = text.to_string();
+    }
+
+    /// Clears the draft, and the pictures attached to it.
+    fn clear_draft(&mut self) {
         self.thread.attachments.clear();
         self.thread.attach_note = None;
-        self.thread.draft.update(cx, |input, cx| input.set_value("", window, cx));
+        self.update_draft("");
     }
 
     /// Takes a queued message back into the draft to edit.
-    fn recall(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+    fn recall(&mut self, ix: usize, cx: &mut Context<Self>) {
         if ix >= self.thread.queue.len() {
             return;
         }
@@ -5059,17 +4830,17 @@ impl Reader {
         if let (Some(kind), Some(client)) = (item.kind, &self.thread.client) {
             client.recall(&item.out.queued_text(), kind);
         }
-        let draft = self.thread.draft.read(cx).value().to_string();
+        let draft = self.thread.draft.clone();
         self.thread.attachments.splice(0..0, item.out.images.iter().cloned());
         self.thread.attachments.truncate(attach::MAX_PER_MESSAGE);
         let text = if draft.trim().is_empty() { item.out.text } else { format!("{}\n{draft}", item.out.text) };
-        self.thread.draft.update(cx, |input, cx| input.set_value(text, window, cx));
+        self.update_draft(&text);
         cx.notify();
     }
 
     /// If no turn is running, sends the oldest queued message that waits here rather than in
     /// the daemon. A message that can't be sent goes back to the draft with the rest.
-    fn send_next(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn send_next(&mut self, cx: &mut Context<Self>) {
         if self.thread.busy {
             return;
         }
@@ -5077,14 +4848,14 @@ impl Reader {
         let mut next = self.thread.queue.remove(at);
         if !self.dispatch(std::mem::replace(&mut next.out, Outgoing::user(String::new(), vec![])), cx) {
             self.thread.queue.insert(0, next);
-            self.restore_queue(window, cx);
+            self.restore_queue(cx);
         }
     }
 
     /// Moves everything queued back into the draft, taking back what the daemon still holds.
     /// The user's own queued messages are theirs to edit again; text sent through the API is
     /// dropped, and reported to its sender (phase 2's notifications) rather than typed over.
-    fn restore_queue(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn restore_queue(&mut self, cx: &mut Context<Self>) {
         if self.thread.queue.is_empty() {
             return;
         }
@@ -5107,11 +4878,12 @@ impl Reader {
                 }
             }
         }
-        let draft = self.thread.draft.read(cx).value().to_string();
+        let draft = self.thread.draft.clone();
         if !draft.trim().is_empty() {
             text.push(draft);
         }
-        self.thread.draft.update(cx, |input, cx| input.set_value(text.join("\n\n"), window, cx));
+        let joined = text.join("\n\n");
+        self.update_draft(&joined);
         cx.notify();
     }
 
@@ -5157,10 +4929,9 @@ impl Reader {
         self.thread.messages.push(Msg::User(out.shown(), out.images.clone()));
         self.thread.messages.push(Msg::Agent(vec![]));
         self.thread.relist(was_last);
-        self.thread.list.scroll_to_end();
     }
 
-    fn stop(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn stop(&mut self, cx: &mut Context<Self>) {
         let Some(client) = &self.thread.client else { return };
         client.cancel();
         for msg in &mut self.thread.messages {
@@ -5175,7 +4946,7 @@ impl Reader {
         }
         self.thread.relist(0);
         // What was waiting goes back to the draft rather than being sent into a stopped turn.
-        self.restore_queue(window, cx);
+        self.restore_queue(cx);
         cx.notify();
     }
 
@@ -5207,11 +4978,10 @@ impl Reader {
     /// Opens every tool call's details, or closes them all when none is left to open. Runs folded
     /// to a line count as something left to open: they are unfolded, details and all.
     fn toggle_tools(&mut self, cx: &mut Context<Self>) {
-        let count = self.thread.messages.len();
         let mut from = None;
         for (ix, msg) in self.thread.messages.iter_mut().enumerate() {
             let Msg::Agent(blocks) = msg else { continue };
-            for start in folded_runs(blocks, ix + 1 == count) {
+            for start in folded_runs(blocks) {
                 let Some(Block::Tool(tool)) = blocks.get_mut(start) else { continue };
                 tool.fold = Some(false);
                 from.get_or_insert(ix);
@@ -5243,256 +5013,65 @@ impl Reader {
             cx.notify();
         }
     }
-
-    /// The strip under the explorer header in Changes mode: an input to open a PR for
-    /// review, or the open PR's summary with a way out.
-    fn pr_strip(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let colors = cx.global::<Palette>();
-        let (border, muted, danger) = (colors.border, colors.muted_foreground, colors.danger);
-        let this = cx.entity();
-        let body: AnyElement = match &self.project.pr {
-            Some(pr) => div()
-                .flex()
-                .items_center()
-                .gap_2()
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .truncate()
-                        .text_xs()
-                        .text_color(muted)
-                        .child(format!("PR #{} · {} files", pr.number, self.project.changes.len())),
-                )
-                .child(
-                    Button::new("pr-close")
-                        .label("Close")
-                        .ghost()
-                        .small()
-                        .on_click(move |_, window, cx| this.update(cx, |reader, cx| reader.close_pr(window, cx))),
-                )
-                .into_any_element(),
-            None => {
-                let open = Button::new("pr-open")
-                    .label(if self.opening { "…" } else { "Open" })
-                    .small()
-                    .outline()
-                    .on_click(move |_, window, cx| this.update(cx, |reader, cx| reader.open_pr(window, cx)));
-                let status = self.pr_status.as_ref().map(|text| {
-                    let failed = !self.opening;
-                    div()
-                        .text_xs()
-                        .text_color(if failed { danger } else { muted })
-                        .max_h(rems(5.))
-                        .overflow_hidden()
-                        .child(text.clone())
-                });
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .child(Input::new(&self.pr_input)),
-                            )
-                            .child(open),
-                    )
-                    .children(status)
-                    .into_any_element()
-            }
-        };
-        div().flex_none().px_3().py_2().border_b_1().border_color(border).child(body)
-    }
-
-    /// For a worktree project: its branch, and the ways to finish it.
-    fn worktree_strip(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
-        let wt = self.project.worktree.as_ref()?;
-        let colors = cx.global::<Palette>();
-        let (border, muted) = (colors.border, colors.muted_foreground);
-        let (merge, discard) = (cx.entity(), cx.entity());
-        let busy = self.finishing;
-        Some(
-            div()
-                .flex_none()
-                .flex()
-                .flex_col()
-                .gap_1()
-                .px_3()
-                .py_2()
-                .border_b_1()
-                .border_color(border)
-                .child(div().truncate().text_xs().text_color(muted).child(format!("⎇ {}", wt.spec.branch)))
-                .child(
-                    div()
-                        .flex()
-                        .gap_2()
-                        .child(
-                            Button::new("worktree-merge")
-                                .label("Merge")
-                                .tooltip("Commit this branch's work and merge it into the checkout it came from")
-                                .small()
-                                .outline()
-                                .on_click(move |_, window, cx| {
-                                    if !busy {
-                                        merge.update(cx, |reader, cx| reader.finish_worktree(true, window, cx))
-                                    }
-                                }),
-                        )
-                        .child(
-                            Button::new("worktree-discard")
-                                .label(if self.confirm_discard { "Discard everything?" } else { "Discard" })
-                                .tooltip("Delete this branch and everything done in it")
-                                .small()
-                                .ghost()
-                                .on_click(move |_, window, cx| {
-                                    if !busy {
-                                        discard.update(cx, |reader, cx| reader.finish_worktree(false, window, cx))
-                                    }
-                                }),
-                        ),
-                ),
-        )
-    }
-
-    /// The file tree beside the viewer: every file, or the changed ones in Changes mode, under a
-    /// header with the mode switch. `lead` is the window's own control, when this is the
-    /// leftmost pane.
-    fn explorer(&self, lead: Option<AnyElement>, trail: Option<AnyElement>, cx: &mut Context<Self>) -> AnyElement {
-        let colors = cx.global::<Palette>();
-        let this = cx.entity();
-        let mode = self.mode;
-        let (source, changes) = (cx.entity(), cx.entity());
-        let modes = div()
-            .flex_none()
-            .flex()
-            .items_center()
-            .gap_1()
-            .child(
-                Button::new("mode-source")
-                    .icon(IconName::Folder)
-                    .ghost()
-                    .small()
-                    .tooltip("Source (Ctrl+1)")
-                    .selected(mode == Mode::Source)
-                    .on_click(move |_, _, cx| source.update(cx, |reader, cx| reader.set_mode(Mode::Source, cx))),
-            )
-            .child(
-                Button::new("mode-diff")
-                    .icon(IconName::Replace)
-                    .ghost()
-                    .small()
-                    .tooltip("Changes (Ctrl+2)")
-                    .selected(mode == Mode::Diff)
-                    .on_click(move |_, _, cx| changes.update(cx, |reader, cx| reader.set_mode(Mode::Diff, cx))),
-            );
-        let title = match mode {
-            Mode::Source => "Explorer",
-            Mode::Diff => "Changes",
-        };
-        let state = &if mode == Mode::Diff { &self.project.changes_tree } else { &self.project.files_tree }.state;
-        let marks = if mode == Mode::Diff { self.project.marks.clone() } else { Rc::default() };
-        let (muted, danger) = (colors.muted_foreground, colors.danger);
-        let kinds = [colors.primary, colors.warning, colors.info, colors.added];
-        let body: AnyElement = if mode == Mode::Diff && self.project.changes.is_empty() {
-            centered("No changes".into(), cx)
+    /// The file tree beside the viewer, drawn by NSH from what it publishes. `lead` and `trail` are
+    /// the window's own controls, when this is the leftmost or rightmost pane.
+    fn explorer(&self, lead: Vec<nsh::header::Control>, trail: Vec<nsh::header::Control>, cx: &mut Context<Self>) -> AnyElement {
+        let diff = self.mode == Mode::Diff;
+        let tree = if diff { &self.project.changes_tree } else { &self.project.files_tree };
+        let body = if diff && self.project.changes.is_empty() {
+            nsh::explorer::Body::Empty("No changes".into())
         } else {
-            tree(state, move |ix, entry, selected, right_clicked, _, _| {
-                let path = entry.id.clone();
-                let name = entry.label.to_string();
-                let lead: AnyElement = if entry.folder {
-                    div()
-                        .w(IconSize::XSmall.rems())
-                        .flex_none()
-                        .flex()
-                        .items_center()
-                        .child(
-                            Icon::new(if entry.expanded { IconName::ChevronDown } else { IconName::ChevronRight })
-                                .size(IconSize::XSmall)
-                                .color(muted),
-                        )
-                        .into_any_element()
-                } else {
-                    let tint = match file_kind(&name) {
-                        FileKind::Code => kinds[0],
-                        FileKind::Data => kinds[1],
-                        FileKind::Doc => muted,
-                        FileKind::Web => kinds[2],
-                        FileKind::Image => kinds[3],
-                        FileKind::Other => muted.opacity(theme::tokens::MUTED),
-                    };
-                    div().size(rems(0.5)).flex_none().rounded(theme::tokens::RADIUS_MARK).bg(tint).into_any_element()
-                };
-                let mark = marks.get(path.as_ref()).map(|status| {
-                    let color = match status {
-                        'A' | 'U' => kinds[3],
-                        'D' => danger,
-                        _ => kinds[1],
-                    };
-                    div().w(rems(0.75)).flex_none().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(color).child(status.to_string())
-                });
-                let label = div()
-                    .flex()
-                    .items_center()
-                    // The chevron svg carries ~4px of padding on its right, so folders take
-                    // a smaller gap to sit the name as far from the glyph as files do.
-                    .when(entry.folder, |d| d.gap_1())
-                    .when(!entry.folder, |d| d.gap_2())
-                    .child(lead)
-                    .child(div().flex_1().min_w_0().truncate().child(name))
-                    .children(mark);
-                let folder = entry.folder;
-                let this = this.clone();
-                ListItem::new(ix)
-                    .selected(selected)
-                    .secondary_selected(right_clicked)
-                    .pl(rems(0.5 + entry.depth as f32))
-                    .text_sm()
-                    .child(label)
-                    .on_click(move |_, window, cx| {
-                        if folder {
-                            return;
-                        }
-                        this.update(cx, |reader, cx| {
-                            // A file picked in the tree is what the viewer shows, not an agent's view.
-                            reader.thread.shown = None;
-                            match mode {
-                                Mode::Source => reader.open(&path, window, cx),
-                                Mode::Diff => reader.pick(&path, cx),
-                            }
-                            reader.reveal_side(cx);
-                        });
-                    })
-                    .into_any_element()
-            })
-            .into_any_element()
+            let marks = &self.project.marks;
+            nsh::explorer::Body::Rows(
+                tree.rows()
+                    .into_iter()
+                    .map(|row| nsh::explorer::Entry { mark: diff.then(|| marks.get(row.id.as_str()).copied()).flatten(), row })
+                    .collect(),
+            )
         };
-        let foreground = colors.foreground;
-        div()
-            .size_full()
-            .flex()
-            .flex_col()
-            .child(header_row(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_1()
-                    .min_w_0()
-                    .children(lead)
-                    .child(div().min_w_0().truncate().text_sm().font_weight(FontWeight::MEDIUM).text_color(foreground).child(title.to_string())),
-                div().flex().items_center().gap_2().child(modes).children(trail),
-                cx,
-            ))
-            .children(self.worktree_strip(cx))
-            .children((mode == Mode::Diff).then(|| self.pr_strip(cx)))
-            .child(div().flex_1().min_h_0().p_1().child(body))
-            .into_any_element()
+        nsh::strip::publish(nsh::strip::Snapshot {
+            worktree: self.project.worktree.as_ref().map(|wt| nsh::strip::Worktree {
+                branch: wt.spec.branch.clone(),
+                confirm_discard: self.confirm_discard,
+            }),
+            pr: self
+                .project
+                .pr
+                .as_ref()
+                .map(|pr| nsh::strip::Pr::Opened { label: format!("PR #{} · {} files", pr.number, self.project.changes.len()) })
+                .or_else(|| diff.then(|| nsh::strip::Pr::Asking { status: self.pr_status.clone(), opening: self.opening })),
+            pr_reset: self.pr_serial,
+        });
+        nsh::explorer::publish(nsh::explorer::Snapshot { glass: cx.global::<Palette>().glass.is_some(), changes: diff, lead, trail, body });
+        div().size_full().child(self.explorer_pane.clone()).into_any_element()
+    }
+
+    /// Opens, or shows the diff of, the file selected in the explorer's tree, as clicking it does.
+    fn open_selected(&mut self, by_user: bool, window: &mut Window, cx: &mut Context<Self>) {
+        match self.mode {
+            Mode::Source => {
+                let Some(path) = self.project.files_tree.selected_file().map(str::to_string) else { return };
+                // A file picked in the tree is what the viewer shows, not an agent's view.
+                if by_user {
+                    self.thread.shown = None;
+                }
+                if self.project.current.as_deref() != Some(&path) {
+                    self.open(&path, window, cx);
+                }
+            }
+            Mode::Diff => {
+                let Some(path) = self.project.changes_tree.selected_file().map(str::to_string) else { return };
+                if by_user {
+                    self.thread.shown = None;
+                }
+                if self.project.picked.as_deref() != Some(&path) {
+                    self.pick(&path, cx);
+                }
+            }
+        }
+        if by_user {
+            self.reveal_side(cx);
+        }
     }
 
     /// Switches a narrow viewer pane between the explorer and the file.
@@ -5501,355 +5080,117 @@ impl Reader {
         cx.notify();
     }
 
-    /// What the sidebar's filter asks for, lowercased; empty when it is not filtering.
-    fn side_query(&self, cx: &App) -> String {
-        self.side_search.read(cx).value().trim().to_lowercase()
-    }
-
     /// Whether a thread answers the sidebar's filter: its title or its latest line says it.
     fn matches_query(&self, thread: &Thread, query: &str) -> bool {
         self.thread_label(thread).to_lowercase().contains(query) || thread.preview().to_lowercase().contains(query)
     }
 
-    /// The left side: every project with its threads.
-    fn left_sidebar(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let query = self.side_query(cx);
+    /// The left side: every project with its threads, drawn by NSH from what [`Self::sidebar_snapshot`]
+    /// publishes.
+    fn left_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        nsh::sidebar::publish(self.sidebar_snapshot(cx));
+        floating(div().size_full().flex().flex_col().child(self.sidebar.clone()), cx)
+    }
+
+    /// What the sidebar shows: the projects and threads that answer its filter, what waits on the
+    /// user, and what agents have suggested.
+    fn sidebar_snapshot(&self, cx: &App) -> nsh::sidebar::Snapshot {
+        use nsh::sidebar as side;
+        let query = self.side_query.trim().to_lowercase();
         let searching = !query.is_empty();
         let views = self.views();
-        let needs_you = self.needs_you_section(&views, &query, cx);
-        let any_waiting = needs_you.is_some();
-        let colors = cx.global::<Palette>();
-        let (hover, selection, muted, foreground, warning) = (colors.list_hover, colors.list_selected, colors.muted_foreground, colors.foreground, colors.warning);
+        let many = views.len() > 1;
         let (active_project, active_thread) = (self.project_id, self.thread.id);
-        let project_count = views.len();
-        let many = project_count > 1;
-        let add = cx.entity();
+        let thread_row = |pid: u64, thread: &Thread| side::Thread {
+            project: pid,
+            id: thread.id,
+            label: self.thread_label(thread),
+            mark: match thread.activity() {
+                Activity::Idle => side::Mark::Idle,
+                Activity::Unread => side::Mark::Unread,
+                Activity::Running => side::Mark::Running,
+                Activity::Asking => side::Mark::Asking,
+            },
+            selected: (pid, thread.id) == (active_project, active_thread),
+            controlled: self.grants.get(&thread.id).is_some_and(|grant| *grant != command::Grant::default()),
+            day: None,
+        };
+        let today = todo::today();
         // Filtering keeps a project whose name matches, with all its threads, and any project with a
-        // thread that does.
+        // thread that does. A thread waiting on the user is in Needs you instead.
         let project_hit = |view: &View<'_>| view.project.name().to_lowercase().contains(&query);
-        // A thread waiting on the user is in NEEDS YOU instead.
-        let views: Vec<_> = views.into_iter().filter(|view| !searching || project_hit(view) || view.threads.iter().any(|t| !self.waits_on_user(view.id, t) && self.matches_query(t, &query))).collect();
-        // Groups are spaced apart by more than anything inside one, so the eye reads them as units.
-        let mut tree = div().id("agents-tree").size_full().overflow_y_scroll().flex().flex_col().gap(SIDE_GROUP_GAP).px(SIDEBAR_GUTTER).pt(SIDE_LIST_TOP).pb(SIDE_LIST_BOTTOM);
-        for view in &views {
-            let pid = view.id;
-            let (select, close, start) = (cx.entity(), cx.entity(), cx.entity());
-            let collapsed = self.projects_collapsed.contains(&pid) && !searching;
-            // A project and its threads are one group, set apart from the next by space, not a box.
-            // The one on screen has its name at full strength, the rest are dimmed.
-            let label = if pid == active_project { foreground } else { foreground.opacity(theme::tokens::DIM) };
-            let mut group = div().flex().flex_col().gap(SIDE_ITEM_GAP);
-            let head = self.heads.get(&view.project.root).filter(|_| view.project.shows_branch());
-            group = group.child(
-                side_row(colors.radius, None)
-                    .id(("agent-project", pid as usize))
-                    .group(row_group("agent-project", pid))
-                    .h(SIDE_TREE_HEIGHT)
-                    .child(side_chevron(!collapsed, muted))
-                    .cursor_pointer()
-                    .hover(move |row| row.bg(hover))
-                    // Clicking the row opens the project and folds or unfolds its threads; the buttons on it are
-                    // their own targets.
-                    .on_click(move |_, window, cx| {
-                        select.update(cx, |reader, cx| {
-                            if !reader.projects_collapsed.insert(pid) {
-                                reader.projects_collapsed.remove(&pid);
-                            }
-                            reader.show_project(pid, window, cx);
-                        })
-                    })
-                    // The name, then the branch right after it, on one baseline. They share what is
-                    // left of the row, each cut with an ellipsis when it doesn't fit.
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .flex()
-                            .items_baseline()
-                            .gap_2()
-                            .child(
-                                div()
-                                    .min_w_0()
-                                    .truncate()
-                                    .text_sm()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(label)
-                                    .child(view.project.name()),
-                            )
-                            .when_some(head, |name, head| {
-                                name.child(div().min_w_0().flex().items_baseline().gap_1().text_xs().text_color(muted).child(
-                                    div().truncate().child(head.name.clone()),
-                                ).when(head.dirty, |tag| tag.child(div().flex_none().text_color(warning).child("*"))))
-                            }),
-                    )
-                    // Starting a thread is on the project's own row, shown when it is hovered.
-                    .child(show_on_hover(
-                        row_group("agent-project", pid),
-                        Button::new(("agent-new-thread", pid as usize))
-                            .icon(IconName::Plus)
-                            .ghost()
-                            .xsmall()
-                            .tooltip("New thread in this project")
-                            .on_click(move |_, window, cx| start.update(cx, |reader, cx| reader.start_thread_in(pid, window, cx))),
-                    ))
-                    .when(many, |row| {
-                        row.child(show_on_hover(
-                            row_group("agent-project", pid),
-                            Button::new(("agent-project-close", pid as usize))
-                                .icon(IconName::Close)
-                                .ghost()
-                                .xsmall()
-                                .tooltip("Close project")
-                                .on_click(move |_, window, cx| close.update(cx, |reader, cx| reader.close_project(pid, window, cx))),
-                        ))
-                    }),
-            );
-            // Most recently active first. Only the active ones show; the rest fold under "more".
-            let mut recent: Vec<&Thread> = view.threads.iter().copied().filter(|t| (!t.blank || t.id == view.shown) && !self.waits_on_user(pid, t)).collect();
-            recent.sort_by_key(|t| (std::cmp::Reverse(t.active_at), std::cmp::Reverse(t.id)));
-            if searching && !project_hit(view) {
-                recent.retain(|t| self.matches_query(t, &query));
-            }
-            let expanded = self.threads_expanded.contains(&pid) || searching;
-            // Active: running, finished unseen with its parent told, or an agent still alive; the one
-            // on screen too, whatever it is doing.
-            let active = |t: &Thread| t.id == view.shown || t.activity() != Activity::Idle || t.client.is_some();
-            let shown_count = recent.iter().filter(|t| active(t)).count();
-            let foldable = !searching && recent.len() > shown_count.max(1);
-            let hidden = if expanded || !foldable {
-                0
-            } else {
-                let keep: Vec<&Thread> = recent.iter().copied().filter(|t| active(t)).collect();
-                let hidden = recent.len() - keep.len().max(1);
-                recent = if keep.is_empty() { recent[..1].to_vec() } else { keep };
-                hidden
-            };
-            if collapsed {
-                recent.clear();
-            }
-            for thread in recent {
-                let tid = thread.id;
-                let (select, close) = (cx.entity(), cx.entity());
-                let selected = (pid, tid) == (active_project, active_thread);
-                // What its agent may do through Po's API, when that is more than talk.
-                let controlled = self.grants.get(&tid).is_some_and(|grant| *grant != command::Grant::default());
-                // A thread sits under its project like a file under a folder: its state in the lead
-                // column, its title on the project name's column. The one on screen is the only
-                // filled row.
-                group = group.child(
-                    side_row(colors.radius, None)
-                        .id(("agent-thread", tid as usize))
-                        .group(row_group("agent-thread", tid))
-                        .h(SIDE_TREE_HEIGHT)
-                        .cursor_pointer()
-                        .when(selected, |row| row.bg(selection))
-                        .when(!selected, |row| row.hover(move |row| row.bg(hover)))
-                        .on_click(move |_, window, cx| select.update(cx, |reader, cx| reader.open_thread(pid, tid, window, cx)))
-                        .child(side_mark(thread.activity(), colors))
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .truncate()
-                                .text_sm()
-                                .when(selected, |label| label.font_weight(FontWeight::MEDIUM))
-                                .text_color(if selected { foreground } else { foreground.opacity(theme::tokens::DIM) })
-                                .child(self.thread_label(thread)),
-                        )
-                        .children(controlled.then(|| {
-                            Button::new(("grant-badge", tid as usize))
-                                .label("⌁")
-                                .tooltip("Agent control granted")
-                                .ghost()
-                                .xsmall()
-                                .selected(true)
-                        }))
-                        .child(show_on_hover(
-                            row_group("agent-thread", tid),
-                            Button::new(("agent-thread-close", tid as usize))
-                                .icon(IconName::Close)
-                                .ghost()
-                                .xsmall()
-                                .tooltip("Close thread")
-                                .on_click(move |_, window, cx| close.update(cx, |reader, cx| reader.close_any_thread(pid, tid, window, cx))),
-                        )),
-                );
-            }
-            if foldable && !collapsed && (hidden > 0 || expanded) {
-                let toggle = cx.entity();
-                let label = if expanded { "Show less".to_string() } else { format!("{hidden} more") };
-                group = group.child(
-                    side_row(colors.radius, None)
-                        .id(("agent-more", pid as usize))
-                        .h(SIDE_MORE_HEIGHT)
-                        .cursor_pointer()
-                        .text_xs()
-                        .text_color(muted)
-                        .hover(move |row| row.bg(hover))
-                        .on_click(move |_, _, cx| {
-                            toggle.update(cx, |reader, cx| {
-                                if !reader.threads_expanded.insert(pid) {
-                                    reader.threads_expanded.remove(&pid);
-                                }
-                                cx.notify();
-                            })
-                        })
-                        .child(side_lead(div()))
-                        .child(label),
-                );
-            }
-            tree = tree.child(group);
-        }
-        if searching && views.is_empty() && !any_waiting {
-            tree = tree.child(side_row(colors.radius, None).h(SIDE_MORE_HEIGHT).text_sm().text_color(muted).child("No matches"));
-        }
-        let title = side_title("Projects", colors);
-        let projects = div()
-            .size_full()
-            .flex()
-            .flex_col()
-            // The same kind of header as the explorer's below: a title, and what you can do here.
-            .child(side_header(header_row(
-                title,
-                Button::new("agents-add")
-                    .icon(IconName::Plus)
-                    .tooltip("Add a project: open a folder (Ctrl+Shift+O)")
-                    .ghost()
-                    .xsmall()
-                    .on_click(move |_, window, cx| add.update(cx, |reader, cx| reader.pick_project(window, cx))),
-                cx,
-            )).h(SIDE_SECTION_HEIGHT + SIDE_SECTION_GAP).pt(SIDE_SECTION_GAP).border_b_0())
-            .children(self.worktree_status.clone().map(|text| {
-                div().px(SIDEBAR_GUTTER + ROW_INSET).py_1().text_sm().text_color(muted).max_h(rems(5.)).overflow_hidden().child(text)
-            }))
-            .children(self.suggestion_rows(cx))
-            .child(div().flex_1().min_h_0().child(tree));
-        let colors = cx.global::<Palette>();
-        let (new_thread, open_settings) = (cx.entity(), cx.entity());
-        let (hover, muted, foreground, radius) = (colors.list_hover, colors.muted_foreground, colors.foreground, colors.radius);
-        // A plain text action below the title bar, not a button: it lights up under the pointer.
-        let actions = div().flex_none().flex().flex_col().gap(SIDE_ACTION_GAP).px(SIDEBAR_GUTTER).pt(SIDE_ACTIONS_TOP).child(
-            side_row(radius, Some(side_icon(IconName::Plus, muted)))
-                .id("sidebar-new-thread")
-                .h(SIDE_ROW_HEIGHT)
-                .cursor_pointer()
-                .text_base()
-                .text_color(muted)
-                .hover(move |this| this.bg(hover).text_color(foreground))
-                .tooltip(|_, cx| ui::button::tooltip("New thread (Ctrl+N)".into(), cx))
-                .on_click(move |_, window, cx| new_thread.update(cx, |reader, cx| reader.new_blank_thread(window, cx)))
-                .child("New"),
-        )
-        .child(self.search_row(window, cx));
-        let pane = div().size_full().flex().flex_col().bg(colors.sidebar).child(side_header(pane_header("Po", div(), None, None, cx))).child(actions).children(needs_you).child(
-            div().flex_1().min_h_0().child(projects),
-        )
-        .child(
-            div().flex_none().px(SIDEBAR_GUTTER).pb_3().child(
-                side_row(radius, Some(side_icon(IconName::Settings, muted)))
-                    .id("sidebar-settings")
-                    .h(SIDE_ROW_HEIGHT)
-                    .cursor_pointer()
-                    .text_base()
-                    .text_color(muted)
-                    .hover(move |this| this.bg(hover).text_color(foreground))
-                    .tooltip(|_, cx| ui::button::tooltip("Settings (Ctrl+,)".into(), cx))
-                    .on_click(move |_, window, cx| open_settings.update(cx, |reader, cx| reader.toggle_settings(window, cx)))
-                    .child("Settings"),
-            ),
-        );
-        floating(pane, cx)
-    }
-
-    /// Whether thread `thread` of project `pid` waits on the user, which takes it out of its
-    /// project and into NEEDS YOU, so a folded project can't hide it. The one on screen is
-    /// already in view, so it stays where it is.
-    fn waits_on_user(&self, pid: u64, thread: &Thread) -> bool {
-        let parent_hears = thread.parent.is_some() && thread.notify != Notify::Never;
-        (pid, thread.id) != (self.project_id, self.thread.id) && thread.activity().needs_you(parent_hears)
-    }
-
-    /// The threads that wait on the user ([`Self::waits_on_user`]), from every project and whether or not
-    /// it is folded, each with its project's name. Nothing at all when none are: the section is
-    /// only there while something waits. Questions come first, the rest in the order they were
-    /// made, so rows don't reshuffle as turns end.
-    fn needs_you_section(&self, views: &[View<'_>], query: &str, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let colors = cx.global::<Palette>();
-        let (hover, muted, foreground, radius) = (colors.list_hover, colors.muted_foreground, colors.foreground, colors.radius);
+        // Questions come first, the rest in the order they were made, so rows don't reshuffle as turns end.
         let mut waiting: Vec<(&View<'_>, &Thread)> = views
             .iter()
             .flat_map(|view| view.threads.iter().map(move |thread| (view, *thread)))
             .filter(|(view, thread)| self.waits_on_user(view.id, thread))
-            .filter(|(view, thread)| query.is_empty() || view.project.name().to_lowercase().contains(query) || self.matches_query(thread, query))
+            .filter(|(view, thread)| !searching || project_hit(view) || self.matches_query(thread, &query))
             .collect();
-        if waiting.is_empty() {
-            return None;
-        }
         waiting.sort_by_key(|(_, thread)| (thread.activity() != Activity::Asking, thread.id));
-        let count = waiting.len();
-        let most = SIDE_LIST_TOP + SIDE_LIST_BOTTOM + (SIDE_ROW_HEIGHT + SIDE_ITEM_GAP) * NEEDS_YOU_ROWS as f32;
-        let mut rows = div().id("needs-you-list").max_h(most).overflow_y_scroll().flex().flex_col().gap(SIDE_ITEM_GAP).px(SIDEBAR_GUTTER).pt(SIDE_LIST_TOP).pb(SIDE_LIST_BOTTOM);
-        for (view, thread) in waiting {
-            let (pid, tid) = (view.id, thread.id);
-            let (select, close) = (cx.entity(), cx.entity());
-            let controlled = self.grants.get(&tid).is_some_and(|grant| *grant != command::Grant::default());
-            rows = rows.child(
-                side_row(radius, None)
-                    .id(("needs-you-thread", tid as usize))
-                    .group(row_group("needs-you-thread", tid))
-                    .h(SIDE_TREE_HEIGHT)
-                    .cursor_pointer()
-                    .hover(move |row| row.bg(hover))
-                    .on_click(move |_, window, cx| select.update(cx, |reader, cx| reader.open_thread(pid, tid, window, cx)))
-                    .child(side_mark(thread.activity(), colors))
-                    .children(controlled.then(|| {
-                        Button::new(("needs-you-grant-badge", tid as usize))
-                            .label("⌁")
-                            .tooltip("Agent control granted")
-                            .ghost()
-                            .xsmall()
-                            .selected(true)
-                    }))
-                    // The title, then the project it is in, which the row no longer sits under.
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .flex()
-                            .items_baseline()
-                            .gap_2()
-                            .child(div().min_w_0().truncate().text_sm().text_color(foreground.opacity(theme::tokens::DIM)).child(self.thread_label(thread)))
-                            .child(div().min_w_0().truncate().text_xs().text_color(muted).child(view.project.name())),
-                    )
-                    .child(show_on_hover(
-                        row_group("needs-you-thread", tid),
-                        Button::new(("needs-you-thread-close", tid as usize))
-                            .icon(IconName::Close)
-                            .ghost()
-                            .xsmall()
-                            .tooltip("Close thread")
-                            .on_click(move |_, window, cx| close.update(cx, |reader, cx| reader.close_any_thread(pid, tid, window, cx))),
-                    )),
-            );
-        }
-        let title = side_title(format!("Needs you · {count}"), colors);
-        Some(
-            div()
-                .flex_none()
-                .flex()
-                .flex_col()
-                .child(side_header(header_row(title, div(), cx)).h(SIDE_SECTION_HEIGHT + SIDE_SECTION_GAP).pt(SIDE_SECTION_GAP).border_b_0())
-                .child(rows)
-                .into_any_element(),
-        )
-    }
+        let waiting = waiting.into_iter().map(|(view, thread)| side::Waiting { thread: thread_row(view.id, thread), project: view.project.name() }).collect();
 
-    /// What agents have put to the user: one line each, with a way to say yes or no.
-    fn suggestion_rows(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        let colors = cx.global::<Palette>();
-        let (muted, border) = (colors.muted_foreground, colors.border);
-        let views = self.views();
-        self.suggestions
+        let projects = views
+            .iter()
+            .filter(|view| !searching || project_hit(view) || view.threads.iter().any(|t| !self.waits_on_user(view.id, t) && self.matches_query(t, &query)))
+            .map(|view| {
+                let pid = view.id;
+                let collapsed = self.projects_collapsed.contains(&pid) && !searching;
+                // Most recently active first. Only the active ones show; the rest fold under "more".
+                let mut recent: Vec<&Thread> = view.threads.iter().copied().filter(|t| (!t.blank || t.id == view.shown) && !self.waits_on_user(pid, t)).collect();
+                recent.sort_by_key(|t| (std::cmp::Reverse(t.active_at), std::cmp::Reverse(t.id)));
+                if searching && !project_hit(view) {
+                    recent.retain(|t| self.matches_query(t, &query));
+                }
+                let expanded = self.threads_expanded.contains(&pid) || searching;
+                // Active: running, finished unseen with its parent told, or an agent still alive; the one
+                // on screen too, whatever it is doing.
+                let active = |t: &Thread| t.id == view.shown || t.activity() != Activity::Idle || t.client.is_some();
+                let shown_count = recent.iter().filter(|t| active(t)).count();
+                let foldable = !searching && recent.len() > shown_count.max(1);
+                let hidden = if expanded || !foldable {
+                    0
+                } else {
+                    let keep: Vec<&Thread> = recent.iter().copied().filter(|t| active(t)).collect();
+                    let hidden = recent.len() - keep.len().max(1);
+                    recent = if keep.is_empty() { recent[..1].to_vec() } else { keep };
+                    hidden
+                };
+                if collapsed {
+                    recent.clear();
+                }
+                let head = self.heads.get(&view.project.root).filter(|_| view.project.shows_branch());
+                side::Project {
+                    id: pid,
+                    name: view.project.name(),
+                    branch: head.map(|head| side::Branch { name: head.name.to_string(), dirty: head.dirty }),
+                    active: pid == active_project,
+                    collapsed,
+                    closable: many,
+                    threads: {
+                        let mut last = None;
+                        recent
+                            .into_iter()
+                            .map(|t| {
+                                let day = match today.days_since(todo::Date::of_ms(t.active_at)) {
+                                    ..=0 => "",
+                                    1 => "Yesterday",
+                                    2..=6 => "Previous 7 days",
+                                    _ => "Older",
+                                };
+                                let mut row = thread_row(pid, t);
+                                row.day = (last != Some(day) && !day.is_empty()).then_some(day);
+                                last = Some(day);
+                                row
+                            })
+                            .collect()
+                    },
+                    fold: (foldable && !collapsed && (hidden > 0 || expanded)).then_some((expanded, hidden)),
+                }
+            })
+            .collect();
+
+        let suggestions = self
+            .suggestions
             .iter()
             .map(|suggestion| {
                 let (text, yes) = match &suggestion.what {
@@ -5864,26 +5205,279 @@ impl Reader {
                         (format!("“{}” wants to merge {what}", suggestion.by), "Merge")
                     }
                 };
-                let (id, accept, turn_away) = (suggestion.id, cx.entity(), cx.entity());
-                div()
-                    .px_3()
-                    .py_1()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .border_b_1()
-                    .border_color(border)
-                    .child(div().text_xs().text_color(muted).child(text))
-                    .child(
-                        div()
-                            .flex()
-                            .gap_1()
-                            .child(Button::new(SharedString::from(format!("suggest-yes-{id}"))).label(yes).primary().xsmall().on_click(move |_, window, cx| accept.update(cx, |reader, cx| reader.answer_suggestion(id, true, window, cx))))
-                            .child(Button::new(SharedString::from(format!("suggest-no-{id}"))).label("Not now").ghost().xsmall().on_click(move |_, window, cx| turn_away.update(cx, |reader, cx| reader.answer_suggestion(id, false, window, cx)))),
-                    )
-                    .into_any_element()
+                side::Suggestion { id: suggestion.id, text, yes }
             })
-            .collect()
+            .collect();
+
+        side::Snapshot {
+            glass: cx.global::<Palette>().glass.is_some(),
+            waiting,
+            projects,
+            suggestions,
+            status: self.worktree_status.clone(),
+            searching,
+            todos_open: self.todos_open,
+            todos: todo::summary(),
+        }
+    }
+
+    /// The conversation, drawn by NSH from what [`Self::chat_snapshot`] publishes; published here in place
+    /// of the pane, as the viewer's panes are.
+    fn chat_pane(&self, lead: Vec<nsh::header::Control>, trail: Vec<nsh::header::Control>, cx: &mut Context<Self>) -> gpui::Div {
+        nsh::chat::publish(self.chat_snapshot(lead, trail, cx));
+        div().size_full().flex().flex_col().child(self.chat.clone())
+    }
+
+    /// What the conversation shows: the header, the transcript, and the composer.
+    fn chat_snapshot(&self, lead: Vec<nsh::header::Control>, trail: Vec<nsh::header::Control>, cx: &App) -> nsh::chat::Snapshot {
+        use nsh::chat as chat;
+        let thread = &self.thread;
+        // Bump the transcript's follow (the pane scrolls to its end) when the thread the pane
+        // shows got louder: a message came or went, or the turn started or stopped.
+        let busy = thread.busy;
+        let blocks = match thread.messages.last() {
+            Some(Msg::Agent(blocks)) => blocks.len(),
+            _ => 0,
+        };
+        // A thread other than the one last shown starts from its own draft and its own end.
+        let shown = (self.project_id, thread.id);
+        if self.chat_shown.replace(shown) != shown {
+            self.chat_reset.set(self.chat_reset.get() + 1);
+        }
+        let growth = match thread.messages.last() {
+            Some(Msg::Agent(blocks)) => match blocks.last() {
+                Some(Block::Text(text)) | Some(Block::Thought(text, _)) => text.len(),
+                _ => 0,
+            },
+            _ => 0,
+        };
+        let louder = (shown, thread.messages.len(), blocks, busy, growth);
+        let before = self.chat_marks.get();
+        let (follow, follow_soft) = if louder == before {
+            (self.chat_follow.get(), self.chat_follow_soft.get())
+        } else if (louder.0, louder.1) != (before.0, before.1) {
+            // Another thread, or a message came or went: the end is where to be.
+            self.chat_follow.set(self.chat_follow.get() + 1);
+            (self.chat_follow.get(), self.chat_follow_soft.get())
+        } else {
+            // Only the turn going on: whoever scrolled up to read stays there.
+            self.chat_follow_soft.set(self.chat_follow_soft.get() + 1);
+            (self.chat_follow.get(), self.chat_follow_soft.get())
+        };
+        self.chat_marks.set(louder);
+        let mut statuses = Vec::new();
+        if let Some(line) = self.children_status(thread.id) {
+            statuses.push(line);
+        }
+        if !thread.status.is_empty() {
+            statuses.push(thread.status.clone());
+        }
+        let picking = thread.picking.then(|| match &thread.sessions {
+            Some(sessions) if !thread.loading && !sessions.is_empty() => chat::Picking::Sessions(sessions.iter().map(|session| chat::Session {
+                id: session.id.clone(),
+                title: session.title.clone(),
+                when: session.updated.get(..16).unwrap_or_default().replace('T', " "),
+            }).collect()),
+            Some(_) if !thread.loading => chat::Picking::Note(format!("No sessions to resume in {}", self.project.root.display())),
+            _ => chat::Picking::Note(thread.status.clone()),
+        });
+        let grant = self.grants.get(&thread.id).copied().unwrap_or_default();
+        chat::Snapshot {
+            glass: cx.global::<Palette>().glass.is_some(),
+            title: thread.title(),
+            lead,
+            trail,
+            statuses,
+            blank: thread.blank,
+            busy,
+            steer: thread.client.as_ref().is_some_and(|client| client.queues()),
+            agents: self.agents.iter().map(|agent| (agent.name.clone(), agent.id.clone())).collect(),
+            chosen: thread.agent.clone().or_else(|| self.chosen_agent.clone()),
+            settings: Thread::ordered(thread.options.iter().collect()).into_iter().map(|option| chat::Setting {
+                id: option.id.clone(),
+                name: option.name.clone(),
+                current: option.current.clone(),
+                choices: option.choices.clone(),
+            }).collect(),
+            isolate: worktree::in_repo(&self.project.root).then(|| thread.isolate),
+            grant: Some(grant).map(|g| chat::Grant {
+                scope: match g.scope {
+                    command::Scope::Viewer => chat::Scope::Viewer,
+                    command::Scope::Orchestrate => chat::Scope::Orchestrate,
+                    command::Scope::Global => chat::Scope::Global,
+                },
+                read: g.read_project,
+                approvals: g.approvals,
+            }),
+            queue: thread.queue.iter().enumerate().map(|(at, queued)| chat::Queued {
+                at,
+                kind: match queued.kind {
+                    Some(Queue::Steer) => "Steer".into(),
+                    Some(Queue::Followup) => "Follow-up".into(),
+                    None => String::new(),
+                },
+                text: queued.out.text.clone(),
+                pictures: queued.out.images.len(),
+            }).collect(),
+            pictures: thread.attachments.iter().map(|a| chat::Picture { uri: a.data_uri() }).collect(),
+            note: thread.attach_note.clone(),
+            items: chat_items(&thread.messages),
+            picking,
+            draft: thread.draft.clone(),
+            draft_reset: self.chat_reset.get(),
+            focus: self.chat_focus.get(),
+            follow,
+            follow_soft,
+        }
+    }
+
+    /// Does what the user asked of on the conversation the NSH pane draws.
+    fn chat_cmd(&mut self, cmd: nsh::chat::Cmd, window: &mut Window, cx: &mut Context<Self>) {
+        use nsh::chat::{Cmd as Chat, GrantChange, Scope as ChatScope};
+        match cmd {
+            Chat::Draft(text) => self.thread.draft = text,
+            Chat::Send { later } => self.send(later, window, cx),
+            Chat::Stop => self.stop(cx),
+            Chat::Drop(uris) => self.attach(uris.iter().filter_map(|uri| file_of(uri)).map(|path| Source::Path(PathBuf::from(path))).collect(), cx),
+            Chat::Paste(pictures) => self.attach(pictures.into_iter().map(Source::Bytes).collect(), cx),
+            Chat::Detach(at) => {
+                if at < self.thread.attachments.len() {
+                    self.thread.attachments.remove(at);
+                }
+                cx.notify();
+            }
+            Chat::Recall(at) => self.recall(at, cx),
+            Chat::Answer { message, block, at } => self.answer(message, block, at, cx),
+            Chat::Approve { message, block, yes } => self.answer_approval(message, block, yes, window, cx),
+            Chat::ToggleTool { message, block } => self.toggle_tool(message, block, cx),
+            Chat::ToggleThought { message, block } => self.toggle_thought(message, block, cx),
+            Chat::Fold { message, block, folded } => self.fold_run(message, block, folded, cx),
+            Chat::Open(path) => self.reveal(&path, window, cx),
+            Chat::Resume(id) => self.resume_session(&id, window, cx),
+            Chat::History => self.resume_thread(window, cx),
+            Chat::PickAgent(id) => self.pick_agent(id, window, cx),
+            Chat::Setting { id, value } => self.choose_option(&id, &value, cx),
+            Chat::ClosePicker => {
+                self.thread.drop_agent();
+                cx.notify();
+            }
+            Chat::DismissNote => {
+                self.thread.attach_note = None;
+                cx.notify();
+            }
+            Chat::Isolate(isolate) => {
+                self.thread.isolate = isolate;
+                cx.notify();
+            }
+            Chat::Grant(change) => {
+                let id = self.thread.id;
+                let grant = self.grants.get(&id).copied().unwrap_or_default();
+                match change {
+                    GrantChange::Set(set) => {
+                        let scope = match set.scope {
+                            ChatScope::Viewer => command::Scope::Viewer,
+                            ChatScope::Orchestrate => command::Scope::Orchestrate,
+                            ChatScope::Global => command::Scope::Global,
+                        };
+                        self.set_grant(id, scope, set.read, set.approvals, cx);
+                    }
+                    GrantChange::Read => self.set_grant(id, grant.scope, !grant.read_project, grant.approvals, cx),
+                    GrantChange::Approvals => self.set_grant(id, grant.scope, grant.read_project, !grant.approvals, cx),
+                    GrantChange::Stop => self.stop_agent_control(id, cx),
+                }
+            }
+        }
+    }
+
+    /// Does what the user asked of a screen drawn by NSH.
+    fn run(&mut self, cmd: nsh::bus::Cmd, window: &mut Window, cx: &mut Context<Self>) {
+        use nsh::bus::Cmd;
+        match cmd {
+            Cmd::SideQuery(query) => {
+                self.side_query = query;
+                cx.notify();
+            }
+            Cmd::ToggleProject(pid) => {
+                let expanding = !self.projects_collapsed.insert(pid);
+                if expanding {
+                    self.projects_collapsed.remove(&pid);
+                }
+                // Folding is only a redraw; the project is switched to only when it opens another one.
+                if expanding && pid != self.project_id {
+                    self.show_project(pid, window, cx);
+                } else {
+                    self.request_save(cx);
+                    cx.notify();
+                }
+            }
+            Cmd::StartThread(pid) => self.start_thread_in(pid, window, cx),
+            Cmd::CloseProject(pid) => self.close_project(pid, window, cx),
+            Cmd::ToggleMore(pid) => {
+                if !self.threads_expanded.insert(pid) {
+                    self.threads_expanded.remove(&pid);
+                }
+                cx.notify();
+            }
+            Cmd::OpenThread(pid, tid) => self.open_thread(pid, tid, window, cx),
+            Cmd::CloseThread(pid, tid) => self.close_any_thread(pid, tid, window, cx),
+            Cmd::AddProject => self.pick_project(window, cx),
+            Cmd::NewThread => self.new_blank_thread(window, cx),
+            Cmd::OpenSettings => self.toggle_settings(window, cx),
+            Cmd::ToggleTodos => self.toggle_todos(window, cx),
+            Cmd::CloseTodos => self.hide_todos(window, cx),
+            Cmd::ToggleLeft => self.toggle_left(cx),
+            Cmd::ToggleRight => self.toggle_right(cx),
+            Cmd::ToggleFocus => self.toggle_focus(cx),
+            Cmd::Browse(browse) => self.set_browsing(browse, cx),
+            Cmd::ToggleRendered => self.toggle_rendered(cx),
+            Cmd::SetSplit(split) => self.set_split(split, cx),
+            Cmd::ShowHome => {
+                self.thread.shown = None;
+                cx.notify();
+            }
+            Cmd::ShowView(id) => self.show_agent_view(&id, cx),
+            Cmd::CloseView(id) => self.close_agent_view(&id, cx),
+            Cmd::SetMode(diff) => self.set_mode(if diff { Mode::Diff } else { Mode::Source }, cx),
+            Cmd::TreeClick(id) => {
+                let tree = if self.mode == Mode::Diff { &mut self.project.changes_tree } else { &mut self.project.files_tree };
+                tree.click(&id);
+                self.open_selected(true, window, cx);
+                cx.notify();
+            }
+            Cmd::TreeStep(step) => {
+                let tree = if self.mode == Mode::Diff { &mut self.project.changes_tree } else { &mut self.project.files_tree };
+                tree.step(step);
+                // Moving the selection with the keyboard opens the file too, like a click.
+                self.open_selected(true, window, cx);
+                cx.notify();
+            }
+            Cmd::OpenUrl(url) => cx.open_url(&url),
+            Cmd::FinderQuery(query) => {
+                if query != self.finder_query {
+                    self.finder_query = query;
+                    self.refind();
+                }
+            }
+            Cmd::FinderPick(path) => self.accept_path(&path, window, cx),
+            Cmd::CloseFinder => self.hide_finder(window, cx),
+            Cmd::CloseSettings => self.hide_settings(window, cx),
+            Cmd::SettingsSaved => self.apply_settings(cx),
+            Cmd::Answer(id, yes) => self.answer_suggestion(id, yes, window, cx),
+            Cmd::SubmitForm(id, values) => self.form_submitted(&id, values, cx),
+            Cmd::OpenPr(spec) => self.open_pr(&spec, window, cx),
+            Cmd::ClosePr => self.close_pr(window, cx),
+            Cmd::MergeWorktree => self.finish_worktree(true, window, cx),
+            Cmd::DiscardWorktree => self.finish_worktree(false, window, cx),
+            Cmd::Chat(chat) => self.chat_cmd(chat, window, cx),
+        }
+    }
+
+    /// Whether thread `thread` of project `pid` waits on the user, which takes it out of its
+    /// project and into NEEDS YOU, so a folded project can't hide it. The one on screen is
+    /// already in view, so it stays where it is.
+    fn waits_on_user(&self, pid: u64, thread: &Thread) -> bool {
+        let parent_hears = thread.parent.is_some() && thread.notify != Notify::Never;
+        (pid, thread.id) != (self.project_id, self.thread.id) && thread.activity().needs_you(parent_hears)
     }
 
     /// The file tree is drawn beside the viewer: the pane is wide enough for both.
@@ -5897,49 +5491,51 @@ impl Reader {
 
     /// The viewer or the diff viewer, as the project's mode says, with the file tree beside it
     /// unless that is hidden or the agent's own view is shown, which has no files to pick.
-    fn pane(&self, lead: Option<AnyElement>, trail: Option<AnyElement>, cx: &mut Context<Self>) -> AnyElement {
-        let tabs = self.view_tabs(cx);
+    fn pane(&self, cx: &mut Context<Self>) -> AnyElement {
+        let tabs = self.view_tabs();
         let has_tabs = tabs.is_some();
-        let shown = self.thread.shown.as_deref().and_then(|id| {
-            let view = self.thread.views.list().iter().find(|view| view.id == id)?;
-            Some((view, self.thread.docs.get(id)?))
-        });
-        let with_tree = shown.is_none() && self.tree_visible();
+        let shown_form = self.thread.shown.as_deref().and_then(|id| self.thread.forms.get(id));
+        let shown = self
+            .thread
+            .shown
+            .as_deref()
+            .and_then(|id| self.thread.views.list().iter().find(|view| view.id == id));
+        let showing_agent = shown.is_some() || shown_form.is_some();
+        let with_tree = !showing_agent && self.tree_visible();
         // The window's own control goes in the leftmost header: the tree's, or the viewer's.
         // A pane too narrow for the tree beside the file takes turns: the explorer fills it until a
         // file is picked, then the file does, with a button back to the explorer.
-        let stacked = shown.is_none() && self.viewer_narrow.get();
+        let stacked = !showing_agent && self.viewer_narrow.get();
         let nothing_picked = if self.mode == Mode::Diff { self.project.picked.is_none() } else { self.project.current.is_none() };
         let explorer_only = stacked && (self.browse || nothing_picked);
-        let (mut tree_lead, body_lead) = if with_tree || explorer_only {
-            (lead, None)
-        } else if stacked {
-            let back = cx.entity();
-            let button = Button::new("show-explorer")
-                .icon(IconName::FolderTree)
-                .ghost()
-                .small()
-                .tooltip("Back to the explorer")
-                .on_click(move |_, _, cx| back.update(cx, |reader, cx| reader.set_browsing(true, cx)))
-                .into_any_element();
-            (None, Some(div().flex().items_center().gap_1().children(lead).child(button).into_any_element()))
-        } else {
-            (None, lead)
-        };
-        let body = match (shown, self.mode) {
+        // A pane wide enough shows the explorer beside what it shows, with the lead controls in
+        // the file's header; stacked, the file's alone gets them, with a way back to the explorer
+        // tacked on.
+        // The same split of the window's controls, as descriptors, for a body NSH draws.
+        let (lead_controls, trail_controls) = self.pane_controls.borrow().clone();
+        let tree_lead = if with_tree || explorer_only { lead_controls.clone() } else { vec![] };
+        let body_controls = |lead: Vec<nsh::header::Control>| if with_tree || explorer_only { (vec![], trail_controls.clone()) } else if stacked { ([lead, vec![nsh::header::Control::Explorer]].concat(), trail_controls.clone()) } else { (lead, trail_controls.clone()) };
+        let body = match (shown, shown_form, self.mode) {
             _ if explorer_only => {
                 let background = cx.global::<Palette>().background;
-                div().size_full().when(!has_tabs, |d| d.bg(background)).child(self.explorer(tree_lead.take(), trail, cx)).into_any_element()
+                div().size_full().when(!has_tabs, |d| d.bg(background)).child(self.explorer(tree_lead.clone(), trail_controls.clone(), cx)).into_any_element()
             }
-            (Some((view, doc)), _) => self.agent_view(&view.title, doc, body_lead, trail, cx).into_any_element(),
-            (None, Mode::Source) => self.viewer(body_lead, trail, cx).into_any_element(),
-            (None, Mode::Diff) => self.diff_viewer(body_lead, trail, cx).into_any_element(),
+            (Some(view), _, _) => self.agent_view(view, body_controls(lead_controls), cx).into_any_element(),
+            (_, Some(form), _) => self.form_view(form, body_controls(lead_controls), cx).into_any_element(),
+            (None, None, Mode::Source) => {
+                let (lead, trail) = body_controls(lead_controls);
+                self.viewer(lead, trail, cx).into_any_element()
+            }
+            (None, None, Mode::Diff) => {
+                let (lead, trail) = body_controls(lead_controls);
+                self.diff_viewer(lead, trail, cx).into_any_element()
+            }
         };
         let background = cx.global::<Palette>().background;
         let body = if with_tree {
             // The viewers paint their own background; the column paints its own too, unless the
             // pane does for both, which would lay a second translucent layer under glass.
-            let column = div().size_full().when(!has_tabs, |d| d.bg(background)).child(self.explorer(tree_lead, None, cx));
+            let column = div().size_full().when(!has_tabs, |d| d.bg(background)).child(self.explorer(tree_lead, vec![], cx));
             sidebars(&self.tree_cols).id("tree").left(true, TREE_RANGE, column).center(div().size_full().child(body)).into_any_element()
         } else {
             body
@@ -5961,362 +5557,150 @@ impl Reader {
         floating(div().size_full().flex().flex_col().relative().when(has_tabs, |d| d.bg(background)).child(measure).children(tabs).child(div().flex_1().min_h_0().child(body)), cx)
     }
 
-    /// A view the agent made, as a markdown document.
-    fn agent_view(&self, title: &str, doc: &Doc, lead: Option<AnyElement>, trail: Option<AnyElement>, cx: &mut Context<Self>) -> impl IntoElement + Styled + use<> {
-        let background = cx.global::<Palette>().background;
-        div()
-            .size_full()
-            .flex()
-            .flex_col()
-            .bg(background)
-            .child(pane_header(title, status_text("from the agent".into(), cx), lead, trail, cx))
-            .child(div().flex_1().min_h_0().child(self.markdown_view(doc, cx)))
+    /// A view the agent made, as a markdown document; the pane NSH draws from what is published.
+    fn agent_view(&self, view: &command::AgentView, (lead, trail): (Vec<nsh::header::Control>, Vec<nsh::header::Control>), cx: &mut Context<Self>) -> impl IntoElement + Styled + use<> {
+        nsh::agent::publish(nsh::agent::Snapshot {
+            glass: cx.global::<Palette>().glass.is_some(),
+            title: view.title.clone(),
+            lead,
+            trail,
+            body: nsh::agent::Body::Markdown(nsh::source::Shared(Arc::from(view.body.as_str()))),
+        });
+        div().size_full().child(self.agent_pane.clone())
+    }
+
+    /// A form the agent put on screen: what it is for, then the fields the user answers, drawn
+    /// and answered by NSH.
+    fn form_view(&self, form: &command::AgentForm, (lead, trail): (Vec<nsh::header::Control>, Vec<nsh::header::Control>), cx: &mut Context<Self>) -> impl IntoElement + Styled + use<> {
+        let fields = form
+            .fields
+            .iter()
+            .map(|field| nsh::agent::Field {
+                name: field.name.clone(),
+                label: field.label.clone(),
+                options: field.options.clone(),
+                value: field.value.clone(),
+            })
+            .collect();
+        nsh::agent::publish(nsh::agent::Snapshot {
+            glass: cx.global::<Palette>().glass.is_some(),
+            title: form.title.clone(),
+            lead,
+            trail,
+            body: nsh::agent::Body::Form {
+                id: form.id.clone(),
+                fields,
+                submit: form.submit.clone(),
+                answered: form.answered.is_some(),
+                doc: form.body.as_deref().map(|body| nsh::source::Shared(Arc::from(body))),
+            },
+        });
+        div().size_full().child(self.agent_pane.clone())
     }
 
     /// Files (or changes) and the agent's views as tabs, with a prompt for one it added while
     /// the user was busy. None while the agent has made no views.
-    fn view_tabs(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        if self.thread.views.is_empty() {
+    fn view_tabs(&self) -> Option<AnyElement> {
+        if self.thread.views.is_empty() && self.thread.forms.is_empty() {
             return None;
         }
-        let colors = cx.global::<Palette>();
-        let border = colors.border;
-        let this = cx.entity();
-        let shown = self.thread.shown.as_deref();
-        let home = {
-            let this = this.clone();
-            Button::new("tab-files")
-                .label(if self.mode == Mode::Diff { "Changes" } else { "Files" })
-                .ghost()
-                .small()
-                .selected(shown.is_none())
-                .on_click(move |_, _, cx| this.update(cx, |reader, cx| {
-                    reader.thread.shown = None;
-                    cx.notify();
-                }))
+        use nsh::tabs::{Snapshot, Tab};
+        let titled = |id: &String| {
+            self.thread
+                .views
+                .list()
+                .iter()
+                .find(|view| view.id == *id)
+                .map(|view| Tab { id: view.id.clone(), title: view.title.clone() })
+                .or_else(|| self.thread.forms.list().iter().find(|form| form.id == *id).map(|form| Tab { id: form.id.clone(), title: form.title.clone() }))
         };
-        let tabs = self.thread.views.list().iter().map(|view| {
-            let (open, close, id) = (this.clone(), this.clone(), view.id.clone());
-            let closing = id.clone();
-            div()
-                .flex()
-                .items_center()
-                .child(
-                    Button::new(SharedString::from(format!("tab-{}", view.id)))
-                        .label(view.title.clone())
-                        .ghost()
-                        .small()
-                        .selected(shown == Some(view.id.as_str()))
-                        .on_click(move |_, _, cx| open.update(cx, |reader, cx| reader.show_agent_view(&id, cx))),
-                )
-                .child(
-                    Button::new(SharedString::from(format!("close-{}", view.id)))
-                        .icon(IconName::Close)
-                        .ghost()
-                        .xsmall()
-                        .tooltip("Close this view")
-                        .on_click(move |_, _, cx| close.update(cx, |reader, cx| reader.close_agent_view(&closing, cx))),
-                )
+        nsh::tabs::publish(Snapshot {
+            home: if self.mode == Mode::Diff { "Changes" } else { "Files" }.into(),
+            shown: self.thread.shown.clone(),
+            tabs: self
+                .thread
+                .views
+                .list()
+                .iter()
+                .map(|view| Tab { id: view.id.clone(), title: view.title.clone() })
+                .chain(self.thread.forms.list().iter().map(|form| Tab { id: form.id.clone(), title: form.title.clone() }))
+                .collect(),
+            offer: self.thread.offered.as_ref().and_then(titled),
         });
-        let offer = self.thread.offered.as_ref().and_then(|id| {
-            let view = self.thread.views.list().iter().find(|view| view.id == *id)?;
-            let (this, id) = (this.clone(), id.clone());
-            Some(
-                Button::new("offered-view")
-                    .label(format!("The agent wants to show “{}”", view.title))
-                    .primary()
-                    .small()
-                    .on_click(move |_, _, cx| this.update(cx, |reader, cx| reader.show_agent_view(&id, cx))),
-            )
-        });
-        Some(
-            div()
-                .flex_none()
-                .flex()
-                .items_center()
-                .gap_1()
-                .px_2()
-                .py_1()
-                .border_b_1()
-                .border_color(border)
-                .child(home)
-                .children(tabs)
-                .children(offer)
-                .into_any_element(),
-        )
+        Some(div().flex_none().h(TABS_HEIGHT).child(self.tabs.clone()).into_any_element())
     }
 
     fn close_agent_view(&mut self, id: &str, cx: &mut Context<Self>) {
-        self.thread.views.apply(command::Command::ViewClose { id: id.to_string() }).ok();
+        if self.thread.forms.remove(id) {
+            let owner = self.thread.id;
+            self.drop_form(owner, id);
+        } else {
+            self.thread.views.apply(command::Command::ViewClose { id: id.to_string() }).ok();
+        }
         self.sync_view_docs(cx);
         cx.notify();
     }
 
-    fn diff_viewer(&self, lead: Option<AnyElement>, trail: Option<AnyElement>, cx: &mut Context<Self>) -> impl IntoElement + Styled + use<> {
-        let colors = cx.global::<Palette>();
-        let Some(path) = self.project.picked.clone() else {
-            return div()
-                .size_full()
-                .flex()
-                .flex_col()
-                .bg(colors.background)
-                .child(pane_header("Changes", status_text(String::new(), cx), lead, trail, cx))
-                .child(div().flex_1().min_h_0().child(centered(self.pick_hint("a changed file"), cx)));
-        };
-        let (rows, pairs, syntax) = (self.project.rows.clone(), self.project.pairs.clone(), self.project.colors.clone());
-        let palettes = syntax.palettes(cx);
-        let (added, removed) = self.project.counts;
-        let (success, danger, muted, border) =
-            (colors.added, colors.danger, colors.muted_foreground, colors.border);
-        let font = cx.global::<Palette>().mono_font_family.clone();
-        let split = self.split;
-        // Only the rows in view are built, so a long diff costs no more than a short one.
-        let body: AnyElement = if rows.is_empty() && self.project.diffing.is_some() {
-            div().into_any_element()
-        } else if rows.is_empty() {
-            centered("No textual changes".into(), cx)
-        } else {
-            let code = |text: &str, styles: Vec<(std::ops::Range<usize>, gpui::HighlightStyle)>| {
-                StyledText::new(SharedString::from(text.to_string())).with_highlights(styles)
-            };
-            list(self.project.diff_list.clone(), move |ix, _, _| {
-                let line = div().flex().w_full().min_h(rems(1.5)).items_start().font_family(font.clone()).text_sm();
-                if split {
-                    let cell = |cell: &Option<diff::Cell>, first: bool| {
-                        let half = div().flex_1().min_w_0().self_stretch().flex().items_start().gap_2();
-                        let half = if first { half.border_r_1().border_color(border) } else { half };
-                        let Some(cell) = cell else { return half.bg(muted.opacity(theme::tokens::TINT_FAINT)) };
-                        let tint = match cell.kind {
-                            Kind::Added => Some(success.opacity(theme::tokens::TINT)),
-                            Kind::Removed => Some(danger.opacity(theme::tokens::TINT)),
-                            _ => None,
-                        };
-                        let half = match tint {
-                            Some(tint) => half.bg(tint),
-                            None => half,
-                        };
-                        let styles = syntax.line(first, cell.number, &cell.text, &palettes);
-                        half.child(div().w(rems(3.)).flex_none().text_right().text_color(muted).child(cell.number.to_string()))
-                            .child(div().flex_1().min_w_0().child(code(&cell.text, styles)))
-                    };
-                    return match &pairs[ix] {
-                        Pair::Hunk(text) => line.px_2().bg(muted.opacity(theme::tokens::TINT_SUBTLE)).text_color(muted).child(text.clone()),
-                        Pair::Line(old, new) => line.child(cell(old, true)).child(cell(new, false)),
-                    }
-                    .into_any_element();
-                }
-                let row = &rows[ix];
-                let number = |n: Option<u32>| {
-                    div().w(rems(3.)).flex_none().text_right().text_color(muted).child(n.map_or(String::new(), |n| n.to_string()))
-                };
-                let (tint, sign) = match row.kind {
-                    Kind::Added => (Some(success.opacity(theme::tokens::TINT)), "+"),
-                    Kind::Removed => (Some(danger.opacity(theme::tokens::TINT)), "-"),
-                    Kind::Hunk => (Some(muted.opacity(theme::tokens::TINT_SUBTLE)), ""),
-                    Kind::Context => (None, " "),
-                };
-                let line = line.gap_2();
-                let line = match tint {
-                    Some(tint) => line.bg(tint),
-                    None => line,
-                };
-                if row.kind == Kind::Hunk {
-                    return line.px_2().text_color(muted).child(row.text.clone()).into_any_element();
-                }
-                // Removed lines read as the old version had them, the rest as the new one does.
-                let styles = match (row.kind, row.old, row.new) {
-                    (Kind::Removed, Some(n), _) => syntax.line(true, n, &row.text, &palettes),
-                    (_, _, Some(n)) => syntax.line(false, n, &row.text, &palettes),
-                    _ => vec![],
-                };
-                line.child(number(row.old))
-                    .child(number(row.new))
-                    .child(div().w(rems(0.75)).flex_none().text_color(muted).child(sign))
-                    .child(div().flex_1().min_w_0().child(code(&row.text, styles)))
-                    .into_any_element()
-            })
-            .size_full()
-            .into_any_element()
-        };
-        let right = div()
-            .flex()
-            .gap_2()
-            .text_xs()
-            .child(div().text_color(success).child(format!("+{added}")))
-            .child(div().text_color(danger).child(format!("-{removed}")));
-        let (inline_view, split_view) = (cx.entity(), cx.entity());
-        let right = div()
-            .flex()
-            .items_center()
-            .gap_3()
-            .child(right)
-            .child(
-                div()
-                    .flex()
-                    .child(
-                        Button::new("view-inline")
-                            .label("Inline")
-                            .tooltip("Toggle inline/split (Ctrl+\\)")
-                            .ghost()
-                            .xsmall()
-                            .selected(!self.split)
-                            .on_click(move |_, _, cx| inline_view.update(cx, |reader, cx| reader.set_split(false, cx))),
-                    )
-                    .child(
-                        Button::new("view-split")
-                            .label("Split")
-                            .tooltip("Toggle inline/split (Ctrl+\\)")
-                            .ghost()
-                            .xsmall()
-                            .selected(self.split)
-                            .on_click(move |_, _, cx| split_view.update(cx, |reader, cx| reader.set_split(true, cx))),
-                    ),
-            );
-        div()
-            .size_full()
-            .flex()
-            .flex_col()
-            .bg(colors.background)
-            .child(pane_header(&path, right, lead, trail, cx))
-            .child(div().flex_1().min_h_0().border_color(border).child(body))
+    /// The user answered form `id`: keep the answers for waits that start later, and wake
+    /// whoever waits on it.
+    fn form_submitted(&mut self, id: &str, values: Value, cx: &mut Context<Self>) {
+        let reply = serde_json::json!({ "form": id, "values": values });
+        let owner = self.thread.id;
+        self.thread.forms.answered(id, reply.clone());
+        self.wake_form(owner, id, reply);
+        cx.notify();
     }
 
-    fn viewer(&self, lead: Option<AnyElement>, trail: Option<AnyElement>, cx: &mut Context<Self>) -> impl IntoElement + Styled + use<> {
-        let background = cx.global::<Palette>().background;
-        let title = self.project.current.clone().unwrap_or_else(|| "No file open".into());
-        let doc = self.project.doc.as_ref().filter(|_| self.rendered);
-        let body: AnyElement = match (&self.project.code, &self.project.notice) {
-            (_, Some(notice)) => centered(notice.clone(), cx),
-            (_, None) if let Some(doc) = doc => self.markdown_view(doc, cx),
-            // Cached: the viewer redraws when it changes, not with every agent update or caret blink elsewhere.
-            (Some(code), None) => code.clone().cached(StyleRefinement::default().size_full()).into_any_element(),
-            (None, None) => centered(self.pick_hint("a file"), cx),
+    /// The picked file's changes, drawn by NSH from what [`Self::diff_snapshot`] publishes.
+    fn diff_viewer(&self, lead: Vec<nsh::header::Control>, trail: Vec<nsh::header::Control>, cx: &mut Context<Self>) -> impl IntoElement + Styled + use<> {
+        nsh::diff::publish(self.diff_snapshot(lead, trail, cx));
+        div().size_full().child(self.diff.clone())
+    }
+
+    fn diff_snapshot(&self, lead: Vec<nsh::header::Control>, trail: Vec<nsh::header::Control>, cx: &App) -> nsh::diff::Snapshot {
+        use nsh::diff::{Body, Snapshot};
+        let project = &self.project;
+        let (title, body) = match (&project.picked, &project.versions) {
+            (None, _) => ("Changes".to_string(), Body::Hint(self.pick_hint("a changed file"))),
+            (Some(path), _) if project.rows.is_empty() && project.diffing.is_some() => (path.clone(), Body::Loading),
+            (Some(path), None) => (path.clone(), Body::NoChanges),
+            (Some(path), Some((old, new))) => (path.clone(), Body::Versions { path: path.clone(), old: old.clone(), new: new.clone() }),
         };
-        div()
-            .size_full()
-            .flex()
-            .flex_col()
-            .bg(background)
-            .child(pane_header(
-                &title,
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .child(status_text(self.project.current.as_deref().map(language).unwrap_or("").to_string(), cx))
-                    .children(self.project.doc.as_ref().map(|_| {
-                        let this = cx.entity();
-                        Button::new("toggle-rendered")
-                            .label(if self.rendered { "Source" } else { "Preview" })
-                            .tooltip(if self.rendered { "Show the markdown source (Ctrl+Shift+M)" } else { "Show the rendered markdown (Ctrl+Shift+M)" })
-                            .ghost()
-                            .small()
-                            .on_click(move |_, _, cx| this.update(cx, |reader, cx| reader.toggle_rendered(cx)))
-                    })),
-                lead,
-                trail,
-                cx,
-            ))
-            .child(div().flex_1().min_h_0().child(body))
+        Snapshot { glass: cx.global::<Palette>().glass.is_some(), title, lead, trail, split: self.split, counts: project.counts, body }
+    }
+
+    /// The open file in the viewer, drawn by NSH from what [`Self::source_snapshot`] publishes.
+    fn viewer(&self, lead: Vec<nsh::header::Control>, trail: Vec<nsh::header::Control>, cx: &mut Context<Self>) -> impl IntoElement + Styled + use<> {
+        nsh::source::publish(self.source_snapshot(lead, trail, cx));
+        div().size_full().child(self.source.clone())
+    }
+
+    fn source_snapshot(&self, lead: Vec<nsh::header::Control>, trail: Vec<nsh::header::Control>, cx: &App) -> nsh::source::Snapshot {
+        use nsh::source::{Body, Snapshot};
+        let current = self.project.current.as_deref();
+        let markdown = self.project.is_markdown;
+        let rendered = markdown && self.rendered;
+        let body = match (&self.project.code, &self.project.notice) {
+            (_, Some(notice)) => Body::Notice(notice.clone()),
+            (Some(code), None) if rendered => Body::Markdown(code.clone()),
+            (Some(code), None) => Body::Code { path: current.unwrap_or_default().to_string(), text: code.clone() },
+            (None, None) => Body::Hint(self.pick_hint("a file")),
+        };
+        Snapshot {
+            glass: cx.global::<Palette>().glass.is_some(),
+            title: current.map_or_else(|| "No file open".to_string(), str::to_string),
+            lead,
+            trail,
+            language: current.map(language).unwrap_or("").to_string(),
+            preview: markdown.then_some(self.rendered),
+            body,
+            reveal: self.reveal,
+        }
     }
 
     fn toggle_rendered(&mut self, cx: &mut Context<Self>) {
         self.rendered = !self.rendered;
         cx.notify();
-    }
-
-    /// A markdown file rendered, scrolling a piece at a time like the thread.
-    fn markdown_view(&self, doc: &Doc, cx: &mut Context<Self>) -> AnyElement {
-        doc.selection.update(cx, |s, _| s.begin_frame());
-        let (chunks, selection, focus) = (doc.chunks.clone(), doc.selection.clone(), doc.focus.clone());
-        // No background of its own: the viewer around it paints one.
-        div()
-            .id("markdown-file")
-            .key_context("Markdown")
-            .track_focus(&focus)
-            .size_full()
-            .on_action(cx.listener({
-                let (chunks, selection) = (chunks.clone(), selection.clone());
-                move |_, _: &ui::markdown::Copy, _, cx| {
-                    // Select All takes the pieces scrolled out of view too, which aren't laid out.
-                    let text = if selection.read(cx).is_all() {
-                        ui::markdown::all_text(chunks.iter().map(String::as_str))
-                    } else {
-                        selection.read(cx).selected_text()
-                    };
-                    if text.is_empty() {
-                        return cx.propagate();
-                    }
-                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
-                }
-            }))
-            .on_action(cx.listener({
-                let selection = selection.clone();
-                move |_, _: &ui::markdown::SelectAll, _, cx| {
-                    selection.update(cx, |s, _| s.select_all());
-                    cx.notify();
-                }
-            }))
-            .on_mouse_down(gpui::MouseButton::Left, cx.listener({
-                let (selection, focus) = (selection.clone(), focus.clone());
-                move |_, event: &gpui::MouseDownEvent, window, cx| {
-                    focus.focus(window, cx);
-                    selection.update(cx, |s, _| s.mouse_down(event.position, event.click_count));
-                    cx.notify();
-                }
-            }))
-            .on_mouse_move(cx.listener({
-                let selection = selection.clone();
-                move |_, event: &gpui::MouseMoveEvent, _, cx| {
-                    if event.pressed_button == Some(gpui::MouseButton::Left) && selection.read(cx).selecting {
-                        selection.update(cx, |s, _| s.drag(event.position));
-                        cx.notify();
-                    }
-                }
-            }))
-            .on_mouse_up(gpui::MouseButton::Left, cx.listener({
-                let selection = selection.clone();
-                move |_, event: &gpui::MouseUpEvent, _, cx| {
-                    if let Some(url) = selection.update(cx, |s, _| s.mouse_up(event.position)) {
-                        cx.open_url(&url);
-                    }
-                    cx.notify();
-                }
-            }))
-            .on_mouse_up_out(gpui::MouseButton::Left, cx.listener({
-                let selection = selection.clone();
-                move |_, event: &gpui::MouseUpEvent, _, cx| {
-                    selection.update(cx, |s, _| {
-                        s.mouse_up(event.position);
-                    });
-                }
-            }))
-            .child(
-                list(
-                    doc.list.clone(),
-                    cx.processor(move |_, ix: usize, window, cx| {
-                        let Some(chunk) = chunks.get(ix) else { return div().into_any_element() };
-                        // A readable column rather than the pane's whole width.
-                        div()
-                            .w_full()
-                            .flex()
-                            .justify_center()
-                            .px_6()
-                            .when(ix == 0, |this| this.pt_5())
-                            .when(ix + 1 == chunks.len(), |this| this.pb_5())
-                            .child(
-                                div()
-                                    .w_full()
-                                    .max_w(px(820.))
-                                    .pb(rems(1.))
-                                    .child(ui::markdown::markdown(("file", ix), chunk, &selection, window, cx)),
-                            )
-                            .into_any_element()
-                    }),
-                )
-                .size_full(),
-            )
-            .into_any_element()
     }
 
     /// Sets what thread `id`'s agent may do through Po's API. Held in memory only, so it is
@@ -6354,71 +5738,6 @@ impl Reader {
         self.background_threads().for_each(quiet);
     }
 
-    /// The Control menu for thread `id`, next to the model in the settings row: its scopes,
-    /// the two separate opt-ins, and the way out. The items are built when the menu opens,
-    /// from what the grant was at the last render.
-    /// `place` names where it is drawn: the composer and the header each have one for the same
-    /// thread, and two with one id would share their menu's state and anchor.
-    fn control_dropdown(&self, id: u64, place: &'static str, this: Entity<Self>) -> AnyElement {
-        let grant = self.grants.get(&id).copied().unwrap_or_default();
-        let label = match grant.scope {
-            command::Scope::Viewer if !grant.read_project && !grant.approvals => "Control".to_string(),
-            command::Scope::Viewer => "Control · reads".to_string(),
-            command::Scope::Orchestrate => "Control · orchestrate".to_string(),
-            command::Scope::Global => "Control · global".to_string(),
-        };
-        let control = grant != command::Grant::default();
-        dropdown(
-            (place, id as usize),
-            Button::new((place, id as usize))
-                .label(label)
-                .tooltip("What this thread's agent may do through Po")
-                .ghost()
-                .small()
-                .dropdown_caret(true)
-                .when(control, |button| button.selected(true)),
-            move || {
-                let (this, id) = (this.clone(), id);
-                let set = |label: String, scope: command::Scope, read: bool, approvals: bool| {
-                    let (this, id) = (this.clone(), id);
-                    MenuItem::new(label, move |_, cx| this.update(cx, |reader, cx| reader.set_grant(id, scope, read, approvals, cx)))
-                };
-                let checked = |label: &str, on: bool| if on { format!("{CHECKED}{label}") } else { label.to_string() };
-                let mut items = vec![
-                    set(checked("Viewer", grant.scope == command::Scope::Viewer), command::Scope::Viewer, grant.read_project, grant.approvals),
-                    set(checked("Orchestrate", grant.scope == command::Scope::Orchestrate), command::Scope::Orchestrate, grant.read_project, grant.approvals),
-                    set(checked("Global", grant.scope == command::Scope::Global), command::Scope::Global, grant.read_project, grant.approvals),
-                    MenuItem::separator(),
-                ];
-                let read = {
-                    let (this, id) = (this.clone(), id);
-                    let on = grant.read_project;
-                    MenuItem::new(checked("May read other threads here", on), move |_, cx| {
-                        this.update(cx, |reader, cx| reader.set_grant(id, grant.scope, !on, grant.approvals, cx))
-                    })
-                };
-                items.push(read);
-                if grant.scope >= command::Scope::Orchestrate {
-                    let approvals = {
-                        let (this, id) = (this.clone(), id);
-                        let on = grant.approvals;
-                        MenuItem::new(checked("May answer its threads' permission asks", on), move |_, cx| {
-                            this.update(cx, |reader, cx| reader.set_grant(id, grant.scope, grant.read_project, !on, cx))
-                        })
-                    };
-                    items.push(approvals);
-                }
-                items.push(MenuItem::separator());
-                items.push(MenuItem::disabled("A raise takes effect when the agent restarts"));
-                if control {
-                    let (this, id) = (this.clone(), id);
-                    items.push(MenuItem::new("Stop agent control", move |_, cx| this.update(cx, |reader, cx| reader.stop_agent_control(id, cx))));
-                }
-                items
-            },
-        )
-        .into_any_element()
-    }
 
     /// What a thread is called in the lists: a child shows under the thread that started it.
     fn thread_label(&self, thread: &Thread) -> String {
@@ -6426,38 +5745,6 @@ impl Reader {
             Some(parent) => format!("↳ {parent}"),
             None => thread.title(),
         }
-    }
-
-    /// The sidebar's filter, a row like the ones around it: a click anywhere on it starts typing, and
-    /// a cross clears it.
-    fn search_row(&self, window: &Window, cx: &App) -> impl IntoElement {
-        let colors = cx.global::<Palette>();
-        let (hover, muted, radius) = (colors.list_hover, colors.muted_foreground, colors.radius);
-        let input = self.side_search.clone();
-        let filled = !self.side_search.read(cx).value().is_empty();
-        // A plain row like New until it is in use: typed into, or holding a filter.
-        let in_use = filled || self.side_search.read(cx).is_focused(window);
-        let clear = filled.then(|| {
-            let input = input.clone();
-            Button::new("sidebar-search-clear")
-                .icon(IconName::Close)
-                .ghost()
-                .xsmall()
-                .tooltip("Clear search")
-                .on_click(move |_, window, cx| input.update(cx, |input, cx| input.set_value("", window, cx)))
-        });
-        let focus = input.clone();
-        side_row(radius, Some(side_icon(IconName::Search, muted)))
-            .id("sidebar-search")
-            .h(SIDE_ROW_HEIGHT)
-            .cursor_text()
-            .text_base()
-            .text_color(muted)
-            .when(in_use, |row| row.bg(colors.input_background))
-            .when(!in_use, |row| row.hover(move |this| this.bg(hover)))
-            .on_click(move |_, window, cx| focus.update(cx, |input, cx| input.focus(window, cx)))
-            .child(div().flex_1().min_w_0().child(Input::new(&input).large()))
-            .children(clear)
     }
 
     /// What the parent of children says in its header: `3 threads · 1 asking · 1 failed`.
@@ -6478,450 +5765,17 @@ impl Reader {
         }
         Some(line)
     }
-
-    /// A menu for each of the thread's session settings: the model first, then the agent's
-    /// others in the order it gave them.
-    fn setting_menus(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {        let this = cx.entity();
-        let (busy, id) = (self.thread.busy, self.thread.id);
-        Thread::ordered(self.thread.options.iter().collect())
-            .into_iter()
-            .map(|option| {
-                let key = SharedString::from(format!("option-{id}-{}", option.id));
-                let (this, setting) = (this.clone(), option.clone());
-                let button = Button::new(key.clone()).label(option.current_name().to_string()).ghost().small().dropdown_caret(true);
-                if busy {
-                    // Agents differ on changing settings mid-turn, so it waits for the turn to end.
-                    return button.tooltip(format!("{}: available when the agent is idle", option.name)).into_any_element();
-                }
-                dropdown(key, button.tooltip(option.name.clone()), move || {
-                    setting
-                        .choices
-                        .iter()
-                        .map(|(value, name)| {
-                            let (this, setting_id, value) = (this.clone(), setting.id.clone(), value.clone());
-                            let label = if *value == setting.current { format!("{}{name}", CHECKED) } else { name.clone() };
-                            MenuItem::new(label, move |_, cx| this.update(cx, |reader, _| reader.choose_option(&setting_id, &value)))
-                        })
-                        .collect()
-                })
-                .into_any_element()
-            })
-            .collect()
-    }
-
-    fn agent_panel(&self, lead: Option<AnyElement>, trail: Option<AnyElement>, cx: &mut Context<Self>) -> impl IntoElement + Styled + use<> {
-        let this = cx.entity();
-        // For the Control menu, whose handle outlives the list's closure taking `this`.
-        let control = this.clone();
-        self.thread.selection.update(cx, |s, _| s.begin_frame());
-        // Only the messages in view are built and laid out, however long the thread gets.
-        let selection = self.thread.selection.clone();
-        let thread: AnyElement = if self.thread.blank && self.thread.messages.is_empty() {
-            centered("Pick an agent and its settings below, then send a message to start a thread".into(), cx)
-        } else if self.thread.picking && self.thread.messages.is_empty() {
-            match &self.thread.sessions {
-                Some(sessions) if !self.thread.loading && !sessions.is_empty() => session_picker(sessions, &this, cx),
-                Some(sessions) if !self.thread.loading => centered(format!("No sessions to resume in {}", self.project.root.display()), cx),
-                _ => centered(self.thread.status.clone(), cx),
-            }
-        } else {
-            list(
-                self.thread.list.clone(),
-                cx.processor(move |reader: &mut Self, ix: usize, window, cx| {
-                    let Some(msg) = reader.thread.messages.get(ix) else { return div().into_any_element() };
-                    let last = ix + 1 == reader.thread.messages.len();
-                    // Boxes share the composer box's edges (the column's own padding); the text
-                    // inside them is inset to the composer's text edge (see `text_inset`).
-                    div()
-                        .pt_6()
-                        .when(last, |this| this.pb_6())
-                        .child(render_msg(ix, msg, last, &this, &selection, window, cx))
-                        .into_any_element()
-                }),
-            )
-            .size_full()
-            .into_any_element()
-        };
-        // The session's settings, which can be changed before the thread starts and after.
-        let settings = self.setting_menus(cx);
-        let colors = cx.global::<Palette>();
-        let (send, stop, history) = (cx.entity(), cx.entity(), cx.entity());
-        let agents = self.agents.clone();
-        let in_repo = worktree::in_repo(&self.project.root);
-        let (pick, isolate) = (cx.entity(), cx.entity());
-        let typed = !self.thread.draft.read(cx).value().trim().is_empty();
-        let stop_button = |stop: Entity<Reader>| {
-            Button::new("stop")
-                .icon(IconName::Square)
-                .ghost()
-                .pill()
-                .small()
-                .tooltip("Stop")
-                .on_click(move |_, window, cx| stop.update(cx, |reader, cx| reader.stop(window, cx)))
-        };
-        let send_button = |send: Entity<Reader>, tooltip: &'static str| {
-            let button = Button::new("send")
-                .icon(IconName::ArrowUp)
-                .ghost()
-                .pill()
-                .small()
-                .tooltip(tooltip)
-                .on_click(move |_, window, cx| send.update(cx, |reader, cx| reader.send(false, window, cx)));
-            // Quiet until there is something to send.
-            if typed { button.primary() } else { button }
-        };
-        let steer_tip = if self.thread.client.as_ref().is_some_and(|client| client.queues()) {
-            "Steer: the agent reads it before its next step (Alt+Enter: after this turn)"
-        } else {
-            "Queue: sent when this turn is over"
-        };
-        let action = if self.thread.busy && typed {
-            // Typing during a turn queues it; Stop stays one click away.
-            div()
-                .flex()
-                .gap_1()
-                .child(stop_button(stop))
-                .child(send_button(send, steer_tip))
-                .into_any_element()
-        } else if self.thread.busy {
-            stop_button(stop).into_any_element()
-        } else {
-            send_button(send, "Send").into_any_element()
-        };
-        let muted = colors.muted_foreground;
-        let (border, queue_this) = (colors.border, cx.entity());
-        let queued: Vec<AnyElement> = self
-            .thread
-            .queue
-            .iter()
-            .enumerate()
-            .map(|(ix, item)| {
-                let label = match item.kind {
-                    Some(Queue::Steer) => "Steer",
-                    Some(Queue::Followup) => "Follow-up",
-                    None => "Queued",
-                };
-                let this = queue_this.clone();
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .text_xs()
-                    .text_color(muted)
-                    .child(div().flex_none().child(label))
-                    .child(div().flex_1().min_w_0().truncate().child(if item.out.text.is_empty() { format!("{} image(s)", item.out.images.len()) } else { item.out.text.replace('\n', " ") }))
-                    .child(
-                        Button::new(("recall", ix))
-                            .icon(IconName::Close)
-                            .ghost()
-                            .small()
-                            .tooltip("Take back to edit")
-                            .on_click(move |_, window, cx| this.update(cx, |reader, cx| reader.recall(ix, window, cx))),
-                    )
-                    .into_any_element()
-            })
-            .collect();
-        let drafting = cx.entity();
-        let strip: Vec<AnyElement> = self
-            .thread
-            .attachments
-            .iter()
-            .enumerate()
-            .map(|(ix, picture)| {
-                let this = drafting.clone();
-                div()
-                    .id(("attachment", ix))
-                    .relative()
-                    .flex_none()
-                    .child(gpui::img(picture.image.clone()).size(px(64.0)).object_fit(gpui::ObjectFit::Cover).rounded(colors.radius).border_1().border_color(border))
-                    .child(
-                        div().absolute().top_0p5().right_0p5().child(
-                            Button::new(("detach", ix))
-                                .icon(IconName::Close)
-                                .small()
-                                .tooltip("Remove the picture")
-                                .on_click(move |_, _, cx| this.update(cx, |reader, cx| {
-                                    if ix < reader.thread.attachments.len() {
-                                        reader.thread.attachments.remove(ix);
-                                    }
-                                    cx.notify();
-                                })),
-                        ),
-                    )
-                    .into_any_element()
-            })
-            .collect();
-        // Before the thread starts, its agent is chosen here; after, it is only named.
-        let chips: AnyElement = if self.thread.blank {
-            let name = self.agent_label().map(str::to_string).or_else(|| self.chosen().map(|agent| agent.name.clone()));
-            let name = name.unwrap_or_else(|| "No agent".to_string());
-            let isolated = self.thread.isolate;
-            div()
-                .flex()
-                .items_center()
-                .gap_1()
-                .child(
-                    dropdown(
-                        "agent-chip",
-                        Button::new("agent-chip").label(name).tooltip("The agent this thread starts with").ghost().small().dropdown_caret(true),
-                        move || {
-                            agents
-                                .iter()
-                                .map(|agent| {
-                                    let (pick, key) = (pick.clone(), agent.id.clone());
-                                    MenuItem::new(agent.name.clone(), move |window, cx| {
-                                        pick.update(cx, |reader, cx| reader.pick_agent(key.clone(), window, cx))
-                                    })
-                                })
-                                .collect()
-                        },
-                    )
-                    .menu(self.agent_menu.clone()),
-                )
-                .children(settings)
-                .children(in_repo.then(|| {
-                    Button::new("worktree-chip")
-                        .label("⎇ Worktree")
-                        .tooltip("Work on a git branch of its own, to review and merge or discard")
-                        .ghost()
-                        .small()
-                        .selected(isolated)
-                        .on_click(move |_, _, cx| {
-                            isolate.update(cx, |reader, cx| {
-                                reader.thread.isolate = !reader.thread.isolate;
-                                cx.notify();
-                            })
-                        })
-                }))
-                .into_any_element()
-        } else {
-            div()
-                .flex()
-                .items_center()
-                .gap_1()
-                .child(div().pl_2().text_sm().text_color(muted).child(self.agent_label().unwrap_or("Agent").to_string()))
-                .children(settings)
-                .child(self.control_dropdown(self.thread.id, "control", control.clone()))
-                .into_any_element()
-        };
-        // A thread whose agent may do more than talk shows it, in the header as in the lists.
-        let controlled = self.grants.get(&self.thread.id).is_some_and(|grant| *grant != command::Grant::default());
-        let drop_tint = colors.primary.opacity(theme::tokens::TINT_SUBTLE);
-        div()
-            .size_full()
-            .flex()
-            .flex_col()
-            .bg(colors.background)
-            // Pictures dropped anywhere on the thread join the draft.
-            .drag_over::<gpui::ExternalPaths>(move |style, _, _, _| style.bg(drop_tint))
-            .on_drop(cx.listener(|reader, dropped: &gpui::ExternalPaths, _, cx| {
-                reader.attach(dropped.paths().iter().cloned().map(Source::Path).collect(), cx);
-            }))
-            .child(pane_header(
-                &self.thread.title(),
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .children(controlled.then(|| self.control_dropdown(self.thread.id, "control-header", control.clone())))
-                    .children(self.children_status(self.thread.id).map(|line| status_text(line, cx)))
-                    .children((!self.thread.status.is_empty()).then(|| status_text(self.thread.status.clone(), cx)))
-                    .child(
-                        Button::new("history")
-                            .label("History")
-                            .tooltip("Resume an earlier session (Ctrl+Shift+H)")
-                            .ghost()
-                            .small()
-                            .on_click(move |_, window, cx| history.update(cx, |reader, cx| reader.resume_thread(window, cx))),
-                    ),
-                lead,
-                trail,
-                cx,
-            ))
-            .child(
-                div()
-                    .id("thread")
-                    .key_context("Markdown")
-                    .track_focus(&self.thread.focus)
-                    .on_action(cx.listener(|reader, _: &ui::markdown::Copy, _, cx| {
-                        // Select All takes the replies scrolled out of view too, which aren't laid out.
-                        let text = if reader.thread.selection.read(cx).is_all() {
-                            ui::markdown::all_text_of(reader.thread.selectable_sources())
-                        } else {
-                            reader.thread.selection.read(cx).selected_text()
-                        };
-                        if text.is_empty() {
-                            return cx.propagate();
-                        }
-                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
-                    }))
-                    .on_action(cx.listener(|reader, _: &ui::markdown::SelectAll, _, cx| {
-                        reader.thread.selection.update(cx, |s, _| s.select_all());
-                        cx.notify();
-                    }))
-                    .on_mouse_down(gpui::MouseButton::Left, cx.listener(|reader, event: &gpui::MouseDownEvent, window, cx| {
-                        reader.thread.focus.focus(window, cx);
-                        reader.thread.selection.update(cx, |s, _| s.mouse_down(event.position, event.click_count));
-                        cx.notify();
-                    }))
-                    .on_mouse_move(cx.listener(|reader, event: &gpui::MouseMoveEvent, _, cx| {
-                        if event.pressed_button == Some(gpui::MouseButton::Left) && reader.thread.selection.read(cx).selecting {
-                            reader.thread.selection.update(cx, |s, _| s.drag(event.position));
-                            cx.notify();
-                        }
-                    }))
-                    .on_mouse_up(gpui::MouseButton::Left, cx.listener(|reader, event: &gpui::MouseUpEvent, _, cx| {
-                        if let Some(url) = reader.thread.selection.update(cx, |s, _| s.mouse_up(event.position)) {
-                            cx.open_url(&url);
-                        }
-                        cx.notify();
-                    }))
-                    .on_mouse_up_out(gpui::MouseButton::Left, cx.listener(|reader, event: &gpui::MouseUpEvent, _, cx| {
-                        reader.thread.selection.update(cx, |s, _| {
-                            s.mouse_up(event.position);
-                        });
-                    }))
-                    .flex_1()
-                    .min_h_0()
-                    // A long line of text is hard to read, so the conversation keeps to a column.
-                    // It has the composer's outer padding too, so both columns are the same width.
-                    .child(div().size_full().flex().justify_center().px_3().child(div().h_full().w_full().max_w(px(860.0)).child(thread))),
-            )
-            .child(
-                div().flex_none().px_3().pt_2().when(cx.global::<Palette>().glass.is_none(), |this| this.pb_3()).flex().justify_center().child(
-                    div()
-                        .w_full()
-                        .max_w(px(860.0))
-                        .flex()
-                        .flex_col()
-                        .gap_2()
-                        .p(rems(COMPOSER_PAD_REM))
-                        .rounded(colors.radius_xl)
-                        .border(px(BOX_BORDER))
-                        .border_color(colors.border)
-                        .bg(colors.sidebar)
-                        .when(!queued.is_empty(), |this| {
-                            this.child(div().flex().flex_col().gap_1().pb_1().border_b_1().border_color(border).children(queued))
-                        })
-                        .children(self.thread.attach_note.as_ref().map(|note| div().text_xs().text_color(muted).child(note.clone())))
-                        .children((!strip.is_empty()).then(|| div().flex().flex_wrap().gap_2().children(strip)))
-                        .child(div().py_1().child(Input::new(&self.thread.draft).large()))
-                        .child(
-                            // The input's text sits 0.75rem in; the chips' own padding (0.5rem) plus this
-                            // inset puts their text, and the label after the thread has started, on its edge.
-                            div().flex().items_center().justify_between().gap_2().pl_1().child(chips).child(action),
-                        ),
-                ),
-            )
-    }
 }
 
-/// The composer's box: its border, its padding, and the padding of the input inside it. The
-/// transcript derives its edges from these, so the two cannot drift apart.
-const BOX_BORDER: f32 = 1.;
-const COMPOSER_PAD_REM: f32 = 0.5;
-const INPUT_PAD_REM: f32 = 0.75;
-
-/// From a box's edge to its text in the composer; the transcript insets its text by the same.
-fn text_inset(window: &Window) -> gpui::Pixels {
-    rems(COMPOSER_PAD_REM + INPUT_PAD_REM).to_pixels(window.rem_size()) + px(BOX_BORDER)
-}
-
-fn render_msg(
-    ix: usize,
-    msg: &Msg,
-    last: bool,
-    this: &Entity<Reader>,
-    selection: &Entity<ui::markdown::Selection>,
-    window: &mut Window,
-    cx: &mut App,
-) -> AnyElement {
-    let blocks = match msg {
-        Msg::User(text, pictures) => {
-            let colors = cx.global::<Palette>();
-            let (bg, radius, border) = (colors.secondary, colors.radius_xl, colors.border);
-            let text_el = ui::markdown::plain(("user", ix), text, selection, window, cx);
-            let shown = (!text.is_empty()).then_some(text_el);
-            return div()
-                .flex()
-                .justify_end()
-                .child(
-                    div()
-                        .max_w(gpui::relative(0.9))
-                        .px_4()
-                        .py_3()
-                        .rounded(radius)
-                        .bg(bg)
-                        .text_base()
-                        .flex()
-                        .flex_col()
-                        .gap_2()
-                        .children((!pictures.is_empty()).then(|| {
-                            div().flex().flex_wrap().gap_2().children(pictures.iter().map(|picture| {
-                                gpui::img(picture.image.clone())
-                                    .max_w(px(420.0))
-                                    .max_h(px(280.0))
-                                    .rounded(radius)
-                                    .border_1()
-                                    .border_color(border)
-                            }))
-                        }))
-                        .children(shown),
-                )
-                .into_any_element();
-        }
-        Msg::Agent(blocks) => blocks,
-    };
-    let colors = cx.global::<Palette>();
-    let mut column = div().flex().flex_col().min_w_0();
-    // Text blocks sit where the composer's text does; boxes (tool cards) span the composer's width.
-    let text_inset = text_inset(window);
-    if blocks.is_empty() {
-        let thinking = div().text_sm().text_color(colors.muted_foreground).child("Thinking…");
-        column = column.child(div().px(text_inset).child(thinking));
-    }
-    let mut n = 0;
-    while n < blocks.len() {
-        let id = ix * 10_000 + n;
-        // Runs of tool calls read as one list; anything else is set a step apart.
-        let run = n > 0 && matches!((&blocks[n - 1], &blocks[n]), (Block::Tool(_), Block::Tool(_)));
-        // A run of three or more tool calls gets a header that can fold it to a single line, and
-        // its first call sits as close under that as the calls do to each other.
-        let len = if matches!(blocks[n], Block::Tool(_)) && !run { blocks[n..].iter().take_while(|b| matches!(b, Block::Tool(_))).count() } else { 0 };
-        let titled = len >= 3;
-        if titled {
-            let folded = run_folded(&blocks[n..n + len], last && n + len == blocks.len());
-            column = column.child(div().when(n > 0, |this| this.mt_4()).child(tool_run(ix, n, &blocks[n..n + len], folded, this, text_inset, cx)));
-            if folded {
-                n += len;
-                continue;
-            }
-        }
-        let (el, boxed) = match &blocks[n] {
-            Block::Text(text) => (ui::markdown::markdown(("answer", id), text, selection, window, cx).into_any_element(), false),
-            Block::Thought(text, open) => (thought(ix, n, text, *open, this, selection, window, cx), false),
-            Block::Tool(tool) => (tool_card(ix, n, tool, this, text_inset, selection, window, cx).into_any_element(), true),
-            Block::Permission(ask) => (permission(ix, n, ask, this, text_inset, cx).into_any_element(), true),
-            Block::Plan(entries) => (plan(entries, cx).into_any_element(), false),
-            Block::Approve { agent, new_agent, mcp, answered, .. } => (approval(ix, n, agent, *new_agent, mcp, *answered, this, text_inset, cx).into_any_element(), true),
-        };
-        let el = if boxed { el } else { div().px(text_inset).child(el).into_any_element() };
-        column = column.child(div().when(n > 0, |this| if run || titled { this.mt_0p5() } else { this.mt_4() }).child(el));
-        n += 1;
-    }
-    column.into_any_element()
-}
-
-/// Whether a run of tool calls shows as one line. A run the user hasn't clicked folds once the
-/// agent has moved on from it (`live` is false) and everything in it went well, so nothing running
-/// or failed hides. `live` is a run still at the end of the latest message.
-fn run_folded(run: &[Block], live: bool) -> bool {
+/// Whether a run of tool calls shows as one line. A run the user hasn't clicked starts folded,
+/// whether its calls are still going or not.
+fn run_folded(run: &[Block]) -> bool {
     let Some(Block::Tool(first)) = run.first() else { return false };
-    first.fold.unwrap_or(!live && run.iter().all(|b| matches!(b, Block::Tool(t) if t.status == Step::Done)))
+    first.fold.unwrap_or(true)
 }
 
 /// Where each run of tool calls shown folded starts in `blocks`.
-fn folded_runs(blocks: &[Block], last: bool) -> Vec<usize> {
+fn folded_runs(blocks: &[Block]) -> Vec<usize> {
     let mut starts = vec![];
     let mut n = 0;
     while n < blocks.len() {
@@ -6930,7 +5784,7 @@ fn folded_runs(blocks: &[Block], last: bool) -> Vec<usize> {
             continue;
         }
         let len = blocks[n..].iter().take_while(|b| matches!(b, Block::Tool(_))).count();
-        if len >= 3 && run_folded(&blocks[n..n + len], last && n + len == blocks.len()) {
+        if len >= 3 && run_folded(&blocks[n..n + len]) {
             starts.push(n);
         }
         n += len;
@@ -6938,36 +5792,6 @@ fn folded_runs(blocks: &[Block], last: bool) -> Vec<usize> {
     starts
 }
 
-/// The header of a run of tool calls: how many there were, and a click folds or unfolds them.
-fn tool_run(ix: usize, n: usize, run: &[Block], folded: bool, this: &Entity<Reader>, text_inset: gpui::Pixels, cx: &App) -> impl IntoElement {
-    let colors = cx.global::<Palette>();
-    let tools: Vec<&ToolBlock> = run.iter().filter_map(|b| if let Block::Tool(t) = b { Some(t) } else { None }).collect();
-    let status = if tools.iter().any(|t| t.status == Step::Failed) {
-        Step::Failed
-    } else if tools.iter().all(|t| t.status == Step::Done) {
-        Step::Done
-    } else {
-        Step::Working
-    };
-    let (mark, tint) = step_mark(status, colors);
-    let (muted, hover, radius) = (colors.muted_foreground, colors.list_hover, colors.radius);
-    let toggle = this.clone();
-    div()
-        .id(("tool-run", ix * 10_000 + n))
-        .flex()
-        .items_center()
-        .gap_2()
-        .py_1p5()
-        .px(text_inset)
-        .rounded(radius)
-        .cursor_pointer()
-        .text_sm()
-        .hover(move |row| row.bg(hover))
-        .on_click(move |_, _, cx| toggle.update(cx, |reader, cx| reader.fold_run(ix, n, !folded, cx)))
-        .child(div().text_color(tint).child(mark))
-        .child(div().text_color(muted).child(format!("{} tool calls", tools.len())))
-        .child(Icon::new(if folded { IconName::ChevronRight } else { IconName::ChevronDown }).size(IconSize::XSmall).color(muted))
-}
 
 /// Opens every block `flag` picks out, or closes them all when none is left to open. Returns
 /// the first message that changed, if any.
@@ -6989,178 +5813,10 @@ fn toggle_all(messages: &mut [Msg], flag: fn(&mut Block) -> Option<&mut bool>) -
     first
 }
 
-/// A thought: a quiet "Thinking" row that opens to the agent's reasoning.
-fn thought(ix: usize, n: usize, text: &str, open: bool, this: &Entity<Reader>, selection: &Entity<ui::markdown::Selection>, window: &mut Window, cx: &mut App) -> AnyElement {
-    let muted = cx.global::<Palette>().muted_foreground;
-    let toggle = this.clone();
-    let header = div()
-        .id(("thought", ix * 10_000 + n))
-        .flex()
-        .items_center()
-        .gap_1()
-        .cursor_pointer()
-        .text_sm()
-        .text_color(muted)
-        .on_click(move |_, _, cx| toggle.update(cx, |reader, cx| reader.toggle_thought(ix, n, cx)))
-        .child(Icon::new(if open { IconName::ChevronDown } else { IconName::ChevronRight }).size(IconSize::XSmall))
-        .child("Thinking");
-    let column = div().flex().flex_col().gap_1().child(header);
-    if open {
-        column.child(div().opacity(theme::tokens::DIM).child(ui::markdown::italic(("thought", ix * 10_000 + n), text, selection, window, cx))).into_any_element()
-    } else {
-        column.into_any_element()
-    }
-}
 
-/// The sessions an agent offers to resume, newest first.
-fn session_picker(sessions: &[SessionInfo], this: &Entity<Reader>, cx: &App) -> AnyElement {
-    let colors = cx.global::<Palette>();
-    div()
-        .id("sessions")
-        .size_full()
-        .overflow_y_scroll()
-        .flex()
-        .flex_col()
-        .gap_1()
-        .p_3()
-        .children(sessions.iter().enumerate().map(|(ix, session)| {
-            let (this, id) = (this.clone(), session.id.clone());
-            let title = if session.title.is_empty() { format!("Session {}", session.id.chars().take(8).collect::<String>()) } else { session.title.clone() };
-            let when = session.updated.get(..16).unwrap_or_default().replace('T', " ");
-            div()
-                .id(("session", ix))
-                .flex()
-                .flex_col()
-                .p_2()
-                .rounded(colors.radius)
-                .cursor_pointer()
-                .hover(|style| style.bg(colors.list_hover))
-                .on_click(move |_, window, cx| this.update(cx, |reader, cx| reader.resume_session(&id, window, cx)))
-                .child(div().text_sm().truncate().child(title))
-                .child(div().text_xs().text_color(colors.muted_foreground).child(when))
-        }))
-        .into_any_element()
-}
 
-fn step_mark(status: Step, colors: &Palette) -> (&'static str, gpui::Hsla) {
-    match status {
-        Step::Waiting => ("○", colors.muted_foreground),
-        Step::Working => ("◐", colors.primary),
-        Step::Done => ("✓", colors.success),
-        Step::Failed => ("✕", colors.danger),
-    }
-}
 
-fn plan(entries: &[(String, Step)], cx: &App) -> impl IntoElement {
-    let colors = cx.global::<Palette>();
-    div()
-        .flex()
-        .flex_col()
-        .gap_1p5()
-        .text_sm()
-        .children(entries.iter().map(|(text, status)| {
-            let (mark, tint) = step_mark(*status, colors);
-            let done = *status == Step::Done;
-            div()
-                .flex()
-                .gap_2()
-                .child(div().flex_none().text_color(tint).child(mark))
-                .child(div().flex_1().min_w_0().text_color(if done { colors.muted_foreground } else { colors.foreground }).child(text.clone()))
-        }))
-}
 
-#[allow(clippy::too_many_arguments)]
-fn tool_card(
-    ix: usize,
-    n: usize,
-    tool: &ToolBlock,
-    this: &Entity<Reader>,
-    text_inset: gpui::Pixels,
-    selection: &Entity<ui::markdown::Selection>,
-    window: &mut Window,
-    cx: &mut App,
-) -> impl IntoElement {
-    let colors = cx.global::<Palette>();
-    let (mark, tint) = step_mark(tool.status, colors);
-    let (muted, hover, border) = (colors.muted_foreground, colors.list_hover, colors.border);
-    let radius = colors.radius;
-    let settled = tool.status == Step::Done;
-    let toggle = this.clone();
-    let reveal = this.clone();
-    let path = tool.path.clone();
-    // A tool call is a quiet row, not a box: it lights up under the pointer, and its text sits on
-    // the composer's text edge like the answer's.
-    let mut card = div()
-        .id(("tool-row", ix * 10_000 + n))
-        .flex()
-        .flex_col()
-        .gap_2()
-        .py_1p5()
-        .px(text_inset)
-        .rounded(radius)
-        .hover(move |row| row.bg(hover))
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .gap_2()
-                .child(
-                    div()
-                        .id(("tool", ix * 10_000 + n))
-                        .flex_1()
-                        .min_w_0()
-                        .flex()
-                        .items_start()
-                        .gap_2()
-                        .cursor_pointer()
-                        .text_sm()
-                        .on_click(move |_, _, cx| toggle.update(cx, |reader, cx| reader.toggle_tool(ix, n, cx)))
-                        .child(div().text_color(tint).child(mark))
-                        .child(div().flex_1().min_w_0().truncate().text_color(if settled { muted } else { colors.foreground }).child(tool.title.clone())),
-                )
-                .children(path.map(|path| {
-                    Button::new(("tool-open", ix * 10_000 + n))
-                        .label("Open")
-                        .tooltip("Show this file, or its changes")
-                        .ghost()
-                        .xsmall()
-                        .on_click(move |_, window, cx| reveal.update(cx, |reader, cx| reader.reveal(&path, window, cx)))
-                })),
-        );
-    if tool.open {
-        for (which, text) in [&tool.arguments, &tool.result].into_iter().enumerate() {
-            if !text.is_empty() {
-                let mono = cx.global::<Palette>().mono_font_family.clone();
-                let family = mono.clone();
-                let body = ui::markdown::plain_styled(
-                    ("tool-text", (ix * 10_000 + n) * 2 + which),
-                    text,
-                    selection,
-                    |style| {
-                        style.font_family = family;
-                        style.color = muted;
-                    },
-                    window,
-                    cx,
-                );
-                card = card.child(
-                    div()
-                        .id(("tool-pane", (ix * 10_000 + n) * 2 + which))
-                        .max_h(rems(16.))
-                        .overflow_y_scroll()
-                        .border_l_2()
-                        .border_color(border)
-                        .pl_3()
-                        .font_family(mono)
-                        .text_xs()
-                        .text_color(muted)
-                        .child(body),
-                );
-            }
-        }
-    }
-    card
-}
 
 /// The one option in a permission request rendered as the filled button: the first way of saying
 /// yes, however the agent orders the rest. Options that describe themselves in `kind` (ACP) are
@@ -7173,124 +5829,9 @@ fn primary_option(options: &[PermissionOption]) -> Option<usize> {
     }
 }
 
-fn permission(ix: usize, n: usize, ask: &Ask, this: &Entity<Reader>, text_inset: gpui::Pixels, cx: &App) -> impl IntoElement {
-    let colors = cx.global::<Palette>();
-    let (muted, warning) = (colors.muted_foreground, colors.warning);
-    let primary = primary_option(&ask.options);
-    let row = div().flex().flex_wrap().gap_2();
-    let row = match &ask.answered {
-        Some(name) => row.child(div().text_color(muted).child(format!("→ {name}"))),
-        None => row.children(ask.options.iter().enumerate().map(|(o, option)| {
-            let this = this.clone();
-            let button = Button::new(("permit", ix * 1_000_000 + n * 100 + o))
-                .label(option.name.clone())
-                .small()
-                .on_click(move |_, _, cx| this.update(cx, |reader, cx| reader.answer(ix, n, o, cx)));
-            if primary == Some(o) { button.primary() } else { button }
-        })),
-    };
-    let waiting = ask.answered.is_none();
-    div()
-        .flex()
-        .flex_col()
-        .gap_2()
-        .py_3()
-        .px(text_inset - px(BOX_BORDER))
-        .rounded(colors.radius)
-        .border(px(BOX_BORDER))
-        // A question still waiting for you is outlined in the warning tone; an answered one settles.
-        .border_color(if waiting { warning.opacity(theme::tokens::MUTED) } else { colors.border })
-        .text_sm()
-        .child(div().flex().gap_2().child(div().flex_none().text_color(muted).child("Permission")).child(div().flex_1().min_w_0().child(ask.title.clone())))
-        .child(row)
-}
 
-/// Asks whether Po may run an agent command it doesn't ship with.
-#[allow(clippy::too_many_arguments)]
-fn approval(ix: usize, n: usize, agent: &config::Agent, new_agent: bool, mcp: &[config::McpServer], answered: Option<bool>, this: &Entity<Reader>, text_inset: gpui::Pixels, cx: &App) -> impl IntoElement {
-    let colors = cx.global::<Palette>();
-    let (muted, warning) = (colors.muted_foreground, colors.warning);
-    let row = div().flex().flex_wrap().gap_2();
-    let row = match answered {
-        Some(yes) => row.child(div().text_color(muted).child(match (yes, new_agent) {
-            (true, _) => "→ Approved",
-            (false, true) => "→ Not run",
-            (false, false) => "→ Left out",
-        })),
-        None => row
-            .child({
-                let this = this.clone();
-                Button::new(("approve-run", ix * 100 + n)).label("Run it").primary().small().on_click(move |_, window, cx| {
-                    this.update(cx, |reader, cx| reader.answer_approval(ix, n, true, window, cx))
-                })
-            })
-            .child({
-                let this = this.clone();
-                Button::new(("approve-skip", ix * 100 + n)).label(if new_agent { "Don't run" } else { "Leave out" }).small().on_click(move |_, window, cx| {
-                    this.update(cx, |reader, cx| reader.answer_approval(ix, n, false, window, cx))
-                })
-            }),
-    };
-    let mut lines: Vec<String> = Vec::new();
-    if new_agent {
-        lines.push(match &agent.daemon {
-            Some(url) => format!("{}  (daemon {url})", agent.command),
-            None => agent.command.clone(),
-        });
-    }
-    lines.extend(mcp.iter().map(|server| format!("{}: {}", server.name, server.line())));
-    let question = match (new_agent, mcp.is_empty()) {
-        (true, true) => format!("“{}” is not one of Po's own agents: it comes from your config. Run this command?", agent.name),
-        (true, false) => format!("“{}” is not one of Po's own agents, and your config lists MCP servers for it. Run these commands?", agent.name),
-        (false, _) => "Your config lists MCP servers for the agent to start, which run as you. Hand them over?".to_string(),
-    };
-    div()
-        .flex()
-        .flex_col()
-        .gap_2()
-        .py_3()
-        .px(text_inset - px(BOX_BORDER))
-        .rounded(colors.radius)
-        .border(px(BOX_BORDER))
-        .border_color(if answered.is_none() { warning.opacity(theme::tokens::MUTED) } else { colors.border })
-        .text_sm()
-        .child(div().flex().gap_2().child(div().flex_none().text_color(muted).child("Approve")).child(
-            div().flex_1().min_w_0().child(question),
-        ))
-        .children(lines.into_iter().map(|line| div().font_family(cx.global::<Palette>().mono_font_family.clone()).child(line)))
-        .child(row)
-}
 
-fn status_text(text: String, cx: &App) -> impl IntoElement {
-    div().flex_none().truncate().text_xs().text_color(cx.global::<Palette>().muted_foreground).child(text)
-}
 
-/// The name that ties a row to the controls that appear only while it is hovered.
-fn row_group(kind: &str, id: u64) -> SharedString {
-    format!("{kind}-row-{id}").into()
-}
-
-/// `control`, kept in the row's layout but drawn only while the row named `group` is hovered.
-fn show_on_hover(group: SharedString, control: impl IntoElement) -> gpui::Div {
-    // A press on the control is its own; the row it sits on doesn't take it as a click.
-    div().invisible().group_hover(group, |style| style.visible()).on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation()).child(control)
-}
-
-/// A pane's header. The window's own controls sit in the headers of the panes at its edges:
-/// `lead` before the title in the leftmost pane, `trail` after what is on the right in the
-/// rightmost one.
-fn pane_header(title: &str, right: impl IntoElement, lead: Option<AnyElement>, trail: Option<AnyElement>, cx: &App) -> gpui::Div {
-    let colors = cx.global::<Palette>();
-    header_row(
-        div().flex().items_center().gap_1().min_w_0().children(lead).child(
-            div().min_w_0().truncate().text_sm().font_weight(FontWeight::MEDIUM).text_color(colors.foreground).child(title.to_string()),
-        ),
-        div().flex().items_center().gap_2().child(right).children(trail),
-        cx,
-    )
-    // The transcript scrolls under this one, so it keeps its line.
-    .when(colors.glass.is_some(), |row| row.border_b_1().border_color(colors.border))
-}
 
 /// `pane` as a sheet of glass floating apart from its neighbours when the glass look is on,
 /// else as it is. Each pane keeps half the gap; the window's padding makes up the other half at
@@ -7308,40 +5849,153 @@ fn floating(pane: impl IntoElement + Styled, cx: &App) -> AnyElement {
     }
 }
 
-/// A pane header: `left` and `right` on a bar with a line under it.
-fn header_row(left: impl IntoElement, right: impl IntoElement, cx: &App) -> gpui::Div {
-    let colors = cx.global::<Palette>();
-    div()
-        .h_11()
-        .flex_none()
-        .flex()
-        .items_center()
-        .justify_between()
-        .gap_3()
-        .px_3()
-        // On glass the headers' titles set the sections apart; no line is drawn under them.
-        .when(colors.glass.is_none(), |row| row.border_b_1().border_color(colors.border))
-        .text_color(colors.foreground)
-        .child(left)
-        .child(right)
+/// Where the file of a `file:` URL pasted in, dropped on it, is: the absolute path, its `%XX`
+/// escapes decoded.
+fn file_of(uri: &str) -> Option<String> {
+    let rest = uri.strip_prefix("file://")?;
+    // What follows the host (empty or `localhost`) is the path, with its leading slash.
+    let path = match rest.find('/') {
+        Some(at) if rest[..at].is_empty() || rest[..at].eq_ignore_ascii_case("localhost") => &rest[at..],
+        _ => return None,
+    };
+    let bytes = path.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut at = 0;
+    while at < bytes.len() {
+        let decoded = (bytes[at] == b'%').then(|| bytes.get(at + 1..at + 3)).flatten().and_then(|hex| u8::from_str_radix(std::str::from_utf8(hex).ok()?, 16).ok());
+        match decoded {
+            Some(byte) => {
+                out.push(byte);
+                at += 3;
+            }
+            None => {
+                out.push(bytes[at]);
+                at += 1;
+            }
+        }
+    }
+    String::from_utf8(out).ok()
 }
 
-fn centered(text: String, cx: &App) -> AnyElement {
-    div()
-        .size_full()
-        .flex()
-        .items_center()
-        .justify_center()
-        .px_4()
-        .text_center()
-        .text_sm()
-        .text_color(cx.global::<Palette>().muted_foreground)
-        .child(div().max_w_full().child(text))
-        .into_any_element()
+/// The message of the conversation as the screen drawn by NSH shows it: the user's text with its
+/// pictures, or the agent's blocks.
+fn chat_items(messages: &[Msg]) -> Vec<nsh::chat::Item> {
+    messages.iter().enumerate().map(|(ix, msg)| match msg {
+        Msg::User(text, pictures) => nsh::chat::Item::User {
+            text: text.clone(),
+            pictures: pictures.iter().map(|a| nsh::chat::Picture { uri: a.data_uri() }).collect(),
+        },
+        Msg::Agent(blocks) => nsh::chat::Item::Agent { index: ix, blocks: chat_blocks(blocks) },
+    }).collect()
+}
+
+/// Whether the run's calls waited, were all told to go, all went well, or one failed.
+fn chat_phase(step: Step) -> nsh::chat::Phase {
+    match step {
+        Step::Waiting => nsh::chat::Phase::Waiting,
+        Step::Working => nsh::chat::Phase::Working,
+        Step::Done => nsh::chat::Phase::Done,
+        Step::Failed => nsh::chat::Phase::Failed,
+    }
+}
+
+/// One agent message's blocks for the conversation drawn by NSH. Runs of three or more tool calls
+/// also carry the row that folds them; the calls stay in place either way, so the indexes their
+/// answers are told by hold.
+fn chat_blocks(blocks: &[Block]) -> Vec<nsh::chat::Block> {
+    let mut out: Vec<nsh::chat::Block> = Vec::with_capacity(blocks.len());
+    let mut n = 0;
+    while n < blocks.len() {
+        let run = n > 0 && matches!(&blocks[n - 1], Block::Tool(_));
+        let len = if matches!(blocks[n], Block::Tool(_)) && !run { blocks[n..].iter().take_while(|b| matches!(b, Block::Tool(_))).count() } else { 0 };
+        if len >= 3 {
+            let run = &blocks[n..n + len];
+            let phase = if run.iter().any(|b| matches!(b, Block::Tool(t) if t.status == Step::Failed)) {
+                Step::Failed
+            } else if run.iter().all(|b| matches!(b, Block::Tool(t) if t.status == Step::Done)) {
+                Step::Done
+            } else {
+                Step::Working
+            };
+            out.push(nsh::chat::Block::Run { index: n, count: len, phase: chat_phase(phase), folded: run_folded(run) });
+            for (k, block) in run.iter().enumerate() {
+                if let Block::Tool(tool) = block {
+                    out.push(nsh::chat::Block::Tool(chat_tool(n + k, tool)));
+                }
+            }
+            n += len;
+            continue;
+        }
+        out.push(match &blocks[n] {
+            Block::Text(text) => nsh::chat::Block::Markdown(nsh::source::Shared(text.as_str().into())),
+            Block::Thought(text, open) => nsh::chat::Block::Thought { index: n, text: text.clone(), open: *open },
+            Block::Tool(tool) => nsh::chat::Block::Tool(chat_tool(n, tool)),
+            Block::Permission(ask) => {
+                let primary = primary_option(&ask.options);
+                nsh::chat::Block::Ask {
+                    index: n,
+                    title: ask.title.clone(),
+                    options: ask.options.iter().enumerate().map(|(at, option)| nsh::chat::AskOption {
+                        at,
+                        label: option.name.clone(),
+                        primary: primary == Some(at),
+                    }).collect(),
+                    answered: ask.answered.clone(),
+                }
+            }
+            Block::Plan(entries) => nsh::chat::Block::Plan(entries.iter().map(|(text, step)| nsh::chat::Entry { text: text.clone(), phase: chat_phase(*step) }).collect()),
+            Block::Approve { agent, new_agent, mcp, resume: _, answered } => {
+                let (question, lines) = approval_text(agent, *new_agent, mcp);
+                nsh::chat::Block::Approve {
+                    index: n,
+                    question,
+                    lines,
+                    answered: answered.map(|said| match (said, new_agent) {
+                        (true, _) => "Approved".into(),
+                        (false, true) => "Not run".into(),
+                        (false, false) => "Left out".into(),
+                    }),
+                }
+            }
+        });
+        n += 1;
+    }
+    out
+}
+
+/// One tool call for the conversation drawn by NSH.
+fn chat_tool(at: usize, tool: &ToolBlock) -> nsh::chat::Tool {
+    nsh::chat::Tool {
+        index: at,
+        title: tool.title.clone(),
+        phase: chat_phase(tool.status),
+        open: tool.open,
+        arguments: tool.arguments.clone(),
+        result: tool.result.clone(),
+        path: tool.path.clone(),
+    }
+}
+
+/// What the approval card says: the question Po asks, and the commands it would hand over.
+fn approval_text(agent: &config::Agent, new_agent: bool, mcp: &[config::McpServer]) -> (String, Vec<String>) {
+    let mut lines = Vec::new();
+    if new_agent {
+        lines.push(match &agent.daemon {
+            Some(url) => format!("{}  (daemon {url})", agent.command),
+            None => agent.command.clone(),
+        });
+    }
+    lines.extend(mcp.iter().map(|server| format!("{}: {}", server.name, server.line())));
+    let question = match (new_agent, mcp.is_empty()) {
+        (true, true) => format!("“{}” is not one of Po's own agents: it comes from your config. Run this command?", agent.name),
+        (true, false) => format!("“{}” is not one of Po's own agents, and your config lists MCP servers for it. Run these commands?", agent.name),
+        (false, _) => "Your config lists MCP servers for the agent to start, which run as you. Hand them over?".to_string(),
+    };
+    (question, lines)
 }
 
 impl Render for Reader {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.settle_agent_changes();
         if !self.painted {
             self.painted = true;
@@ -7360,50 +6014,35 @@ impl Render for Reader {
         // conversation's, on the side the viewer opens), and, with the viewer open, a button that
         // gives it the room by hiding the conversation.
         let focus = side_open && !agent_open;
-        let (left, right, focus_viewer) = (cx.entity(), cx.entity(), cx.entity());
-        let sidebar_toggle = Button::new("toggle-left")
-            .icon(IconName::PanelLeft)
-            .ghost()
-            .small()
-            .selected(left_open)
-            .tooltip("Sidebar (Ctrl+B)")
-            .on_click(move |_, _, cx| left.update(cx, |reader, cx| reader.toggle_left(cx)))
-            .into_any_element();
-        let viewer_toggle = move |right: Entity<Reader>| {
-            Button::new("toggle-right")
-                .icon(IconName::FileText)
-                .ghost()
-                .small()
-                .selected(side_open)
-                .tooltip("Viewer (Ctrl+Shift+B)")
-                .on_click(move |_, _, cx| right.update(cx, |reader, cx| reader.toggle_right(cx)))
-                .into_any_element()
-        };
-        let focus_button = Button::new("focus-viewer")
-            .icon(if focus { IconName::Minimize } else { IconName::Maximize })
-            .ghost()
-            .small()
-            .tooltip(if focus { "Show the conversation (Ctrl+Shift+F)" } else { "Focus the viewer (Ctrl+Shift+F)" })
-            .on_click(move |_, _, cx| focus_viewer.update(cx, |reader, cx| reader.toggle_focus(cx)))
-            .into_any_element();
-        let viewer_trail = div().flex().items_center().gap_1().child(focus_button).child(viewer_toggle(right.clone())).into_any_element();
-        let (middle, side) = if !side_open {
+        use nsh::header::Control;
+        let controls = |lead: Vec<Control>, trail: Vec<Control>| *self.pane_controls.borrow_mut() = (lead, trail);
+        let trail_all = vec![Control::Focus(focus), Control::Viewer(side_open)];
+        // The viewer pane is only built where it shows: a pane nobody sees would publish over the
+        // one that is.
+        let hidden = || div().size_full().into_any_element();
+        let (middle, side) = if self.todos_open {
+            (self.todos.clone().into_any_element(), hidden())
+        } else if !side_open {
             // Only the conversation shows, and the viewer's button waits on the side it opens.
-            let button = viewer_toggle(right);
+            let chat_lead = vec![Control::Sidebar(left_open), Control::Viewer(side_open)];
+            let chat_trail = vec![Control::Viewer(side_open)];
+            let mut chat = |lead: Vec<Control>, trail: Vec<Control>| floating(self.chat_pane(lead, trail, cx), cx);
             if swapped {
-                let lead = div().flex().items_center().gap_1().child(sidebar_toggle).child(button).into_any_element();
-                (floating(self.agent_panel(Some(lead), None, cx), cx), self.pane(None, None, cx))
+                (chat(chat_lead, vec![]), hidden())
             } else {
-                (floating(self.agent_panel(Some(sidebar_toggle), Some(button), cx), cx), self.pane(None, None, cx))
+                (chat(vec![Control::Sidebar(left_open)], chat_trail), hidden())
             }
         } else if focus {
-            (self.pane(Some(sidebar_toggle), Some(viewer_trail), cx), self.pane(None, None, cx))
+            controls(vec![Control::Sidebar(left_open)], trail_all);
+            (self.pane(cx), hidden())
         } else if swapped {
-            (self.pane(Some(sidebar_toggle), Some(viewer_trail), cx), floating(self.agent_panel(None, None, cx), cx))
+            controls(vec![Control::Sidebar(left_open)], trail_all);
+            (self.pane(cx), floating(self.chat_pane(vec![], vec![], cx), cx))
         } else {
-            (floating(self.agent_panel(Some(sidebar_toggle), None, cx), cx), self.pane(None, Some(viewer_trail), cx))
+            controls(vec![], trail_all);
+            (floating(self.chat_pane(vec![Control::Sidebar(left_open)], vec![], cx), cx), self.pane(cx))
         };
-        let right_open = side_open && !focus;
+        let right_open = side_open && !focus && !self.todos_open;
         div()
             .size_full()
             .flex()
@@ -7415,8 +6054,14 @@ impl Render for Reader {
             .on_key_down(cx.listener(|reader, _, _, _| reader.last_input = Instant::now()))
             .on_scroll_wheel(cx.listener(|reader, _, _, _| reader.last_input = Instant::now()))
             .on_mouse_down(gpui::MouseButton::Left, cx.listener(|reader, _, _, _| reader.last_input = Instant::now()))
-            .on_action(cx.listener(|reader, _: &ShowFinder, window, cx| reader.show_finder(window, cx)))
-            .on_action(cx.listener(|reader, _: &ShowSettings, window, cx| reader.toggle_settings(window, cx)))
+            .on_action(cx.listener(|reader, _: &ShowFinder, window, cx| {
+                reader.hide_todos(window, cx);
+                reader.show_finder(window, cx)
+            }))
+            .on_action(cx.listener(|reader, _: &ShowSettings, window, cx| {
+                reader.hide_todos(window, cx);
+                reader.toggle_settings(window, cx)
+            }))
             .on_action(cx.listener(|reader, _: &CloseSettings, window, cx| reader.hide_settings(window, cx)))
             .on_action(cx.listener(|reader, _: &ToggleTools, _, cx| reader.toggle_tools(cx)))
             .on_action(cx.listener(|reader, _: &ToggleThoughts, _, cx| reader.toggle_thoughts(cx)))
@@ -7430,8 +6075,12 @@ impl Render for Reader {
             .on_action(cx.listener(|reader, _: &ShowHistory, window, cx| reader.resume_thread(window, cx)))
             .on_action(cx.listener(|reader, _: &ToggleSplit, _, cx| reader.set_split(!reader.split, cx)))
             .on_action(cx.listener(|reader, _: &ToggleRendered, _, cx| reader.toggle_rendered(cx)))
-            .on_action(cx.listener(|reader, _: &OpenProject, window, cx| reader.pick_project(window, cx)))
+            .on_action(cx.listener(|reader, _: &OpenProject, window, cx| {
+                reader.hide_todos(window, cx);
+                reader.pick_project(window, cx)
+            }))
             .on_action(cx.listener(|reader, _: &NewThread, window, cx| {
+                reader.hide_todos(window, cx);
                 reader.new_blank_thread(window, cx);
             }))
             // macOS draws no titlebar of its own (see `main`): this strip clears the traffic lights
@@ -7442,13 +6091,13 @@ impl Render for Reader {
             .child(
                 div().flex_1().min_h_0().when_some(glass, |this, glass| this.p(glass.inset / 2.)).child(
                     sidebars(&self.sidebars)
-                        .left(left_open, px(220.0)..px(520.0), self.left_sidebar(window, cx))
+                        .left(left_open, px(220.0)..px(520.0), self.left_sidebar(cx))
                         .center(middle)
                         .right(right_open, px(320.0)..px(900.0), side),
                 ),
             )
-            .when(self.finder_open, |this| this.child(self.finder(cx)))
-            .children(self.settings_page.as_ref().map(|(page, _)| page.clone()))
+            .when(self.finder_open, |this| this.child(self.finder.clone()))
+            .when(self.settings_open, |this| this.child(self.settings.clone()))
     }
 }
 
@@ -7532,6 +6181,9 @@ impl Render for Shell {
 
 /// Height of the strip standing in for macOS's titlebar, which holds the traffic lights.
 const TITLEBAR_HEIGHT: Pixels = px(32.0);
+
+/// Height of the row holding the viewer's tabs.
+const TABS_HEIGHT: gpui::Rems = rems(2.5);
 
 fn main() {
     // `po update` is a terminal command, not a window: it runs to completion and
@@ -7618,8 +6270,6 @@ fn main() {
     let prefetch = Prefetch::start(pr.as_ref().map_or_else(|| root.clone(), |pr| pr.worktree.clone()));
     gpui_platform::application().run(move |cx: &mut App| {
         trace::mark("app running");
-        viewer::init(cx);
-        ui::init(cx);
         cx.bind_keys([
             KeyBinding::new("ctrl-o", ToggleTools, None),
             KeyBinding::new("ctrl-t", ToggleThoughts, None),
@@ -7639,10 +6289,7 @@ fn main() {
             KeyBinding::new("secondary-,", ShowSettings, None),
             KeyBinding::new("secondary-w", CloseWindow, None),
             KeyBinding::new("escape", CloseSettings, Some("Settings")),
-            KeyBinding::new("escape", CloseFinder, Some("Finder")),
             // The Input binds up/down itself and swallows them when single-line, so these name it.
-            KeyBinding::new("up", FinderUp, Some("Finder > Input")),
-            KeyBinding::new("down", FinderDown, Some("Finder > Input")),
         ]);
         cx.on_action(|_: &CloseWindow, cx| {
             if let Some(window) = cx.active_window() {
@@ -7657,6 +6304,7 @@ fn main() {
         })
         .detach();
         let bounds = Bounds::centered(None, size(px(1360.0), px(840.0)), cx);
+        nsh::init();
         cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -7822,7 +6470,7 @@ mod tests {
         assert_eq!(toggle_all(&mut vec![Msg::User("x".into(), vec![])], thought_flag), None);
     }
 
-    use super::{NOTICE_RATE, notice_wait, Activity, Block, Msg, PermissionOption, Step, ToolBlock, folded_runs, preview_of, language, run_folded, toggle_all, match_files, primary_option, syntax};
+    use super::{NOTICE_RATE, notice_wait, Activity, Block, Msg, PermissionOption, Step, ToolBlock, folded_runs, preview_of, language, run_folded, toggle_all, match_files, primary_option};
 
     #[test]
     fn file_matches_rank_names_before_paths() {
@@ -7844,14 +6492,9 @@ mod tests {
     }
 
     #[test]
-    fn elixir_files_highlight() {
+    fn elixir_files_are_named() {
         assert_eq!(language("lib/app.ex"), "Elixir");
         assert_eq!(language("lib/app.exs"), "Elixir");
-        // `.ex` resolves through the viewer's alias table, `.exs` through `syntax`.
-        assert_eq!(syntax("lib/app.ex"), "ex");
-        assert_eq!(syntax("mix.exs"), "elixir");
-        assert!(super::viewer::highlights("defmodule A do\nend\n", "ex"));
-        assert!(super::viewer::highlights("defmodule A do\nend\n", &syntax("mix.exs")));
     }
 
     fn option(name: &str, kind: &str) -> PermissionOption {
@@ -7890,14 +6533,13 @@ mod tests {
     }
 
     #[test]
-    fn a_run_of_finished_calls_folds_once_it_is_behind_the_latest_message() {
+    fn a_run_of_calls_starts_folded_even_while_it_runs_or_fails() {
         let run = vec![tool("a", Step::Done), tool("b", Step::Done), tool("c", Step::Done)];
-        assert!(run_folded(&run, false));
-        assert!(!run_folded(&run, true), "the latest message stays open");
+        assert!(run_folded(&run));
         let failed = vec![tool("a", Step::Done), tool("b", Step::Failed), tool("c", Step::Done)];
-        assert!(!run_folded(&failed, false), "a failure doesn't hide");
+        assert!(run_folded(&failed));
         let running = vec![tool("a", Step::Done), tool("b", Step::Working), tool("c", Step::Waiting)];
-        assert!(!run_folded(&running, false), "a call still going doesn't hide");
+        assert!(run_folded(&running));
     }
 
     #[test]
@@ -7915,11 +6557,11 @@ mod tests {
         let mut run = vec![tool("a", Step::Done), tool("b", Step::Done), tool("c", Step::Done)];
         let Block::Tool(first) = &mut run[0] else { unreachable!() };
         first.fold = Some(false);
-        assert!(!run_folded(&run, false));
+        assert!(!run_folded(&run));
         let mut failed = vec![tool("a", Step::Failed), tool("b", Step::Done), tool("c", Step::Done)];
         let Block::Tool(first) = &mut failed[0] else { unreachable!() };
         first.fold = Some(true);
-        assert!(run_folded(&failed, true));
+        assert!(run_folded(&failed));
     }
 
     #[test]
@@ -7932,15 +6574,14 @@ mod tests {
             tool("d", Step::Done),
             tool("e", Step::Done),
         ];
-        assert_eq!(folded_runs(&blocks, false), vec![3]);
-        assert!(folded_runs(&blocks, true).is_empty());
+        assert_eq!(folded_runs(&blocks), vec![3]);
     }
 
     #[test]
     fn a_run_followed_by_text_folds_in_the_latest_message() {
         let blocks = vec![tool("a", Step::Done), tool("b", Step::Done), tool("c", Step::Done), Block::Text("x".into())];
-        assert_eq!(folded_runs(&blocks, true), vec![0]);
-        assert!(folded_runs(&blocks[..3], true).is_empty());
+        assert_eq!(folded_runs(&blocks), vec![0]);
+        assert_eq!(folded_runs(&blocks[..3]), vec![0]);
     }
 
     #[test]
@@ -7964,5 +6605,18 @@ mod tests {
         assert!(!Activity::Running.needs_you(false) && !Activity::Idle.needs_you(false));
         // A child's parent picks up its finished turn; a question is still the user's.
         assert!(!Activity::Unread.needs_you(true) && Activity::Asking.needs_you(true));
+    }
+}
+
+#[cfg(test)]
+mod file_url_tests {
+    use super::file_of;
+
+    #[test]
+    fn file_urls_become_absolute_paths() {
+        assert_eq!(file_of("file:///home/aks/a.png").as_deref(), Some("/home/aks/a.png"));
+        assert_eq!(file_of("file://localhost/tmp/a%20b.png").as_deref(), Some("/tmp/a b.png"));
+        assert_eq!(file_of("file://other/tmp/a.png"), None);
+        assert_eq!(file_of("https://example.com/a.png"), None);
     }
 }
