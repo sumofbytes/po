@@ -1,4 +1,4 @@
-//! The left side: New, Search, Todos, what needs the user, and every project with its threads.
+//! The left side: New, Search, Tasks, what needs the user, and every project with its threads.
 //! [`Snapshot`] is what [`crate::Reader`] publishes (already filtered by the search); the screen
 //! only draws it, and what is pressed goes back as a [`Cmd`].
 use std::sync::LazyLock;
@@ -81,9 +81,9 @@ pub struct Snapshot {
     /// What a worktree is doing, under the Projects header.
     pub status: Option<String>,
     pub searching: bool,
-    pub todos_open: bool,
-    /// How many todos are left, and how many of those are late.
-    pub todos: (usize, usize),
+    pub tasks_open: bool,
+    /// How many tasks are left, and how many of those are late.
+    pub tasks: (usize, usize),
 }
 
 static SNAPSHOT: LazyLock<watch::Sender<Snapshot>> = LazyLock::new(|| watch::Sender::new(Snapshot::default()));
@@ -238,18 +238,27 @@ fn project_group(project: &Project) -> View {
     let active = project.active;
     let label = move || if active { Colors::foreground()() } else { Colors::dim(Colors::foreground())() };
     let chevron = if project.collapsed { IconName::ChevronRight } else { IconName::ChevronDown };
+    let full = match &project.branch {
+        Some(branch) => format!("{} ⎇ {}", project.name, branch.name),
+        None => project.name.clone(),
+    };
     let name = view()
         .flex_1()
+        .min_w(rems(0.))
+        .tooltip(super::tooltip(full))
         .flex_row()
         .items_baseline()
         .gap(rems(0.5))
-        .child(text(project.name.clone()).number_of_lines(1).flex_shrink(1.).text_size(text_sm()).font_weight(FontWeight::SEMIBOLD).text_color(label))
+        .child(text(project.name.clone()).number_of_lines(1).flex_shrink(0.1).text_size(text_sm()).font_weight(FontWeight::SEMIBOLD).text_color(label))
         .child(project.branch.as_ref().map(|branch| {
             view()
                 .flex_row()
                 .items_baseline()
                 .gap(rems(0.25))
-                .child(text(branch.name.clone()).number_of_lines(1).flex_shrink(1.).text_size(text_xs()).text_color(Colors::muted()))
+                .flex_shrink(1.)
+                .min_w(rems(0.))
+                .overflow_hidden()
+                .child(text(branch.name.clone()).number_of_lines(1).flex_shrink(1.).min_w(rems(0.)).text_size(text_xs()).text_color(Colors::muted()))
                 .child(branch.dirty.then(|| text("*").text_color(Colors::warning())))
         }));
     // Pressing the row opens the project and folds or unfolds its threads; the buttons on it are
@@ -383,19 +392,19 @@ pub fn Sidebar() -> impl IntoElement {
     };
 
     let glass = move || state.with(|s| s.glass);
-    let todos = move || {
-        let (left, late) = state.with(|s| s.todos);
-        let open = state.with(|s| s.todos_open);
+    let tasks = move || {
+        let (left, late) = state.with(|s| s.tasks);
+        let open = state.with(|s| s.tasks_open);
         let count = (left > 0).then(|| {
             view()
                 .min_w(rems(1.25))
                 .flex_none()
                 .items_center()
                 .justify_center()
-                .tooltip(super::tooltip(if late > 0 { "Some are late" } else { "Todos left" }))
+                .tooltip(super::tooltip(if late > 0 { "Some are late" } else { "Tasks left" }))
                 .child(text(left.to_string()).text_size(text_sm()).text_color(if late > 0 { Colors::danger()() } else { Colors::muted()() }))
         });
-        action(IconName::SquareCheck, "Todos", "Todos", Some(open), || send(Cmd::ToggleTodos)).child(count)
+        action(IconName::SquareCheck, "Tasks", "Tasks", Some(open), || send(Cmd::ToggleTasks)).child(count)
     };
 
     let waiting = move || {
@@ -452,7 +461,7 @@ pub fn Sidebar() -> impl IntoElement {
                 .pt(space::actions_top())
                 .child(action(IconName::Plus, "New", "New thread (Ctrl+N)", None, || send(Cmd::NewThread)))
                 .child(dynamic(search))
-                .child(dynamic(todos)),
+                .child(dynamic(tasks)),
         )
         .child(dynamic(waiting))
         .child(
@@ -521,7 +530,7 @@ mod tests {
                 Project { id: 2, name: "other".into(), branch: None, active: false, collapsed: true, closable: true, threads: vec![], fold: None },
             ],
             suggestions: vec![Suggestion { id: 7, text: "“Fix the build” wants to open /tmp/x".into(), yes: "Open" }],
-            todos: (3, 1),
+            tasks: (3, 1),
             ..Snapshot::default()
         });
         let mut app = start();
@@ -547,8 +556,8 @@ mod tests {
         assert_eq!(next(&mut app), [Cmd::NewThread]);
         app.press("text:Settings").unwrap();
         assert_eq!(next(&mut app), [Cmd::OpenSettings]);
-        app.press("text:Todos").unwrap();
-        assert_eq!(next(&mut app), [Cmd::ToggleTodos]);
+        app.press("text:Tasks").unwrap();
+        assert_eq!(next(&mut app), [Cmd::ToggleTasks]);
         app.press("label:Add a project: open a folder (Ctrl+Shift+O)").unwrap();
         assert_eq!(next(&mut app), [Cmd::AddProject]);
         app.hover("text:Old idea").unwrap();

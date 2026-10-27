@@ -1,4 +1,4 @@
-//! The todos window, opened from the sidebar: a list of things to do, each with a date it is due by, nested under one
+//! The tasks window, opened from the sidebar: a list of things to do, each with a date it is due by, nested under one
 //! another and grouped under headers. There is one list for all windows, kept in `todos.json`.
 use std::path::PathBuf;
 use std::sync::LazyLock;
@@ -209,7 +209,7 @@ pub fn due_label(due: Date, today: Date) -> String {
     }
 }
 
-/// A todo, or a header that groups the todos under it. Headers are only ever at the top.
+/// A task, or a header that groups the tasks under it. Headers are only ever at the top.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Item {
     pub id: u64,
@@ -223,7 +223,7 @@ pub struct Item {
 }
 
 impl Item {
-    /// Its todos, done and in all, at every depth.
+    /// Its tasks, done and in all, at every depth.
     pub fn progress(&self) -> (usize, usize) {
         self.children.iter().fold((0, 0), |(done, all), child| {
             let (d, a) = child.progress();
@@ -249,7 +249,7 @@ impl Item {
     }
 }
 
-/// Which todos the list shows, as its footer picks.
+/// Which tasks the list shows, as its footer picks.
 #[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
 pub enum Show {
     #[default]
@@ -258,14 +258,14 @@ pub enum Show {
     Done,
 }
 
-/// Where a todo with no header goes at the top: after the others like it, before the first header,
+/// Where a task with no header goes at the top: after the others like it, before the first header,
 /// so it never looks as though it were under one.
 fn ungrouped_end(items: &[Item]) -> usize {
     items.iter().position(|item| item.header).unwrap_or(items.len())
 }
 
 #[derive(Clone, Default, Debug, PartialEq)]
-pub struct Todos {
+pub struct Tasks {
     pub items: Vec<Item>,
     next: u64,
 }
@@ -274,7 +274,7 @@ fn find(items: &mut [Item], id: u64) -> Option<&mut Item> {
     items.iter_mut().find_map(|item| if item.id == id { Some(item) } else { find(&mut item.children, id) })
 }
 
-/// Takes `id` out of `items`; a header leaves its todos where it was.
+/// Takes `id` out of `items`; a header leaves its tasks where it was.
 fn remove(items: &mut Vec<Item>, id: u64) -> bool {
     if let Some(ix) = items.iter().position(|item| item.id == id) {
         let item = items.remove(ix);
@@ -287,15 +287,15 @@ fn remove(items: &mut Vec<Item>, id: u64) -> bool {
     items.iter_mut().any(|item| remove(&mut item.children, id))
 }
 
-/// Drops the done todos from `items`. A done todo with subtasks still to do stays, so they aren't
+/// Drops the done tasks from `items`. A done task with subtasks still to do stays, so they aren't
 /// lost with it.
 fn clear_done(items: &mut Vec<Item>) {
     items.iter_mut().for_each(|item| clear_done(&mut item.children));
     items.retain(|item| item.header || !item.done || !item.children.is_empty());
 }
 
-impl Todos {
-    /// Adds a todo at the end of `parent`'s, or of the todos under no header, or a header at the
+impl Tasks {
+    /// Adds a task at the end of `parent`'s, or of the tasks under no header, or a header at the
     /// end of the list.
     pub fn add(&mut self, parent: Option<u64>, text: String, due: Option<Date>, header: bool) -> u64 {
         self.next += 1;
@@ -315,7 +315,7 @@ impl Todos {
         find(&mut self.items, id)
     }
 
-    /// Checks a todo off, and everything under it, or unchecks just it.
+    /// Checks a task off, and everything under it, or unchecks just it.
     pub fn toggle(&mut self, id: u64) {
         if let Some(item) = self.get(id) {
             if item.done { item.done = false } else { item.finish() }
@@ -330,7 +330,7 @@ impl Todos {
         clear_done(&mut self.items);
     }
 
-    /// How many todos are left to do, and whether any are done.
+    /// How many tasks are left to do, and whether any are done.
     pub fn counts(&self) -> (usize, bool) {
         let (done, all) = self.items.iter().fold((0, 0), |(done, all), item| {
             let (d, a) = item.progress();
@@ -339,7 +339,7 @@ impl Todos {
         (all - done, done > 0)
     }
 
-    /// How many todos not yet done were due before `today`.
+    /// How many tasks not yet done were due before `today`.
     pub fn late(&self, today: Date) -> usize {
         fn late(items: &[Item], today: Date) -> usize {
             items.iter().map(|item| usize::from(!item.header && !item.done && item.due.is_some_and(|due| due < today)) + late(&item.children, today)).sum()
@@ -397,31 +397,31 @@ pub(crate) fn file() -> PathBuf {
 
 /// The saved list. A file that can't be read is moved aside as `todos.json.bak` rather than
 /// written over by the first change.
-fn load() -> Todos {
+fn load() -> Tasks {
     let target = file();
-    let Ok(text) = std::fs::read_to_string(&target) else { return Todos::default() };
+    let Ok(text) = std::fs::read_to_string(&target) else { return Tasks::default() };
     match serde_json::from_str::<Value>(&text) {
-        Ok(value) => Todos::from_json(&value),
+        Ok(value) => Tasks::from_json(&value),
         Err(error) => {
             log::error!("{}: {error}; kept as a .bak", target.display());
             if let Err(error) = std::fs::rename(&target, target.with_extension("json.bak")) {
                 log::warn!("keeping {}: {error}", target.display());
             }
-            Todos::default()
+            Tasks::default()
         }
     }
 }
 
-fn save(todos: &Todos) -> std::io::Result<()> {
+fn save(tasks: &Tasks) -> std::io::Result<()> {
     let target = file();
     std::fs::create_dir_all(target.parent().ok_or_else(|| std::io::Error::other("no directory"))?)?;
     let temp = target.with_extension(format!("json.{}.tmp", std::process::id()));
-    std::fs::write(&temp, serde_json::to_vec_pretty(&todos.to_json()).unwrap_or_default())?;
+    std::fs::write(&temp, serde_json::to_vec_pretty(&tasks.to_json()).unwrap_or_default())?;
     std::fs::rename(&temp, &target)
 }
 
-/// What the composer is writing: a subtask of this todo or a todo under this header, a header, or
-/// a change to a row. New todos at the top come from the add field instead.
+/// What the composer is writing: a subtask of this task or a task under this header, a header, or
+/// a change to a row. New tasks at the top come from the add field instead.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Target {
     Under(u64),
@@ -431,23 +431,23 @@ pub enum Target {
 
 /// The list, shared by the window that edits it and the sidebar that counts it. Every change is
 /// saved as it is made.
-static STORE: LazyLock<watch::Sender<Todos>> = LazyLock::new(|| watch::Sender::new(load()));
+static STORE: LazyLock<watch::Sender<Tasks>> = LazyLock::new(|| watch::Sender::new(load()));
 
 /// The list now and after every change.
-pub fn watch() -> watch::Receiver<Todos> {
+pub fn watch() -> watch::Receiver<Tasks> {
     STORE.subscribe()
 }
 
-/// How many todos are left, and how many of those are late, for the sidebar's row.
+/// How many tasks are left, and how many of those are late, for the sidebar's row.
 pub fn summary() -> (usize, usize) {
-    let todos = STORE.borrow();
-    (todos.counts().0, todos.late(today()))
+    let tasks = STORE.borrow();
+    (tasks.counts().0, tasks.late(today()))
 }
 
 /// Changes the list with `f`, saves it, and tells whoever follows it.
-pub fn change<R>(f: impl FnOnce(&mut Todos) -> R) -> R {
+pub fn change<R>(f: impl FnOnce(&mut Tasks) -> R) -> R {
     let mut out = None;
-    STORE.send_modify(|todos| out = Some(f(todos)));
+    STORE.send_modify(|tasks| out = Some(f(tasks)));
     if let Err(error) = save(&STORE.borrow()) {
         log::warn!("saving {}: {error}", file().display());
     }
@@ -511,23 +511,23 @@ mod tests {
 
     #[test]
     fn clearing_done_keeps_subtasks_still_to_do() {
-        let mut todos = Todos::default();
-        let ship = todos.add(None, "Ship".into(), None, false);
-        todos.add(Some(ship), "Notes".into(), None, false);
-        todos.add(None, "Milk".into(), None, false);
-        let milk = todos.items[1].id;
-        todos.toggle(milk);
+        let mut tasks = Tasks::default();
+        let ship = tasks.add(None, "Ship".into(), None, false);
+        tasks.add(Some(ship), "Notes".into(), None, false);
+        tasks.add(None, "Milk".into(), None, false);
+        let milk = tasks.items[1].id;
+        tasks.toggle(milk);
         // Checked off with its subtask, then the subtask is brought back.
-        todos.toggle(ship);
-        let notes = todos.items[0].children[0].id;
-        todos.toggle(notes);
-        todos.clear_done();
-        assert_eq!(todos.items.iter().map(|item| item.text.as_str()).collect::<Vec<_>>(), ["Ship"]);
-        assert_eq!(todos.items[0].children.len(), 1);
-        // With nothing under it, a done todo goes.
-        todos.toggle(notes);
-        todos.clear_done();
-        assert!(todos.items.is_empty());
+        tasks.toggle(ship);
+        let notes = tasks.items[0].children[0].id;
+        tasks.toggle(notes);
+        tasks.clear_done();
+        assert_eq!(tasks.items.iter().map(|item| item.text.as_str()).collect::<Vec<_>>(), ["Ship"]);
+        assert_eq!(tasks.items[0].children.len(), 1);
+        // With nothing under it, a done task goes.
+        tasks.toggle(notes);
+        tasks.clear_done();
+        assert!(tasks.items.is_empty());
     }
 
     #[test]
@@ -542,85 +542,85 @@ mod tests {
     }
 
     #[test]
-    fn todos_nest_and_headers_group_them() {
-        let mut todos = Todos::default();
-        let work = todos.add(None, "Work".into(), None, true);
-        let ship = todos.add(Some(work), "Ship".into(), None, false);
-        let notes = todos.add(Some(ship), "Release notes".into(), None, false);
-        todos.add(Some(ship), "Tag".into(), None, false);
+    fn tasks_nest_and_headers_group_them() {
+        let mut tasks = Tasks::default();
+        let work = tasks.add(None, "Work".into(), None, true);
+        let ship = tasks.add(Some(work), "Ship".into(), None, false);
+        let notes = tasks.add(Some(ship), "Release notes".into(), None, false);
+        tasks.add(Some(ship), "Tag".into(), None, false);
         // A header is never put under anything.
-        todos.add(Some(ship), "Home".into(), None, true);
-        assert_eq!(todos.items.len(), 2);
-        assert_eq!(todos.items[0].progress(), (0, 3));
-        // Checking a todo off checks off what is under it; unchecking leaves them.
-        todos.toggle(ship);
-        assert_eq!(todos.items[0].progress(), (3, 3));
-        todos.toggle(ship);
-        assert_eq!(todos.items[0].progress(), (2, 3));
-        assert_eq!(todos.counts(), (1, true));
-        todos.toggle(notes);
-        assert_eq!(todos.counts(), (2, true));
-        todos.clear_done();
-        assert_eq!(todos.items[0].progress(), (0, 2));
+        tasks.add(Some(ship), "Home".into(), None, true);
+        assert_eq!(tasks.items.len(), 2);
+        assert_eq!(tasks.items[0].progress(), (0, 3));
+        // Checking a task off checks off what is under it; unchecking leaves them.
+        tasks.toggle(ship);
+        assert_eq!(tasks.items[0].progress(), (3, 3));
+        tasks.toggle(ship);
+        assert_eq!(tasks.items[0].progress(), (2, 3));
+        assert_eq!(tasks.counts(), (1, true));
+        tasks.toggle(notes);
+        assert_eq!(tasks.counts(), (2, true));
+        tasks.clear_done();
+        assert_eq!(tasks.items[0].progress(), (0, 2));
     }
 
     #[test]
-    fn removing_a_header_keeps_its_todos_but_removing_a_todo_takes_its_subtasks() {
-        let mut todos = Todos::default();
-        let work = todos.add(None, "Work".into(), None, true);
-        let ship = todos.add(Some(work), "Ship".into(), None, false);
-        todos.add(Some(ship), "Tag".into(), None, false);
-        todos.add(None, "Later".into(), None, false);
-        todos.remove(work);
-        assert_eq!(todos.items.iter().map(|item| item.text.as_str()).collect::<Vec<_>>(), ["Later", "Ship"]);
-        todos.remove(ship);
-        assert_eq!(todos.items.iter().map(|item| item.text.as_str()).collect::<Vec<_>>(), ["Later"]);
+    fn removing_a_header_keeps_its_tasks_but_removing_a_task_takes_its_subtasks() {
+        let mut tasks = Tasks::default();
+        let work = tasks.add(None, "Work".into(), None, true);
+        let ship = tasks.add(Some(work), "Ship".into(), None, false);
+        tasks.add(Some(ship), "Tag".into(), None, false);
+        tasks.add(None, "Later".into(), None, false);
+        tasks.remove(work);
+        assert_eq!(tasks.items.iter().map(|item| item.text.as_str()).collect::<Vec<_>>(), ["Later", "Ship"]);
+        tasks.remove(ship);
+        assert_eq!(tasks.items.iter().map(|item| item.text.as_str()).collect::<Vec<_>>(), ["Later"]);
     }
 
     #[test]
     fn a_list_survives_its_file() {
-        let mut todos = Todos::default();
-        let work = todos.add(None, "Work".into(), None, true);
-        let ship = todos.add(Some(work), "Ship".into(), Some(day(2026, 11, 2)), false);
-        todos.add(Some(ship), "Tag".into(), None, false);
-        todos.toggle(ship);
-        assert_eq!(Todos::from_json(&todos.to_json()), todos);
+        let mut tasks = Tasks::default();
+        let work = tasks.add(None, "Work".into(), None, true);
+        let ship = tasks.add(Some(work), "Ship".into(), Some(day(2026, 11, 2)), false);
+        tasks.add(Some(ship), "Tag".into(), None, false);
+        tasks.toggle(ship);
+        assert_eq!(Tasks::from_json(&tasks.to_json()), tasks);
     }
 
     #[test]
-    fn only_todos_left_to_do_and_past_their_date_are_late() {
-        let mut todos = Todos::default();
+    fn only_tasks_left_to_do_and_past_their_date_are_late() {
+        let mut tasks = Tasks::default();
         let monday = day(2026, 10, 26);
-        let a = todos.add(None, "a".into(), Some(monday.plus(-1)), false);
-        todos.add(Some(a), "b".into(), Some(monday.plus(-3)), false);
-        todos.add(None, "c".into(), Some(monday), false);
-        assert_eq!(todos.late(monday), 2);
-        todos.toggle(a);
-        assert_eq!(todos.late(monday), 0);
+        let a = tasks.add(None, "a".into(), Some(monday.plus(-1)), false);
+        tasks.add(Some(a), "b".into(), Some(monday.plus(-3)), false);
+        tasks.add(None, "c".into(), Some(monday), false);
+        assert_eq!(tasks.late(monday), 2);
+        tasks.toggle(a);
+        assert_eq!(tasks.late(monday), 0);
     }
 
     #[test]
-    fn a_todo_under_no_header_goes_before_the_headers() {
-        let mut todos = Todos::default();
-        let work = todos.add(None, "Work".into(), None, true);
-        todos.add(Some(work), "Ship".into(), None, false);
-        todos.add(None, "Milk".into(), None, false);
-        todos.add(None, "Bread".into(), None, false);
-        assert_eq!(todos.items.iter().map(|item| item.text.as_str()).collect::<Vec<_>>(), ["Milk", "Bread", "Work"]);
-        // A removed header's todos join the others under none.
-        todos.remove(work);
-        assert_eq!(todos.items.iter().map(|item| item.text.as_str()).collect::<Vec<_>>(), ["Milk", "Bread", "Ship"]);
+    fn a_task_under_no_header_goes_before_the_headers() {
+        let mut tasks = Tasks::default();
+        let work = tasks.add(None, "Work".into(), None, true);
+        tasks.add(Some(work), "Ship".into(), None, false);
+        tasks.add(None, "Milk".into(), None, false);
+        tasks.add(None, "Bread".into(), None, false);
+        assert_eq!(tasks.items.iter().map(|item| item.text.as_str()).collect::<Vec<_>>(), ["Milk", "Bread", "Work"]);
+        // A removed header's tasks join the others under none.
+        tasks.remove(work);
+        assert_eq!(tasks.items.iter().map(|item| item.text.as_str()).collect::<Vec<_>>(), ["Milk", "Bread", "Ship"]);
     }
 
     #[test]
     fn the_footer_filters_show_what_is_left_or_done_with_what_they_are_under() {
-        let mut todos = Todos::default();
-        let work = todos.add(None, "Work".into(), None, true);
-        let ship = todos.add(Some(work), "Ship".into(), None, false);
-        let tag = todos.add(Some(ship), "Tag".into(), None, false);
-        let empty = todos.add(None, "Someday".into(), None, true);
-        todos.toggle(tag);
-        let header = |id| todos.items.iter().find(|item| item.id == id).unwrap().clone();
+        let mut tasks = Tasks::default();
+        let work = tasks.add(None, "Work".into(), None, true);
+        let ship = tasks.add(Some(work), "Ship".into(), None, false);
+        let tag = tasks.add(Some(ship), "Tag".into(), None, false);
+        let empty = tasks.add(None, "Someday".into(), None, true);
+        tasks.toggle(tag);
+        let header = |id| tasks.items.iter().find(|item| item.id == id).unwrap().clone();
         let (work, empty) = (header(work), header(empty));
         assert!(work.shows(Show::Active) && work.shows(Show::Done));
         // Ship is still to do, but shows under Done for its done subtask.

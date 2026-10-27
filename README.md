@@ -42,7 +42,7 @@ cargo run --release
 
 Screens are moving to [NSH](https://nsh.dev): each runs as an NSH app (a Rust
 root, no JavaScript) inside Po's window through `nsh-platform-gpui`, which draws
-with the same GPUI. The Todos window is the first (`src/nsh/`); its headless
+with the same GPUI. The Tasks window is the first (`src/nsh/`); its headless
 test runs with `cargo test`.
 
 ## Usage
@@ -286,6 +286,8 @@ and sizes. `family` and `mono_family` take a name or a list tried in order
 skipped. Without one, the monospace font is the system's `monospace` (fontconfig
 on Linux), then a well-known one for the platform, then the bundled Fira Mono.
 `size` also scales the UI's spacing, since layout is measured in units of it.
+`transcript_family` and `transcript_size` set the font of the agent's replies on their
+own (same forms as `family` and `size`); without them the conversation follows the UI font.
 Edits to `config.json` and to theme files apply without a restart.
 
 Ctrl+, (Cmd+, on macOS) opens a settings page for the theme, fonts, glass,

@@ -1,12 +1,12 @@
-//! The todos window's screen, laid out like a plain todo app: a field to add one at the top, the
+//! The tasks window's screen, laid out like a plain to-do app: a field to add one at the top, the
 //! list with a box to check each off, and a footer with what is left and which to show. The list
-//! itself is [`crate::todo`]'s store; [`crate::todo::TodoPanel`] is the frame Po shows this in.
+//! itself is [`crate::task`]'s store; [`crate::task::TaskPanel`] is the frame Po shows this in.
 use nsh_core::prelude::*;
 
 use super::{Colors, icon, icon_button, on_hover, rems, text_sm, text_xs};
 use super::bus::{Cmd, send};
 use super::overlay::{self, Height};
-use crate::todo::{self, Date, Item, Show, Target, due_label, parse_due, today};
+use crate::task::{self, Date, Item, Show, Target, due_label, parse_due, today};
 use crate::ui::icon::IconName;
 
 /// The height the screen needs, which the overlay around it takes.
@@ -38,7 +38,7 @@ struct Entry {
     done: bool,
     due: Option<Date>,
     folded: bool,
-    /// Its todos done, and in all, at every depth.
+    /// Its tasks done, and in all, at every depth.
     progress: (usize, usize),
 }
 
@@ -53,7 +53,7 @@ impl Entry {
 enum Line {
     /// `spaced` keeps it apart from what is above it.
     Header { entry: Entry, spaced: bool },
-    Todo { entry: Entry, depth: usize },
+    Task { entry: Entry, depth: usize },
     /// The composer, in place of the row it edits or where what it adds will go.
     Composer { target: Target, depth: usize },
     Empty(&'static str),
@@ -63,7 +63,7 @@ impl Line {
     fn key(&self) -> (u8, u64) {
         match self {
             Line::Header { entry, .. } => (0, entry.id),
-            Line::Todo { entry, .. } => (1, entry.id),
+            Line::Task { entry, .. } => (1, entry.id),
             Line::Composer { .. } => (2, 0),
             Line::Empty(_) => (3, 0),
         }
@@ -81,7 +81,7 @@ fn lines(items: &[Item], depth: usize, show: Show, composer: Option<Target>, out
         } else if item.header {
             out.push(Line::Header { entry: Entry::of(item), spaced: !out.is_empty() });
         } else {
-            out.push(Line::Todo { entry: Entry::of(item), depth });
+            out.push(Line::Task { entry: Entry::of(item), depth });
         }
         let adding = composer == Some(Target::Under(id));
         if !item.folded || filtering || adding {
@@ -97,7 +97,7 @@ fn lines(items: &[Item], depth: usize, show: Show, composer: Option<Target>, out
 /// The screen's own state: what it shows, and what its fields hold.
 #[derive(Clone, Copy)]
 struct State {
-    list: Signal<todo::Todos>,
+    list: Signal<task::Tasks>,
     show: Signal<Show>,
     composer: Signal<Option<Target>>,
     /// The add field's, always there.
@@ -117,8 +117,8 @@ impl State {
         if text.is_empty() {
             return;
         }
-        todo::change(|todos| todos.add(None, text, due, false));
-        // A new todo is one to do, so it shouldn't land out of sight.
+        task::change(|tasks| tasks.add(None, text, due, false));
+        // A new task is one to do, so it shouldn't land out of sight.
         if self.show.get_untracked() == Show::Done {
             self.show.set(Show::All);
         }
@@ -139,8 +139,8 @@ impl State {
         // What it adds to or edits has to be on screen.
         self.show.set(Show::All);
         if let Target::Under(id) = target {
-            todo::change(|todos| {
-                if let Some(parent) = todos.get(id) {
+            task::change(|tasks| {
+                if let Some(parent) = tasks.get(id) {
                     parent.folded = false;
                 }
             });
@@ -156,7 +156,7 @@ impl State {
     }
 
     /// Keeps what the composer holds. Adding leaves it open for the next one, under a new header for
-    /// the todos that go in it; an edit closes it. Nothing typed closes it as well.
+    /// the tasks that go in it; an edit closes it. Nothing typed closes it as well.
     fn commit(self) {
         let Some(target) = self.composer.get_untracked() else { return };
         let text = self.text.get_untracked().trim().to_string();
@@ -166,8 +166,8 @@ impl State {
         let Some(due) = parse_due(&self.due.get_untracked(), today()) else { return };
         match target {
             Target::Edit(id) => {
-                todo::change(|todos| {
-                    if let Some(item) = todos.get(id) {
+                task::change(|tasks| {
+                    if let Some(item) = tasks.get(id) {
                         item.text = text;
                         if !item.header {
                             item.due = due;
@@ -177,12 +177,12 @@ impl State {
                 self.close_composer();
             }
             Target::Under(parent) => {
-                todo::change(|todos| todos.add(Some(parent), text, due, false));
+                task::change(|tasks| tasks.add(Some(parent), text, due, false));
                 self.text.set(String::new());
                 self.due.set(String::new());
             }
             Target::Header => {
-                let id = todo::change(|todos| todos.add(None, text, None, true));
+                let id = task::change(|tasks| tasks.add(None, text, None, true));
                 self.compose(Target::Under(id));
             }
         }
@@ -196,13 +196,13 @@ impl State {
             self.new_text.set(String::new());
             self.new_due.set(String::new());
         } else {
-            send(Cmd::CloseTodos);
+            send(Cmd::CloseTasks);
         }
     }
 
     fn fold(self, id: u64) {
-        todo::change(|todos| {
-            if let Some(item) = todos.get(id) {
+        task::change(|tasks| {
+            if let Some(item) = tasks.get(id) {
                 item.folded = !item.folded;
             }
         });
@@ -210,9 +210,9 @@ impl State {
 }
 
 #[component]
-pub fn Todos() -> impl IntoElement {
+pub fn Tasks() -> impl IntoElement {
     let state = State {
-        list: signal(todo::watch().borrow().clone()),
+        list: signal(task::watch().borrow().clone()),
         show: signal(Show::All),
         composer: signal(None),
         new_text: signal(String::new()),
@@ -222,9 +222,9 @@ pub fn Todos() -> impl IntoElement {
         add_field: element_ref(),
     };
     spawn(async move {
-        let mut todos = todo::watch();
-        while todos.changed().await.is_ok() {
-            let now = todos.borrow_and_update().clone();
+        let mut tasks = task::watch();
+        while tasks.changed().await.is_ok() {
+            let now = tasks.borrow_and_update().clone();
             state.list.set(now);
         }
     });
@@ -248,14 +248,14 @@ pub fn Todos() -> impl IntoElement {
         }
         if out.is_empty() {
             out.push(Line::Empty(match show {
-                _ if state.list.with(|list| list.items.is_empty()) => "Nothing to do yet. Add a todo above, or a header to group them.",
+                _ if state.list.with(|list| list.items.is_empty()) => "Nothing to do yet. Add a task above, or a header to group them.",
                 Show::Done => "Nothing done yet",
                 _ => "All done",
             }));
         }
         out
     };
-    let has_todos = move || state.list.with(|list| list.counts() != (0, false));
+    let has_tasks = move || state.list.with(|list| list.counts() != (0, false));
 
     view()
         .flex_1()
@@ -270,9 +270,9 @@ pub fn Todos() -> impl IntoElement {
                 .border_b_1()
                 .border_color(Colors::border())
                 .on_layout(measure(0))
-                .child(text("Todos").flex_1().font_weight(FontWeight::SEMIBOLD).text_color(Colors::foreground()))
+                .child(text("Tasks").flex_1().font_weight(FontWeight::SEMIBOLD).text_color(Colors::foreground()))
                 .child(icon_button(IconName::Heading, rems(0.875), "Add a header", move || state.compose(Target::Header)))
-                .child(icon_button(IconName::Close, rems(0.875), "Close (Esc)", || send(Cmd::CloseTodos))),
+                .child(icon_button(IconName::Close, rems(0.875), "Close (Esc)", || send(Cmd::CloseTasks))),
         )
         .child(view().px(rems(1.)).pt(rems(0.75)).pb(rems(0.5)).on_layout(measure(1)).child(add_row(state)))
         .child(
@@ -285,12 +285,12 @@ pub fn Todos() -> impl IntoElement {
                     .child(each(lines, Line::key, move |line, _| render_line(state, line))),
             ),
         )
-        .child(when(has_todos, move || footer(state).on_layout(measure(3))).otherwise(move || {
+        .child(when(has_tasks, move || footer(state).on_layout(measure(3))).otherwise(move || {
             parts[3].set(0.);
         }))
 }
 
-/// A line to type a todo into: its lead icon, the text, then the due date with how it was read.
+/// A line to type a task into: its lead icon, the text, then the due date with how it was read.
 fn entry(name: &'static str, lead_icon: IconName, value: Signal<String>, placeholder: &'static str, due: Option<Signal<String>>, on_submit: impl Fn() + Copy + 'static, field: Option<ElementRef>) -> View {
     let input = |id: String, value: Signal<String>, placeholder: &'static str| {
         nsh_core::element::input()
@@ -352,7 +352,7 @@ fn add_row(state: State) -> View {
         .border_1()
         .border_color(Colors::input_border())
         .bg(Colors::input_background())
-        .child(entry("todo-new", IconName::Plus, state.new_text, "What needs to be done?", Some(state.new_due), move || state.add(), Some(state.add_field)))
+        .child(entry("task-new", IconName::Plus, state.new_text, "What needs to be done?", Some(state.new_due), move || state.add(), Some(state.add_field)))
 }
 
 fn composer(state: State, target: Target, depth: usize) -> View {
@@ -364,7 +364,7 @@ fn composer(state: State, target: Target, depth: usize) -> View {
     let lead_icon = if header { IconName::Heading } else { IconName::Square };
     let placeholder = match target {
         Target::Header => "Header",
-        Target::Under(id) if state.list.with_untracked(|list| list.items.iter().any(|item| item.id == id && item.header)) => "Todo",
+        Target::Under(id) if state.list.with_untracked(|list| list.items.iter().any(|item| item.id == id && item.header)) => "Task",
         _ => "Subtask",
     };
     let label = if matches!(target, Target::Edit(_)) { "Cancel (Esc)" } else { "Done adding (Esc)" };
@@ -377,14 +377,14 @@ fn composer(state: State, target: Target, depth: usize) -> View {
         .ml(indent(depth))
         .rounded(Colors::radius())
         .bg(Colors::input_background())
-        .child(entry("todo-composer", lead_icon, state.text, placeholder, (!header).then_some(state.due), move || state.commit(), None))
+        .child(entry("task-composer", lead_icon, state.text, placeholder, (!header).then_some(state.due), move || state.commit(), None))
         .child(icon_button(IconName::Close, rems(0.75), label, move || state.close_composer()))
 }
 
 fn render_line(state: State, line: ReadSignal<Line>) -> AnyElement {
     match line.get_untracked() {
         Line::Header { entry, .. } => header_row(state, entry.id, line).into_element(),
-        Line::Todo { entry, .. } => todo_row(state, entry.id, line).into_element(),
+        Line::Task { entry, .. } => task_row(state, entry.id, line).into_element(),
         Line::Composer { target, depth } => composer(state, target, depth).into_element(),
         Line::Empty(message) => view()
             .py(rems(1.5))
@@ -396,7 +396,7 @@ fn render_line(state: State, line: ReadSignal<Line>) -> AnyElement {
 
 fn entry_of(line: ReadSignal<Line>) -> Entry {
     match line.get() {
-        Line::Header { entry, .. } | Line::Todo { entry, .. } => entry,
+        Line::Header { entry, .. } | Line::Task { entry, .. } => entry,
         _ => unreachable!("a row's line keeps its kind"),
     }
 }
@@ -426,14 +426,14 @@ fn header_row(state: State, id: u64, line: ReadSignal<Line>) -> View {
                 .child(text(move || entry_of(line).text).number_of_lines(1).flex_shrink(1.).font_weight(FontWeight::SEMIBOLD).text_color(Colors::foreground()))
                 .child(text(progress).flex_none().text_size(text_xs()).text_color(Colors::muted())),
         )
-        .child(on_hover(icon_button(IconName::Plus, rems(0.75), "Add a todo under this header", move || state.compose(Target::Under(id)))))
+        .child(on_hover(icon_button(IconName::Plus, rems(0.75), "Add a task under this header", move || state.compose(Target::Under(id)))))
         .child(on_hover(icon_button(IconName::Pencil, rems(0.75), "Rename header", move || state.compose(Target::Edit(id)))))
-        .child(on_hover(icon_button(IconName::Close, rems(0.75), "Remove header, keep its todos", move || todo::change(|todos| todos.remove(id)))))
+        .child(on_hover(icon_button(IconName::Close, rems(0.75), "Remove header, keep its tasks", move || task::change(|tasks| tasks.remove(id)))))
 }
 
-fn todo_row(state: State, id: u64, line: ReadSignal<Line>) -> View {
+fn task_row(state: State, id: u64, line: ReadSignal<Line>) -> View {
     let depth = move || match line.get() {
-        Line::Todo { depth, .. } => depth,
+        Line::Task { depth, .. } => depth,
         _ => 0,
     };
     let done = move || entry_of(line).done;
@@ -444,7 +444,7 @@ fn todo_row(state: State, id: u64, line: ReadSignal<Line>) -> View {
         Some((due, today)) if !done() && due == today => Colors::warning()(),
         _ => Colors::muted()(),
     };
-    // Folding a todo is on its count of subtasks, since its lead column is its box.
+    // Folding a task is on its count of subtasks, since its lead column is its box.
     let count = move || {
         let entry = entry_of(line);
         let (done, all) = entry.progress;
@@ -453,10 +453,10 @@ fn todo_row(state: State, id: u64, line: ReadSignal<Line>) -> View {
     };
     let has_subtasks = move || entry_of(line).progress.1 > 0;
     row()
-        .test_id(&format!("todo-{id}"))
+        .test_id(&format!("task-{id}"))
         .ml(move || indent(depth()))
-        // A press on the row checks it off, as in any todo list; the pencil edits it.
-        .on_press(move || todo::change(|todos| todos.toggle(id)))
+        // A press on the row checks it off, as in any task list; the pencil edits it.
+        .on_press(move || task::change(|tasks| tasks.toggle(id)))
         .child(
             view()
                 .w(lead())
@@ -484,7 +484,7 @@ fn todo_row(state: State, id: u64, line: ReadSignal<Line>) -> View {
         .child(text(move || due().map(|(due, today)| due_label(due, today)).unwrap_or_default()).flex_none().text_size(text_xs()).text_color(due_tint))
         .child(on_hover(icon_button(IconName::Plus, rems(0.75), "Add a subtask", move || state.compose(Target::Under(id)))))
         .child(on_hover(icon_button(IconName::Pencil, rems(0.75), "Edit, or set its due date", move || state.compose(Target::Edit(id)))))
-        .child(on_hover(icon_button(IconName::Close, rems(0.75), "Delete, with its subtasks", move || todo::change(|todos| todos.remove(id)))))
+        .child(on_hover(icon_button(IconName::Close, rems(0.75), "Delete, with its subtasks", move || task::change(|tasks| tasks.remove(id)))))
 }
 
 /// A row of the list: its controls show while the pointer is on it.
@@ -501,7 +501,7 @@ fn row() -> View {
         .hover(|s| s.bg(Colors::hover()))
 }
 
-/// What is left, which todos to show, and a way to clear the done ones.
+/// What is left, which tasks to show, and a way to clear the done ones.
 fn footer(state: State) -> View {
     let left = move || {
         let left = state.list.with(|list| list.counts().0);
@@ -541,7 +541,7 @@ fn footer(state: State) -> View {
                 .w(rems(5.5))
                 .flex_row()
                 .justify_end()
-                .child(when(any_done, move || link("Clear done", None, Box::new(|| todo::change(|todos| todos.clear_done()))))),
+                .child(when(any_done, move || link("Clear done", None, Box::new(|| task::change(|tasks| tasks.clear_done()))))),
         )
 }
 
@@ -554,15 +554,15 @@ mod tests {
 
     use super::*;
 
-    fn todo_named(text: &str) -> Option<Item> {
+    fn task_named(text: &str) -> Option<Item> {
         fn find(items: &[Item], text: &str) -> Option<Item> {
             items.iter().find_map(|item| if item.text == text { Some(item.clone()) } else { find(&item.children, text) })
         }
-        find(&todo::watch().borrow().items, text)
+        find(&task::watch().borrow().items, text)
     }
 
     fn start() -> Headless {
-        let mut config = EngineConfig::new(nsh_platform_gpui::Root::of::<Todos>());
+        let mut config = EngineConfig::new(nsh_platform_gpui::Root::of::<Tasks>());
         config.ui_sets = vec![nsh_base::registry()];
         config.viewport = Size::new(Points(600.), Points(700.));
         config.environment.idiom = nsh_core::platform::Idiom::Desktop;
@@ -574,27 +574,27 @@ mod tests {
 
     /// The one test of the screen: the list is the store's, which is shared, so its steps run in order.
     #[test]
-    fn the_screen_adds_checks_off_nests_filters_and_clears_todos() {
+    fn the_screen_adds_checks_off_nests_filters_and_clears_tasks() {
         let mut commands = super::super::bus::lock();
         let commands = commands.as_mut().expect("the channel");
-        todo::change(|todos| *todos = todo::Todos::default());
+        task::change(|tasks| *tasks = task::Tasks::default());
         let mut app = start();
-        assert!(app.shows("Nothing to do yet. Add a todo above, or a header to group them."));
+        assert!(app.shows("Nothing to do yet. Add a task above, or a header to group them."));
 
         // The add field: Enter adds what it holds, with its due date as people say it.
-        app.type_text("id:todo-new-text", "Buy milk").unwrap();
-        app.type_text("id:todo-new-due", "tomorrow").unwrap();
+        app.type_text("id:task-new-text", "Buy milk").unwrap();
+        app.type_text("id:task-new-due", "tomorrow").unwrap();
         assert!(app.shows("Tomorrow"), "the due date is read as it is typed");
-        app.submit("id:todo-new-due").unwrap();
+        app.submit("id:task-new-due").unwrap();
         app.settle();
-        let milk = todo_named("Buy milk").expect("added");
+        let milk = task_named("Buy milk").expect("added");
         assert_eq!(milk.due, Some(today().plus(1)));
         assert!(app.shows("1 item left"));
 
         // A press on the row checks it off; Active then hides it.
         app.press("text:Buy milk").unwrap();
         app.settle();
-        assert!(todo_named("Buy milk").unwrap().done);
+        assert!(task_named("Buy milk").unwrap().done);
         app.press("Active").unwrap();
         app.settle();
         assert!(!app.shows("Buy milk"));
@@ -602,23 +602,23 @@ mod tests {
         app.press("All").unwrap();
         app.settle();
 
-        // A header, then the composer stays open for the todos that go under it.
+        // A header, then the composer stays open for the tasks that go under it.
         app.press("role:button[Add a header]").unwrap();
         app.settle();
         assert!(app.screen().count("text:Header").unwrap() > 0, "the composer is for a header");
-        app.type_text("id:todo-composer-text", "Work").unwrap();
-        app.submit("id:todo-composer-text").unwrap();
+        app.type_text("id:task-composer-text", "Work").unwrap();
+        app.submit("id:task-composer-text").unwrap();
         app.settle();
-        assert!(app.screen().count("text:Todo").unwrap() > 0, "the composer is for a todo");
-        app.type_text("id:todo-composer-text", "Ship").unwrap();
-        app.submit("id:todo-composer-text").unwrap();
+        assert!(app.screen().count("text:Task").unwrap() > 0, "the composer is for a task");
+        app.type_text("id:task-composer-text", "Ship").unwrap();
+        app.submit("id:task-composer-text").unwrap();
         app.settle();
-        let work = todo::watch().borrow().items.iter().find(|item| item.header).cloned().expect("a header");
+        let work = task::watch().borrow().items.iter().find(|item| item.header).cloned().expect("a header");
         assert_eq!(work.text, "Work");
         assert_eq!(work.children.iter().map(|item| item.text.as_str()).collect::<Vec<_>>(), ["Ship"]);
         app.press_key("escape").unwrap();
         app.settle();
-        assert_eq!(app.screen().count("id:todo-composer-text").unwrap(), 0, "Esc closes the composer");
+        assert_eq!(app.screen().count("id:task-composer-text").unwrap(), 0, "Esc closes the composer");
 
         // Pressing the header folds it.
         app.press("text:Work").unwrap();
@@ -628,29 +628,29 @@ mod tests {
         app.settle();
 
         // A subtask, from the row's own button.
-        let ship = format!("id:todo-{}", todo_named("Ship").unwrap().id);
+        let ship = format!("id:task-{}", task_named("Ship").unwrap().id);
         app.hover(&ship).unwrap();
         app.press(&format!("{ship} >> label:Add a subtask")).unwrap();
         app.settle();
         assert!(app.screen().count("text:Subtask").unwrap() > 0, "the composer is for a subtask");
-        app.type_text("id:todo-composer-text", "Tag").unwrap();
-        app.submit("id:todo-composer-text").unwrap();
+        app.type_text("id:task-composer-text", "Tag").unwrap();
+        app.submit("id:task-composer-text").unwrap();
         app.settle();
-        assert_eq!(todo_named("Ship").unwrap().children.iter().map(|item| item.text.as_str()).collect::<Vec<_>>(), ["Tag"]);
+        assert_eq!(task_named("Ship").unwrap().children.iter().map(|item| item.text.as_str()).collect::<Vec<_>>(), ["Tag"]);
         app.press_key("escape").unwrap();
         app.settle();
 
-        // Clear done drops the done todo.
+        // Clear done drops the done task.
         app.press("Clear done").unwrap();
         app.settle();
-        assert!(todo_named("Buy milk").is_none());
+        assert!(task_named("Buy milk").is_none());
         assert!(app.shows("2 items left"));
 
         // With nothing typed and nothing open, Esc asks the frame to close.
         app.press_key("escape").unwrap();
         app.wait(Duration::from_millis(50)).unwrap();
-        assert_eq!(commands.try_recv().ok(), Some(Cmd::CloseTodos));
+        assert_eq!(commands.try_recv().ok(), Some(Cmd::CloseTasks));
         drop(app);
-        let _ = std::fs::remove_dir_all(todo::file().parent().unwrap());
+        let _ = std::fs::remove_dir_all(task::file().parent().unwrap());
     }
 }

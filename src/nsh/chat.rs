@@ -11,7 +11,7 @@ use tokio::sync::watch;
 
 use super::header::{Control, pane_header};
 use super::source::Shared;
-use super::{Colors, icon, mono_size, rems, text_base, text_sm, text_xs, tooltip};
+use super::{Colors, icon, mono_size, rems, text_sm, text_xs, tooltip, transcript_family, transcript_size};
 use crate::ui::icon::IconName;
 
 /// Whether a step of the agent's is waiting, going, done or failed: a tool call, the plan's
@@ -211,6 +211,8 @@ pub struct Snapshot {
     /// Bumped when the app wrote the draft itself (taking a queued message back, clearing it),
     /// so the screen takes that text over.
     pub draft_reset: u64,
+    /// Where the caret goes (UTF-16 units) when the screen takes the app's draft over.
+    pub draft_caret: Option<u32>,
     /// Bumped when the field should take the keyboard (a new thread opened for a message).
     pub focus: u64,
     /// Bumped when the transcript should follow its end (the user sent something).
@@ -230,6 +232,65 @@ pub fn publish(snapshot: Snapshot) {
         }
         changed
     });
+}
+
+static MENTIONS: LazyLock<watch::Sender<Vec<String>>> = LazyLock::new(|| watch::Sender::new(Vec::new()));
+
+/// Shows the files to suggest after an `@`; nothing is redrawn when they are the ones on screen.
+pub fn publish_mentions(files: Vec<String>) {
+    MENTIONS.send_if_modified(|now| {
+        let changed = *now != files;
+        if changed {
+            *now = files;
+        }
+        changed
+    });
+}
+
+/// How many files the suggestions list.
+pub const MENTIONS_SHOWN: usize = 8;
+
+/// The `@word` the caret (UTF-16 units) is at the end of, if any: where its `@` is (UTF-16 units)
+/// and what follows it. An `@` counts at the start of the text or after a space, so an address
+/// like `a@b.c` is not one.
+fn mention_at(text: &str, caret: u32) -> Option<(u32, String)> {
+    let mut units = 0_u32;
+    let mut before = String::new();
+    for c in text.chars() {
+        let next = units + c.len_utf16() as u32;
+        if next > caret {
+            break;
+        }
+        units = next;
+        before.push(c);
+    }
+    let word_start = before.rfind(char::is_whitespace).map_or(0, |at| at + before[at..].chars().next().map_or(1, char::len_utf8));
+    let word = &before[word_start..];
+    let query = word.strip_prefix('@')?;
+    let at = before[..word_start].encode_utf16().count() as u32;
+    Some((at, query.to_string()))
+}
+
+/// `text` with the `@word` from `at` to `caret` (UTF-16 units) replaced by a mention of `path`,
+/// and the caret's place after it.
+fn mentioned(text: &str, at: u32, caret: u32, path: &str) -> (String, u32) {
+    let char_of = |units: u32| {
+        let mut seen = 0;
+        text.char_indices().find_map(|(index, c)| {
+            if seen >= units {
+                return Some(index);
+            }
+            seen += c.len_utf16() as u32;
+            None
+        }).unwrap_or(text.len())
+    };
+    let (from, to) = (char_of(at), char_of(caret));
+    let insert = format!("@{path} ");
+    let after = &text[to..];
+    // A space already follows: it is the one the mention ends with.
+    let rest = after.strip_prefix(' ').unwrap_or(after);
+    let caret = (text[..from].encode_utf16().count() + insert.encode_utf16().count()) as u32;
+    (format!("{}{insert}{rest}", &text[..from]), caret)
 }
 
 /// What the user did, for [`crate::Reader::run`].
@@ -265,6 +326,14 @@ pub enum Cmd {
     Fold { message: usize, block: usize, folded: bool },
     /// A tool call wrote or changed a file: it opens in the other pane.
     Open(String),
+    /// A link of the agent's text led to a file, at a line (from 1) if it said one.
+    OpenAt(String, Option<usize>),
+    /// The word being typed after an `@` in the draft, or `None` when there is none: the files
+    /// that match are published to [`mentions`].
+    Mention(Option<String>),
+    /// The draft written by the screen itself (a file chosen from the suggestions), with the
+    /// caret's place in it (UTF-16 units).
+    SetDraft { text: String, caret: u32 },
     /// Which session to resume.
     Resume(String),
     /// The agent's sessions are asked for.
@@ -292,6 +361,55 @@ pub enum GrantChange {
 /// Asks the Reader ([`super::bus`]); the conversation is [`super::bus::Cmd::Chat`].
 fn tell(cmd: Cmd) {
     super::bus::send(super::bus::Cmd::Chat(cmd));
+}
+
+/// Where a link of the agent's text leads.
+#[derive(Clone, PartialEq, Debug)]
+enum Link {
+    /// Something the system opens: a web page or a mail address.
+    Url(String),
+    /// A file, at a line (from 1) if the link said one.
+    File(String, Option<usize>),
+    /// A place within the text itself, which has nowhere to go.
+    Nowhere,
+}
+
+/// What a press on `url` should do: `src/a.rs`, `/abs/a.rs:42`, `a.rs:42-50:3`, `a.rs#L42` and
+/// `file:///abs/a.rs` are files; a URL with another scheme is left to the system.
+fn link_target(url: &str) -> Link {
+    let url = url.trim();
+    if url.is_empty() || url.starts_with('#') {
+        return Link::Nowhere;
+    }
+    let path = if url.starts_with("file:") {
+        match crate::file_of(url) {
+            Some(path) => path,
+            None => return Link::Nowhere,
+        }
+    } else {
+        // A scheme is two or more letters before a colon that no number follows, so `C:` and `a.rs:42` are not one.
+        let scheme = url.split_once(':').is_some_and(|(scheme, rest)| !rest.starts_with(|c: char| c.is_ascii_digit()) && scheme.len() > 1 && scheme.starts_with(|c: char| c.is_ascii_alphabetic()) && scheme.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.')));
+        if scheme {
+            return Link::Url(url.to_string());
+        }
+        url.to_string()
+    };
+    let (path, fragment_line) = match path.rsplit_once("#L") {
+        Some((path, line)) => (path.to_string(), line.split(['-', ':', 'C']).next().and_then(|n| n.parse().ok())),
+        None => (path, None),
+    };
+    // `:42`, `:42-50`, `:42:3`: the first number is the line.
+    let mut path = path.as_str();
+    let mut line = fragment_line;
+    while let Some((head, tail)) = path.rsplit_once(':') {
+        let first = tail.split('-').next().unwrap_or("");
+        if tail.is_empty() || !tail.chars().all(|c| c.is_ascii_digit() || c == '-') || first.is_empty() {
+            break;
+        }
+        line = first.parse().ok();
+        path = head;
+    }
+    Link::File(path.to_string(), line.filter(|line| *line > 0))
 }
 
 /// What a phase is drawn with: quiet while it waits, principal while it goes, and what it
@@ -785,12 +903,21 @@ fn approve_row(message: usize, at: usize, question: &str, lines: &[String], answ
 /// ([`Block`]'s `index`), not its place among the rows drawn: a folded run adds a row of its own.
 fn block_row(message: usize, block: &Block) -> AnyElement {
     match block {
-        Block::Markdown(markdown) => text_view()
-            .markdown(markdown.0.to_string())
-            .selectable(true)
-            .text_base()
-            .text_color(Colors::foreground())
-            .into_element(),
+        Block::Markdown(markdown) => {
+            let body = text_view()
+                .markdown(markdown.0.to_string())
+                .on_link_press(|press: &nsh_base::TextViewLinkPressEvent| match link_target(&press.url) {
+                    Link::Url(url) => super::bus::send(super::bus::Cmd::OpenUrl(url)),
+                    Link::File(path, line) => tell(Cmd::OpenAt(path, line)),
+                    Link::Nowhere => {}
+                })
+                .selectable(true).text_size(transcript_size()).text_color(Colors::foreground());
+            match transcript_family() {
+                Some(family) => body.font_family(family),
+                None => body,
+            }
+            .into_element()
+        }
         Block::Thought { index, text: thought, open } => thought_row(message, *index, thought, *open),
         Block::Tool(tool) => tool_row(message, tool.index, tool),
         Block::Run { index, count, phase, folded } => run_row(message, *index, *count, *phase, *folded),
@@ -1192,17 +1319,97 @@ fn send_button(snap: Snapshot, draft: Signal<String>) -> AnyElement {
         .into_element()
 }
 
+/// The suggestions of files after an `@` in the draft: the files that match, which one is
+/// picked, and where the caret is.
+#[derive(Clone, Copy)]
+struct Mentions {
+    files: Signal<Vec<String>>,
+    selected: Signal<usize>,
+    caret: Signal<u32>,
+    /// The `@` that Esc closed the suggestions of, so they stay closed until it is another.
+    dismissed: Signal<Option<u32>>,
+    draft: Signal<String>,
+}
+
+impl Mentions {
+    /// The `@word` being typed, while there are files to suggest for it.
+    fn open(&self) -> Option<(u32, String)> {
+        let found = mention_at(&self.draft.get(), self.caret.get())?;
+        (self.dismissed.get() != Some(found.0) && !self.files.with(|files| files.is_empty())).then_some(found)
+    }
+
+    /// Moves the pick by `by`, wrapping; false when nothing is suggested.
+    fn step(&self, by: isize) -> bool {
+        let len = self.files.with_untracked(|files| files.len()) as isize;
+        if len == 0 || self.open().is_none() {
+            return false;
+        }
+        self.selected.set((self.selected.get_untracked() as isize + by).rem_euclid(len) as usize);
+        true
+    }
+
+    /// Writes the picked file into the draft in place of the word; false when nothing is suggested.
+    fn accept(&self, at: Option<usize>) -> bool {
+        let Some((start, _)) = self.open() else { return false };
+        let at = at.unwrap_or_else(|| self.selected.get_untracked());
+        let Some(path) = self.files.with_untracked(|files| files.get(at).cloned()) else { return false };
+        let (text, caret) = mentioned(&self.draft.get_untracked(), start, self.caret.get_untracked(), &path);
+        tell(Cmd::SetDraft { text, caret });
+        true
+    }
+
+    fn close(&self) -> bool {
+        match self.open() {
+            Some((start, _)) => {
+                self.dismissed.set(Some(start));
+                true
+            }
+            None => false,
+        }
+    }
+}
+
+/// The list of suggested files above the composer, the picked one marked.
+fn mention_list(mentions: Mentions) -> AnyElement {
+    let files = mentions.files.get();
+    let selected = mentions.selected.get();
+    let mut column = view().flex_col().py(rems(0.25)).rounded(Colors::radius()).border_1().border_color(Colors::input_border()).bg(Colors::input_background()).overflow_hidden();
+    for (at, path) in files.iter().enumerate() {
+        let name = path.rsplit('/').next().unwrap_or(path).to_string();
+        let folder = path.strip_suffix(name.as_str()).unwrap_or("").to_string();
+        column = column.child(
+            view()
+                .role(AccessibilityRole::Button)
+                .label(path.clone())
+                .flex_row()
+                .items_baseline()
+                .gap(rems(0.5))
+                .px(rems(0.75))
+                .py(rems(0.25))
+                .cursor_pointer()
+                .hover(|s| s.bg(Colors::hover()))
+                .when(at == selected, |s| s.bg(Colors::selected()))
+                .on_press(move || {
+                    mentions.accept(Some(at));
+                })
+                .child(text(name).flex_none().text_sm().text_color(Colors::foreground()))
+                .child(text(folder).flex_shrink(1.).number_of_lines(1).text_xs().text_color(Colors::muted())),
+        );
+    }
+    column.into_element()
+}
+
 /// The field the draft is typed in, reporting what the user pasted:
 /// the pictures and files it came with, and the text it says.
-fn draft_field(draft: &Signal<String>, field_ref: ElementRef) -> Input {
+fn draft_field(draft: &Signal<String>, field_ref: ElementRef, mentions: Mentions) -> Input {
     let held = draft.clone();
-    input()
+    let field = input()
         .test_id("chat-draft")
         .element_ref(&field_ref)
         .flex_1()
         .min_w_0()
         .max_h(px(160.))
-        .text_size(text_base())
+        .text_size(transcript_size())
         .multiline(true)
         .value(move || held.get())
         .text_color(Colors::foreground())
@@ -1225,12 +1432,21 @@ fn draft_field(draft: &Signal<String>, field_ref: ElementRef) -> Input {
                 tell(Cmd::Drop(paste.uris.clone()));
             }
         })
-        .on_submit(|text: &str| {
+        .on_selection_change(move |selection: &nsh_core::element::Selection| mentions.caret.set(selection.end))
+        .on_submit(move |text: &str| {
+            // With files suggested, Enter takes the picked one rather than sending.
+            if mentions.accept(None) {
+                return;
+            }
             let text = text.to_string();
             tell(Cmd::Draft(text.clone()));
             tell(Cmd::Send { later: false });
         })
-        .on_file_drop(move |drop: &FileDropEvent| tell(Cmd::Drop(drop.uris.clone())))
+        .on_file_drop(move |drop: &FileDropEvent| tell(Cmd::Drop(drop.uris.clone())));
+    match transcript_family() {
+        Some(family) => field.font_family(family),
+        None => field,
+    }
 }
 
 /// The field in its row. A value the app writes to a field the user has typed in is dropped as
@@ -1248,7 +1464,7 @@ fn fresh_field(reset: u64, field: Input) -> AnyElement {
 
 /// The composer: the note, the strip of pictures, the setup of a thread that waits to start,
 /// the field, and the send.
-fn bar(snap: Snapshot, draft: Signal<String>, field_ref: ElementRef) -> AnyElement {
+fn bar(snap: Snapshot, draft: Signal<String>, field_ref: ElementRef, mentions: Mentions) -> AnyElement {
     let field = draft.clone();
     let low = draft.clone();
     let has_pictures = !snap.pictures.is_empty();
@@ -1284,7 +1500,7 @@ fn bar(snap: Snapshot, draft: Signal<String>, field_ref: ElementRef) -> AnyEleme
         .on_file_drop(move |drop: &FileDropEvent| tell(Cmd::Drop(drop.uris.clone())))
         .children(snap.note.as_deref().map(note_row))
         .children((!snap.pictures.is_empty()).then(|| pictures_row(&snap.pictures)))
-        .child(fresh_field(snap.draft_reset, draft_field(&field, field_ref)))
+        .child(fresh_field(snap.draft_reset, draft_field(&field, field_ref, mentions)))
         .child(
             view()
                 .flex_row()
@@ -1301,6 +1517,8 @@ fn bar(snap: Snapshot, draft: Signal<String>, field_ref: ElementRef) -> AnyEleme
     if !snap.queue.is_empty() {
         column = column.child(view().w_full().max_w(px(COLUMN)).flex_col().gap(rems(0.25)).child(snap.queue.iter().cloned().map(queue_row).collect::<Vec<_>>()));
     }
+    // Its own region: read in the body, every keystroke would build the composer, and its field, again.
+    column = column.child(dynamic(move || mentions.open().map(|_| view().w_full().max_w(px(COLUMN)).child(mention_list(mentions)))));
     column = column.child(card);
     column.into_element()
 }
@@ -1335,13 +1553,60 @@ pub fn Chat() -> impl IntoElement {
     let draft = signal(state.with_untracked(|s| s.draft.clone()));
     let taken = stored(u64::MAX);
     effect(move || {
-        let (sentinel, text) = state.with(|s| (s.draft_reset, s.draft.clone()));
+        let (sentinel, text, caret) = state.with(|s| (s.draft_reset, s.draft.clone(), s.draft_caret));
         if taken.replace(sentinel) != sentinel {
             if text != draft.get_untracked() {
                 draft.set(text);
             }
-            spawn(async move { field_ref.focus() });
+            // The field is built again for this draft, and a press or Tab that chose a file may
+            // still move the focus on, so it is taken back once the frame is drawn.
+            let take = move || {
+                field_ref.focus();
+                if let Some(caret) = caret {
+                    field_ref.set_selection(caret, caret);
+                }
+            };
+            spawn(async move {
+                take();
+                next_frame().await;
+                take();
+            });
+            set_timeout(std::time::Duration::from_millis(50), take);
         }
+    });
+
+    // `@` in the draft suggests the project's files: the app finds them for the word typed, and
+    // the keys move through them while they are shown.
+    let mentions = Mentions { files: signal(MENTIONS.borrow().clone()), selected: signal(0), caret: signal(0), dismissed: signal(None), draft };
+    spawn(async move {
+        let mut files = MENTIONS.subscribe();
+        files.mark_changed();
+        while files.changed().await.is_ok() {
+            let now = files.borrow_and_update().clone();
+            mentions.selected.set(0);
+            mentions.files.set(now);
+        }
+    });
+    // Nothing is suggested before a word is typed, so the first no-word is not worth saying.
+    let asked = stored(Some(None::<String>));
+    effect(move || {
+        let word = mention_at(&draft.get(), mentions.caret.get()).map(|(_, word)| word);
+        if asked.replace(Some(word.clone())) != Some(word.clone()) {
+            tell(Cmd::Mention(word));
+        }
+    });
+    let always = KeyOptions { when: nsh_core::keymap::When::Always, repeat: true };
+    on_key_with("up", always, move |_| {
+        mentions.step(-1);
+    });
+    on_key_with("down", always, move |_| {
+        mentions.step(1);
+    });
+    on_key_with("tab", KeyOptions { repeat: false, ..always }, move |_| {
+        mentions.accept(None);
+    });
+    on_key_with("escape", KeyOptions { repeat: false, ..always }, move |_| {
+        mentions.close();
     });
 
     // The field takes the keyboard whenever the app asks it to.
@@ -1349,7 +1614,15 @@ pub fn Chat() -> impl IntoElement {
     effect(move || {
         let bump = state.with(|s| s.focus);
         if bump > 0 && focused.replace(bump) != bump {
-            field_ref.focus();
+            // The thread's field may be built again for this snapshot, so the focus is taken
+            // again once the frame is drawn.
+            let take = move || field_ref.focus();
+            spawn(async move {
+                take();
+                next_frame().await;
+                take();
+            });
+            set_timeout(std::time::Duration::from_millis(50), take);
         }
     });
 
@@ -1413,7 +1686,7 @@ pub fn Chat() -> impl IntoElement {
             .flex_1()
             .min_h_0()
             .flex_col()
-            .children([top, bar(snap, draft, field_ref)])
+            .children([top, bar(snap, draft, field_ref, mentions)])
             .into_element()
     };
 
@@ -1433,6 +1706,40 @@ mod tests {
 
     use super::*;
     use crate::nsh::bus::Cmd as Bus;
+
+    #[test]
+    fn an_at_word_at_the_caret_is_a_mention_and_a_picked_file_replaces_it() {
+        assert_eq!(mention_at("look at @src/ma", 15), Some((8, "src/ma".into())));
+        assert_eq!(mention_at("@", 1), Some((0, String::new())));
+        assert_eq!(mention_at("é @a", 4), Some((2, "a".into())));
+        // Not at the end of the word, in an address, or after the word ended.
+        assert_eq!(mention_at("mail a@b.c", 10), None);
+        assert_eq!(mention_at("@a b", 4), None);
+        assert_eq!(mention_at("hello", 5), None);
+        // The word is cut at the caret.
+        assert_eq!(mention_at("@abc def", 3), Some((0, "ab".into())));
+
+        assert_eq!(mentioned("look at @src/ma", 8, 15, "src/main.rs"), ("look at @src/main.rs ".into(), 21));
+        // The space that followed is kept once.
+        assert_eq!(mentioned("see @ma now", 4, 7, "a.rs"), ("see @a.rs now".into(), 10));
+        assert_eq!(mentioned("é @a", 2, 4, "b.rs"), ("é @b.rs ".into(), 8));
+    }
+
+    #[test]
+    fn a_link_leads_to_a_file_at_a_line_or_to_the_system() {
+        let file = |path: &str, line| Link::File(path.into(), line);
+        assert_eq!(link_target("src/main.rs"), file("src/main.rs", None));
+        assert_eq!(link_target("src/main.rs:42"), file("src/main.rs", Some(42)));
+        assert_eq!(link_target("/home/a/po/src/main.rs:42-50"), file("/home/a/po/src/main.rs", Some(42)));
+        assert_eq!(link_target("a.rs:7:3"), file("a.rs", Some(7)));
+        assert_eq!(link_target("a.rs#L12"), file("a.rs", Some(12)));
+        assert_eq!(link_target("a.rs:0"), file("a.rs", None));
+        assert_eq!(link_target("file:///home/a/my%20file.rs"), file("/home/a/my file.rs", None));
+        assert_eq!(link_target("https://example.com/a:1"), Link::Url("https://example.com/a:1".into()));
+        assert_eq!(link_target("mailto:a@b.c"), Link::Url("mailto:a@b.c".into()));
+        assert_eq!(link_target("#heading"), Link::Nowhere);
+        assert_eq!(link_target(""), Link::Nowhere);
+    }
 
     #[test]
     fn queued_messages_can_be_taken_back_and_a_busy_turn_offers_steer_and_stop() {
@@ -1469,6 +1776,26 @@ mod tests {
         app.press("label:Steer: the agent reads it before its next step (Alt+Enter: after this turn)").unwrap();
         let sent = drain(&mut app);
         assert!(sent.contains(&Bus::Chat(Cmd::Send { later: false })), "{sent:?}");
+    }
+
+    #[test]
+    fn typing_after_an_at_keeps_the_field_and_narrows_the_files() {
+        let mut guard = crate::nsh::bus::lock();
+        let commands = guard.as_mut().expect("the channel");
+        publish_mentions(vec!["src/main.rs".into(), "src/nsh/chat.rs".into()]);
+        let mut app = start(Snapshot { blank: true, ..Snapshot::default() });
+        app.type_text("id:chat-draft", "look at @").unwrap();
+        app.type_text("id:chat-draft", "ma").unwrap();
+        app.settle();
+        let sent: Vec<_> = std::iter::from_fn(|| commands.try_recv().ok()).collect();
+        assert_eq!(sent.last(), Some(&Bus::Chat(Cmd::Mention(Some("ma".into())))), "{sent:?}");
+        assert!(app.shows("main.rs") && app.shows("chat.rs"), "{:?}", app.screen().texts());
+        // The field is still the one typed in: more typing lands in it, not in a fresh one.
+        app.type_text("id:chat-draft", "i").unwrap();
+        app.settle();
+        let sent: Vec<_> = std::iter::from_fn(|| commands.try_recv().ok()).collect();
+        assert!(sent.contains(&Bus::Chat(Cmd::Draft("look at @mai".into()))), "{sent:?}");
+        publish_mentions(vec![]);
     }
 
     fn start(snapshot: Snapshot) -> Headless {

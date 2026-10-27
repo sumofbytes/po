@@ -17,7 +17,7 @@ const BUNDLED_MONO: &[u8] = include_bytes!("../assets/fonts/FiraMono-Medium.ttf"
 const BUNDLED_MONO_FAMILY: &str = "Fira Mono";
 
 /// The keys of the config's `font` block.
-const KEYS: [&str; 4] = ["family", "size", "mono_family", "mono_size"];
+const KEYS: [&str; 6] = ["family", "size", "mono_family", "mono_size", "transcript_family", "transcript_size"];
 
 /// The families to try, in order, and the size of one kind of text.
 #[derive(Debug, PartialEq)]
@@ -31,6 +31,8 @@ struct Role {
 struct Settings {
     ui: Role,
     mono: Role,
+    /// The conversation's text; what it leaves unset follows `ui`.
+    transcript: Role,
 }
 
 /// The fonts to draw with.
@@ -39,6 +41,9 @@ pub struct Fonts {
     pub ui_size: f32,
     pub mono: SharedString,
     pub mono_size: f32,
+    /// The conversation's own family and size, when set; it draws with the UI font otherwise.
+    pub transcript: Option<SharedString>,
+    pub transcript_size: Option<f32>,
 }
 
 /// A family name, or a list of them to try in order.
@@ -91,6 +96,7 @@ fn settings(theme: &Value, config: &Value) -> Settings {
     Settings {
         ui: role(config, "family", "size", theme, "font.family", "font.size"),
         mono: role(config, "mono_family", "mono_size", theme, "mono_font.family", "mono_font.size"),
+        transcript: role(config, "transcript_family", "transcript_size", &Value::Null, "", ""),
     }
 }
 
@@ -183,7 +189,7 @@ pub fn register(cx: &App) {
 pub fn resolve(theme: &Value, config: &Value, cx: &App) -> Fonts {
     register(cx);
     let installed = cx.text_system().all_font_names();
-    let Settings { ui, mono } = settings(theme, config);
+    let Settings { ui, mono, transcript } = settings(theme, config);
     let ui_family = match pick(&ui.families, &installed, "UI") {
         Some(family) => family.into(),
         None => system_ui(&installed, cx),
@@ -196,11 +202,14 @@ pub fn resolve(theme: &Value, config: &Value, cx: &App) -> Fonts {
             .unwrap_or_else(|| BUNDLED_MONO_FAMILY.into())
             .into(),
     };
+    let transcript_family = pick(&transcript.families, &installed, "transcript").map(SharedString::from);
     Fonts {
         ui: ui_family,
         ui_size: ui.size.unwrap_or(UI_SIZE),
         mono: mono_family,
         mono_size: mono.size.unwrap_or(MONO_SIZE),
+        transcript: transcript_family,
+        transcript_size: transcript.size,
     }
 }
 
@@ -217,6 +226,13 @@ mod tests {
         let got = settings(&theme, &config);
         assert_eq!(got.ui, Role { families: vec!["A".into(), "B".into()], size: Some(16.0) });
         assert_eq!(got.mono, Role { families: vec!["Theme Mono".into()], size: Some(12.0) });
+    }
+
+    #[test]
+    fn the_transcript_has_its_own_font_only_when_asked() {
+        let got = settings(&Value::Null, &json!({ "font": { "transcript_family": "Serif", "transcript_size": 17 } }));
+        assert_eq!(got.transcript, Role { families: vec!["Serif".into()], size: Some(17.0) });
+        assert_eq!(settings(&Value::Null, &json!({})).transcript, Role { families: vec![], size: None });
     }
 
     #[test]
