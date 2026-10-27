@@ -1011,10 +1011,21 @@ fn picker(picking: &Picking) -> AnyElement {
         .into_element()
 }
 
-/// What a thread waits on before it starts: the agent to run it, and whether it starts in a git
-/// worktree of its own.
+/// The icon and name inside the worktree chip, in `tone`.
+fn worktree_label(tone: impl Fn() -> AdaptiveColor + Copy + 'static) -> AnyElement {
+    view()
+        .flex_row()
+        .items_center()
+        .gap(rems(0.25))
+        .child(icon(IconName::GitBranch, rems(0.75), tone))
+        .child(text("Worktree").font_weight(FontWeight::MEDIUM).text_size(text_sm()).text_color(tone))
+        .into_element()
+}
+
+/// What a thread waits on before it starts: the agent to run it, and a chip that, when on, starts
+/// it in a git worktree of its own. Both sit in the row of chips under the field.
 fn setup(snap: &Snapshot) -> AnyElement {
-    let mut column = view().flex_col().gap(rems(0.625)).pb(rems(0.625));
+    let mut row = view().flex_row().flex_wrap().items_center().gap(rems(0.5));
     let name = snap
         .chosen
         .as_ref()
@@ -1029,39 +1040,31 @@ fn setup(snap: &Snapshot) -> AnyElement {
             tell(Cmd::PickAgent(id))
         }));
     }
-    column = column.child(agents.into_element());
+    row = row.child(agents.into_element());
     if let Some(isolate) = snap.isolate {
         let tip = "Start the thread in a git worktree of its own";
-        let box_ = view()
-            .w(rems(0.875))
-            .h(rems(0.875))
-            .rounded(Colors::radius())
-            .border_1()
-            .border_color(Colors::input_border())
-            .bg(Colors::input_background())
-            .flex_none()
-            .flex_row()
-            .items_center()
-            .justify_center()
-            .style_when(move || isolate, |s| s.bg(Colors::primary()).border_color(Colors::primary()))
-            .children(isolate.then(|| icon(IconName::SquareCheck, rems(0.75), Colors::primary_foreground())));
-        column = column.child(
+        row = row.child(
             view()
                 .role(AccessibilityRole::Button)
                 .label(tip)
+                .flex_none()
                 .flex_row()
                 .items_center()
-                .gap(rems(0.5))
+                .gap(rems(0.25))
                 .px(rems(0.5))
+                .py(rems(0.25))
+                .rounded_full()
+                .border_1()
+                .border_color(Colors::input_border())
                 .cursor_pointer()
+                .style_when(move || isolate, |s| s.bg(Colors::hover()).border_color(Colors::primary()))
                 .hover(|s| s.bg(Colors::hover()))
                 .tooltip(tooltip(tip))
                 .on_press(move || tell(Cmd::Isolate(!isolate)))
-                .child(box_)
-                .child(text("Start in a worktree of its own").text_sm().text_color(Colors::foreground())),
+                .child(if isolate { worktree_label(Colors::foreground()) } else { worktree_label(Colors::muted()) }),
         );
     }
-    column.into_element()
+    row.into_element()
 }
 
 /// The settings of the session, as menus named for each.
