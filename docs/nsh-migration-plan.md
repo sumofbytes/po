@@ -24,7 +24,17 @@ Look at `src/nsh/diff.rs` or `src/nsh/source.rs` as the template.
 6. Delete the legacy code the step replaces in the same commit. One commit per view, message `Draw the X with NSH`.
 
 ## Steps, in suggested order
-1. ~~**Dead-code sweep (small, do first).**~~ Done. The old viewer is no longer built: `CodeView`, `CodeViewState`,
+1. ~~**Dead-code sweep (small, do first).**~~ Done.
+2. ~~**Agent / form panes.**~~ Done. `src/nsh/agent.rs` publishes the pane: a `Body::Markdown`
+   (the agent's document rendered with NSH's `text_view`) or a `Body::Form` (its fields and
+   whether the agent has the answers). What a field holds is the screen's own (`drafts`); the
+   seeds reset when the form's id or fields change, which is what a replaced form means.
+   Answers go back as `Cmd::SubmitForm(id, values)`, trimmed and with the empty ones left out,
+   and `form_submitted` handles them where it did before. Gone with this step: `ui::form`
+   wholly, `Thread.docs`/`form_uis`/`form_subs`/`sync_forms` and `markdown_view`; `Project.doc`
+   is now just `is_markdown` — the markdown file itself is shown by the source pane's
+   `Body::Markdown`. The legacy tab row (`view_tabs`, which keeps the agent's views as tabs)
+   still switches among these panes. The old viewer is no longer built: `CodeView`, `CodeViewState`,
    `ViewScroll`, and most of `viewer/{cursor,element,search,wrap,text}.rs`. Still live: `viewer::CodeColors`
    (used by `ui/markdown.rs`), `viewer::prewarm`, `viewer::init`, `viewer::highlights` (a test). Cut it down to
    those, then move them somewhere small. Also unused: `ui::button::Button::text`, `ui::input::Input::{field,suffix}`,

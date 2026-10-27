@@ -100,12 +100,6 @@ impl Button {
         self
     }
 
-    /// Greyed out and not clickable.
-    pub fn disabled(mut self, disabled: bool) -> Self {
-        self.disabled = disabled;
-        self
-    }
-
     /// A chevron after the label, for a button that opens a menu.
     pub fn dropdown_caret(mut self, caret: bool) -> Self {
         self.caret = caret;

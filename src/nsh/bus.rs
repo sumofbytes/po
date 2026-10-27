@@ -44,6 +44,8 @@ pub enum Cmd {
     SettingsSaved,
     /// An agent's suggestion, answered yes or no.
     Answer(u64, bool),
+    /// A form the agent put on screen, answered by the user.
+    SubmitForm(String, serde_json::Value),
 }
 
 /// The sending end, and the receiving end until the one listener takes it.

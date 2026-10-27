@@ -543,15 +543,6 @@ enum Mode {
     Diff,
 }
 
-/// A markdown file as the viewer shows it rendered: cut into pieces so that only those in view
-/// are laid out, with a selection and focus of its own.
-struct Doc {
-    chunks: Rc<Vec<String>>,
-    list: ListState,
-    selection: Entity<ui::markdown::Selection>,
-    focus: gpui::FocusHandle,
-}
-
 fn is_markdown(path: &str) -> bool {
     path.rsplit_once('.').is_some_and(|(_, ext)| ext.eq_ignore_ascii_case("md") || ext.eq_ignore_ascii_case("markdown"))
 }
@@ -585,8 +576,8 @@ struct Project {
     current: Option<String>,
     stamp: Option<Stamp>,
     code: Option<nsh::source::Shared>,
-    /// The current file rendered, when it is markdown.
-    doc: Option<Doc>,
+    /// What the current file is: the markdown flag of it, loaded elsewhere.
+    is_markdown: bool,
     notice: Option<String>,
     /// Every file, folders closed until the user opens them.
     files_tree: FileTree,
@@ -623,12 +614,8 @@ impl Project {
 struct Thread {
     /// Documents the agent put on screen through Po's MCP server.
     views: command::Views,
-    /// The rendered form of each view.
-    docs: HashMap<String, Doc>,
     /// Forms the agent put on screen through Po's MCP server, and the form of each.
     forms: command::Forms,
-    form_uis: HashMap<String, Entity<ui::form::FormState>>,
-    form_subs: HashMap<String, Subscription>,
     /// The view the viewer shows in place of a file or the changes.
     shown: Option<String>,
     /// A view the agent added while the user was busy, waiting for a click.
@@ -1241,6 +1228,9 @@ struct Reader {
     /// The viewer's diff pane, drawn by NSH, and what keeps it in Po's theme.
     diff: Entity<nsh_platform_gpui::AppView>,
     _diff_theme: Subscription,
+    /// The agent's own view or form shown in the viewer, drawn by NSH.
+    agent_pane: Entity<nsh_platform_gpui::AppView>,
+    _agent_pane_theme: Subscription,
     /// The window's controls the pane being built carries: its lead, then its trail.
     pane_controls: std::cell::RefCell<(Vec<nsh::header::Control>, Vec<nsh::header::Control>)>,
     /// A line the viewer was asked to scroll to, and a number that changes with each ask.
@@ -1344,6 +1334,7 @@ impl Reader {
             InputState::new(window, cx).auto_grow(1, 1).submit_on_enter(true).placeholder("PR number or URL")
         });
         let (diff_pane, diff_theme) = nsh::mount(nsh_platform_gpui::Root::of::<nsh::diff::Diff>(), window, cx);
+        let (agent_pane, agent_pane_theme) = nsh::mount(nsh_platform_gpui::Root::of::<nsh::agent::Agent>(), window, cx);
         let (source, source_theme) = nsh::mount(nsh_platform_gpui::Root::of::<nsh::source::Source>(), window, cx);
         let (sidebar, sidebar_theme) = nsh::mount(nsh_platform_gpui::Root::of::<nsh::sidebar::Sidebar>(), window, cx);
         let finder_window = cx.new(|cx| nsh::overlay::Overlay::new(560., 8., || nsh_platform_gpui::Root::of::<nsh::finder::Finder>(), &nsh::finder::HEIGHT, cx));
@@ -1390,12 +1381,9 @@ impl Reader {
             agents.push(config::Agent { id: command.clone(), name: "Custom".into(), command: command.clone(), daemon: None, vouched: true });
         }
         let project = Self::build_project(root, pr, files, window, cx);
-        let thread = Thread {
+            let thread = Thread {
             views: Default::default(),
-            docs: HashMap::new(),
             forms: Default::default(),
-            form_uis: HashMap::new(),
-            form_subs: HashMap::new(),
             shown: None,
             offered: None,
             id: 0,
@@ -1474,6 +1462,8 @@ impl Reader {
             _source_theme: source_theme,
             diff: diff_pane,
             _diff_theme: diff_theme,
+            agent_pane,
+            _agent_pane_theme: agent_pane_theme,
             pane_controls: Default::default(),
             reveal: None,
             reveal_serial: 0,
@@ -1712,7 +1702,7 @@ impl Reader {
             current: None,
             stamp: None,
             code: None,
-            doc: None,
+            is_markdown: false,
             notice: None,
             files_tree,
             worktree: None,
@@ -2361,16 +2351,14 @@ impl Reader {
             self.with_thread(id, |reader, visible| {
                 let reply = match &command {
                     Command::FormShow { id, title, body, fields, submit } => {
-                        // A replaced form is filled in again from scratch, so its widgets go.
-                        if let Some(id) = id {
-                            reader.thread.form_uis.remove(id);
-                        }
+                        // A replaced form is filled in again from scratch; the screen seeds its
+                        // answers anew wherever the fields (which carry the starting values)
+                        // changed.
                         reader.thread.forms.show(id.clone(), title.clone(), body.clone(), fields.clone(), submit.clone())?
                     }
                     _ => reader.thread.views.apply(command.clone())?,
                 };
                 reader.sync_view_docs(cx);
-                reader.sync_forms(window, cx);
                 if let (true, Some(view)) = (shows, reply["id"].as_str()) {
                     let view = view.to_string();
                     if visible && reader.last_input.elapsed() >= QUIET {
@@ -3267,8 +3255,8 @@ impl Reader {
         }
     }
 
-    /// Renders the thread's views and forms again after they changed, and drops what belongs to
-    /// ones that are gone.
+    /// Tells what the viewer is showing about views and forms that are gone, since the pane the
+    /// NSH screen draws picks its view by id.
     fn sync_view_docs(&mut self, cx: &mut Context<Self>) {
         let live: HashSet<String> = self
             .thread
@@ -3278,46 +3266,11 @@ impl Reader {
             .map(|view| view.id.clone())
             .chain(self.thread.forms.list().iter().map(|form| form.id.clone()))
             .collect();
-        self.thread.docs.retain(|id, _| live.contains(id));
-        for view in self.thread.views.list().to_vec() {
-            let chunks = Rc::new(ui::markdown::chunks(&view.body));
-            let doc = Self::doc_for(self.thread.docs.remove(&view.id), chunks, cx);
-            self.thread.docs.insert(view.id, doc);
-        }
-        for form in self.thread.forms.list().to_vec() {
-            let chunks = Rc::new(ui::markdown::chunks(form.body.as_deref().unwrap_or_default()));
-            let doc = Self::doc_for(self.thread.docs.remove(&form.id), chunks, cx);
-            self.thread.docs.insert(form.id, doc);
-        }
         for slot in [&mut self.thread.shown, &mut self.thread.offered] {
             if slot.as_ref().is_some_and(|id| !live.contains(id)) {
                 *slot = None;
+                cx.notify();
             }
-        }
-    }
-
-    /// Creates the form of each form the agent put on screen, and drops those that are gone.
-    fn sync_forms(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let live: HashSet<String> = self.thread.forms.list().iter().map(|form| form.id.clone()).collect();
-        self.thread.form_uis.retain(|id, _| live.contains(id));
-        self.thread.form_subs.retain(|id, _| live.contains(id));
-        for agent in self.thread.forms.list().to_vec() {
-            if self.thread.form_uis.contains_key(&agent.id) {
-                continue;
-            }
-            let fields = agent
-                .fields
-                .iter()
-                .map(|field| ui::form::Field { name: field.name.clone(), label: field.label.clone(), options: field.options.clone(), value: field.value.clone() })
-                .collect();
-            let id = agent.id.clone();
-            let form = cx.new(|cx| ui::form::FormState::new(fields, agent.submit.clone(), window, cx));
-            let events = cx.subscribe_in(&form, window, move |reader, _, event: &ui::form::FormEvent, _, cx| match event {
-                ui::form::FormEvent::Submit(values) => reader.form_submitted(&id, values.clone(), cx),
-                ui::form::FormEvent::Changed => cx.notify(),
-            });
-            self.thread.form_uis.insert(agent.id.clone(), form);
-            self.thread.form_subs.insert(agent.id, events);
         }
     }
 
@@ -4122,10 +4075,7 @@ impl Reader {
             selection: cx.new(|_| ui::markdown::Selection::default()),
             focus: cx.focus_handle(),
             views: Default::default(),
-            docs: HashMap::new(),
             forms: Default::default(),
-            form_uis: HashMap::new(),
-            form_subs: HashMap::new(),
             shown: None,
             offered: None,
         }
@@ -4824,43 +4774,6 @@ impl Reader {
         cx.notify();
     }
 
-    /// The rendered form of `text` if `path` is markdown, keeping the scroll position and
-    /// selection when it's the file already open being read again.
-    fn markdown_doc(&mut self, path: &str, text: &str, cx: &mut Context<Self>) -> Option<Doc> {
-        if !is_markdown(path) {
-            return None;
-        }
-        let chunks = Rc::new(ui::markdown::chunks(text));
-        let doc = self.project.doc.take().filter(|_| self.project.current.as_deref() == Some(path));
-        Some(Self::doc_for(doc, chunks, cx))
-    }
-
-    /// `doc` showing `chunks`, or a new one: reading the same document again keeps its scroll
-    /// position and its selection, as far as they still make sense.
-    fn doc_for(doc: Option<Doc>, chunks: Rc<Vec<String>>, cx: &mut Context<Self>) -> Doc {
-        match doc {
-            Some(doc) if *doc.chunks == *chunks => doc,
-            Some(doc) => {
-                // Splicing resets the scroll to the top, so put it back, and drop a selection
-                // that may now point at different text.
-                let mut top = doc.list.logical_scroll_top();
-                doc.list.splice(0..doc.list.item_count(), chunks.len());
-                if top.item_ix >= chunks.len() {
-                    top = gpui::ListOffset { item_ix: chunks.len().saturating_sub(1), offset_in_item: px(0.) };
-                }
-                doc.list.scroll_to(top);
-                doc.selection.update(cx, |s, _| s.clear());
-                Doc { chunks, ..doc }
-            }
-            None => Doc {
-                list: ListState::new(chunks.len(), ListAlignment::Top, px(400.)),
-                chunks,
-                selection: cx.new(|_| ui::markdown::Selection::default()),
-                focus: cx.focus_handle(),
-            },
-        }
-    }
-
     fn open(&mut self, path: &str, _window: &mut Window, cx: &mut Context<Self>) {
         self.browse = false;
         let full = self.project.root.join(path);
@@ -4869,11 +4782,12 @@ impl Reader {
         let read = if too_big { Ok(None) } else { std::fs::read_to_string(&full).map(Some) };
         match read {
             Ok(None) => {
-                self.project.doc = None;
+                self.project.code = None;
+                self.project.is_markdown = false;
                 self.project.notice = Some(format!("{path} is too large to show"));
             }
             Ok(Some(text)) => {
-                self.project.doc = self.markdown_doc(path, &text, cx);
+                self.project.is_markdown = is_markdown(path);
                 // The same file keeps its place: the editor swaps the text in, and the scroll position
                 // and caret survive.
                 self.project.code = Some(nsh::source::Shared(Arc::from(text)));
@@ -4882,7 +4796,7 @@ impl Reader {
             Err(error) => {
                 log::warn!("open {path}: {error}");
                 self.project.code = None;
-                self.project.doc = None;
+                self.project.is_markdown = false;
                 self.project.notice = Some(format!("{path} is not a text file"));
             }
         }
@@ -5636,6 +5550,7 @@ impl Reader {
             Cmd::CloseSettings => self.hide_settings(window, cx),
             Cmd::SettingsSaved => self.apply_settings(cx),
             Cmd::Answer(id, yes) => self.answer_suggestion(id, yes, window, cx),
+            Cmd::SubmitForm(id, values) => self.form_submitted(&id, values, cx),
         }
     }
 
@@ -5662,32 +5577,23 @@ impl Reader {
         let tabs = self.view_tabs(cx);
         let has_tabs = tabs.is_some();
         let shown_form = self.thread.shown.as_deref().and_then(|id| self.thread.forms.get(id));
-        let shown = self.thread.shown.as_deref().and_then(|id| {
-            let view = self.thread.views.list().iter().find(|view| view.id == id)?;
-            Some((view, self.thread.docs.get(id)?))
-        });
-        let with_tree = shown.is_none() && shown_form.is_none() && self.tree_visible();
+        let shown = self
+            .thread
+            .shown
+            .as_deref()
+            .and_then(|id| self.thread.views.list().iter().find(|view| view.id == id));
+        let showing_agent = shown.is_some() || shown_form.is_some();
+        let with_tree = !showing_agent && self.tree_visible();
         // The window's own control goes in the leftmost header: the tree's, or the viewer's.
         // A pane too narrow for the tree beside the file takes turns: the explorer fills it until a
         // file is picked, then the file does, with a button back to the explorer.
-        let stacked = shown.is_none() && self.viewer_narrow.get();
+        let stacked = !showing_agent && self.viewer_narrow.get();
         let nothing_picked = if self.mode == Mode::Diff { self.project.picked.is_none() } else { self.project.current.is_none() };
         let explorer_only = stacked && (self.browse || nothing_picked);
-        let (mut tree_lead, body_lead) = if with_tree || explorer_only {
-            (lead, None)
-        } else if stacked {
-            let back = cx.entity();
-            let button = Button::new("show-explorer")
-                .icon(IconName::FolderTree)
-                .ghost()
-                .small()
-                .tooltip("Back to the explorer")
-                .on_click(move |_, _, cx| back.update(cx, |reader, cx| reader.set_browsing(true, cx)))
-                .into_any_element();
-            (None, Some(div().flex().items_center().gap_1().children(lead).child(button).into_any_element()))
-        } else {
-            (None, lead)
-        };
+        // A pane wide enough shows the explorer beside what it shows, with the lead controls in
+        // the file's header; stacked, the file's alone gets them, with a way back to the explorer
+        // tacked on.
+        let mut tree_lead = if with_tree || explorer_only { lead } else { None };
         // The same split of the window's controls, as descriptors, for a body NSH draws.
         let (lead_controls, trail_controls) = self.pane_controls.borrow().clone();
         let body_controls = |lead: Vec<nsh::header::Control>| if with_tree || explorer_only { (vec![], trail_controls.clone()) } else if stacked { ([lead, vec![nsh::header::Control::Explorer]].concat(), trail_controls.clone()) } else { (lead, trail_controls.clone()) };
@@ -5696,11 +5602,8 @@ impl Reader {
                 let background = cx.global::<Palette>().background;
                 div().size_full().when(!has_tabs, |d| d.bg(background)).child(self.explorer(tree_lead.take(), trail, cx)).into_any_element()
             }
-            (Some((view, doc)), _, _) => self.agent_view(&view.title, doc, body_lead, trail, cx).into_any_element(),
-            (_, Some(form), _) => {
-                let doc = self.thread.docs.get(&form.id);
-                self.form_view(form, doc, body_lead, trail, cx).into_any_element()
-            }
+            (Some(view), _, _) => self.agent_view(view, body_controls(lead_controls), cx).into_any_element(),
+            (_, Some(form), _) => self.form_view(form, body_controls(lead_controls), cx).into_any_element(),
             (None, None, Mode::Source) => {
                 let (lead, trail) = body_controls(lead_controls);
                 self.viewer(lead, trail, cx).into_any_element()
@@ -5736,49 +5639,45 @@ impl Reader {
         floating(div().size_full().flex().flex_col().relative().when(has_tabs, |d| d.bg(background)).child(measure).children(tabs).child(div().flex_1().min_h_0().child(body)), cx)
     }
 
-    /// A view the agent made, as a markdown document.
-    fn agent_view(&self, title: &str, doc: &Doc, lead: Option<AnyElement>, trail: Option<AnyElement>, cx: &mut Context<Self>) -> impl IntoElement + Styled + use<> {
-        let background = cx.global::<Palette>().background;
-        div()
-            .size_full()
-            .flex()
-            .flex_col()
-            .bg(background)
-            .child(pane_header(title, status_text("from the agent".into(), cx), lead, trail, cx))
-            .child(div().flex_1().min_h_0().child(self.markdown_view(doc, cx)))
+    /// A view the agent made, as a markdown document; the pane NSH draws from what is published.
+    fn agent_view(&self, view: &command::AgentView, (lead, trail): (Vec<nsh::header::Control>, Vec<nsh::header::Control>), cx: &mut Context<Self>) -> impl IntoElement + Styled + use<> {
+        nsh::agent::publish(nsh::agent::Snapshot {
+            glass: cx.global::<Palette>().glass.is_some(),
+            title: view.title.clone(),
+            lead,
+            trail,
+            body: nsh::agent::Body::Markdown(nsh::source::Shared(Arc::from(view.body.as_str()))),
+        });
+        div().size_full().child(self.agent_pane.clone())
     }
 
-    /// A form the agent put on screen: what it is for, then the form itself, which is the
-    /// standard [`ui::form`] component the rest of the app's inputs and buttons are drawn with.
-    fn form_view(&self, form: &command::AgentForm, doc: Option<&Doc>, lead: Option<AnyElement>, trail: Option<AnyElement>, cx: &mut Context<Self>) -> impl IntoElement + Styled + use<> {
-        let background = cx.global::<Palette>().background;
-        div()
-            .size_full()
-            .flex()
-            .flex_col()
-            .bg(background)
-            .child(pane_header(&form.title, status_text("a form from the agent".into(), cx), lead, trail, cx))
-            .child(
-                div()
-                    .id(SharedString::from(format!("form-body-{}", form.id)))
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .flex()
-                    .flex_col()
-                    .items_center()
-                    .py_4()
-                    .child(
-                        div()
-                            .w(px(640.))
-                            .flex()
-                            .flex_col()
-                            .gap_3()
-                            .px_4()
-                            .children(doc.map(|doc| self.markdown_view(doc, cx)))
-                            .children(self.thread.form_uis.get(&form.id).cloned()),
-                    ),
-            )
+    /// A form the agent put on screen: what it is for, then the fields the user answers, drawn
+    /// and answered by NSH.
+    fn form_view(&self, form: &command::AgentForm, (lead, trail): (Vec<nsh::header::Control>, Vec<nsh::header::Control>), cx: &mut Context<Self>) -> impl IntoElement + Styled + use<> {
+        let fields = form
+            .fields
+            .iter()
+            .map(|field| nsh::agent::Field {
+                name: field.name.clone(),
+                label: field.label.clone(),
+                options: field.options.clone(),
+                value: field.value.clone(),
+            })
+            .collect();
+        nsh::agent::publish(nsh::agent::Snapshot {
+            glass: cx.global::<Palette>().glass.is_some(),
+            title: form.title.clone(),
+            lead,
+            trail,
+            body: nsh::agent::Body::Form {
+                id: form.id.clone(),
+                fields,
+                submit: form.submit.clone(),
+                answered: form.answered.is_some(),
+                doc: form.body.as_deref().map(|body| nsh::source::Shared(Arc::from(body))),
+            },
+        });
+        div().size_full().child(self.agent_pane.clone())
     }
 
     /// Files (or changes) and the agent's views as tabs, with a prompt for one it added while
@@ -5871,8 +5770,6 @@ impl Reader {
     fn close_agent_view(&mut self, id: &str, cx: &mut Context<Self>) {
         if self.thread.forms.remove(id) {
             let owner = self.thread.id;
-            self.thread.form_uis.remove(id);
-            self.thread.form_subs.remove(id);
             self.drop_form(owner, id);
         } else {
             self.thread.views.apply(command::Command::ViewClose { id: id.to_string() }).ok();
@@ -5918,7 +5815,7 @@ impl Reader {
     fn source_snapshot(&self, lead: Vec<nsh::header::Control>, trail: Vec<nsh::header::Control>, cx: &App) -> nsh::source::Snapshot {
         use nsh::source::{Body, Snapshot};
         let current = self.project.current.as_deref();
-        let markdown = self.project.doc.is_some();
+        let markdown = self.project.is_markdown;
         let rendered = markdown && self.rendered;
         let body = match (&self.project.code, &self.project.notice) {
             (_, Some(notice)) => Body::Notice(notice.clone()),
@@ -5941,100 +5838,6 @@ impl Reader {
     fn toggle_rendered(&mut self, cx: &mut Context<Self>) {
         self.rendered = !self.rendered;
         cx.notify();
-    }
-
-    /// A markdown file rendered, scrolling a piece at a time like the thread.
-    fn markdown_view(&self, doc: &Doc, cx: &mut Context<Self>) -> AnyElement {
-        doc.selection.update(cx, |s, _| s.begin_frame());
-        let (chunks, selection, focus) = (doc.chunks.clone(), doc.selection.clone(), doc.focus.clone());
-        // No background of its own: the viewer around it paints one.
-        div()
-            .id("markdown-file")
-            .key_context("Markdown")
-            .track_focus(&focus)
-            .size_full()
-            .on_action(cx.listener({
-                let (chunks, selection) = (chunks.clone(), selection.clone());
-                move |_, _: &ui::markdown::Copy, _, cx| {
-                    // Select All takes the pieces scrolled out of view too, which aren't laid out.
-                    let text = if selection.read(cx).is_all() {
-                        ui::markdown::all_text(chunks.iter().map(String::as_str))
-                    } else {
-                        selection.read(cx).selected_text()
-                    };
-                    if text.is_empty() {
-                        return cx.propagate();
-                    }
-                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
-                }
-            }))
-            .on_action(cx.listener({
-                let selection = selection.clone();
-                move |_, _: &ui::markdown::SelectAll, _, cx| {
-                    selection.update(cx, |s, _| s.select_all());
-                    cx.notify();
-                }
-            }))
-            .on_mouse_down(gpui::MouseButton::Left, cx.listener({
-                let (selection, focus) = (selection.clone(), focus.clone());
-                move |_, event: &gpui::MouseDownEvent, window, cx| {
-                    focus.focus(window, cx);
-                    selection.update(cx, |s, _| s.mouse_down(event.position, event.click_count));
-                    cx.notify();
-                }
-            }))
-            .on_mouse_move(cx.listener({
-                let selection = selection.clone();
-                move |_, event: &gpui::MouseMoveEvent, _, cx| {
-                    if event.pressed_button == Some(gpui::MouseButton::Left) && selection.read(cx).selecting {
-                        selection.update(cx, |s, _| s.drag(event.position));
-                        cx.notify();
-                    }
-                }
-            }))
-            .on_mouse_up(gpui::MouseButton::Left, cx.listener({
-                let selection = selection.clone();
-                move |_, event: &gpui::MouseUpEvent, _, cx| {
-                    if let Some(url) = selection.update(cx, |s, _| s.mouse_up(event.position)) {
-                        cx.open_url(&url);
-                    }
-                    cx.notify();
-                }
-            }))
-            .on_mouse_up_out(gpui::MouseButton::Left, cx.listener({
-                let selection = selection.clone();
-                move |_, event: &gpui::MouseUpEvent, _, cx| {
-                    selection.update(cx, |s, _| {
-                        s.mouse_up(event.position);
-                    });
-                }
-            }))
-            .child(
-                list(
-                    doc.list.clone(),
-                    cx.processor(move |_, ix: usize, window, cx| {
-                        let Some(chunk) = chunks.get(ix) else { return div().into_any_element() };
-                        // A readable column rather than the pane's whole width.
-                        div()
-                            .w_full()
-                            .flex()
-                            .justify_center()
-                            .px_6()
-                            .when(ix == 0, |this| this.pt_5())
-                            .when(ix + 1 == chunks.len(), |this| this.pb_5())
-                            .child(
-                                div()
-                                    .w_full()
-                                    .max_w(px(820.))
-                                    .pb(rems(1.))
-                                    .child(ui::markdown::markdown(("file", ix), chunk, &selection, window, cx)),
-                            )
-                            .into_any_element()
-                    }),
-                )
-                .size_full(),
-            )
-            .into_any_element()
     }
 
     /// Sets what thread `id`'s agent may do through Po's API. Held in memory only, so it is

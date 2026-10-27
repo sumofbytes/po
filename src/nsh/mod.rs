@@ -1,6 +1,7 @@
 //! Po's screens drawn with NSH: each runs as an NSH app in an [`AppView`], a GPUI view that sits in
 //! Po's window like any other. This module is what they share: the theme and fonts they take from
 //! Po's [`Palette`], Po's icons, and the views themselves.
+pub mod agent;
 pub mod bus;
 pub mod diff;
 pub mod finder;

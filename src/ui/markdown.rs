@@ -236,13 +236,7 @@ fn leaves<'a>(blocks: &'a [Block], out: &mut Vec<&'a str>) {
     }
 }
 
-/// The text Select All copies from `sources`, the replies in order, including those scrolled
-/// out of view and so not laid out: every run's text, one run a line.
-pub fn all_text<'a>(sources: impl IntoIterator<Item = &'a str>) -> String {
-    all_text_of(sources.into_iter().map(|source| (source, false)))
-}
-
-/// Like [`all_text`], for sources that may be plain text (drawn by [`plain`]) rather than markdown.
+/// Like `Select All` over sources that may be plain text (drawn by [`plain`]) rather than markdown.
 pub fn all_text_of<'a>(sources: impl IntoIterator<Item = (&'a str, bool)>) -> String {
     let sources: Vec<(&str, Option<Vec<Block>>)> =
         sources.into_iter().map(|(source, plain)| (source, (!plain).then(|| parse(source)))).collect();
@@ -254,26 +248,6 @@ pub fn all_text_of<'a>(sources: impl IntoIterator<Item = (&'a str, bool)>) -> St
         }
     }
     parts.join("\n").replace(CODE_PAD, "").trim().to_string()
-}
-
-/// `source` cut into pieces at its top-level blocks, so a long document can be laid out a
-/// piece at a time. Link reference definitions go with every piece, since a link can use one
-/// from anywhere in the file.
-pub fn chunks(source: &str) -> Vec<String> {
-    let Ok(Node::Root(root)) = ::markdown::to_mdast(source, &::markdown::ParseOptions::gfm()) else {
-        return vec![source.to_string()];
-    };
-    let span = |node: &Node| node.position().and_then(|p| source.get(p.start.offset..p.end.offset));
-    let definitions: String =
-        root.children.iter().filter(|node| matches!(node, Node::Definition(_))).filter_map(span).map(|d| format!("{d}\n")).collect();
-    let chunks: Vec<String> = root
-        .children
-        .iter()
-        .filter(|node| !matches!(node, Node::Definition(_)))
-        .filter_map(span)
-        .map(|text| if definitions.is_empty() { text.to_string() } else { format!("{text}\n\n{definitions}") })
-        .collect();
-    if chunks.is_empty() { vec![source.to_string()] } else { chunks }
 }
 
 /// The runs laid out in one frame, in reading order.
@@ -900,16 +874,7 @@ fn prefix(ix: usize, start: Option<u32>, ordered: bool, depth: usize) -> String 
 
 #[cfg(test)]
 mod tests {
-    use super::{Block, Picked, Selection, Span, chunks, parse, prefix, word_at};
-
-    #[test]
-    fn chunks_split_at_blocks_and_keep_definitions() {
-        let pieces = chunks("# Title\n\nSee [it][a].\n\n- x\n- y\n\n[a]: http://x.y\n");
-        assert_eq!(pieces.len(), 3);
-        assert!(pieces[0].starts_with("# Title"));
-        assert!(pieces.iter().all(|piece| piece.contains("[a]: http://x.y")));
-        assert_eq!(chunks("").len(), 1);
-    }
+    use super::{Block, Picked, Selection, Span, parse, prefix, word_at};
 
     #[test]
     fn soft_breaks_reflow_and_marks_land_on_text() {
@@ -940,7 +905,7 @@ mod tests {
 
     #[test]
     fn select_all_takes_every_run() {
-        let text = super::all_text(["# Hi\n\n- one\n- two\n\n```rs\nfn x() {}\n```\n", "| a | b |\n|---|---|\n| c | d |\n"]);
+        let text = super::all_text_of([("# Hi\n\n- one\n- two\n\n```rs\nfn x() {}\n```\n", false), ("| a | b |\n|---|---|\n| c | d |\n", false)]);
         assert_eq!(text, "Hi\none\ntwo\nfn x() {}\na\nb\nc\nd");
     }
 
