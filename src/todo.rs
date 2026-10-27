@@ -61,6 +61,29 @@ impl Date {
         (self.0 + 4).rem_euclid(7) as usize
     }
 
+    /// The day a time in milliseconds since the epoch falls on, where the user is.
+    pub fn of_ms(ms: u64) -> Self {
+        let secs = (ms / 1000) as i64;
+        #[cfg(unix)]
+        {
+            // SAFETY: `localtime_r` writes only into the `tm` it is given.
+            let local = unsafe {
+                let at: libc::time_t = secs as libc::time_t;
+                let mut tm: libc::tm = std::mem::zeroed();
+                (!libc::localtime_r(&at, &mut tm).is_null()).then_some(tm)
+            };
+            if let Some(day) = local.and_then(|tm| Self::from_ymd(i64::from(tm.tm_year) + 1900, tm.tm_mon as u32 + 1, tm.tm_mday as u32)) {
+                return day;
+            }
+        }
+        Self(secs.div_euclid(86_400))
+    }
+
+    /// How many days `self` is after `earlier`.
+    pub fn days_since(self, earlier: Self) -> i64 {
+        self.0 - earlier.0
+    }
+
     pub fn plus(self, days: i64) -> Self {
         Self(self.0 + days)
     }

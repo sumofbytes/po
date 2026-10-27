@@ -31,6 +31,8 @@ pub struct Thread {
     pub selected: bool,
     /// What its agent may do through Po's API is more than talk.
     pub controlled: bool,
+    /// The day this one starts in its project's list ("Today", "Yesterday"...), if it does.
+    pub day: Option<&'static str>,
 }
 
 #[derive(Clone, PartialEq, Debug)]
@@ -209,6 +211,28 @@ fn thread_row(thread: &Thread, project: Option<&str>, close_tip: &'static str) -
     if selected { row.bg(Colors::selected()) } else { row.hover(|s| s.bg(Colors::hover())) }
 }
 
+/// A wavy line with the day centred in it, over the threads of that day.
+fn day_separator(day: &'static str) -> View {
+    let wave = || {
+        view().flex_1().min_w(rems(0.)).w(rems(0.)).overflow_hidden().child(text("~".repeat(80)).number_of_lines(1).ellipsize_mode(nsh_core::EllipsizeMode::Clip).text_size(text_xs()).text_color(|| Colors::primary()().opacity(0.45)))
+    };
+    view()
+        .w_full()
+        .overflow_hidden()
+        .h(space::more() + space::group_gap())
+        .flex_none()
+        .flex_row()
+        .items_center()
+        .gap(rems(0.5))
+        .pl(space::inset() + space::lead() + rems(0.5))
+        .pr(space::inset() + rems(1.))
+        .pt(space::section_gap())
+        .pb(space::section_gap())
+        .child(wave())
+        .child(text(day).flex_none().text_size(text_xs()).text_color(|| Colors::primary()().opacity(0.45)))
+        .child(wave())
+}
+
 fn project_group(project: &Project) -> View {
     let pid = project.id;
     let active = project.active;
@@ -249,7 +273,14 @@ fn project_group(project: &Project) -> View {
     view()
         .gap(space::item_gap())
         .child(head)
-        .child(project.threads.iter().map(|thread| thread_row(thread, None, "Close thread")).collect::<Vec<_>>())
+        .child(
+            project
+                .threads
+                .iter()
+                .flat_map(|thread| [thread.day.map(day_separator), Some(thread_row(thread, None, "Close thread"))])
+                .flatten()
+                .collect::<Vec<_>>(),
+        )
         .child(fold)
 }
 
@@ -299,6 +330,8 @@ pub fn Sidebar() -> impl IntoElement {
     let state = signal(SNAPSHOT.borrow().clone());
     spawn(async move {
         let mut snapshot = SNAPSHOT.subscribe();
+        // What was published before this ran would otherwise never arrive.
+        snapshot.mark_changed();
         while snapshot.changed().await.is_ok() {
             let now = snapshot.borrow_and_update().clone();
             state.set(now);
@@ -454,7 +487,7 @@ mod tests {
     use super::*;
 
     fn thread(project: u64, id: u64, label: &str, mark: Mark, selected: bool) -> Thread {
-        Thread { project, id, label: label.into(), mark, selected, controlled: false }
+        Thread { project, id, label: label.into(), mark, selected, controlled: false, day: None }
     }
 
     fn start() -> Headless {

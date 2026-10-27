@@ -301,18 +301,14 @@ and Wayland compositors with KDE's blur protocol. Other Wayland compositors, and
 X11 with a compositor running, show the window see-through without blur.
 
 Markdown, in the agent's replies and in `.md` files (which open rendered; the
-**Source** button or Ctrl+Shift+M switches to the text), is coloured from the
-theme: headings from the `title` syntax colour, inline code from `string`,
-bullets from `punctuation`, links from `colors.link`. An optional top-level
-`"markdown"` object overrides any of these with `#rrggbb` colours: `heading`,
-`code`, `code_background`, `inline_code_background`, `quote`, `quote_border`,
-`rule`, `marker`, `strong`, `emphasis`.
+**Source** button or Ctrl+Shift+M switches to the text), is drawn by NSH in the
+theme's colours. Code is coloured by NSH's own fixed palette.
 
 ## License
 
 Dual-licensed under [MIT](LICENSE) or [Apache-2.0](LICENSE-APACHE), at your
 option. Bundled third-party material keeps its own license: `vendor/gpui-fast-wgpu`,
-`vendor/gpui-fast-apple`, and `vendor/gpui-fast-windows` (Apache-2.0), `src/viewer/languages`
-queries (Apache-2.0), and the Lucide icons in `assets/icons` (ISC).
+`vendor/gpui-fast-apple`, and `vendor/gpui-fast-windows` (Apache-2.0),
+and the Lucide icons in `assets/icons` (ISC).
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md).

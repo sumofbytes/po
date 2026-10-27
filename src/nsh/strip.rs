@@ -156,6 +156,8 @@ pub fn strips_view() -> View {
     let spec = signal(String::new());
     spawn(async move {
         let mut snapshot = SNAPSHOT.subscribe();
+        // What was published before this ran would otherwise never arrive.
+        snapshot.mark_changed();
         // The value of `pr_reset` the field was seen with last.
         let mut emptied = 0_u64;
         while snapshot.changed().await.is_ok() {

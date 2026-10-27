@@ -1188,11 +1188,14 @@ struct Reader {
     chat_shown: std::cell::Cell<(u64, u64)>,
     /// What the transcript's next publishing carries as [`Snapshot::follow`], bumped when the thread gets louder.
     chat_follow: std::cell::Cell<u64>,
+    /// Like [`Self::chat_follow`], for the thread growing under the reader's eyes: the transcript
+    /// follows it only while it is at its end.
+    chat_follow_soft: std::cell::Cell<u64>,
     /// What [`Snapshot::draft_reset`] carries next, bumped whenever the app writes the draft itself.
     chat_reset: std::cell::Cell<u64>,
     /// What [`nsh::chat::Snapshot::focus`] carries next.
     chat_focus: std::cell::Cell<u64>,
-    /// The todos window, shown over everything while `todos_open`; the sidebar has a row for it.
+    /// The todos page, shown in place of the conversation while `todos_open`; the sidebar has a row for it.
     todos: Entity<nsh::overlay::Overlay>,
     todos_open: bool,
     /// Progress or failure of the last attempt to open a PR.
@@ -1292,7 +1295,7 @@ impl Reader {
         let (explorer_pane, explorer_theme) = nsh::mount(nsh_platform_gpui::Root::of::<nsh::explorer::Explorer>(), window, cx);
         let finder_window = cx.new(|cx| nsh::overlay::Overlay::new(560., 8., || nsh_platform_gpui::Root::of::<nsh::finder::Finder>(), &nsh::finder::HEIGHT, cx));
         let settings_window = cx.new(|cx| nsh::overlay::Overlay::new(680., 24., || nsh_platform_gpui::Root::of::<nsh::settings::Settings>(), &nsh::settings::HEIGHT, cx));
-        let todos = cx.new(|cx| nsh::overlay::Overlay::new(600., 24., || nsh_platform_gpui::Root::of::<nsh::todos::Todos>(), &nsh::todos::HEIGHT, cx));
+        let todos = cx.new(|cx| nsh::overlay::Overlay::page(760., || nsh_platform_gpui::Root::of::<nsh::todos::Todos>(), &nsh::todos::HEIGHT, cx));
         let sidebars = cx.new(|_| SidebarsState::new(px(280.0), px(560.0)));
         let tree_cols = cx.new(|_| SidebarsState::new(px(TREE_WIDTH), px(0.0)));
         let subscriptions = vec![
@@ -1414,6 +1417,7 @@ impl Reader {
             chat_marks: std::cell::Cell::new(((0, 0), 0, 0, false, 0)),
             chat_shown: std::cell::Cell::new((u64::MAX, u64::MAX)),
             chat_follow: std::cell::Cell::new(0),
+            chat_follow_soft: std::cell::Cell::new(0),
             chat_reset: std::cell::Cell::new(0),
             chat_focus: std::cell::Cell::new(0),
             todos,
@@ -4974,11 +4978,10 @@ impl Reader {
     /// Opens every tool call's details, or closes them all when none is left to open. Runs folded
     /// to a line count as something left to open: they are unfolded, details and all.
     fn toggle_tools(&mut self, cx: &mut Context<Self>) {
-        let count = self.thread.messages.len();
         let mut from = None;
         for (ix, msg) in self.thread.messages.iter_mut().enumerate() {
             let Msg::Agent(blocks) = msg else { continue };
-            for start in folded_runs(blocks, ix + 1 == count) {
+            for start in folded_runs(blocks) {
                 let Some(Block::Tool(tool)) = blocks.get_mut(start) else { continue };
                 tool.fold = Some(false);
                 from.get_or_insert(ix);
@@ -5110,7 +5113,9 @@ impl Reader {
             },
             selected: (pid, thread.id) == (active_project, active_thread),
             controlled: self.grants.get(&thread.id).is_some_and(|grant| *grant != command::Grant::default()),
+            day: None,
         };
+        let today = todo::today();
         // Filtering keeps a project whose name matches, with all its threads, and any project with a
         // thread that does. A thread waiting on the user is in Needs you instead.
         let project_hit = |view: &View<'_>| view.project.name().to_lowercase().contains(&query);
@@ -5161,7 +5166,24 @@ impl Reader {
                     active: pid == active_project,
                     collapsed,
                     closable: many,
-                    threads: recent.into_iter().map(|t| thread_row(pid, t)).collect(),
+                    threads: {
+                        let mut last = None;
+                        recent
+                            .into_iter()
+                            .map(|t| {
+                                let day = match today.days_since(todo::Date::of_ms(t.active_at)) {
+                                    ..=0 => "",
+                                    1 => "Yesterday",
+                                    2..=6 => "Previous 7 days",
+                                    _ => "Older",
+                                };
+                                let mut row = thread_row(pid, t);
+                                row.day = (last != Some(day) && !day.is_empty()).then_some(day);
+                                last = Some(day);
+                                row
+                            })
+                            .collect()
+                    },
                     fold: (foldable && !collapsed && (hidden > 0 || expanded)).then_some((expanded, hidden)),
                 }
             })
@@ -5230,10 +5252,17 @@ impl Reader {
             _ => 0,
         };
         let louder = (shown, thread.messages.len(), blocks, busy, growth);
-        let follow = if louder == self.chat_marks.get() { self.chat_follow.get() } else {
-            let follow = self.chat_follow.get() + 1;
-            self.chat_follow.set(follow);
-            follow
+        let before = self.chat_marks.get();
+        let (follow, follow_soft) = if louder == before {
+            (self.chat_follow.get(), self.chat_follow_soft.get())
+        } else if (louder.0, louder.1) != (before.0, before.1) {
+            // Another thread, or a message came or went: the end is where to be.
+            self.chat_follow.set(self.chat_follow.get() + 1);
+            (self.chat_follow.get(), self.chat_follow_soft.get())
+        } else {
+            // Only the turn going on: whoever scrolled up to read stays there.
+            self.chat_follow_soft.set(self.chat_follow_soft.get() + 1);
+            (self.chat_follow.get(), self.chat_follow_soft.get())
         };
         self.chat_marks.set(louder);
         let mut statuses = Vec::new();
@@ -5298,6 +5327,7 @@ impl Reader {
             draft_reset: self.chat_reset.get(),
             focus: self.chat_focus.get(),
             follow,
+            follow_soft,
         }
     }
 
@@ -5368,10 +5398,17 @@ impl Reader {
                 cx.notify();
             }
             Cmd::ToggleProject(pid) => {
-                if !self.projects_collapsed.insert(pid) {
+                let expanding = !self.projects_collapsed.insert(pid);
+                if expanding {
                     self.projects_collapsed.remove(&pid);
                 }
-                self.show_project(pid, window, cx);
+                // Folding is only a redraw; the project is switched to only when it opens another one.
+                if expanding && pid != self.project_id {
+                    self.show_project(pid, window, cx);
+                } else {
+                    self.request_save(cx);
+                    cx.notify();
+                }
             }
             Cmd::StartThread(pid) => self.start_thread_in(pid, window, cx),
             Cmd::CloseProject(pid) => self.close_project(pid, window, cx),
@@ -5590,7 +5627,7 @@ impl Reader {
                 .collect(),
             offer: self.thread.offered.as_ref().and_then(titled),
         });
-        Some(div().flex_none().h(rems(2.5)).child(self.tabs.clone()).into_any_element())
+        Some(div().flex_none().h(TABS_HEIGHT).child(self.tabs.clone()).into_any_element())
     }
 
     fn close_agent_view(&mut self, id: &str, cx: &mut Context<Self>) {
@@ -5730,16 +5767,15 @@ impl Reader {
     }
 }
 
-/// Whether a run of tool calls shows as one line. A run the user hasn't clicked folds once the
-/// agent has moved on from it (`live` is false) and everything in it went well, so nothing running
-/// or failed hides. `live` is a run still at the end of the latest message.
-fn run_folded(run: &[Block], live: bool) -> bool {
+/// Whether a run of tool calls shows as one line. A run the user hasn't clicked starts folded,
+/// whether its calls are still going or not.
+fn run_folded(run: &[Block]) -> bool {
     let Some(Block::Tool(first)) = run.first() else { return false };
-    first.fold.unwrap_or(!live && run.iter().all(|b| matches!(b, Block::Tool(t) if t.status == Step::Done)))
+    first.fold.unwrap_or(true)
 }
 
 /// Where each run of tool calls shown folded starts in `blocks`.
-fn folded_runs(blocks: &[Block], last: bool) -> Vec<usize> {
+fn folded_runs(blocks: &[Block]) -> Vec<usize> {
     let mut starts = vec![];
     let mut n = 0;
     while n < blocks.len() {
@@ -5748,7 +5784,7 @@ fn folded_runs(blocks: &[Block], last: bool) -> Vec<usize> {
             continue;
         }
         let len = blocks[n..].iter().take_while(|b| matches!(b, Block::Tool(_))).count();
-        if len >= 3 && run_folded(&blocks[n..n + len], last && n + len == blocks.len()) {
+        if len >= 3 && run_folded(&blocks[n..n + len]) {
             starts.push(n);
         }
         n += len;
@@ -5813,26 +5849,43 @@ fn floating(pane: impl IntoElement + Styled, cx: &App) -> AnyElement {
     }
 }
 
-/// Where the file of a `file:` URL pasted in, dropped on it, is.
-fn file_of(uri: &str) -> Option<&str> {
-    let path = uri.strip_prefix("file://")?;
-    let path = match path.split_once('/') {
-        Some((host, path)) if host.is_empty() || host == "localhost" => path,
-        _ => path,
+/// Where the file of a `file:` URL pasted in, dropped on it, is: the absolute path, its `%XX`
+/// escapes decoded.
+fn file_of(uri: &str) -> Option<String> {
+    let rest = uri.strip_prefix("file://")?;
+    // What follows the host (empty or `localhost`) is the path, with its leading slash.
+    let path = match rest.find('/') {
+        Some(at) if rest[..at].is_empty() || rest[..at].eq_ignore_ascii_case("localhost") => &rest[at..],
+        _ => return None,
     };
-    Some(path)
+    let bytes = path.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut at = 0;
+    while at < bytes.len() {
+        let decoded = (bytes[at] == b'%').then(|| bytes.get(at + 1..at + 3)).flatten().and_then(|hex| u8::from_str_radix(std::str::from_utf8(hex).ok()?, 16).ok());
+        match decoded {
+            Some(byte) => {
+                out.push(byte);
+                at += 3;
+            }
+            None => {
+                out.push(bytes[at]);
+                at += 1;
+            }
+        }
+    }
+    String::from_utf8(out).ok()
 }
 
 /// The message of the conversation as the screen drawn by NSH shows it: the user's text with its
 /// pictures, or the agent's blocks.
 fn chat_items(messages: &[Msg]) -> Vec<nsh::chat::Item> {
-    let last = messages.len().saturating_sub(1);
     messages.iter().enumerate().map(|(ix, msg)| match msg {
         Msg::User(text, pictures) => nsh::chat::Item::User {
             text: text.clone(),
             pictures: pictures.iter().map(|a| nsh::chat::Picture { uri: a.data_uri() }).collect(),
         },
-        Msg::Agent(blocks) => nsh::chat::Item::Agent { index: ix, blocks: chat_blocks(blocks, ix == last) },
+        Msg::Agent(blocks) => nsh::chat::Item::Agent { index: ix, blocks: chat_blocks(blocks) },
     }).collect()
 }
 
@@ -5849,7 +5902,7 @@ fn chat_phase(step: Step) -> nsh::chat::Phase {
 /// One agent message's blocks for the conversation drawn by NSH. Runs of three or more tool calls
 /// also carry the row that folds them; the calls stay in place either way, so the indexes their
 /// answers are told by hold.
-fn chat_blocks(blocks: &[Block], last: bool) -> Vec<nsh::chat::Block> {
+fn chat_blocks(blocks: &[Block]) -> Vec<nsh::chat::Block> {
     let mut out: Vec<nsh::chat::Block> = Vec::with_capacity(blocks.len());
     let mut n = 0;
     while n < blocks.len() {
@@ -5864,7 +5917,7 @@ fn chat_blocks(blocks: &[Block], last: bool) -> Vec<nsh::chat::Block> {
             } else {
                 Step::Working
             };
-            out.push(nsh::chat::Block::Run { index: n, count: len, phase: chat_phase(phase), folded: run_folded(run, last && n + len == blocks.len()) });
+            out.push(nsh::chat::Block::Run { index: n, count: len, phase: chat_phase(phase), folded: run_folded(run) });
             for (k, block) in run.iter().enumerate() {
                 if let Block::Tool(tool) = block {
                     out.push(nsh::chat::Block::Tool(chat_tool(n + k, tool)));
@@ -5967,7 +6020,9 @@ impl Render for Reader {
         // The viewer pane is only built where it shows: a pane nobody sees would publish over the
         // one that is.
         let hidden = || div().size_full().into_any_element();
-        let (middle, side) = if !side_open {
+        let (middle, side) = if self.todos_open {
+            (self.todos.clone().into_any_element(), hidden())
+        } else if !side_open {
             // Only the conversation shows, and the viewer's button waits on the side it opens.
             let chat_lead = vec![Control::Sidebar(left_open), Control::Viewer(side_open)];
             let chat_trail = vec![Control::Viewer(side_open)];
@@ -5987,7 +6042,7 @@ impl Render for Reader {
             controls(vec![], trail_all);
             (floating(self.chat_pane(vec![Control::Sidebar(left_open)], vec![], cx), cx), self.pane(cx))
         };
-        let right_open = side_open && !focus;
+        let right_open = side_open && !focus && !self.todos_open;
         div()
             .size_full()
             .flex()
@@ -6042,7 +6097,6 @@ impl Render for Reader {
                 ),
             )
             .when(self.finder_open, |this| this.child(self.finder.clone()))
-            .when(self.todos_open, |this| this.child(self.todos.clone()))
             .when(self.settings_open, |this| this.child(self.settings.clone()))
     }
 }
@@ -6127,6 +6181,9 @@ impl Render for Shell {
 
 /// Height of the strip standing in for macOS's titlebar, which holds the traffic lights.
 const TITLEBAR_HEIGHT: Pixels = px(32.0);
+
+/// Height of the row holding the viewer's tabs.
+const TABS_HEIGHT: gpui::Rems = rems(2.5);
 
 fn main() {
     // `po update` is a terminal command, not a window: it runs to completion and
@@ -6476,14 +6533,13 @@ mod tests {
     }
 
     #[test]
-    fn a_run_of_finished_calls_folds_once_it_is_behind_the_latest_message() {
+    fn a_run_of_calls_starts_folded_even_while_it_runs_or_fails() {
         let run = vec![tool("a", Step::Done), tool("b", Step::Done), tool("c", Step::Done)];
-        assert!(run_folded(&run, false));
-        assert!(!run_folded(&run, true), "the latest message stays open");
+        assert!(run_folded(&run));
         let failed = vec![tool("a", Step::Done), tool("b", Step::Failed), tool("c", Step::Done)];
-        assert!(!run_folded(&failed, false), "a failure doesn't hide");
+        assert!(run_folded(&failed));
         let running = vec![tool("a", Step::Done), tool("b", Step::Working), tool("c", Step::Waiting)];
-        assert!(!run_folded(&running, false), "a call still going doesn't hide");
+        assert!(run_folded(&running));
     }
 
     #[test]
@@ -6501,11 +6557,11 @@ mod tests {
         let mut run = vec![tool("a", Step::Done), tool("b", Step::Done), tool("c", Step::Done)];
         let Block::Tool(first) = &mut run[0] else { unreachable!() };
         first.fold = Some(false);
-        assert!(!run_folded(&run, false));
+        assert!(!run_folded(&run));
         let mut failed = vec![tool("a", Step::Failed), tool("b", Step::Done), tool("c", Step::Done)];
         let Block::Tool(first) = &mut failed[0] else { unreachable!() };
         first.fold = Some(true);
-        assert!(run_folded(&failed, true));
+        assert!(run_folded(&failed));
     }
 
     #[test]
@@ -6518,15 +6574,14 @@ mod tests {
             tool("d", Step::Done),
             tool("e", Step::Done),
         ];
-        assert_eq!(folded_runs(&blocks, false), vec![3]);
-        assert!(folded_runs(&blocks, true).is_empty());
+        assert_eq!(folded_runs(&blocks), vec![3]);
     }
 
     #[test]
     fn a_run_followed_by_text_folds_in_the_latest_message() {
         let blocks = vec![tool("a", Step::Done), tool("b", Step::Done), tool("c", Step::Done), Block::Text("x".into())];
-        assert_eq!(folded_runs(&blocks, true), vec![0]);
-        assert!(folded_runs(&blocks[..3], true).is_empty());
+        assert_eq!(folded_runs(&blocks), vec![0]);
+        assert_eq!(folded_runs(&blocks[..3]), vec![0]);
     }
 
     #[test]
@@ -6550,5 +6605,18 @@ mod tests {
         assert!(!Activity::Running.needs_you(false) && !Activity::Idle.needs_you(false));
         // A child's parent picks up its finished turn; a question is still the user's.
         assert!(!Activity::Unread.needs_you(true) && Activity::Asking.needs_you(true));
+    }
+}
+
+#[cfg(test)]
+mod file_url_tests {
+    use super::file_of;
+
+    #[test]
+    fn file_urls_become_absolute_paths() {
+        assert_eq!(file_of("file:///home/aks/a.png").as_deref(), Some("/home/aks/a.png"));
+        assert_eq!(file_of("file://localhost/tmp/a%20b.png").as_deref(), Some("/tmp/a b.png"));
+        assert_eq!(file_of("file://other/tmp/a.png"), None);
+        assert_eq!(file_of("https://example.com/a.png"), None);
     }
 }
