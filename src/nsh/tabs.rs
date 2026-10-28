@@ -7,7 +7,7 @@ use nsh_core::prelude::*;
 use tokio::sync::watch;
 
 use super::bus::{Cmd, send};
-use super::{Colors, rems, text_sm};
+use super::{Colors, body, rems, text_sm};
 use crate::ui::icon::IconName;
 
 #[derive(Clone, PartialEq, Debug)]
@@ -50,7 +50,7 @@ fn tab_button(label: String, selected: bool, on_press: impl Fn() + 'static) -> V
         .rounded(Colors::radius())
         .cursor_pointer()
         .on_press(on_press)
-        .child(text(label).number_of_lines(1).text_size(text_sm()).text_color(Colors::foreground()));
+        .child(body(label).number_of_lines(1));
     if selected { b.bg(Colors::selected()) } else { b.hover(|s| s.bg(Colors::hover())) }
 }
 

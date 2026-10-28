@@ -6,7 +6,7 @@ use nsh_core::prelude::*;
 
 use super::bus::{Cmd, send};
 use super::overlay::{self, Height};
-use super::{Colors, button, field, field_height, rems, text_sm, text_xs};
+use super::{Colors, body, button, caption, field, field_height, rems, text_xs};
 use crate::schemes;
 use crate::settings::{AgentForm, Form};
 
@@ -30,7 +30,7 @@ struct Agent {
 }
 
 fn section(title: &'static str) -> View {
-    view().pt(rems(0.75)).pb(rems(0.25)).child(text(title.to_uppercase()).text_size(text_xs()).text_color(Colors::muted()))
+    view().pt(rems(0.75)).pb(rems(0.25)).child(caption(title.to_uppercase()))
 }
 
 /// A label on the left and its control on the right.
@@ -44,8 +44,8 @@ fn row(label: &'static str, hint: &'static str, control: impl IntoElement) -> Vi
             view()
                 .w(Points(200.))
                 .flex_none()
-                .child(text(label).text_size(text_sm()).text_color(Colors::foreground()))
-                .child(text(hint).text_size(text_xs()).text_color(Colors::muted())),
+                .child(body(label))
+                .child(caption(hint)),
         )
         .child(view().flex_1().child(control))
 }
@@ -66,7 +66,7 @@ fn toggle(on: Signal<bool>, labels: (&'static str, &'static str), highlight: boo
         .hover(|s| s.bg(Colors::hover()))
         .style_when(move || highlight && on.get(), |s| s.bg(Colors::selected()))
         .on_press(move || on.update(|on| *on = !*on))
-        .child(text(shown).text_size(text_sm()).text_color(Colors::foreground()));
+        .child(body(shown));
     view().flex_row().justify_end().child(button)
 }
 
@@ -208,7 +208,7 @@ pub fn Settings() -> impl IntoElement {
                                             .cursor_pointer()
                                             .hover(|s| s.bg(Colors::hover()))
                                             .on_press(move || theme.set(name.to_string()))
-                                            .child(text(name).text_size(text_sm()).text_color(Colors::foreground()))
+                                            .child(body(name))
                                     })
                                     .collect::<Vec<_>>(),
                             )

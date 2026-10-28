@@ -11,7 +11,7 @@ use tokio::sync::watch;
 
 use super::header::{Control, pane_header};
 use super::source::Shared;
-use super::{Colors, icon, mono_size, rems, text_base, text_sm, text_xs, tooltip};
+use super::{Colors, body, caption, icon, mono_size, note, rems, text_base, text_sm, tooltip};
 use crate::ui::icon::IconName;
 
 /// Whether a step of the agent's is waiting, going, done or failed: a tool call, the plan's
@@ -353,7 +353,7 @@ fn menu_trigger(label: String, tip: &'static str) -> View {
                 .flex_row()
                 .items_center()
                 .gap(rems(0.25))
-                .child(text(label).font_weight(FontWeight::MEDIUM).text_size(text_sm()).text_color(Colors::foreground()))
+                .child(body(label).font_weight(FontWeight::MEDIUM))
                 .child(icon(IconName::ChevronDown, rems(0.75), Colors::muted())),
         )
 }
@@ -372,7 +372,7 @@ fn item(what: String, on_press: impl Fn() + 'static) -> AnyElement {
 
 /// A line in a header, like `3 threads · 1 asking`.
 fn status_line(line: String) -> Text {
-    text(line).number_of_lines(1).text_size(text_xs()).text_color(Colors::muted())
+    caption(line).number_of_lines(1)
 }
 
 /// The pane header of the conversation: the title, the statuses, the history button, the Control
@@ -394,7 +394,7 @@ fn pane(title: String, snap: &Snapshot) -> View {
                 .hover(|s| s.bg(Colors::hover()))
                 .on_press(|| tell(Cmd::History))
                 .tooltip(tooltip("Resume an earlier session (Ctrl+Shift+H)"))
-                .child(text("History").text_size(text_sm()).text_color(Colors::foreground())),
+                .child(body("History")),
         );
     }
     // The Control menu, once the thread's agent may do more than talk.
@@ -428,7 +428,7 @@ fn grant_menu(grant: Grant) -> AnyElement {
         menu = menu.child(item(choice("May answer its threads' permission asks".to_string(), grant.approvals), move || tell(Cmd::Grant(GrantChange::Approvals))));
     }
     menu = menu.child(separator());
-    menu = menu.child(menu_item().disabled(true).px(rems(0.75)).py(rems(0.375)).child(text("A raise takes effect when the agent restarts").text_size(text_sm()).text_color(Colors::muted())).into_element());
+    menu = menu.child(menu_item().disabled(true).px(rems(0.75)).py(rems(0.375)).child(note("A raise takes effect when the agent restarts")).into_element());
     if active {
         menu = menu.child(item("Stop agent control".to_string(), move || tell(Cmd::Grant(GrantChange::Stop))));
     }
@@ -655,7 +655,7 @@ fn ask_row(message: usize, at: usize, title: &str, options: &[AskOption], answer
         .px(rems(0.75))
         .rounded(Colors::radius())
         .border_1()
-        .border_color(move || if waiting { Colors::warning()().opacity(0.4) } else { Colors::border()() })
+        .border_color(move || if waiting { Colors::warning()().opacity(crate::theme::tokens::ALERT_BORDER) } else { Colors::border()() })
         .child(
             view()
                 .flex_row()
@@ -708,7 +708,7 @@ fn approve_row(message: usize, at: usize, question: &str, lines: &[String], answ
         .px(rems(0.75))
         .rounded(Colors::radius())
         .border_1()
-        .border_color(move || if waiting { Colors::warning()().opacity(0.4) } else { Colors::border()() })
+        .border_color(move || if waiting { Colors::warning()().opacity(crate::theme::tokens::ALERT_BORDER) } else { Colors::border()() })
         .child(
             view()
                 .flex_row()
@@ -883,7 +883,7 @@ fn pictures_row(pictures: &[Picture]) -> AnyElement {
                                 .top(rems(-0.25))
                                 .right(rems(-0.25))
                                 .p(rems(0.125))
-                                .rounded_full()
+                                .rounded(super::pill())
                                 .bg(Colors::background())
                                 .border_1()
                                 .border_color(Colors::border())
@@ -927,7 +927,7 @@ fn queue_row(queued: Queued) -> AnyElement {
                 .label("Take back into the draft")
                 .flex_none()
                 .p(rems(0.125))
-                .rounded_full()
+                .rounded(super::pill())
                 .cursor_pointer()
                 .hover(|s| s.bg(Colors::hover()))
                 .on_press(move || tell(Cmd::Recall(queued.at)))
@@ -949,7 +949,7 @@ fn note_row(note: &str) -> AnyElement {
                 .label("Dismiss")
                 .flex_none()
                 .p(rems(0.125))
-                .rounded_full()
+                .rounded(super::pill())
                 .cursor_pointer()
                 .hover(|s| s.bg(Colors::hover()))
                 .on_press(|| tell(Cmd::DismissNote))
@@ -1009,7 +1009,7 @@ fn picker(picking: &Picking) -> AnyElement {
                         .label("Close")
                         .flex_none()
                         .p(rems(0.125))
-                        .rounded_full()
+                        .rounded(super::pill())
                         .cursor_pointer()
                         .hover(|s| s.bg(Colors::hover()))
                         .on_press(|| tell(Cmd::ClosePicker))
@@ -1062,7 +1062,7 @@ fn setup(snap: &Snapshot) -> AnyElement {
                 .gap(rems(0.25))
                 .px(rems(0.5))
                 .py(rems(0.25))
-                .rounded_full()
+                .rounded(super::pill())
                 .border_1()
                 .border_color(Colors::input_border())
                 .cursor_pointer()
@@ -1089,7 +1089,7 @@ fn settings_rows(settings: &[Setting], busy: bool) -> AnyElement {
                 .iter()
                 .map(|setting| {
                     if busy {
-                        return menu_trigger(setting.current_name(), "Available when the agent is idle").opacity(0.5).into_element();
+                        return menu_trigger(setting.current_name(), "Available when the agent is idle").opacity(crate::theme::tokens::DISABLED).into_element();
                     }
                     let mut menu = menu().popup_class(MENU).trigger(menu_trigger(setting.current_name(), "What the session uses"));
                     for (value, name) in &setting.choices {
@@ -1134,11 +1134,11 @@ fn steer_button(steer: bool, draft: Signal<String>, has_pictures: bool) -> AnyEl
         .justify_center()
         .w(rems(1.75))
         .h(rems(1.75))
-        .rounded_full()
+        .rounded(super::pill())
         .border_1()
         .border_color(Colors::input_border())
         .cursor_pointer()
-        .style_when(move || typed.get().trim().is_empty() && !has_pictures, |s| s.opacity(0.4))
+        .style_when(move || typed.get().trim().is_empty() && !has_pictures, |s| s.opacity(crate::theme::tokens::DISABLED))
         .hover(|s| s.bg(Colors::hover()))
         .tooltip(tooltip(tip))
         .on_press(move || {
@@ -1172,13 +1172,13 @@ fn send_button(snap: Snapshot, draft: Signal<String>) -> AnyElement {
         .justify_center()
         .w(rems(1.75))
         .h(rems(1.75))
-        .rounded_full()
+        .rounded(super::pill())
         .cursor_pointer()
         .style_when(
             move || !busy && draft.get_untracked().trim().is_empty(),
-            |s| s.opacity(0.4),
+            |s| s.opacity(crate::theme::tokens::DISABLED),
         )
-        .hover(|s| s.opacity(0.85))
+        .hover(|s| s.opacity(crate::theme::tokens::HOVER))
         .bg(Colors::primary())
         .tooltip(tooltip(tip))
         .on_press(move || {

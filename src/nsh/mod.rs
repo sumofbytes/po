@@ -226,6 +226,36 @@ pub fn text_sm() -> Points {
     rems(0.875)
 }
 
+/// Quiet small text: dates, counts, secondary labels.
+pub fn caption(content: impl IntoReactive<SharedString>) -> Text {
+    text(content).text_size(text_xs()).text_color(Colors::muted())
+}
+
+/// Small text in the foreground color: short labels and marks.
+pub fn small(content: impl IntoReactive<SharedString>) -> Text {
+    text(content).text_size(text_xs()).text_color(Colors::foreground())
+}
+
+/// Quiet text: notes, empty states, hints.
+pub fn note(content: impl IntoReactive<SharedString>) -> Text {
+    text(content).text_size(text_sm()).text_color(Colors::muted())
+}
+
+/// Text of a row or control, in the foreground color.
+pub fn body(content: impl IntoReactive<SharedString>) -> Text {
+    text(content).text_size(text_sm()).text_color(Colors::foreground())
+}
+
+/// A radius that makes a pill or dot of anything square.
+pub fn pill() -> Points {
+    Points(999.)
+}
+
+/// The small radius of a swatch or marker.
+pub fn swatch_radius() -> Points {
+    Points(2.)
+}
+
 /// One of Po's Lucide icons, tinted.
 pub fn icon(name: IconName, size: Points, tint: impl Fn() -> AdaptiveColor + 'static) -> nsh_core::element::Image {
     let uri = format!("data:image/svg+xml;base64,{}", base64::engine::general_purpose::STANDARD.encode(name.svg().1));
@@ -234,9 +264,7 @@ pub fn icon(name: IconName, size: Points, tint: impl Fn() -> AdaptiveColor + 'st
 
 /// A tooltip in Po's look: a small popover with a line of text.
 pub fn tooltip(label: &'static str) -> Text {
-    text(label)
-        .text_size(text_xs())
-        .text_color(Colors::foreground())
+    small(label)
         .bg(Colors::popover())
         .border_1()
         .border_color(Colors::border())

@@ -2,8 +2,8 @@
 //! milestones and issues. Drawn with [`crate::nsh::issues`]'s pieces and state.
 use nsh_core::prelude::*;
 
-use super::issues::{State, Page, boxed, caption, chip, delete_button, due_hint, issue_row, line_input, text_area};
-use super::{Colors, icon, icon_button, rems, text_sm, text_xs};
+use super::issues::{State, Page, boxed, chip, delete_button, due_hint, issue_row, legend, line_input, text_area};
+use super::{Colors, caption, icon, icon_button, note, rems};
 use crate::issues::shared;
 use crate::issues::{EpicStatus, Progress};
 use crate::date::{Date, due_label, parse_due, today};
@@ -118,10 +118,10 @@ pub fn epics_page(state: State) -> View {
                                 .on_press(move || state.open_epic(&id))
                                 .child(icon(IconName::Layers, rems(0.875), Colors::muted()))
                                 .child(text(epic.name.clone()).flex_1().number_of_lines(1).text_color(Colors::foreground()))
-                                .child(text(epic.status.name()).flex_none().text_size(text_xs()).text_color(Colors::muted()))
+                                .child(caption(epic.status.name()).flex_none())
                                 .child(view().w(rems(8.)).flex_none().flex_row().child(bar(progress)))
-                                .child(text(count(progress)).flex_none().w(rems(4.)).text_size(text_xs()).text_color(Colors::muted()))
-                                .child(text(epic.target.map(|t| due_label(t, today())).unwrap_or_default()).flex_none().w(rems(4.5)).text_size(text_xs()).text_color(Colors::muted()))
+                                .child(caption(count(progress)).flex_none().w(rems(4.)))
+                                .child(caption(epic.target.map(|t| due_label(t, today())).unwrap_or_default()).flex_none().w(rems(4.5)))
                         })
                         .collect()
                 });
@@ -131,9 +131,9 @@ pub fn epics_page(state: State) -> View {
                     .px(rems(0.75))
                     .pb(rems(0.75))
                     .child(rows)
-                    .child(empty.then(|| view().py(rems(1.5)).items_center().child(text("No epics yet. An epic groups issues toward a goal.").text_size(text_sm()).text_color(Colors::muted()))))
+                    .child(empty.then(|| view().py(rems(1.5)).items_center().child(note("No epics yet. An epic groups issues toward a goal."))))
             })))
-    }).otherwise(|| view().py(rems(1.5)).items_center().child(text("Open a project to see its epics.").text_size(text_sm()).text_color(Colors::muted()))))
+    }).otherwise(|| view().py(rems(1.5)).items_center().child(note("Open a project to see its epics."))))
 }
 
 pub fn epic_page(state: State, id: String) -> View {
@@ -187,9 +187,9 @@ fn epic_body(state: State, id: String) -> AnyElement {
                                             .px(rems(0.5))
                                             .child(icon(IconName::Flag, rems(0.75), Colors::muted()))
                                             .child(text(m.name.clone()).flex_1().number_of_lines(1).text_color(Colors::foreground()))
-                                            .child(text(m.target.map(|t| due_label(t, today())).unwrap_or_default()).flex_none().text_size(text_xs()).text_color(Colors::muted()))
+                                            .child(caption(m.target.map(|t| due_label(t, today())).unwrap_or_default()).flex_none())
                                             .child(view().w(rems(7.)).flex_none().flex_row().child(bar(progress)))
-                                            .child(text(count(progress)).flex_none().w(rems(4.)).text_size(text_xs()).text_color(Colors::muted()))
+                                            .child(caption(count(progress)).flex_none().w(rems(4.)))
                                             .child(super::on_hover(icon_button(IconName::Close, rems(0.75), "Remove milestone", move || {
                                                 shared::change(|t, n| t.update_epic(&epic_id, n, |e| e.milestones.retain(|m| m.id != mid)));
                                             })))
@@ -213,7 +213,7 @@ fn epic_body(state: State, id: String) -> AnyElement {
             },
             {
                 let id = id.clone();
-                move || view().flex_row().items_center().gap(rems(0.75)).child(bar(state.data.with(|data| data.tracker.epic_progress(&id)))).child(text(count(state.data.with(|data| data.tracker.epic_progress(&id)))).text_size(text_xs()).text_color(Colors::muted()))
+                move || view().flex_row().items_center().gap(rems(0.75)).child(bar(state.data.with(|data| data.tracker.epic_progress(&id)))).child(caption(count(state.data.with(|data| data.tracker.epic_progress(&id)))))
             },
         )
     };
@@ -240,7 +240,7 @@ fn epic_body(state: State, id: String) -> AnyElement {
                     .items_center()
                     .gap(rems(0.5))
                     .child(icon_button(IconName::ChevronLeft, rems(0.875), "Back (Esc)", move || state.back()))
-                    .child(text(id.clone()).flex_1().text_size(text_sm()).text_color(Colors::muted()))
+                    .child(note(id.clone()).flex_1())
                     .child(delete_button(state, "Delete epic", move || state.delete_epic(&delete_id))),
             )
             .child(boxed(IconName::Pencil, line_input("epic-name", state.epic_name, "Name", move || state.flush()).on_change(move |text: &str| {
@@ -251,24 +251,24 @@ fn epic_body(state: State, id: String) -> AnyElement {
                 state.epic_description.set(text.to_string());
                 state.touch(|edited| edited.epic_description = true);
             }))
-            .child(view().flex_row().items_center().gap(rems(0.75)).child(view().w(rems(5.5)).flex_none().child(caption("Status"))).child(dynamic(statuses)))
+            .child(view().flex_row().items_center().gap(rems(0.75)).child(view().w(rems(5.5)).flex_none().child(legend("Status"))).child(dynamic(statuses)))
             .child(
-                view().flex_row().items_center().gap(rems(0.75)).child(view().w(rems(5.5)).flex_none().child(caption("Target"))).child(
+                view().flex_row().items_center().gap(rems(0.75)).child(view().w(rems(5.5)).flex_none().child(legend("Target"))).child(
                     view().flex_1().child(boxed(IconName::Calendar, line_input("epic-target", state.epic_target, DUE_HINT, move || state.flush()).on_change(move |text: &str| {
                         state.epic_target.set(text.to_string());
                         state.touch(|edited| edited.epic_target = true);
                     }), Some(due_hint(state.epic_target)))),
                 ),
             )
-            .child(view().flex_row().items_center().gap(rems(0.75)).child(view().w(rems(5.5)).flex_none().child(caption("Progress"))).child(view().flex_1().child(dynamic(overall))))
-            .child(caption("Milestones"))
+            .child(view().flex_row().items_center().gap(rems(0.75)).child(view().w(rems(5.5)).flex_none().child(legend("Progress"))).child(view().flex_1().child(dynamic(overall))))
+            .child(legend("Milestones"))
             .child(dynamic(milestones))
             .child(boxed(
                 IconName::Flag,
                 line_input("milestone-name", state.milestone_name, "New milestone", add_milestone),
                 Some(view().flex_none().w(rems(11.)).flex_row().items_center().gap(rems(0.5)).child(line_input("milestone-due", state.milestone_due, DUE_HINT, add_milestone_due)).child(due_hint(state.milestone_due))),
             ))
-            .child(caption("Issues"))
+            .child(legend("Issues"))
             .child(boxed(IconName::Plus, line_input("epic-issue-title", state.new_title, "New issue in this epic", move || state.add(Some(add_id.clone()))), None))
             .child(dynamic(issues)),
     )
