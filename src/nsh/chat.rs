@@ -1325,6 +1325,8 @@ fn pressed_send(draft: &Signal<String>) {
 /// which follows what its [`Snapshot`] says as it changes.
 #[component]
 pub fn Chat() -> impl IntoElement {
+    // The transcript's links show the pointer rather than the text cursor of the selectable text.
+    provide_context(nsh_base::TextViewParts::new().part(nsh_base::TextViewPart::Link, |style| style.cursor_pointer()));
     let state = signal(SNAPSHOT.borrow().clone());
     spawn(async move {
         let mut snapshot = SNAPSHOT.subscribe();
