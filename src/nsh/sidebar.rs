@@ -7,7 +7,7 @@ use nsh_core::prelude::*;
 use tokio::sync::watch;
 
 use super::bus::{Cmd, send};
-use super::{Colors, body, caption, header_height, icon, icon_button, note, on_hover, rems, text_base, text_sm, text_xs};
+use super::{Colors, body, caption, header_height, icon, icon_button, note, on_hover, rems, small, text_base, text_sm, text_xs};
 use crate::ui::icon::IconName;
 
 /// What a thread is up to, for its mark.
@@ -178,7 +178,7 @@ fn grant_badge() -> View {
         .rounded(Colors::radius())
         .bg(Colors::hover())
         .tooltip(super::tooltip("Agent control granted"))
-        .child(text("⌁").text_size(text_xs()).text_color(Colors::foreground()))
+        .child(small("⌁"))
 }
 
 fn thread_row(thread: &Thread, project: Option<&str>, close_tip: &'static str) -> View {

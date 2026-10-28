@@ -614,7 +614,7 @@ fn run_row(message: usize, at: usize, count: usize, phase: Phase, folded: bool) 
         .hover(|s| s.bg(Colors::hover()))
         .on_press(move || tell(Cmd::Fold { message, block: at, folded: !folded }))
         .child(step_glyph(phase))
-        .child(note(label).flex_1())
+        .child(text(label).flex_1().text_sm().text_color(Colors::muted()))
         .child(icon(if folded { IconName::ChevronRight } else { IconName::ChevronDown }, rems(0.75), Colors::muted()))
         .into_element()
 }
@@ -661,13 +661,13 @@ fn ask_row(message: usize, at: usize, title: &str, options: &[AskOption], answer
                 .flex_row()
                 .items_start()
                 .gap(rems(0.5))
-                .child(caption("Permission").flex_none().font_weight(FontWeight::MEDIUM))
+                .child(text("Permission").flex_none().text_xs().font_weight(FontWeight::MEDIUM).text_color(Colors::muted()))
                 .child(view().flex_1().min_w_0().child(text_view().markdown(title).text_sm().text_color(Colors::foreground()))),
         );
     match answered {
         Some(given) => {
             let said = format!("→ {given}");
-            card = card.child(note(said));
+            card = card.child(text(said).text_sm().text_color(Colors::muted()));
         }
         None => {
             let mut row = view().flex_row().flex_wrap().gap(rems(0.375));
@@ -714,7 +714,7 @@ fn approve_row(message: usize, at: usize, question: &str, lines: &[String], answ
                 .flex_row()
                 .items_start()
                 .gap(rems(0.5))
-                .child(caption("Approve").flex_none().font_weight(FontWeight::MEDIUM))
+                .child(text("Approve").flex_none().text_xs().font_weight(FontWeight::MEDIUM).text_color(Colors::muted()))
                 .child(view().flex_1().min_w_0().child(text_view().markdown(title).text_sm().text_color(Colors::foreground()))),
         )
         .children((!lines.is_empty()).then(|| {
@@ -741,7 +741,7 @@ fn approve_row(message: usize, at: usize, question: &str, lines: &[String], answ
     match answered {
         Some(said) => {
             let said = format!("→ {said}");
-            card = card.child(note(said));
+            card = card.child(text(said).text_sm().text_color(Colors::muted()));
         }
         None => {
             card = card.child(
@@ -773,7 +773,7 @@ fn approve_row(message: usize, at: usize, question: &str, lines: &[String], answ
                             .border_color(Colors::input_border())
                             .hover(|s| s.bg(Colors::hover()))
                             .on_press(move || tell(Cmd::Approve { message, block: at, yes: false }))
-                            .child(body("Leave out")),
+                            .child(text("Leave out").text_sm().text_color(Colors::foreground())),
                     ),
             );
         }
@@ -805,7 +805,7 @@ fn agent_row(message: usize, blocks: &[Block]) -> AnyElement {
     let mut column = view().flex_col().min_w_0().gap(rems(0.75));
     let mut skip = 0;
     if blocks.is_empty() {
-        column = column.child(note("Thinking…"));
+        column = column.child(text("Thinking…").text_sm().text_color(Colors::muted()));
     }
     for block in blocks {
         if skip > 0 {
@@ -910,13 +910,13 @@ fn queue_row(queued: Queued) -> AnyElement {
         .rounded(Colors::radius())
         .bg(Colors::selected());
     row = if queued.kind.is_empty() {
-        row.child(caption("Queued").flex_none().font_weight(FontWeight::MEDIUM))
+        row.child(text("Queued").flex_none().text_xs().font_weight(FontWeight::MEDIUM).text_color(Colors::muted()))
     } else {
-        row.child(caption(queued.kind.clone()).flex_none().font_weight(FontWeight::MEDIUM))
+        row.child(text(queued.kind.clone()).flex_none().text_xs().font_weight(FontWeight::MEDIUM).text_color(Colors::muted()))
     };
     row = if queued.text.is_empty() {
         let word = if queued.pictures == 1 { "1 picture".to_string() } else { format!("{} pictures", queued.pictures) };
-        row.child(note(word).flex_1().min_w_0())
+        row.child(text(word).flex_1().min_w_0().text_sm().text_color(Colors::muted()))
     } else {
         row.child(text_view().markdown(queued.text.clone()).flex_1().min_w_0().text_sm().text_color(Colors::foreground()))
     };
@@ -942,7 +942,7 @@ fn note_row(note: &str) -> AnyElement {
         .flex_row()
         .items_center()
         .gap(rems(0.5))
-        .child(caption(note.to_string()).flex_1().min_w_0())
+        .child(text(note.to_string()).flex_1().min_w_0().text_xs().text_color(Colors::muted()))
         .child(
             view()
                 .role(AccessibilityRole::Button)
@@ -979,8 +979,8 @@ fn picker(picking: &Picking) -> AnyElement {
                         .cursor_pointer()
                         .hover(|s| s.bg(Colors::hover()))
                         .on_press(move || tell(Cmd::Resume(id.clone())))
-                        .child(body(label).flex_1().min_w_0().number_of_lines(1))
-                        .child(caption(when).flex_none()),
+                        .child(text(label).flex_1().min_w_0().number_of_lines(1).text_sm().text_color(Colors::foreground()))
+                        .child(text(when).flex_none().text_xs().text_color(Colors::muted())),
                 );
             }
             column.into_element()
@@ -1002,7 +1002,7 @@ fn picker(picking: &Picking) -> AnyElement {
                 .items_center()
                 .px(rems(0.375))
                 .pb(rems(0.25))
-                .child(caption(title).flex_1().font_weight(FontWeight::MEDIUM))
+                .child(text(title).flex_1().text_xs().font_weight(FontWeight::MEDIUM).text_color(Colors::muted()))
                 .child(
                     view()
                         .role(AccessibilityRole::Button)
@@ -1263,7 +1263,7 @@ fn bar(snap: Snapshot, draft: Signal<String>, field_ref: ElementRef) -> AnyEleme
             .as_ref()
             .map(|id| snap.agents.iter().find(|(_, key)| key == id).map_or(id.clone(), |(name, _)| name.clone()))
             .unwrap_or_else(|| "Agent".to_string());
-        chips = chips.child(note(name).px(rems(0.5)));
+        chips = chips.child(text(name).px(rems(0.5)).text_sm().text_color(Colors::muted()));
     }
     if !snap.settings.is_empty() {
         chips = chips.child(settings_rows(&snap.settings, snap.busy));
@@ -1404,7 +1404,7 @@ pub fn Chat() -> impl IntoElement {
                 .justify_center()
                 .gap(rems(0.75))
                 .px(rems(1.))
-                .children([text("What is this thread about?").text_base().text_color(Colors::muted()), note("Message an agent to begin.")])
+                .children([text("What is this thread about?").text_base().text_color(Colors::muted()), text("Message an agent to begin.").text_sm().text_color(Colors::muted())])
                 .into_element()
         } else {
             transcript(&snap.items, scrolled.clone(), at_end)

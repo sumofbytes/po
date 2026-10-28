@@ -525,7 +525,7 @@ pub fn due_hint(value: Signal<String>) -> View {
     view().flex_none().child(text(move || read().0).text_size(text_xs()).text_color(move || if read().1 { Colors::danger()() } else { Colors::muted()() }))
 }
 
-/// A small muted caption for a group of controls.
+/// A [`caption`] in medium weight, naming a group of controls.
 pub fn legend(label: &'static str) -> Text {
     caption(label).font_weight(FontWeight::MEDIUM)
 }

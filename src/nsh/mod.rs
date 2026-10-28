@@ -231,6 +231,11 @@ pub fn caption(content: impl IntoReactive<SharedString>) -> Text {
     text(content).text_size(text_xs()).text_color(Colors::muted())
 }
 
+/// Small text in the foreground color: short labels and marks.
+pub fn small(content: impl IntoReactive<SharedString>) -> Text {
+    text(content).text_size(text_xs()).text_color(Colors::foreground())
+}
+
 /// Quiet text: notes, empty states, hints.
 pub fn note(content: impl IntoReactive<SharedString>) -> Text {
     text(content).text_size(text_sm()).text_color(Colors::muted())
@@ -259,15 +264,13 @@ pub fn icon(name: IconName, size: Points, tint: impl Fn() -> AdaptiveColor + 'st
 
 /// A tooltip in Po's look: a small popover with a line of text.
 pub fn tooltip(label: &'static str) -> Text {
-    text(label)
-        .text_size(text_xs())
-        .text_color(Colors::foreground())
+    small(label)
         .bg(Colors::popover())
         .border_1()
         .border_color(Colors::border())
         .rounded(Colors::radius())
-        .px(rems(0.5))
-        .py(rems(0.25))
+        .px(Points(8.))
+        .py(Points(4.))
 }
 
 /// A row's control that only shows while the pointer is on the row.

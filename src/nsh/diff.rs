@@ -10,7 +10,7 @@ use tokio::sync::watch;
 use super::bus::{Cmd, send};
 use super::header::{Control, pane_header};
 use super::source::Shared;
-use super::{Colors, note, rems, text_xs};
+use super::{Colors, note, rems, small, text_xs};
 
 #[derive(Clone, PartialEq, Debug)]
 pub enum Body {
@@ -74,7 +74,7 @@ fn layout_button(label: &'static str, split: bool, current: Signal<Snapshot>) ->
         .hover(|s| s.bg(Colors::hover()))
         .style_when(selected, |s| s.bg(Colors::selected()))
         .on_press(move || send(Cmd::SetSplit(split)))
-        .child(text(label).text_size(text_xs()).text_color(Colors::foreground()))
+        .child(small(label))
 }
 
 #[component]
