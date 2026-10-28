@@ -188,7 +188,7 @@ fn thread_row(thread: &Thread, project: Option<&str>, close_tip: &'static str) -
         .number_of_lines(1)
         .flex_shrink(1.)
         .text_size(text_sm())
-        .text_color(move || if selected { Colors::foreground()() } else { Colors::dim(Colors::foreground())() })
+        .text_color(move || if selected { Colors::foreground()() } else { Colors::foreground()().opacity(crate::theme::tokens::HOVER) })
         .style_when(selected, |s| s.font_weight(FontWeight::MEDIUM));
     let title = match project {
         // The title, then the project it is in, which the row no longer sits under.
@@ -214,7 +214,7 @@ fn thread_row(thread: &Thread, project: Option<&str>, close_tip: &'static str) -
 /// A wavy line with the day centred in it, over the threads of that day.
 fn day_separator(day: &'static str) -> View {
     let wave = || {
-        view().flex_1().min_w(rems(0.)).w(rems(0.)).overflow_hidden().child(text("~".repeat(80)).number_of_lines(1).ellipsize_mode(nsh_core::EllipsizeMode::Clip).text_size(text_xs()).text_color(|| Colors::primary()().opacity(crate::theme::tokens::FAINT)))
+        view().flex_1().min_w(rems(0.)).w(rems(0.)).overflow_hidden().child(text("~".repeat(80)).number_of_lines(1).ellipsize_mode(nsh_core::EllipsizeMode::Clip).text_size(text_xs()).text_color(|| Colors::primary()().opacity(crate::theme::tokens::DIM)))
     };
     view()
         .w_full()
@@ -229,14 +229,14 @@ fn day_separator(day: &'static str) -> View {
         .pt(space::section_gap())
         .pb(space::section_gap())
         .child(wave())
-        .child(text(day).flex_none().text_size(text_xs()).text_color(|| Colors::primary()().opacity(crate::theme::tokens::FAINT)))
+        .child(text(day).flex_none().text_size(text_xs()).text_color(|| Colors::primary()().opacity(crate::theme::tokens::DIM)))
         .child(wave())
 }
 
 fn project_group(project: &Project) -> View {
     let pid = project.id;
     let active = project.active;
-    let label = move || if active { Colors::foreground()() } else { Colors::dim(Colors::foreground())() };
+    let label = move || if active { Colors::foreground()() } else { Colors::foreground()().opacity(crate::theme::tokens::HOVER) };
     let chevron = if project.collapsed { IconName::ChevronRight } else { IconName::ChevronDown };
     let name = view()
         .flex_1()
@@ -321,7 +321,7 @@ fn action(icon_name: IconName, label: &'static str, tip: &'static str, selected:
         .h(space::row())
         .tooltip(super::tooltip(tip))
         .on_press(on_press)
-        .child(text(label).flex_1().text_size(text_base()).text_color(move || if selected == Some(true) { Colors::foreground()() } else { Colors::muted()() }));
+        .child(text(label).flex_1().text_size(text_base()).text_color(move || if selected == Some(true) { Colors::foreground()() } else { Colors::foreground()().opacity(crate::theme::tokens::HOVER) }));
     if selected == Some(true) { row.bg(Colors::selected()) } else { row.hover(|s| s.bg(Colors::hover())) }
 }
 
