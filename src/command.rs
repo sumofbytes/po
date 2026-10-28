@@ -117,12 +117,87 @@ pub struct AgentView {
     pub body: String,
 }
 
+/// The kind of a form's field: text typed in, or one of a list of choices picked.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Kind {
+    Text,
+    Choice,
+}
+
+/// One field of a form: what the agent calls it, what the user sees, and what it starts as.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Field {
+    pub name: String,
+    pub label: String,
+    pub kind: Kind,
+    /// A choice's options, in order; empty for text.
+    pub options: Vec<String>,
+    /// The initial text, or the choice picked to begin with.
+    pub value: Option<String>,
+}
+
+impl Field {
+    /// Reads one field of a `form.show` request.
+    fn parse(field: &Value) -> Result<Self, String> {
+        let name = field["name"].as_str().unwrap_or_default().trim();
+        if name.is_empty() {
+            return Err("every field needs a `name`".into());
+        }
+        let label = field["label"].as_str().unwrap_or(name).trim();
+        let value = field["value"].as_str().map(str::trim).filter(|value| !value.is_empty()).map(String::from);
+        match field["kind"].as_str().unwrap_or("text") {
+            "text" => Ok(Self { name: name.into(), label: label.into(), kind: Kind::Text, options: vec![], value }),
+            "choice" => {
+                let bad = || format!("the choice `{name}` needs a list of `options`");
+                let options: Vec<String> = field["options"]
+                    .as_array()
+                    .ok_or_else(bad)?
+                    .iter()
+                    .map(|option| option.as_str().map(str::trim).filter(|option| !option.is_empty()).map(String::from).ok_or_else(bad))
+                    .collect::<Result<_, _>>()?;
+                if options.is_empty() {
+                    return Err(bad());
+                }
+                if let Some(value) = &value
+                    && !options.contains(value)
+                {
+                    return Err(format!("`{value}` is not one of `{name}`'s options"));
+                }
+                Ok(Self { name: name.into(), label: label.into(), kind: Kind::Choice, options, value })
+            }
+            kind => Err(format!("`{kind}` is not a kind of field; `text` or `choice`")),
+        }
+    }
+}
+
+/// A form an agent put on screen: fields the user fills in, and a button that answers it.
+#[derive(Clone, Debug)]
+pub struct AgentForm {
+    pub id: String,
+    pub title: String,
+    /// Markdown, shown above the fields.
+    pub body: Option<String>,
+    pub fields: Vec<Field>,
+    pub submit: String,
+    /// What the user answered, once they have.
+    pub answered: Option<Value>,
+}
+
+/// The most fields a form may have, and the most options a choice may offer.
+pub const MAX_FIELDS: usize = 12;
+pub const MAX_OPTIONS: usize = 32;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Command {
     /// Adds a markdown view, or replaces the caller's view with the same `id`.
     ViewShow { id: Option<String>, title: String, body: String },
     ViewUpdate { id: String, title: Option<String>, body: Option<String> },
     ViewClose { id: String },
+    /// Adds a form — fields and a submit button the user answers at their pace — or replaces
+    /// the caller's form with the same `id`.
+    FormShow { id: Option<String>, title: String, body: Option<String>, fields: Vec<Field>, submit: Option<String> },
+    /// Waits for the user to submit one of the caller's forms, or for the timeout.
+    FormWait { id: String, timeout: Option<u64> },
     /// Opens a file of the project in the viewer, at a line (from 1) if one is given.
     FileOpen { path: String, line: Option<usize> },
     /// Shows the changes in the viewer, at one file's diff if `path` is given.
@@ -214,6 +289,8 @@ pub struct Wait {
     pub until: Vec<&'static str>,
     /// When to stop waiting; the timeout is capped by [`Command::timeout`].
     pub deadline: std::time::Instant,
+    /// The form to wait for, for a `form.wait`.
+    pub form: Option<String>,
 }
 
 /// The most views a thread may keep, and the longest body one may have.
@@ -273,6 +350,8 @@ impl Command {
             Self::ViewShow { .. } => "view.show",
             Self::ViewUpdate { .. } => "view.update",
             Self::ViewClose { .. } => "view.close",
+            Self::FormShow { .. } => "form.show",
+            Self::FormWait { .. } => "form.wait",
             Self::FileOpen { .. } => "file.open",
             Self::DiffShow { .. } => "diff.show",
             Self::ViewerClose => "viewer.close",
@@ -306,7 +385,9 @@ impl Command {
 
     pub fn family(&self) -> Family {
         match self {
-            Self::ViewShow { .. } | Self::ViewUpdate { .. } | Self::ViewClose { .. } | Self::FileOpen { .. } | Self::DiffShow { .. } | Self::ViewerClose => Family::View,
+            Self::ViewShow { .. } | Self::ViewUpdate { .. } | Self::ViewClose { .. } | Self::FormShow { .. } | Self::FileOpen { .. } | Self::DiffShow { .. } | Self::ViewerClose => Family::View,
+            // A form wait answers later, like a thread wait, so it is pumped with those.
+            Self::FormWait { .. } => Family::Thread,
             Self::ControlInfo => Family::Control,
             Self::WindowInfo | Self::AuditList { .. } | Self::EventsSubscribe => Family::Window,
             Self::AgentList => Family::Agent,
@@ -331,7 +412,7 @@ impl Command {
     /// The smallest grant that may run this command at all, before reach is judged.
     pub fn scope(&self) -> Scope {
         match self {
-            Self::ViewShow { .. } | Self::ViewUpdate { .. } | Self::ViewClose { .. } | Self::FileOpen { .. } | Self::DiffShow { .. } | Self::ViewerClose => Scope::Viewer,
+            Self::ViewShow { .. } | Self::ViewUpdate { .. } | Self::ViewClose { .. } | Self::FormShow { .. } | Self::FormWait { .. } | Self::FileOpen { .. } | Self::DiffShow { .. } | Self::ViewerClose => Scope::Viewer,
             Self::ControlInfo | Self::AgentList | Self::ProjectList | Self::ProjectChanges { .. } | Self::ThreadList { .. } | Self::ThreadGet { .. } | Self::ThreadOptions { .. } | Self::ThreadMessages { .. } | Self::ThreadLastReply { .. } => Scope::Viewer,
             // Setting a thread's own option is a viewer's; the reach table refuses a child of
             // anyone below Orchestrate.
@@ -375,7 +456,7 @@ impl Command {
         match self {
             // Putting something on screen changes what the caller's views are and may move the
             // viewer; the reads don't.
-            Self::ViewShow { .. } | Self::ViewUpdate { .. } | Self::ViewClose { .. } | Self::FileOpen { .. } | Self::DiffShow { .. } | Self::ViewerClose => true,
+            Self::ViewShow { .. } | Self::ViewUpdate { .. } | Self::ViewClose { .. } | Self::FormShow { .. } | Self::FileOpen { .. } | Self::DiffShow { .. } | Self::ViewerClose => true,
             Self::ThreadCreate { .. } | Self::ThreadSend { .. } | Self::ThreadCancel { .. } | Self::ThreadSetOption { .. } | Self::ThreadClose { .. } | Self::ThreadAnswer { .. } => true,
             Self::ProjectOpen { .. } | Self::ProjectClose { .. } | Self::ProjectOffer { .. } | Self::ThreadCreateIsolated { .. } | Self::WorktreeMerge { .. } => true,
             Self::ControlInfo
@@ -391,6 +472,7 @@ impl Command {
             | Self::WindowInfo
             | Self::AuditList { .. }
             | Self::EventsSubscribe
+            | Self::FormWait { .. }
             | Self::ThreadWait { .. } => false,
         }
     }
@@ -400,7 +482,7 @@ impl Command {
     pub fn timeout(&self) -> std::time::Duration {
         const ANSWER: std::time::Duration = std::time::Duration::from_secs(10);
         match self {
-            Self::ThreadWait { timeout, .. } => std::time::Duration::from_secs(timeout.unwrap_or(25).min(50)),
+            Self::ThreadWait { timeout, .. } | Self::FormWait { timeout, .. } => std::time::Duration::from_secs(timeout.unwrap_or(25).min(50)),
             _ => ANSWER,
         }
     }
@@ -428,6 +510,15 @@ impl Command {
                 Self::ViewUpdate { id: need("id")?, title: opt("title"), body: opt("body") }
             }
             "view.close" => Self::ViewClose { id: need("id")? },
+            "form.show" => {
+                let fields = match &request["fields"] {
+                    Value::Null => vec![],
+                    Value::Array(fields) => fields.iter().map(Field::parse).collect::<Result<Vec<_>, _>>()?,
+                    _ => return Err("`fields` is a list of fields".into()),
+                };
+                Self::FormShow { id: opt("id"), title: need("title")?, body: opt("body"), fields, submit: opt("submit") }
+            }
+            "form.wait" => Self::FormWait { id: need("id")?, timeout: number("timeout")? },
             "file.open" => Self::FileOpen { path: need("path")?, line: line(request)? },
             "diff.show" => Self::DiffShow { path: opt("path") },
             "viewer.close" => Self::ViewerClose,
@@ -501,6 +592,7 @@ impl Command {
         let (title, body) = match self {
             Self::ViewShow { title, body, .. } => (Some(title), Some(body)),
             Self::ViewUpdate { title, body, .. } => (title.as_ref(), body.as_ref()),
+            Self::FormShow { title, body, .. } => (Some(title), body.as_ref()),
             _ => (None, None),
         };
         if title.is_some_and(|title| title.chars().count() > MAX_TITLE) {
@@ -508,6 +600,24 @@ impl Command {
         }
         if body.is_some_and(|body| body.len() > MAX_BODY) {
             return Err(format!("a view is at most {} KiB", MAX_BODY / 1024));
+        }
+        if let Self::FormShow { fields, submit, .. } = self {
+            if fields.len() > MAX_FIELDS {
+                return Err(format!("a form has at most {MAX_FIELDS} fields"));
+            }
+            let mut names: Vec<&str> = vec![];
+            for field in fields {
+                if names.contains(&field.name.as_str()) {
+                    return Err(format!("two fields are named `{}`", field.name));
+                }
+                names.push(&field.name);
+                if field.options.len() > MAX_OPTIONS {
+                    return Err(format!("`{}` offers at most {MAX_OPTIONS} options", field.name));
+                }
+            }
+            if submit.as_ref().is_some_and(|submit| submit.chars().count() > MAX_TITLE) {
+                return Err(format!("a submit label is at most {MAX_TITLE} characters"));
+            }
         }
         Ok(())
     }
@@ -567,6 +677,63 @@ impl Views {
                 if self.list.len() == before { Err(format!("no view `{id}`")) } else { Ok(json!({ "id": id })) }
             }
             _ => Err("not a view command".into()),
+        }
+    }
+}
+
+/// The forms of one thread. Agents have no handle on anyone else's.
+#[derive(Default)]
+pub struct Forms {
+    list: Vec<AgentForm>,
+    next: u64,
+}
+
+/// The most forms a thread may keep.
+pub const MAX_FORMS: usize = 8;
+
+impl Forms {
+    pub fn list(&self) -> &[AgentForm] {
+        &self.list
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.list.is_empty()
+    }
+
+    pub fn get(&self, id: &str) -> Option<&AgentForm> {
+        self.list.iter().find(|form| form.id == id)
+    }
+
+    /// Applies a `form.show`: adds a form, or replaces the caller's with the same `id`.
+    pub fn show(&mut self, id: Option<String>, title: String, body: Option<String>, fields: Vec<Field>, submit: Option<String>) -> Reply {
+        let id = id.unwrap_or_else(|| {
+            self.next += 1;
+            format!("f{}", self.next)
+        });
+        let form = AgentForm { id: id.clone(), title, body, fields, submit: submit.filter(|submit| !submit.is_empty()).unwrap_or_else(|| "Submit".into()), answered: None };
+        match self.list.iter_mut().find(|form| form.id == id) {
+            Some(at) => *at = form,
+            None => {
+                if self.list.len() >= MAX_FORMS {
+                    return Err(format!("a thread keeps at most {MAX_FORMS} forms; close one first"));
+                }
+                self.list.push(form);
+            }
+        }
+        Ok(json!({ "id": id }))
+    }
+
+    /// Takes `id` out; true if it was there.
+    pub fn remove(&mut self, id: &str) -> bool {
+        let before = self.list.len();
+        self.list.retain(|form| form.id != id);
+        self.list.len() != before
+    }
+
+    /// What the user answered, kept so a wait that starts after the submit still reads it.
+    pub fn answered(&mut self, id: &str, values: Value) {
+        if let Some(form) = self.list.iter_mut().find(|form| form.id == id) {
+            form.answered = Some(values);
         }
     }
 }
@@ -751,6 +918,65 @@ mod tests {
         assert!(views.apply(show(Some("v1"), "again", "")).is_ok());
     }
 
+    #[test]
+    fn forms_are_read_and_kept() {
+        let form = |fields| json!({ "command": "form.show", "title": "Ship it", "fields": fields });
+        let parsed = Command::parse(&form(json!([
+            { "name": "name", "label": "Your name", "value": "Ada" },
+            { "name": "size", "kind": "choice", "options": ["small", "large"], "value": "small" },
+        ])));
+        assert_eq!(
+            parsed,
+            Ok(Command::FormShow {
+                id: None,
+                title: "Ship it".into(),
+                body: None,
+                submit: None,
+                fields: vec![
+                    Field { name: "name".into(), label: "Your name".into(), kind: Kind::Text, options: vec![], value: Some("Ada".into()) },
+                    Field { name: "size".into(), label: "size".into(), kind: Kind::Choice, options: vec!["small".into(), "large".into()], value: Some("small".into()) },
+                ],
+            })
+        );
+        // What a form may not be.
+        assert!(Command::parse(&form(json!([{}]))).is_err(), "a field needs a name");
+        assert!(Command::parse(&form(json!([{ "name": "a", "kind": "magic" }]))).is_err());
+        assert!(Command::parse(&form(json!([{ "name": "a", "kind": "choice" }]))).is_err(), "a choice needs options");
+        assert!(Command::parse(&form(json!([{ "name": "a", "kind": "choice", "options": [""] }]))).is_err());
+        assert!(Command::parse(&form(json!([{ "name": "a", "kind": "choice", "options": ["x"], "value": "y" }]))).is_err());
+        assert!(Command::parse(&form(json!("nope"))).is_err());
+        assert!(Command::parse(&form(json!([{ "name": "a" }, { "name": "a" }]))).is_err(), "names are unique");
+        let many: Vec<_> = (0..=MAX_FIELDS).map(|n| json!({ "name": format!("f{n}") })).collect();
+        assert!(Command::parse(&form(json!(many))).is_err());
+        assert!(Command::parse(&json!({ "command": "form.wait" })).is_err());
+        assert_eq!(Command::parse(&json!({ "command": "form.wait", "id": "f1", "timeout": 90 })).unwrap().timeout(), std::time::Duration::from_secs(50));
+        let show = Command::parse(&form(json!([]))).unwrap();
+        assert_eq!((show.name(), show.scope(), show.writes()), ("form.show", Scope::Viewer, true));
+        assert_eq!(show.family(), Family::View);
+    }
+
+    #[test]
+    fn forms_are_shown_replaced_answered_and_removed() {
+        let mut forms = Forms::default();
+        let field = Field { name: "a".into(), label: "A".into(), kind: Kind::Text, options: vec![], value: None };
+        assert_eq!(forms.show(None, "One".into(), None, vec![field.clone()], None), Ok(json!({ "id": "f1" })));
+        assert_eq!(forms.show(Some("f1".into()), "Two".into(), None, vec![], None), Ok(json!({ "id": "f1" })));
+        assert_eq!(forms.list().len(), 1);
+        assert_eq!(forms.list()[0].title, "Two");
+        assert!(forms.get("f1").is_some() && forms.get("nope").is_none());
+        // The answer of a form is kept for a wait that starts later.
+        forms.answered("f1", json!({ "a": "b" }));
+        assert_eq!(forms.get("f1").unwrap().answered.as_ref(), Some(&json!({ "a": "b" })));
+        assert!(forms.remove("f1"));
+        assert!(forms.is_empty() && !forms.remove("f1"));
+        for n in 0..MAX_FORMS {
+            forms.show(None, format!("f{n}"), None, vec![], None).unwrap();
+        }
+        assert!(forms.show(None, "one more".into(), None, vec![], None).is_err());
+        // The ids handed out so far are f2..f9: the first show spent f1, the replace spent none.
+        assert!(forms.show(Some("f2".into()), "again".into(), None, vec![], None).is_ok(), "replacing one is not adding one");
+    }
+
     // Every command against every grant and every target relation: the reach table of §4.2 in
     // the control plan, so a new command can't quietly widen what a grant allows.
     #[test]
@@ -766,6 +992,7 @@ mod tests {
             Command::ViewShow { id: None, title: "t".into(), body: String::new() },
             Command::ViewUpdate { id: "v".into(), title: None, body: Some(String::new()) },
             Command::ViewClose { id: "v".into() },
+            Command::FormShow { id: None, title: "t".into(), body: None, fields: vec![], submit: None },
             Command::FileOpen { path: "a.rs".into(), line: None },
             Command::DiffShow { path: None },
             Command::ViewerClose,

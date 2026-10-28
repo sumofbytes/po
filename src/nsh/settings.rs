@@ -1,0 +1,341 @@
+//! The settings page: the options of `config.json` as fields, written back to it on Save. What
+//! the fields hold and how it is written is [`crate::settings`]; this is the screen.
+use std::sync::Mutex;
+
+use nsh_core::prelude::*;
+
+use super::bus::{Cmd, send};
+use super::overlay::{self, Height};
+use super::{Colors, button, field, field_height, rems, text_sm, text_xs};
+use crate::schemes;
+use crate::settings::{AgentForm, Form};
+
+/// The height the screen needs, which the overlay around it takes.
+pub static HEIGHT: Height = overlay::height();
+
+/// Where the viewer is as the page opens, which is what its "Viewer position" starts from.
+static VIEWER_LEFT: Mutex<bool> = Mutex::new(false);
+
+/// Sets what the next page starts from.
+pub fn start(viewer_left: bool) {
+    *VIEWER_LEFT.lock().unwrap_or_else(|e| e.into_inner()) = viewer_left;
+}
+
+/// An agent's fields, known by a number the page gives it so a row keeps its input while others
+/// come and go.
+#[derive(Clone, PartialEq)]
+struct Agent {
+    key: u64,
+    form: AgentForm,
+}
+
+fn section(title: &'static str) -> View {
+    view().pt(rems(0.75)).pb(rems(0.25)).child(text(title.to_uppercase()).text_size(text_xs()).text_color(Colors::muted()))
+}
+
+/// A cell of a row of fields: `width` wide, or what the others leave. A fixed one doesn't also grow,
+/// since a growing view's basis would stay at nothing and the width be ignored.
+fn sized(width: Option<f32>) -> View {
+    match width {
+        Some(width) => view().w(Points(width)).flex_none(),
+        None => view().w(Points(0.)).flex_1(),
+    }
+}
+
+/// A label on the left and its control on the right.
+fn row(label: &'static str, hint: &'static str, control: impl IntoElement) -> View {
+    view()
+        .flex_row()
+        .items_center()
+        .gap(rems(0.75))
+        .py(rems(0.25))
+        .child(
+            view()
+                .w(Points(200.))
+                .flex_none()
+                .child(text(label).text_size(text_sm()).text_color(Colors::foreground()))
+                .child(text(hint).text_size(text_xs()).text_color(Colors::muted())),
+        )
+        .child(view().flex_1().child(control))
+}
+
+/// An on / off button, or a choice of two when `highlight` is false.
+fn toggle(on: Signal<bool>, labels: (&'static str, &'static str), highlight: bool) -> View {
+    let shown = move || if on.get() { labels.0 } else { labels.1 };
+    let button = view()
+        .role(AccessibilityRole::Button)
+        .label(shown)
+        .flex_none()
+        .px(rems(0.75))
+        .py(rems(0.375))
+        .rounded(Colors::radius())
+        .border_1()
+        .border_color(Colors::input_border())
+        .cursor_pointer()
+        .hover(|s| s.bg(Colors::hover()))
+        .style_when(move || highlight && on.get(), |s| s.bg(Colors::selected()))
+        .on_press(move || on.update(|on| *on = !*on))
+        .child(text(shown).text_size(text_sm()).text_color(Colors::foreground()));
+    view().flex_row().justify_end().child(button)
+}
+
+#[component]
+pub fn Settings() -> impl IntoElement {
+    let loaded = Form::load(*VIEWER_LEFT.lock().unwrap_or_else(|e| e.into_inner()));
+    let theme = signal(loaded.theme.clone());
+    let font_family = signal(loaded.font_family.clone());
+    let font_size = signal(loaded.font_size.clone());
+    let mono_family = signal(loaded.mono_family.clone());
+    let mono_size = signal(loaded.mono_size.clone());
+    let idle_minutes = signal(loaded.idle_minutes.clone());
+    let max_live = signal(loaded.max_live.clone());
+    let notifications = signal(loaded.notifications);
+    let glass = signal(loaded.glass);
+    let viewer_left = signal(loaded.viewer_left);
+    let next_key = stored(loaded.agents.len() as u64);
+    let agents = signal(loaded.agents.iter().cloned().enumerate().map(|(key, form)| Agent { key: key as u64, form }).collect::<Vec<_>>());
+    let error = signal(None::<String>);
+
+    let save = move || {
+        let form = Form {
+            theme: theme.get_untracked(),
+            font_family: font_family.get_untracked(),
+            font_size: font_size.get_untracked(),
+            mono_family: mono_family.get_untracked(),
+            mono_size: mono_size.get_untracked(),
+            idle_minutes: idle_minutes.get_untracked(),
+            max_live: max_live.get_untracked(),
+            notifications: notifications.get_untracked(),
+            glass: glass.get_untracked(),
+            viewer_left: viewer_left.get_untracked(),
+            agents: agents.get_untracked().into_iter().map(|agent| agent.form).collect(),
+        };
+        match form.save() {
+            Ok(()) => {
+                error.set(None);
+                send(Cmd::SettingsSaved);
+            }
+            Err(message) => error.set(Some(message)),
+        }
+    };
+    on_key_with("escape", KeyOptions { when: nsh_core::keymap::When::Always, repeat: false }, |_| send(Cmd::CloseSettings));
+
+    // The frame around the screen takes the height its parts need, as far as the window has room.
+    let parts: [Signal<f32>; 3] = [signal(0.), signal(0.), signal(0.)];
+    effect(move || {
+        let height: f32 = parts.iter().map(|part| part.get()).sum();
+        HEIGHT.send_if_modified(|now| std::mem::replace(now, height) != height);
+    });
+    let measure = move |part: usize| move |bounds: &Bounds<Points>| parts[part].set(bounds.size.height.0);
+
+    // The theme's matches follow what is typed.
+    let matches = move || {
+        let typed = theme.get().trim().to_string();
+        if typed.is_empty() || schemes::names().any(|name| name.eq_ignore_ascii_case(&typed)) {
+            return vec![];
+        }
+        let needle = typed.to_lowercase();
+        schemes::names().filter(|name| name.to_lowercase().contains(&needle)).take(6).collect::<Vec<_>>()
+    };
+
+    let edit = move |key: u64, change: fn(&mut AgentForm, String)| {
+        move |text: &str| {
+            agents.update(|list| {
+                if let Some(agent) = list.iter_mut().find(|agent| agent.key == key) {
+                    change(&mut agent.form, text.to_string());
+                }
+            })
+        }
+    };
+    let agent_row = move |agent: ReadSignal<Agent>, _: ReadSignal<usize>| {
+        let key = agent.get_untracked().key;
+        let input = move |id: &str, width: Option<f32>, placeholder: &'static str, value: fn(&AgentForm) -> String, change: fn(&mut AgentForm, String)| {
+            // The box is a view and the input fills it, as in [`field`]: the box's width is what the
+            // row gives it, and what is typed stays inside.
+            sized(width).child(
+                view()
+                    .w_full()
+                    .h(field_height())
+                    .flex_row()
+                    .items_center()
+                    .px(rems(0.625))
+                    .rounded(Colors::radius())
+                    .border_1()
+                    .border_color(Colors::input_border())
+                    .bg(Colors::input_background())
+                    .child(
+                        nsh_core::element::input()
+                            .test_id(&format!("agent-{key}-{id}"))
+                            .value(move || value(&agent.get().form))
+                            .placeholder(placeholder)
+                            .placeholder_color(Colors::one(Colors::muted()))
+                            .selection_color(Colors::one(Colors::caret()))
+                            .text_color(Colors::foreground())
+                            .auto_correct(false)
+                            .on_change(edit(key, change))
+                            .flex_1(),
+                    ),
+            )
+        };
+        view()
+            .flex_row()
+            .items_center()
+            .gap(rems(0.5))
+            .py(rems(0.25))
+            .child(input("id", Some(90.), "id", |a| a.id.clone(), |a, t| a.id = t))
+            .child(input("name", Some(120.), "Name", |a| a.name.clone(), |a, t| a.name = t))
+            .child(input("command", None, "command --acp", |a| a.command.clone(), |a, t| a.command = t))
+            .child(
+                super::icon_button(crate::ui::icon::IconName::Close, rems(0.75), "Remove", move || agents.update(|list| list.retain(|a| a.key != key))),
+            )
+    };
+
+    view()
+        .flex_1()
+        .bg(Colors::popover())
+        .child(
+            view()
+                .px(rems(1.))
+                .py(rems(0.5))
+                .border_b_1()
+                .border_color(Colors::border())
+                .on_layout(measure(0))
+                .child(text("Settings").font_weight(FontWeight::SEMIBOLD).text_color(Colors::foreground())),
+        )
+        .child(
+            scroll().flex_shrink(1.).child(
+                view()
+                    .px(rems(1.))
+                    .pb(rems(0.75))
+                    .on_layout(measure(1))
+                    .child(section("Appearance"))
+                    .child(row("Theme", "A colour scheme name or theme file", field("settings-theme", theme, "Rose Pine", || {})))
+                    .child(dynamic(move || {
+                        let names = matches();
+                        (!names.is_empty()).then(|| {
+                            view().pb(rems(0.25)).child(
+                                names
+                                    .into_iter()
+                                    .map(|name| {
+                                        view()
+                                            .role(AccessibilityRole::Button)
+                                            .label(name)
+                                            .px(rems(0.75))
+                                            .py(rems(0.25))
+                                            .rounded(Colors::radius())
+                                            .cursor_pointer()
+                                            .hover(|s| s.bg(Colors::hover()))
+                                            .on_press(move || theme.set(name.to_string()))
+                                            .child(text(name).text_size(text_sm()).text_color(Colors::foreground()))
+                                    })
+                                    .collect::<Vec<_>>(),
+                            )
+                        })
+                    }))
+                    .child(row("Glass", "Translucent panes over the desktop", toggle(glass, ("On", "Off"), true)))
+                    .child(row("UI font", "Names tried in order, comma separated", field("settings-font-family", font_family, "Adwaita Sans", || {})))
+                    .child(row("UI font size", "Also scales spacing", field("settings-font-size", font_size, "14", || {})))
+                    .child(row("Monospace font", "Names tried in order, comma separated", field("settings-mono-family", mono_family, "system monospace", || {})))
+                    .child(row("Monospace font size", "Code and diffs", field("settings-mono-size", mono_size, "13", || {})))
+                    .child(section("Layout"))
+                    .child(row("Viewer position", "Which side of the conversation (Ctrl+Shift+S)", toggle(viewer_left, ("Left", "Right"), false)))
+                    .child(section("Behavior"))
+                    .child(row("Notifications", "When a thread needs you in the background", toggle(notifications, ("On", "Off"), true)))
+                    .child(row("Idle minutes", "Stop an idle agent after this long; 0 never", field("settings-idle", idle_minutes, "15", || {})))
+                    .child(row("Max live agents", "Longest idle agents stop beyond this many", field("settings-max-live", max_live, "8", || {})))
+                    .child(section("Agents"))
+                    .child(
+                        text("Added to the bundled agents; the same id replaces one. A new command asks before it first runs.")
+                            .text_size(text_xs())
+                            .text_color(Colors::muted())
+                            .pb(rems(0.25)),
+                    )
+                    .child(each(agents, |agent: &Agent| agent.key, agent_row))
+                    .child(view().pt(rems(0.25)).flex_row().child(button("Add agent", false, move || {
+                        let key = next_key.replace(next_key.get() + 1);
+                        agents.update(|list| list.push(Agent { key, form: AgentForm { id: String::new(), name: String::new(), command: String::new(), extra: Default::default() } }));
+                    }))),
+            ),
+        )
+        .child(
+            view()
+                .flex_row()
+                .items_center()
+                .gap(rems(0.5))
+                .px(rems(1.))
+                .py(rems(0.5))
+                .border_t_1()
+                .border_color(Colors::border())
+                .on_layout(measure(2))
+                .child(
+                    text(move || error.get().unwrap_or_else(|| "Saved to config.json; other keys in it are kept. MCP servers are edited there.".into()))
+                        .flex_1()
+                        .text_size(text_xs())
+                        .text_color(move || if error.get().is_some() { Colors::danger()() } else { Colors::muted()() }),
+                )
+                .child(button("Close", false, || send(Cmd::CloseSettings)))
+                .child(button("Save", true, save)),
+        )
+}
+
+#[cfg(test)]
+mod tests {
+    use nsh_engine::EngineConfig;
+    use nsh_testing::Headless;
+
+    use super::*;
+
+    /// Never saves: a valid Save would write the real `config.json`.
+    #[test]
+    fn the_page_checks_its_fields_adds_agents_and_closes() {
+        let mut guard = super::super::bus::lock();
+        let commands = guard.as_mut().expect("the channel");
+        let mut config = EngineConfig::new(nsh_platform_gpui::Root::of::<Settings>());
+        config.ui_sets = vec![nsh_base::registry()];
+        config.viewport = Size::new(Points(680.), Points(900.));
+        config.environment.idiom = nsh_core::platform::Idiom::Desktop;
+        config.environment.os = nsh_core::platform::Os::Linux;
+        let mut app = Headless::start(config).expect("engine");
+        app.first_render().expect("first render");
+        for shown in ["Settings", "APPEARANCE", "Theme", "UI font size", "Notifications", "AGENTS", "Add agent", "Close", "Save"] {
+            assert!(app.shows(shown), "{shown} is on screen: {:?}", app.screen().texts());
+        }
+
+        // A number field that is not a number is refused, and nothing is written.
+        app.type_text("id:settings-font-size", "big").unwrap();
+        app.press("label:Save").unwrap();
+        app.settle();
+        assert!(app.shows("Font size needs a number"), "{:?}", app.screen().texts());
+        assert!(commands.try_recv().is_err(), "nothing saved, so nothing to apply");
+
+        // A scheme typed in part offers its matches; pressing one fills the field.
+        app.clear("id:settings-theme").unwrap();
+        app.type_text("id:settings-theme", "rose").unwrap();
+        app.settle();
+        let first = schemes::names().find(|name| name.to_lowercase().contains("rose")).expect("a bundled rose scheme");
+        app.press(&format!("label:{first}")).unwrap();
+        app.settle();
+        assert_eq!(app.screen().input_text("id:settings-theme").unwrap(), Some(first));
+
+        // A toggle flips, and an agent row comes and goes.
+        app.press("label:Left").ok();
+        let before = app.screen().count("role:button[Remove]").unwrap();
+        app.press("label:Add agent").unwrap();
+        app.settle();
+        assert_eq!(app.screen().count("role:button[Remove]").unwrap(), before + 1);
+        app.type_text(&format!("id:agent-{before}-id"), "mine").unwrap();
+        app.settle();
+        assert_eq!(app.screen().input_text(&format!("id:agent-{before}-id")).unwrap(), Some("mine"));
+        app.press(&format!("role:button[Remove] >> nth={before}")).unwrap();
+        app.settle();
+        assert_eq!(app.screen().count("role:button[Remove]").unwrap(), before);
+
+        // Close, and Esc, both ask the frame to close it.
+        app.press("label:Close").unwrap();
+        app.settle();
+        assert_eq!(commands.try_recv().ok(), Some(Cmd::CloseSettings));
+        app.press_key("escape").unwrap();
+        app.settle();
+        assert_eq!(commands.try_recv().ok(), Some(Cmd::CloseSettings));
+    }
+}
