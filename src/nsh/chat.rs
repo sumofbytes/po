@@ -11,7 +11,7 @@ use tokio::sync::watch;
 
 use super::header::{Control, pane_header};
 use super::source::Shared;
-use super::{Colors, body, caption, icon, mono_size, note, rems, text_base, text_sm, tooltip};
+use super::{Colors, body, caption, icon, mono_size, note, rems, text_sm, tooltip};
 use crate::ui::icon::IconName;
 
 /// Whether a step of the agent's is waiting, going, done or failed: a tool call, the plan's
@@ -1202,7 +1202,7 @@ fn draft_field(draft: &Signal<String>, field_ref: ElementRef) -> Input {
         .flex_1()
         .min_w_0()
         .max_h(px(160.))
-        .text_size(text_base())
+        .text_base()
         .multiline(true)
         .value(move || held.get())
         .text_color(Colors::foreground())
