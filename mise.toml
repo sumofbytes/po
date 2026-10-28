@@ -1,0 +1,3 @@
+[tools]
+# libghostty-vt builds Ghostty with the Zig it pins; a newer Zig fails the build.
+zig = "0.15.2"

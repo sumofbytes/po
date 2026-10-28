@@ -200,6 +200,9 @@ file's header goes back to it.
 Which side of the conversation the viewer is on is a setting, not a button: **Viewer position**
 on the settings page, or `"viewer_position": "left"` in `config.json`. Ctrl+Shift+S flips it.
 
+The **terminal** (Ctrl+`) opens a shell in the project's folder as a tab of the viewer, drawn with libghostty;
+Ctrl+Shift+V pastes. Building Po needs Zig 0.15.2 for it (`mise install` reads `mise.toml`).
+
 Three shortcuts set how the layout is used:
 
 - **Browse** (Ctrl+1): the viewer open on files. It opens wide, since reading

@@ -61,6 +61,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+      # libghostty-vt builds Ghostty, which pins this Zig (see mise.toml).
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
