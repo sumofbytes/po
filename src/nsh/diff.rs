@@ -10,7 +10,7 @@ use tokio::sync::watch;
 use super::bus::{Cmd, send};
 use super::header::{Control, pane_header};
 use super::source::Shared;
-use super::{Colors, rems, text_sm, text_xs};
+use super::{Colors, note, rems, small, text_xs};
 
 #[derive(Clone, PartialEq, Debug)]
 pub enum Body {
@@ -57,7 +57,7 @@ pub fn publish(snapshot: Snapshot) {
 }
 
 fn centered(message: String) -> View {
-    view().flex_1().items_center().justify_center().px(rems(1.)).child(text(message).text_size(text_sm()).text_color(Colors::muted()))
+    view().flex_1().items_center().justify_center().px(rems(1.)).child(note(message))
 }
 
 /// One of the two layouts, as a button of the pair.
@@ -74,7 +74,7 @@ fn layout_button(label: &'static str, split: bool, current: Signal<Snapshot>) ->
         .hover(|s| s.bg(Colors::hover()))
         .style_when(selected, |s| s.bg(Colors::selected()))
         .on_press(move || send(Cmd::SetSplit(split)))
-        .child(text(label).text_size(text_xs()).text_color(Colors::foreground()))
+        .child(small(label))
 }
 
 #[component]

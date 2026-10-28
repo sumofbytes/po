@@ -9,7 +9,7 @@ use tokio::sync::watch;
 use super::bus::{Cmd, send};
 use super::header::{Control, pane_header, toggle_button};
 use super::strip::strips_view;
-use super::{Colors, icon, rems, text_sm, text_xs};
+use super::{Colors, body, icon, note, rems, text_xs};
 use crate::explorer::{FileKind, Row, Step, file_kind};
 use crate::ui::icon::IconName;
 
@@ -73,7 +73,7 @@ fn row(entry: Entry) -> View {
     let lead = if row.folder {
         icon(if row.expanded { IconName::ChevronDown } else { IconName::ChevronRight }, rems(0.75), Colors::muted()).into_element()
     } else {
-        view().w(rems(0.5)).h(rems(0.5)).flex_none().rounded(Points(2.)).bg(kind_color(file_kind(&row.name))).into_element()
+        view().w(rems(0.5)).h(rems(0.5)).flex_none().rounded(super::swatch_radius()).bg(kind_color(file_kind(&row.name))).into_element()
     };
     let id = row.id.clone();
     let mark = mark.map(|status| {
@@ -99,7 +99,7 @@ fn row(entry: Entry) -> View {
         .when(row.selected, |v| v.bg(Colors::selected()))
         .on_press(move || send(Cmd::TreeClick(id.clone())))
         .child(lead)
-        .child(text(row.name).flex_1().min_w_0().number_of_lines(1).text_size(text_sm()).text_color(Colors::foreground()))
+        .child(body(row.name).flex_1().min_w_0().number_of_lines(1))
         .children(mark)
 }
 
@@ -172,7 +172,7 @@ pub fn Explorer() -> impl IntoElement {
                         .flex_1()
                         .items_center()
                         .justify_center()
-                        .child(text(message).text_size(text_sm()).text_color(Colors::muted()))
+                        .child(note(message))
                         .into_element(),
                     Body::Rows(_) => virtual_list(rows, item).element_ref(&list).estimated_item_size(rems(1.75)).flex_1().into_element(),
                 })),

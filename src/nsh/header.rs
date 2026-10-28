@@ -3,7 +3,7 @@
 use nsh_core::prelude::*;
 
 use super::bus::{Cmd, send};
-use super::{Colors, header_height, icon, rems, text_sm, tooltip};
+use super::{Colors, body, caption, header_height, icon, rems, tooltip};
 use crate::ui::icon::IconName;
 
 /// One of the window's controls.
@@ -71,7 +71,7 @@ pub fn pane_header(title: impl IntoReactive<SharedString>, right: impl IntoEleme
                 .gap(rems(0.25))
                 .flex_shrink(1.)
                 .child(controls(lead).collect::<Vec<_>>())
-                .child(text(title).number_of_lines(1).flex_shrink(1.).text_size(text_sm()).font_weight(FontWeight::MEDIUM).text_color(Colors::foreground())),
+                .child(body(title).number_of_lines(1).flex_shrink(1.).font_weight(FontWeight::MEDIUM)),
         )
         .child(view().flex_row().items_center().gap(rems(0.5)).child(right).child(controls(trail).collect::<Vec<_>>()));
     if glass { bar } else { bar.border_b_1().border_color(Colors::border()) }
@@ -79,7 +79,7 @@ pub fn pane_header(title: impl IntoReactive<SharedString>, right: impl IntoEleme
 
 /// A quiet note in a header, such as the language of the file.
 pub fn status(text_: impl IntoReactive<SharedString>) -> Text {
-    text(text_).text_size(super::text_xs()).text_color(Colors::muted())
+    caption(text_)
 }
 
 /// A small text button in a header.
@@ -95,5 +95,5 @@ pub fn header_button(label: &'static str, tip: &'static str, on_press: impl Fn()
         .tooltip(tooltip(tip))
         .hover(|s| s.bg(Colors::hover()))
         .on_press(on_press)
-        .child(text(label).text_size(text_sm()).text_color(Colors::foreground()))
+        .child(body(label))
 }

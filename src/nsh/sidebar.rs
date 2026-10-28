@@ -7,7 +7,7 @@ use nsh_core::prelude::*;
 use tokio::sync::watch;
 
 use super::bus::{Cmd, send};
-use super::{Colors, header_height, icon, icon_button, on_hover, rems, text_base, text_sm, text_xs};
+use super::{Colors, body, caption, header_height, icon, icon_button, note, on_hover, rems, small, text_base, text_sm, text_xs};
 use crate::ui::icon::IconName;
 
 /// What a thread is up to, for its mark.
@@ -148,7 +148,7 @@ fn lead(content: impl IntoElement) -> View {
 /// news, a ! when it asks, nothing when idle.
 fn mark(mark: Mark) -> View {
     let size = rems(0.4375);
-    let dot = |color: fn() -> AdaptiveColor| view().w(size).h(size).rounded(Points(999.)).bg(color);
+    let dot = |color: fn() -> AdaptiveColor| view().w(size).h(size).rounded(super::pill()).bg(color);
     centered(match mark {
         Mark::Idle => view().into_element(),
         Mark::Asking => text("!").text_size(text_sm()).font_weight(FontWeight::BOLD).text_color(Colors::warning()).into_element(),
@@ -167,7 +167,7 @@ fn section(title: impl IntoReactive<SharedString>, action: Option<View>) -> View
         .items_center()
         .justify_between()
         .px(space::gutter() + space::inset())
-        .child(text(title).text_size(text_sm()).font_weight(FontWeight::MEDIUM).text_color(Colors::muted()))
+        .child(note(title).font_weight(FontWeight::MEDIUM))
         .child(action)
 }
 
@@ -178,7 +178,7 @@ fn grant_badge() -> View {
         .rounded(Colors::radius())
         .bg(Colors::hover())
         .tooltip(super::tooltip("Agent control granted"))
-        .child(text("⌁").text_size(text_xs()).text_color(Colors::foreground()))
+        .child(small("⌁"))
 }
 
 fn thread_row(thread: &Thread, project: Option<&str>, close_tip: &'static str) -> View {
@@ -198,7 +198,7 @@ fn thread_row(thread: &Thread, project: Option<&str>, close_tip: &'static str) -
             .items_baseline()
             .gap(rems(0.5))
             .child(label)
-            .child(text(project.to_string()).number_of_lines(1).flex_shrink(1.).text_size(text_xs()).text_color(Colors::muted())),
+            .child(caption(project.to_string()).number_of_lines(1).flex_shrink(1.)),
         None => view().flex_1().flex_row().child(label.flex_1()),
     };
     let row = side_row(Some(mark(thread.mark)))
@@ -214,7 +214,7 @@ fn thread_row(thread: &Thread, project: Option<&str>, close_tip: &'static str) -
 /// A wavy line with the day centred in it, over the threads of that day.
 fn day_separator(day: &'static str) -> View {
     let wave = || {
-        view().flex_1().min_w(rems(0.)).w(rems(0.)).overflow_hidden().child(text("~".repeat(80)).number_of_lines(1).ellipsize_mode(nsh_core::EllipsizeMode::Clip).text_size(text_xs()).text_color(|| Colors::primary()().opacity(0.45)))
+        view().flex_1().min_w(rems(0.)).w(rems(0.)).overflow_hidden().child(text("~".repeat(80)).number_of_lines(1).ellipsize_mode(nsh_core::EllipsizeMode::Clip).text_size(text_xs()).text_color(|| Colors::primary()().opacity(crate::theme::tokens::FAINT)))
     };
     view()
         .w_full()
@@ -229,7 +229,7 @@ fn day_separator(day: &'static str) -> View {
         .pt(space::section_gap())
         .pb(space::section_gap())
         .child(wave())
-        .child(text(day).flex_none().text_size(text_xs()).text_color(|| Colors::primary()().opacity(0.45)))
+        .child(text(day).flex_none().text_size(text_xs()).text_color(|| Colors::primary()().opacity(crate::theme::tokens::FAINT)))
         .child(wave())
 }
 
@@ -249,7 +249,7 @@ fn project_group(project: &Project) -> View {
                 .flex_row()
                 .items_baseline()
                 .gap(rems(0.25))
-                .child(text(branch.name.clone()).number_of_lines(1).flex_shrink(1.).text_size(text_xs()).text_color(Colors::muted()))
+                .child(caption(branch.name.clone()).number_of_lines(1).flex_shrink(1.))
                 .child(branch.dirty.then(|| text("*").text_color(Colors::warning())))
         }));
     // Pressing the row opens the project and folds or unfolds its threads; the buttons on it are
@@ -268,7 +268,7 @@ fn project_group(project: &Project) -> View {
             .h(space::more())
             .hover(|s| s.bg(Colors::hover()))
             .on_press(move || send(Cmd::ToggleMore(pid)))
-            .child(text(label).text_size(text_xs()).text_color(Colors::muted()))
+            .child(caption(label))
     });
     view()
         .gap(space::item_gap())
@@ -305,7 +305,7 @@ fn suggestion(item: &Suggestion) -> View {
         .gap(rems(0.25))
         .border_b_1()
         .border_color(Colors::border())
-        .child(text(item.text.clone()).text_size(text_xs()).text_color(Colors::muted()))
+        .child(caption(item.text.clone()))
         .child(
             view()
                 .flex_row()
@@ -428,7 +428,7 @@ pub fn Sidebar() -> impl IntoElement {
                 .pt(space::list_top())
                 .pb(space::list_bottom())
                 .child(projects.iter().map(project_group).collect::<Vec<_>>())
-                .child(empty.then(|| side_row(None).h(space::more()).child(text("No matches").text_size(text_sm()).text_color(Colors::muted())))),
+                .child(empty.then(|| side_row(None).h(space::more()).child(note("No matches")))),
         )
     };
 
@@ -442,7 +442,7 @@ pub fn Sidebar() -> impl IntoElement {
                 .justify_center()
                 .px(space::gutter() + space::inset())
                 .style_when(move || !glass(), |s| s.border_b_1().border_color(Colors::border()))
-                .child(text("Po").text_size(text_sm()).font_weight(FontWeight::MEDIUM).text_color(Colors::foreground())),
+                .child(body("Po").font_weight(FontWeight::MEDIUM)),
         )
         .child(
             view()
@@ -464,7 +464,7 @@ pub fn Sidebar() -> impl IntoElement {
                 ))
                 .child(dynamic(move || {
                     state.with(|s| s.status.clone()).map(|status| {
-                        view().px(space::gutter() + space::inset()).py(rems(0.25)).max_h(rems(5.)).child(text(status).text_size(text_sm()).text_color(Colors::muted()))
+                        view().px(space::gutter() + space::inset()).py(rems(0.25)).max_h(rems(5.)).child(note(status))
                     })
                 }))
                 .child(dynamic(move || state.with(|s| s.suggestions.clone()).iter().map(suggestion).collect::<Vec<_>>()))

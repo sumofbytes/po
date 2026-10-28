@@ -13,6 +13,14 @@ const DEFAULT_THEME: &str = "Rose Pine";
 pub mod tokens {
     /// Alpha of dimmed content, like a model's reasoning.
     pub const DIM: f32 = 0.7;
+    /// Alpha of decoration that should recede, like a divider's glyphs.
+    pub const FAINT: f32 = 0.45;
+    /// Alpha of a border that asks for attention, like a pending permission's.
+    pub const ALERT_BORDER: f32 = 0.4;
+    /// Alpha of a control that cannot be used right now.
+    pub const DISABLED: f32 = 0.5;
+    /// Alpha of a control while the pointer is on it.
+    pub const HOVER: f32 = 0.85;
 }
 
 /// Where themes are picked from: `<config>/themes/`.
