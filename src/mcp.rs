@@ -19,14 +19,17 @@ offered rather than shown. Don't fight that by asking again.";
 const READS: &str = "You can also ask about yourself and your project: control_info says who \
 you are and what the user has granted; get_thread, thread_messages and last_reply read your \
 thread's state and transcript; thread_options lists its settings; list_threads, list_agents, \
-list_projects and project_changes say what else Po has open. Reading the threads of others, \
+list_projects and project_changes say what else Po has open. list_issues, get_issue and \
+list_epics read the project's issues, which live in its .po folder. Reading the threads of others, \
 rather than your own, needs a grant the user gives in Po.";
 
 /// What an orchestrator may do, added when its grant says so. The tools of this scope arrive
 /// with phase 2 of the control plan.
 const ORCHESTRATE: &str = "You may start and steer other threads: each starts with the agent \
 and settings you choose, answers you when it finishes or asks, and is yours to read and close. \
-They start with the smallest grant, and nothing they do can reach further than yours does.";
+They start with the smallest grant, and nothing they do can reach further than yours does. \
+You may also keep the project's issues: create_issue, update_issue, create_epic and \
+update_epic. When you work an issue, move it along and report with a note.";
 
 /// What a globally granted thread may do, added when its grant says so.
 const GLOBAL: &str = "You may open other projects and offer them to the user: opening a new \
@@ -422,6 +425,135 @@ fn tools() -> Vec<(&'static str, &'static str, &'static str, Value, Scope)> {
             "Close a project you opened, once the user has no thread of their own in it.",
             json!({ "type": "object", "properties": { "project": number("The project, as list_projects says.") }, "required": ["project"] }),
             Scope::Global,
+        ),
+        (
+            "list_issues",
+            "issue.list",
+            "The project's issues, most pressing first. Open ones unless `scope` says otherwise; \
+             `status`, `epic`, `label`, `priority`, `text` and `parent` narrow it.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "scope": string("open (default), closed or all."),
+                    "status": string("backlog, todo, in-progress, in-review, done or canceled."),
+                    "epic": string("An epic's id."),
+                    "label": string("A label's name."),
+                    "priority": string("urgent, high, medium or low."),
+                    "text": string("Words to find in the key, title, description or labels."),
+                    "parent": string("An issue's key: only its sub-issues."),
+                    "limit": number("At most this many (default 50, most 200)."),
+                },
+            }),
+            Scope::Viewer,
+        ),
+        (
+            "get_issue",
+            "issue.get",
+            "One issue in full: description, links, sub-issues and their progress.",
+            json!({ "type": "object", "properties": { "issue": string("The issue's key, such as PO-12.") }, "required": ["issue"] }),
+            Scope::Viewer,
+        ),
+        (
+            "create_issue",
+            "issue.create",
+            "Add an issue to the project. It starts as a todo. Labels you name that the project \
+             lacks are added.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "title": string("What needs doing."),
+                    "description": string("Markdown."),
+                    "status": string("backlog, todo (default), in-progress, in-review, done or canceled."),
+                    "priority": string("urgent, high, medium or low."),
+                    "labels": json!({ "type": "array", "items": { "type": "string" }, "description": "Label names." }),
+                    "assignee": string("Who it is for."),
+                    "parent": string("The key of the issue this is a sub-issue of."),
+                    "epic": string("An epic's id."),
+                    "milestone": string("A milestone's id in that epic."),
+                    "due": string("2026-11-02, or fri, nov 2."),
+                    "estimate": number("A whole number."),
+                },
+                "required": ["title"],
+            }),
+            Scope::Orchestrate,
+        ),
+        (
+            "update_issue",
+            "issue.update",
+            "Change an issue. Give only what changes; null clears assignee, parent, epic, \
+             milestone, due and estimate. `note` is added to the description under a dated \
+             heading, which is how to report progress. `link` ties it to a thread, branch or PR. \
+             Move it to in-progress when you start it and to in-review or done when you finish.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "issue": string("The issue's key, such as PO-12."),
+                    "title": string("A new title."),
+                    "description": string("Replaces the description."),
+                    "note": string("Appended to the description, dated."),
+                    "status": string("backlog, todo, in-progress, in-review, done or canceled."),
+                    "priority": string("urgent, high, medium, low or none."),
+                    "labels": json!({ "type": "array", "items": { "type": "string" }, "description": "Replaces the labels." }),
+                    "add_labels": json!({ "type": "array", "items": { "type": "string" } }),
+                    "remove_labels": json!({ "type": "array", "items": { "type": "string" } }),
+                    "assignee": json!({ "type": ["string", "null"] }),
+                    "parent": json!({ "type": ["string", "null"], "description": "A key." }),
+                    "epic": json!({ "type": ["string", "null"], "description": "An epic's id." }),
+                    "milestone": json!({ "type": ["string", "null"] }),
+                    "due": json!({ "type": ["string", "null"] }),
+                    "estimate": json!({ "type": ["integer", "null"] }),
+                    "link": json!({ "type": "object", "description": "One of {thread: session}, {branch: name}, {pr: number}." }),
+                },
+                "required": ["issue"],
+            }),
+            Scope::Orchestrate,
+        ),
+        (
+            "list_epics",
+            "epic.list",
+            "The project's epics, with their milestones and how far along each is.",
+            json!({ "type": "object", "properties": {} }),
+            Scope::Viewer,
+        ),
+        (
+            "create_epic",
+            "epic.create",
+            "Add an epic: a body of work that issues belong to.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "name": string("The epic's name."),
+                    "description": string("Markdown."),
+                    "status": string("planned (default), active, paused or done."),
+                    "lead": string("Who leads it."),
+                    "start": string("A date."),
+                    "target": string("A date."),
+                    "add_milestone": json!({ "description": "A name, or {name, target}.", "type": ["string", "object"] }),
+                },
+                "required": ["name"],
+            }),
+            Scope::Orchestrate,
+        ),
+        (
+            "update_epic",
+            "epic.update",
+            "Change an epic, or add or remove one of its milestones.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "epic": string("The epic's id, as list_epics says."),
+                    "name": string("A new name."),
+                    "description": string("Replaces the description."),
+                    "status": string("planned, active, paused or done."),
+                    "lead": json!({ "type": ["string", "null"] }),
+                    "start": json!({ "type": ["string", "null"] }),
+                    "target": json!({ "type": ["string", "null"] }),
+                    "add_milestone": json!({ "description": "A name, or {name, target}.", "type": ["string", "object"] }),
+                    "remove_milestone": string("A milestone's id."),
+                },
+                "required": ["epic"],
+            }),
+            Scope::Orchestrate,
         ),
         (
             "offer_project",

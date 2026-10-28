@@ -27,6 +27,10 @@ pub enum Cmd {
     OpenSettings,
     ToggleTodos,
     CloseTodos,
+    ToggleIssues,
+    CloseIssues,
+    /// Start a thread in a worktree on an issue.
+    WorkOnIssue(u64),
     /// The window's own controls, which sit in the headers of the panes at its edges.
     ToggleLeft,
     ToggleRight,

@@ -94,7 +94,7 @@ impl Date {
         format!("{y:04}-{m:02}-{d:02}")
     }
 
-    fn from_iso(text: &str) -> Option<Self> {
+    pub fn from_iso(text: &str) -> Option<Self> {
         let mut parts = text.splitn(3, '-');
         let y = parts.next()?.parse().ok()?;
         let m = parts.next()?.parse().ok()?;

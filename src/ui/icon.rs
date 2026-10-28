@@ -25,6 +25,18 @@ pub enum IconName {
     Settings,
     Square,
     SquareCheck,
+    Circle,
+    CircleCheck,
+    CircleDashed,
+    CircleDot,
+    CircleHalf,
+    CircleX,
+    Flag,
+    Layers,
+    List,
+    Signal,
+    SquareKanban,
+    Tag,
 }
 
 impl IconName {
@@ -59,6 +71,18 @@ impl IconName {
             Self::Settings => icon!("settings"),
             Self::Square => icon!("square"),
             Self::SquareCheck => icon!("square-check"),
+            Self::Circle => icon!("circle"),
+            Self::CircleCheck => icon!("circle-check"),
+            Self::CircleDashed => icon!("circle-dashed"),
+            Self::CircleDot => icon!("circle-dot"),
+            Self::CircleHalf => icon!("circle-half"),
+            Self::CircleX => icon!("circle-x"),
+            Self::Flag => icon!("flag"),
+            Self::Layers => icon!("layers"),
+            Self::List => icon!("list"),
+            Self::Signal => icon!("signal"),
+            Self::SquareKanban => icon!("square-kanban"),
+            Self::Tag => icon!("tag"),
         }
     }
 }

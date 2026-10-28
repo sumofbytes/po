@@ -84,6 +84,9 @@ pub struct Snapshot {
     pub todos_open: bool,
     /// How many todos are left, and how many of those are late.
     pub todos: (usize, usize),
+    pub issues_open: bool,
+    /// How many of the project's issues are open, and how many of those are late.
+    pub issues: (usize, usize),
 }
 
 static SNAPSHOT: LazyLock<watch::Sender<Snapshot>> = LazyLock::new(|| watch::Sender::new(Snapshot::default()));
@@ -397,6 +400,20 @@ pub fn Sidebar() -> impl IntoElement {
         });
         action(IconName::SquareCheck, "Todos", "Todos", Some(open), || send(Cmd::ToggleTodos)).child(count)
     };
+    let issues = move || {
+        let (left, late) = state.with(|s| s.issues);
+        let open = state.with(|s| s.issues_open);
+        let count = (left > 0).then(|| {
+            view()
+                .min_w(rems(1.25))
+                .flex_none()
+                .items_center()
+                .justify_center()
+                .tooltip(super::tooltip(if late > 0 { "Some are late" } else { "Open issues" }))
+                .child(text(left.to_string()).text_size(text_sm()).text_color(if late > 0 { Colors::danger()() } else { Colors::muted()() }))
+        });
+        action(IconName::CircleDot, "Issues", "Issues", Some(open), || send(Cmd::ToggleIssues)).child(count)
+    };
 
     let waiting = move || {
         let waiting = state.with(|s| s.waiting.clone());
@@ -452,6 +469,7 @@ pub fn Sidebar() -> impl IntoElement {
                 .pt(space::actions_top())
                 .child(action(IconName::Plus, "New", "New thread (Ctrl+N)", None, || send(Cmd::NewThread)))
                 .child(dynamic(search))
+                .child(dynamic(issues))
                 .child(dynamic(todos)),
         )
         .child(dynamic(waiting))
@@ -522,6 +540,8 @@ mod tests {
             ],
             suggestions: vec![Suggestion { id: 7, text: "“Fix the build” wants to open /tmp/x".into(), yes: "Open" }],
             todos: (3, 1),
+            issues_open: false,
+            issues: (2, 0),
             ..Snapshot::default()
         });
         let mut app = start();
@@ -549,6 +569,8 @@ mod tests {
         assert_eq!(next(&mut app), [Cmd::OpenSettings]);
         app.press("text:Todos").unwrap();
         assert_eq!(next(&mut app), [Cmd::ToggleTodos]);
+        app.press("text:Issues").unwrap();
+        assert_eq!(next(&mut app), [Cmd::ToggleIssues]);
         app.press("label:Add a project: open a folder (Ctrl+Shift+O)").unwrap();
         assert_eq!(next(&mut app), [Cmd::AddProject]);
         app.hover("text:Old idea").unwrap();

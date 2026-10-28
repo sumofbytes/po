@@ -11,6 +11,7 @@ mod dex;
 mod diff;
 mod explorer;
 mod fonts;
+mod issues;
 mod mcp;
 mod nsh;
 mod pr;
@@ -1198,6 +1199,13 @@ struct Reader {
     /// The todos page, shown in place of the conversation while `todos_open`; the sidebar has a row for it.
     todos: Entity<nsh::overlay::Overlay>,
     todos_open: bool,
+    /// The issues page, shown in the same place as the todos page, one at a time.
+    issues: Entity<nsh::overlay::Overlay>,
+    issues_open: bool,
+    /// The project whose issues [`issues::shared`] holds, so it is only switched when this changes.
+    issues_root: PathBuf,
+    /// An issue "Work on this" is making a worktree for, to link its branch once it exists.
+    issue_for_worktree: Option<u64>,
     /// Progress or failure of the last attempt to open a PR.
     pr_status: Option<String>,
     opening: bool,
@@ -1296,6 +1304,7 @@ impl Reader {
         let finder_window = cx.new(|cx| nsh::overlay::Overlay::new(560., 8., || nsh_platform_gpui::Root::of::<nsh::finder::Finder>(), &nsh::finder::HEIGHT, cx));
         let settings_window = cx.new(|cx| nsh::overlay::Overlay::new(680., 24., || nsh_platform_gpui::Root::of::<nsh::settings::Settings>(), &nsh::settings::HEIGHT, cx));
         let todos = cx.new(|cx| nsh::overlay::Overlay::page(760., || nsh_platform_gpui::Root::of::<nsh::todos::Todos>(), &nsh::todos::HEIGHT, cx));
+        let issues = cx.new(|cx| nsh::overlay::Overlay::page(1000., || nsh_platform_gpui::Root::of::<nsh::issues::Issues>(), &nsh::issues::HEIGHT, cx));
         let sidebars = cx.new(|_| SidebarsState::new(px(280.0), px(560.0)));
         let tree_cols = cx.new(|_| SidebarsState::new(px(TREE_WIDTH), px(0.0)));
         let subscriptions = vec![
@@ -1316,6 +1325,9 @@ impl Reader {
             }),
             cx.subscribe_in(&todos, window, |reader, _, event: &nsh::overlay::OverlayEvent, window, cx| match event {
                 nsh::overlay::OverlayEvent::Close => reader.hide_todos(window, cx),
+            }),
+            cx.subscribe_in(&issues, window, |reader, _, event: &nsh::overlay::OverlayEvent, window, cx| match event {
+                nsh::overlay::OverlayEvent::Close => reader.hide_issues(window, cx),
             }),
         ];
         let settings = config::load();
@@ -1422,6 +1434,10 @@ impl Reader {
             chat_focus: std::cell::Cell::new(0),
             todos,
             todos_open: false,
+            issues,
+            issues_open: false,
+            issues_root: PathBuf::new(),
+            issue_for_worktree: None,
             pr_status: None,
             opening: false,
             worktree_status: None,
@@ -1513,6 +1529,16 @@ impl Reader {
         let mut todo_changes = todo::watch();
         cx.spawn(async move |this, cx| {
             while todo_changes.changed().await.is_ok() {
+                if this.update(cx, |_, cx| cx.notify()).is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
+        // So is its count of issues.
+        let mut issue_changes = issues::shared::watch();
+        cx.spawn(async move |this, cx| {
+            while issue_changes.changed().await.is_ok() {
                 if this.update(cx, |_, cx| cx.notify()).is_err() {
                     break;
                 }
@@ -1943,6 +1969,7 @@ impl Reader {
                             }
                             Err(error) => {
                                 log::warn!("worktree: {error}");
+                                reader.issue_for_worktree = None;
                                 reader.worktree_status = Some(error);
                                 if let Some((_, (_, tid))) = first {
                                     reader.with_thread(tid, |reader, _| reader.thread.status.clear());
@@ -1959,6 +1986,9 @@ impl Reader {
 
     fn open_worktree(&mut self, wt: worktree::Worktree, agent: String, first: Option<(Outgoing, (u64, u64))>, window: &mut Window, cx: &mut Context<Self>) {
         log::info!("worktree: {} for {agent}", wt.spec.branch);
+        if let Some(number) = self.issue_for_worktree.take() {
+            self.issue_started(number, Some(wt.spec.branch.clone()));
+        }
         let mut project = Self::build_project(wt.spec.path.clone(), None, vec![]);
         project.base = wt.spec.base.clone();
         project.worktree = Some(wt);
@@ -2028,6 +2058,11 @@ impl Reader {
                         reader.finishing = false;
                         let told = match result {
                             Ok(into) => {
+                                // A merged branch finishes the issues linked to it.
+                                let landed = into.is_some().then(|| reader.project_by_id(id).and_then(|p| p.worktree.as_ref()).map(|wt| (wt.spec.repo.clone(), wt.spec.branch.clone()))).flatten();
+                                if let Some((repo, branch)) = landed {
+                                    issues::shared::branch_merged(&repo, &branch);
+                                }
                                 reader.close_worktree_project(id, window, cx);
                                 reader.api_projects.remove(&id);
                                 let status = match into {
@@ -2355,6 +2390,7 @@ impl Reader {
                     .collect();
                 Ok(json!({ "agents": agents, "default": self.chosen_agent }))
             }
+            Command::Issues { op, args } => self.run_issues(id, op, &args),
             Command::ProjectList => {
                 let own = self.own_project(id);
                 let projects: Vec<Value> = self
@@ -2503,6 +2539,7 @@ impl Reader {
         use command::Command;
         use serde_json::json;
         match command {
+            Command::Issues { op, args } => self.run_issues(id, op, &args),
             Command::ProjectOpen { path: None, pr: Some(spec) } => {
                 // Reviewed from the checkout the caller is in, as the PR strip does.
                 let from = self.project_of(id).and_then(|project| self.project_by_id(project).map(|project| project.root.clone())).unwrap_or_else(|| self.home.clone());
@@ -2554,6 +2591,14 @@ impl Reader {
             }
             _ => Err("not a project command".into()),
         }
+    }
+
+    /// The issue and epic commands, on the issues of the repo the caller works in (the project on
+    /// screen for the user's own `po ctl`).
+    fn run_issues(&self, id: u64, op: issues::api::Op, args: &serde_json::Value) -> command::Reply {
+        let root = self.own_project(id).and_then(|project| self.views().iter().find(|view| view.id == project).map(|view| view.project.root.clone())).unwrap_or_else(|| self.project.root.clone());
+        let today = todo::today();
+        issues::shared::change_repo(&root, |tracker, now| issues::api::run(op, args, tracker, now, today))
     }
 
     /// `thread.create_isolated`: the worktree is made off the UI thread, then the thread starts
@@ -4604,16 +4649,93 @@ impl Reader {
         cx.notify();
     }
 
+    fn toggle_issues(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.issues_open {
+            return self.hide_issues(window, cx);
+        }
+        self.hide_todos(window, cx);
+        self.follow_issues();
+        self.issues_open = true;
+        self.issues.update(cx, |issues, cx| issues.open(window, cx));
+        cx.notify();
+    }
+
+    fn hide_issues(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.issues_open {
+            return;
+        }
+        self.issues_open = false;
+        self.issues.update(cx, |issues, _| issues.close());
+        self.focus.focus(window, cx);
+        cx.notify();
+    }
+
+    /// Points the shared issues at the project on screen, if it isn't already.
+    fn follow_issues(&mut self) {
+        if self.issues_root != self.project.root {
+            self.issues_root = self.project.root.clone();
+            issues::shared::set_project(&self.project.root);
+        }
+    }
+
+    /// Starts a thread on an issue, in a worktree of its own when the project is a repo, and moves
+    /// the issue to In Progress with the branch linked.
+    fn work_on_issue(&mut self, number: u64, window: &mut Window, cx: &mut Context<Self>) {
+        self.follow_issues();
+        let Some(prompt) = issues::shared::watch().borrow().tracker.issue(number).map(|issue| {
+            let tracker = issues::shared::watch().borrow().tracker.clone();
+            let key = tracker.key(number);
+            let mut prompt = format!("Work on {key}: {}", issue.title);
+            if !issue.description.trim().is_empty() {
+                prompt.push_str(&format!("\n\n{}", issue.description.trim()));
+            }
+            prompt.push_str(&format!("\n\nThis issue is tracked in .po/issues/{key}.json. Keep its status up to date as you go."));
+            prompt
+        }) else {
+            return;
+        };
+        self.hide_issues(window, cx);
+        self.new_blank_thread(window, cx);
+        self.thread.isolate = true;
+        self.issue_for_worktree = Some(number);
+        let out = Outgoing { text: prompt, origin: Origin::User, images: vec![] };
+        self.start_thread(out, false, window, cx);
+        // No worktree is being made: it went ahead in the project itself.
+        if !self.finishing && let Some(number) = self.issue_for_worktree.take() {
+            self.issue_started(number, None);
+        }
+        cx.notify();
+    }
+
+    /// An issue's work has begun: In Progress, and the branch it is on.
+    fn issue_started(&mut self, number: u64, branch: Option<String>) {
+        issues::shared::change(|tracker, now| {
+            tracker.update(number, now, |issue| {
+                if issue.status.is_open() && issue.status != issues::Status::InReview {
+                    issue.status = issues::Status::InProgress;
+                }
+                if let Some(branch) = &branch {
+                    let link = issues::Link::Branch(branch.clone());
+                    if !issue.links.contains(&link) {
+                        issue.links.push(link);
+                    }
+                }
+            });
+        });
+    }
+
     fn toggle_todos(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.todos_open {
             return self.hide_todos(window, cx);
         }
+        self.hide_issues(window, cx);
         self.todos_open = true;
         self.todos.update(cx, |todos, cx| todos.open(window, cx));
         cx.notify();
     }
 
     fn hide_todos(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.hide_issues(window, cx);
         if !self.todos_open {
             return;
         }
@@ -5218,6 +5340,8 @@ impl Reader {
             searching,
             todos_open: self.todos_open,
             todos: todo::summary(),
+            issues_open: self.issues_open,
+            issues: issues::shared::summary(),
         }
     }
 
@@ -5425,6 +5549,9 @@ impl Reader {
             Cmd::OpenSettings => self.toggle_settings(window, cx),
             Cmd::ToggleTodos => self.toggle_todos(window, cx),
             Cmd::CloseTodos => self.hide_todos(window, cx),
+            Cmd::ToggleIssues => self.toggle_issues(window, cx),
+            Cmd::CloseIssues => self.hide_issues(window, cx),
+            Cmd::WorkOnIssue(number) => self.work_on_issue(number, window, cx),
             Cmd::ToggleLeft => self.toggle_left(cx),
             Cmd::ToggleRight => self.toggle_right(cx),
             Cmd::ToggleFocus => self.toggle_focus(cx),
@@ -6020,7 +6147,9 @@ impl Render for Reader {
         // The viewer pane is only built where it shows: a pane nobody sees would publish over the
         // one that is.
         let hidden = || div().size_full().into_any_element();
-        let (middle, side) = if self.todos_open {
+        let (middle, side) = if self.issues_open {
+            (self.issues.clone().into_any_element(), hidden())
+        } else if self.todos_open {
             (self.todos.clone().into_any_element(), hidden())
         } else if !side_open {
             // Only the conversation shows, and the viewer's button waits on the side it opens.
@@ -6042,7 +6171,7 @@ impl Render for Reader {
             controls(vec![], trail_all);
             (floating(self.chat_pane(vec![Control::Sidebar(left_open)], vec![], cx), cx), self.pane(cx))
         };
-        let right_open = side_open && !focus && !self.todos_open;
+        let right_open = side_open && !focus && !self.todos_open && !self.issues_open;
         div()
             .size_full()
             .flex()
