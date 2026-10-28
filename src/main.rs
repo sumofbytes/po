@@ -11,6 +11,7 @@ mod dex;
 mod diff;
 mod explorer;
 mod fonts;
+mod issues;
 mod mcp;
 mod nsh;
 mod pr;
@@ -18,7 +19,7 @@ mod schemes;
 mod settings;
 mod theme;
 mod state;
-mod todo;
+mod date;
 mod trace;
 mod ui;
 mod update;
@@ -1195,9 +1196,13 @@ struct Reader {
     chat_reset: std::cell::Cell<u64>,
     /// What [`nsh::chat::Snapshot::focus`] carries next.
     chat_focus: std::cell::Cell<u64>,
-    /// The todos page, shown in place of the conversation while `todos_open`; the sidebar has a row for it.
-    todos: Entity<nsh::overlay::Overlay>,
-    todos_open: bool,
+    /// The issues page, shown in place of the conversation while `issues_open`; the sidebar has a row for it.
+    issues: Entity<nsh::overlay::Overlay>,
+    issues_open: bool,
+    /// The project whose issues [`issues::shared`] holds, so it is only switched when this changes.
+    issues_root: std::cell::RefCell<PathBuf>,
+    /// An issue "Work on this" is making a worktree for, to link its branch once it exists.
+    issue_for_worktree: Option<(PathBuf, u64)>,
     /// Progress or failure of the last attempt to open a PR.
     pr_status: Option<String>,
     opening: bool,
@@ -1295,7 +1300,7 @@ impl Reader {
         let (explorer_pane, explorer_theme) = nsh::mount(nsh_platform_gpui::Root::of::<nsh::explorer::Explorer>(), window, cx);
         let finder_window = cx.new(|cx| nsh::overlay::Overlay::new(560., 8., || nsh_platform_gpui::Root::of::<nsh::finder::Finder>(), &nsh::finder::HEIGHT, cx));
         let settings_window = cx.new(|cx| nsh::overlay::Overlay::new(680., 24., || nsh_platform_gpui::Root::of::<nsh::settings::Settings>(), &nsh::settings::HEIGHT, cx));
-        let todos = cx.new(|cx| nsh::overlay::Overlay::page(760., || nsh_platform_gpui::Root::of::<nsh::todos::Todos>(), &nsh::todos::HEIGHT, cx));
+        let issues = cx.new(|cx| nsh::overlay::Overlay::page(1000., || nsh_platform_gpui::Root::of::<nsh::issues::Issues>(), &nsh::issues::HEIGHT, cx));
         let sidebars = cx.new(|_| SidebarsState::new(px(280.0), px(560.0)));
         let tree_cols = cx.new(|_| SidebarsState::new(px(TREE_WIDTH), px(0.0)));
         let subscriptions = vec![
@@ -1314,8 +1319,8 @@ impl Reader {
             cx.subscribe_in(&settings_window, window, |reader, _, event: &nsh::overlay::OverlayEvent, window, cx| match event {
                 nsh::overlay::OverlayEvent::Close => reader.hide_settings(window, cx),
             }),
-            cx.subscribe_in(&todos, window, |reader, _, event: &nsh::overlay::OverlayEvent, window, cx| match event {
-                nsh::overlay::OverlayEvent::Close => reader.hide_todos(window, cx),
+            cx.subscribe_in(&issues, window, |reader, _, event: &nsh::overlay::OverlayEvent, window, cx| match event {
+                nsh::overlay::OverlayEvent::Close => reader.hide_issues(window, cx),
             }),
         ];
         let settings = config::load();
@@ -1420,8 +1425,10 @@ impl Reader {
             chat_follow_soft: std::cell::Cell::new(0),
             chat_reset: std::cell::Cell::new(0),
             chat_focus: std::cell::Cell::new(0),
-            todos,
-            todos_open: false,
+            issues,
+            issues_open: false,
+            issues_root: Default::default(),
+            issue_for_worktree: None,
             pr_status: None,
             opening: false,
             worktree_status: None,
@@ -1509,10 +1516,10 @@ impl Reader {
             })
             .detach();
         }
-        // The sidebar's count of todos follows the list, whoever changes it.
-        let mut todo_changes = todo::watch();
+        // The sidebar's count of issues follows them, whoever changes them.
+        let mut issue_changes = issues::shared::watch();
         cx.spawn(async move |this, cx| {
-            while todo_changes.changed().await.is_ok() {
+            while issue_changes.changed().await.is_ok() {
                 if this.update(cx, |_, cx| cx.notify()).is_err() {
                     break;
                 }
@@ -1943,6 +1950,7 @@ impl Reader {
                             }
                             Err(error) => {
                                 log::warn!("worktree: {error}");
+                                reader.issue_for_worktree = None;
                                 reader.worktree_status = Some(error);
                                 if let Some((_, (_, tid))) = first {
                                     reader.with_thread(tid, |reader, _| reader.thread.status.clear());
@@ -1959,6 +1967,9 @@ impl Reader {
 
     fn open_worktree(&mut self, wt: worktree::Worktree, agent: String, first: Option<(Outgoing, (u64, u64))>, window: &mut Window, cx: &mut Context<Self>) {
         log::info!("worktree: {} for {agent}", wt.spec.branch);
+        if let Some((root, number)) = self.issue_for_worktree.take() {
+            Self::issue_started(&root, number, Some(wt.spec.branch.clone()));
+        }
         let mut project = Self::build_project(wt.spec.path.clone(), None, vec![]);
         project.base = wt.spec.base.clone();
         project.worktree = Some(wt);
@@ -2028,6 +2039,11 @@ impl Reader {
                         reader.finishing = false;
                         let told = match result {
                             Ok(into) => {
+                                // A merged branch finishes the issues linked to it.
+                                let landed = into.is_some().then(|| reader.project_by_id(id).and_then(|p| p.worktree.as_ref()).map(|wt| (wt.spec.repo.clone(), wt.spec.branch.clone()))).flatten();
+                                if let Some((repo, branch)) = landed {
+                                    issues::shared::branch_merged(&repo, &branch);
+                                }
                                 reader.close_worktree_project(id, window, cx);
                                 reader.api_projects.remove(&id);
                                 let status = match into {
@@ -2355,6 +2371,7 @@ impl Reader {
                     .collect();
                 Ok(json!({ "agents": agents, "default": self.chosen_agent }))
             }
+            Command::Issues { op, args } => self.run_issues(id, op, &args),
             Command::ProjectList => {
                 let own = self.own_project(id);
                 let projects: Vec<Value> = self
@@ -2503,6 +2520,9 @@ impl Reader {
         use command::Command;
         use serde_json::json;
         match command {
+            Command::Issues { op: issues::api::Op::IssueWork, args } => self.work_issue(id, &args, window, cx),
+            Command::Issues { op: issues::api::Op::IssueShow, args } => self.show_issues(id, &args, window, cx),
+            Command::Issues { op, args } => self.run_issues(id, op, &args),
             Command::ProjectOpen { path: None, pr: Some(spec) } => {
                 // Reviewed from the checkout the caller is in, as the PR strip does.
                 let from = self.project_of(id).and_then(|project| self.project_by_id(project).map(|project| project.root.clone())).unwrap_or_else(|| self.home.clone());
@@ -2556,12 +2576,47 @@ impl Reader {
         }
     }
 
+    /// The issue and epic commands, on the issues of the repo the caller works in (the project on
+    /// screen for the user's own `po ctl`).
+    fn run_issues(&self, id: u64, op: issues::api::Op, args: &serde_json::Value) -> command::Reply {
+        let root = self.issues_root_of(id);
+        let today = date::today();
+        issues::shared::change_repo(&root, |tracker, now| issues::api::run(op, args, tracker, now, today))
+    }
+
+    /// The project the caller works in, whose issues its commands act on; the one on screen for
+    /// the user's own `po ctl`.
+    fn issues_root_of(&self, id: u64) -> PathBuf {
+        self.own_project(id).and_then(|project| self.views().iter().find(|view| view.id == project).map(|view| view.project.root.clone())).unwrap_or_else(|| self.project.root.clone())
+    }
+
     /// `thread.create_isolated`: the worktree is made off the UI thread, then the thread starts
     /// in a project of its own, and the caller is told how it went.
     fn create_isolated(&mut self, id: u64, command: command::Command, window: &mut Window, cx: &mut Context<Self>) -> command::Reply {
         let command::Command::ThreadCreateIsolated { prompt, agent, options, notify } = command else {
             return Err("not a thread.create_isolated".into());
         };
+        self.create_isolated_for(id, prompt, agent, options, notify, None, window, cx)
+    }
+
+    /// `issue.work`: a thread in a worktree of its own on an issue, whose branch is linked to the
+    /// issue and which is moved to In Progress once the worktree is up.
+    fn work_issue(&mut self, id: u64, args: &serde_json::Value, window: &mut Window, cx: &mut Context<Self>) -> command::Reply {
+        let root = self.issues_root_of(id);
+        let (number, prompt, key) = issues::shared::change_repo(&root, |tracker, _| {
+            let number = issues::api::work_issue(tracker, args)?;
+            Ok::<_, String>((number, issues::api::work_prompt(tracker, number).ok_or("that issue is gone")?, tracker.key(number)))
+        })?;
+        let options = args["options"].as_object().map(|options| options.iter().filter_map(|(id, value)| value.as_str().map(|value| (id.clone(), value.to_string()))).collect()).unwrap_or_default();
+        let agent = args["agent"].as_str().map(String::from);
+        let notify = args["notify"].as_str().map(String::from);
+        let mut reply = self.create_isolated_for(id, prompt, agent, options, notify, Some((root, number)), window, cx)?;
+        reply["issue"] = serde_json::json!(key);
+        Ok(reply)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn create_isolated_for(&mut self, id: u64, prompt: String, agent: Option<String>, options: Vec<(String, String)>, notify: Option<String>, issue: Option<(PathBuf, u64)>, window: &mut Window, cx: &mut Context<Self>) -> command::Reply {
         let key = self.child_agent(id, agent)?;
         let project = self.project_of(id).ok_or("that thread is gone")?;
         if self.finishing || self.isolating {
@@ -2586,7 +2641,14 @@ impl Reader {
                     this.update(cx, |reader, cx| {
                         reader.isolating = false;
                         let told = match made {
-                            Ok(wt) => reader.start_isolated(id, wt, key, prompt, options, notify, window, cx),
+                            Ok(wt) => {
+                                let branch = wt.spec.branch.clone();
+                                let started = reader.start_isolated(id, wt, key, prompt, options, notify, window, cx);
+                                if let (Ok(_), Some((root, number))) = (&started, &issue) {
+                                    Self::issue_started(root, *number, Some(branch));
+                                }
+                                started
+                            }
                             Err(error) => Err(error),
                         };
                         let text = match told {
@@ -4604,23 +4666,113 @@ impl Reader {
         cx.notify();
     }
 
-    fn toggle_todos(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.todos_open {
-            return self.hide_todos(window, cx);
+    fn toggle_issues(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.issues_open {
+            return self.hide_issues(window, cx);
         }
-        self.todos_open = true;
-        self.todos.update(cx, |todos, cx| todos.open(window, cx));
+        self.follow_issues();
+        self.issues_open = true;
+        self.issues.update(cx, |issues, cx| issues.open(window, cx));
         cx.notify();
     }
 
-    fn hide_todos(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.todos_open {
+    fn hide_issues(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.issues_open {
             return;
         }
-        self.todos_open = false;
-        self.todos.update(cx, |todos, _| todos.close());
+        self.issues_open = false;
+        self.issues.update(cx, |issues, _| issues.close());
         self.focus.focus(window, cx);
         cx.notify();
+    }
+
+    /// Points the shared issues at the project on screen, if it isn't already. The sidebar's
+    /// snapshot does this, so the page and the counts follow the project whatever switched it.
+    fn follow_issues(&self) {
+        let mut shown = self.issues_root.borrow_mut();
+        if *shown != self.project.root {
+            *shown = self.project.root.clone();
+            issues::shared::set_project(&self.project.root);
+        }
+    }
+
+    /// Starts a thread on an issue, in a worktree of its own when the project is a repo, and moves
+    /// the issue to In Progress with the branch linked.
+    fn work_on_issue(&mut self, number: u64, window: &mut Window, cx: &mut Context<Self>) {
+        self.follow_issues();
+        let tracker = issues::shared::watch().borrow().tracker.clone();
+        if let Err(message) = issues::api::check_workable(&tracker, number) {
+            self.worktree_status = Some(message);
+            cx.notify();
+            return;
+        }
+        let Some(prompt) = issues::api::work_prompt(&tracker, number) else {
+            return;
+        };
+        // Another worktree is being made or merged, or there is no agent to start: nothing would
+        // begin, so the issue is left as it is.
+        if self.finishing || self.chosen().is_none() {
+            return;
+        }
+        self.hide_issues(window, cx);
+        self.new_blank_thread(window, cx);
+        self.thread.isolate = true;
+        let root = self.project.root.clone();
+        self.issue_for_worktree = Some((root.clone(), number));
+        let out = Outgoing { text: prompt, origin: Origin::User, images: vec![] };
+        self.start_thread(out, false, window, cx);
+        // With a worktree being made, the issue waits for its branch. Without one the thread
+        // went ahead in the project itself, if it started at all.
+        if !self.finishing {
+            self.issue_for_worktree = None;
+            if !self.thread.blank {
+                Self::issue_started(&root, number, None);
+            }
+        }
+        cx.notify();
+    }
+
+    /// `issue.show`: puts the issues page on screen where the request says. Only for the project
+    /// on screen, since the page shows that one.
+    fn show_issues(&mut self, id: u64, args: &serde_json::Value, window: &mut Window, cx: &mut Context<Self>) -> command::Reply {
+        if self.project_of(id).is_some_and(|project| project != self.project_id) {
+            return Err("that project is not on screen; the issues page shows the one that is".into());
+        }
+        // Like any move of what the user is looking at, it is the thread on screen's to make, and
+        // not while the user is typing or scrolling.
+        if self.threads_all().any(|thread| thread.id == id) {
+            if self.thread.id != id {
+                return Err("only the thread on screen can put the issues page up".into());
+            }
+            if self.last_input.elapsed() < QUIET {
+                return Err("the user is typing or scrolling; ask again in a moment".into());
+            }
+        }
+        self.follow_issues();
+        let nav = issues::api::show_nav(&issues::shared::watch().borrow().tracker, args)?;
+        if !self.issues_open {
+            self.toggle_issues(window, cx);
+        }
+        issues::shared::navigate(nav);
+        Ok(serde_json::json!({ "shown": true }))
+    }
+
+    /// An issue's work has begun: In Progress, and the branch it is on. In the issues of the repo
+    /// `root` belongs to, which need not be the one on screen.
+    fn issue_started(root: &std::path::Path, number: u64, branch: Option<String>) {
+        issues::shared::change_repo(root, |tracker, now| {
+            tracker.update(number, now, |issue| {
+                if issue.status.is_open() && issue.status != issues::Status::InReview {
+                    issue.status = issues::Status::InProgress;
+                }
+                if let Some(branch) = &branch {
+                    let link = issues::Link::Branch(branch.clone());
+                    if !issue.links.contains(&link) {
+                        issue.links.push(link);
+                    }
+                }
+            });
+        });
     }
 
     fn hide_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -5115,7 +5267,7 @@ impl Reader {
             controlled: self.grants.get(&thread.id).is_some_and(|grant| *grant != command::Grant::default()),
             day: None,
         };
-        let today = todo::today();
+        let today = date::today();
         // Filtering keeps a project whose name matches, with all its threads, and any project with a
         // thread that does. A thread waiting on the user is in Needs you instead.
         let project_hit = |view: &View<'_>| view.project.name().to_lowercase().contains(&query);
@@ -5171,7 +5323,7 @@ impl Reader {
                         recent
                             .into_iter()
                             .map(|t| {
-                                let day = match today.days_since(todo::Date::of_ms(t.active_at)) {
+                                let day = match today.days_since(date::Date::of_ms(t.active_at)) {
                                     ..=0 => "",
                                     1 => "Yesterday",
                                     2..=6 => "Previous 7 days",
@@ -5216,8 +5368,11 @@ impl Reader {
             suggestions,
             status: self.worktree_status.clone(),
             searching,
-            todos_open: self.todos_open,
-            todos: todo::summary(),
+            issues_open: self.issues_open,
+            issues: {
+                self.follow_issues();
+                issues::shared::summary()
+            },
         }
     }
 
@@ -5423,8 +5578,9 @@ impl Reader {
             Cmd::AddProject => self.pick_project(window, cx),
             Cmd::NewThread => self.new_blank_thread(window, cx),
             Cmd::OpenSettings => self.toggle_settings(window, cx),
-            Cmd::ToggleTodos => self.toggle_todos(window, cx),
-            Cmd::CloseTodos => self.hide_todos(window, cx),
+            Cmd::ToggleIssues => self.toggle_issues(window, cx),
+            Cmd::CloseIssues => self.hide_issues(window, cx),
+            Cmd::WorkOnIssue(number) => self.work_on_issue(number, window, cx),
             Cmd::ToggleLeft => self.toggle_left(cx),
             Cmd::ToggleRight => self.toggle_right(cx),
             Cmd::ToggleFocus => self.toggle_focus(cx),
@@ -6020,8 +6176,8 @@ impl Render for Reader {
         // The viewer pane is only built where it shows: a pane nobody sees would publish over the
         // one that is.
         let hidden = || div().size_full().into_any_element();
-        let (middle, side) = if self.todos_open {
-            (self.todos.clone().into_any_element(), hidden())
+        let (middle, side) = if self.issues_open {
+            (self.issues.clone().into_any_element(), hidden())
         } else if !side_open {
             // Only the conversation shows, and the viewer's button waits on the side it opens.
             let chat_lead = vec![Control::Sidebar(left_open), Control::Viewer(side_open)];
@@ -6042,7 +6198,7 @@ impl Render for Reader {
             controls(vec![], trail_all);
             (floating(self.chat_pane(vec![Control::Sidebar(left_open)], vec![], cx), cx), self.pane(cx))
         };
-        let right_open = side_open && !focus && !self.todos_open;
+        let right_open = side_open && !focus && !self.issues_open;
         div()
             .size_full()
             .flex()
@@ -6055,11 +6211,11 @@ impl Render for Reader {
             .on_scroll_wheel(cx.listener(|reader, _, _, _| reader.last_input = Instant::now()))
             .on_mouse_down(gpui::MouseButton::Left, cx.listener(|reader, _, _, _| reader.last_input = Instant::now()))
             .on_action(cx.listener(|reader, _: &ShowFinder, window, cx| {
-                reader.hide_todos(window, cx);
+                reader.hide_issues(window, cx);
                 reader.show_finder(window, cx)
             }))
             .on_action(cx.listener(|reader, _: &ShowSettings, window, cx| {
-                reader.hide_todos(window, cx);
+                reader.hide_issues(window, cx);
                 reader.toggle_settings(window, cx)
             }))
             .on_action(cx.listener(|reader, _: &CloseSettings, window, cx| reader.hide_settings(window, cx)))
@@ -6076,11 +6232,11 @@ impl Render for Reader {
             .on_action(cx.listener(|reader, _: &ToggleSplit, _, cx| reader.set_split(!reader.split, cx)))
             .on_action(cx.listener(|reader, _: &ToggleRendered, _, cx| reader.toggle_rendered(cx)))
             .on_action(cx.listener(|reader, _: &OpenProject, window, cx| {
-                reader.hide_todos(window, cx);
+                reader.hide_issues(window, cx);
                 reader.pick_project(window, cx)
             }))
             .on_action(cx.listener(|reader, _: &NewThread, window, cx| {
-                reader.hide_todos(window, cx);
+                reader.hide_issues(window, cx);
                 reader.new_blank_thread(window, cx);
             }))
             // macOS draws no titlebar of its own (see `main`): this strip clears the traffic lights

@@ -5,16 +5,17 @@ pub mod agent;
 pub mod chat;
 pub mod bus;
 pub mod diff;
+pub mod epics;
 pub mod explorer;
 pub mod finder;
 pub mod header;
+pub mod issues;
 pub mod overlay;
 pub mod settings;
 pub mod source;
 pub mod sidebar;
 pub mod strip;
 pub mod tabs;
-pub mod todos;
 
 use base64::Engine as _;
 use gpui::{AppContext as _, Entity, Hsla, Subscription, Window};
@@ -279,14 +280,9 @@ pub fn button(label: &'static str, primary: bool, on_press: impl Fn() + 'static)
     if primary { b.bg(Colors::primary()) } else { b.border_1().border_color(Colors::input_border()).hover(|s| s.bg(Colors::hover())) }
 }
 
-/// A line of text in a bordered box, as the settings page has them. `id` names it for tests.
-pub fn field(id: &str, value: Signal<String>, placeholder: &'static str, on_submit: impl Fn() + 'static) -> View {
-    field_with(id, value, placeholder, on_submit, |input| input)
-}
-
-/// [`field`], with `more` done to its input (a ref, focus).
-pub fn field_with(id: &str, value: Signal<String>, placeholder: &'static str, on_submit: impl Fn() + 'static, more: impl FnOnce(nsh_base::Input) -> nsh_base::Input) -> View {
-    let input = more(nsh_core::element::input()
+/// A single line of text for `value`, filling its row; Enter calls `on_submit`. `id` names it for tests.
+pub fn text_input(id: &str, value: Signal<String>, placeholder: &'static str, on_submit: impl Fn() + 'static) -> nsh_base::Input {
+    nsh_core::element::input()
         .test_id(id)
         .value(move || value.get())
         .placeholder(placeholder)
@@ -297,7 +293,17 @@ pub fn field_with(id: &str, value: Signal<String>, placeholder: &'static str, on
         .submit_behavior(nsh_core::element::SubmitBehavior::Submit)
         .on_change(move |text: &str| value.set(text.to_string()))
         .on_submit(move |_: &str| on_submit())
-        .flex_1());
+        .flex_1()
+}
+
+/// A line of text in a bordered box, as the settings page has them. `id` names it for tests.
+pub fn field(id: &str, value: Signal<String>, placeholder: &'static str, on_submit: impl Fn() + 'static) -> View {
+    field_with(id, value, placeholder, on_submit, |input| input)
+}
+
+/// [`field`], with `more` done to its input (a ref, focus).
+pub fn field_with(id: &str, value: Signal<String>, placeholder: &'static str, on_submit: impl Fn() + 'static, more: impl FnOnce(nsh_base::Input) -> nsh_base::Input) -> View {
+    let input = more(text_input(id, value, placeholder, on_submit));
     view()
         .h(field_height())
         .flex_row()

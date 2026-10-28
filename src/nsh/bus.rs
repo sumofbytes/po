@@ -1,5 +1,5 @@
 //! What the NSH screens ask of Po. A screen only draws a snapshot Po publishes (the way
-//! [`crate::todo`]'s store is read); everything the user does on it comes back here as a [`Cmd`],
+//! [`crate::issues::shared`]'s store is read); everything the user does on it comes back here as a [`Cmd`],
 //! which the [`crate::Reader`] runs where it has the window and the agents.
 use std::sync::{LazyLock, Mutex};
 
@@ -25,8 +25,10 @@ pub enum Cmd {
     AddProject,
     NewThread,
     OpenSettings,
-    ToggleTodos,
-    CloseTodos,
+    ToggleIssues,
+    CloseIssues,
+    /// Start a thread in a worktree on an issue.
+    WorkOnIssue(u64),
     /// The window's own controls, which sit in the headers of the panes at its edges.
     ToggleLeft,
     ToggleRight,

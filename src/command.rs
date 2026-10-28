@@ -211,6 +211,8 @@ pub enum Command {
     AgentList,
     /// The projects open in the window. Another project's needs Global.
     ProjectList,
+    /// An issue or epic command, with the request it came in; [`crate::issues::api`] reads it.
+    Issues { op: crate::issues::api::Op, args: Value },
     /// The changed files of a project, or one file's diff with `path`.
     ProjectChanges { project: Option<u64>, path: Option<String> },
     /// The threads a caller may read, and where each stands.
@@ -358,6 +360,7 @@ impl Command {
             Self::ControlInfo => "control.info",
             Self::AgentList => "agent.list",
             Self::ProjectList => "project.list",
+            Self::Issues { op, .. } => op.name(),
             Self::ProjectChanges { .. } => "project.changes",
             Self::ThreadList { .. } => "thread.list",
             Self::ThreadGet { .. } => "thread.get",
@@ -391,7 +394,7 @@ impl Command {
             Self::ControlInfo => Family::Control,
             Self::WindowInfo | Self::AuditList { .. } | Self::EventsSubscribe => Family::Window,
             Self::AgentList => Family::Agent,
-            Self::ProjectList | Self::ProjectChanges { .. } | Self::ProjectOpen { .. } | Self::ProjectClose { .. } | Self::ProjectOffer { .. } | Self::WorktreeMerge { .. } => Family::Project,
+            Self::ProjectList | Self::Issues { .. } | Self::ProjectChanges { .. } | Self::ProjectOpen { .. } | Self::ProjectClose { .. } | Self::ProjectOffer { .. } | Self::WorktreeMerge { .. } => Family::Project,
             Self::ThreadList { .. }
             | Self::ThreadGet { .. }
             | Self::ThreadOptions { .. }
@@ -419,6 +422,18 @@ impl Command {
             Self::ThreadSetOption { .. } => Scope::Viewer,
             Self::ThreadCreate { .. } | Self::ThreadSend { .. } | Self::ThreadCancel { .. } | Self::ThreadClose { .. } | Self::ThreadWait { .. } | Self::ThreadAnswer { .. } => Scope::Orchestrate,
             Self::ThreadFind { .. } => Scope::Viewer,
+            // Reading the issues is a viewer's; changing them takes the orchestrator's reach.
+            // Starting a worktree thread is the reach `thread.create_isolated` has, and what can't
+            // be taken back (deleting, importing a file) is the reach of closing a project.
+            Self::Issues { op, .. } => {
+                if op.starts_thread() || op.destructive() {
+                    Scope::Global
+                } else if op.writes() {
+                    Scope::Orchestrate
+                } else {
+                    Scope::Viewer
+                }
+            }
             Self::WindowInfo | Self::AuditList { .. } | Self::EventsSubscribe => Scope::Global,
             Self::ProjectOpen { .. } | Self::ProjectClose { .. } | Self::ProjectOffer { .. } | Self::ThreadCreateIsolated { .. } | Self::WorktreeMerge { .. } => Scope::Global,
         }
@@ -447,7 +462,7 @@ impl Command {
     /// Whether it acts as a parent (starts, steers or waits on a thread of the caller's own),
     /// which the user's connection, with no thread of its own, cannot.
     pub fn needs_parent(&self) -> bool {
-        matches!(self, Self::ThreadCreate { .. } | Self::ThreadCreateIsolated { .. } | Self::ThreadSend { .. } | Self::ThreadWait { .. })
+        matches!(self, Self::ThreadCreate { .. } | Self::ThreadCreateIsolated { .. } | Self::ThreadSend { .. } | Self::ThreadWait { .. }) || matches!(self, Self::Issues { op, .. } if op.starts_thread())
     }
 
     /// Whether running it changes something, as opposed to only reading. Reading another
@@ -459,6 +474,7 @@ impl Command {
             Self::ViewShow { .. } | Self::ViewUpdate { .. } | Self::ViewClose { .. } | Self::FormShow { .. } | Self::FileOpen { .. } | Self::DiffShow { .. } | Self::ViewerClose => true,
             Self::ThreadCreate { .. } | Self::ThreadSend { .. } | Self::ThreadCancel { .. } | Self::ThreadSetOption { .. } | Self::ThreadClose { .. } | Self::ThreadAnswer { .. } => true,
             Self::ProjectOpen { .. } | Self::ProjectClose { .. } | Self::ProjectOffer { .. } | Self::ThreadCreateIsolated { .. } | Self::WorktreeMerge { .. } => true,
+            Self::Issues { op, .. } => op.writes(),
             Self::ControlInfo
             | Self::AgentList
             | Self::ProjectList
@@ -525,6 +541,7 @@ impl Command {
             "control.info" => Self::ControlInfo,
             "agent.list" => Self::AgentList,
             "project.list" => Self::ProjectList,
+            issue if crate::issues::api::Op::from_name(issue).is_some() => Self::Issues { op: crate::issues::api::Op::from_name(issue).expect("checked"), args: request.clone() },
             "project.changes" => Self::ProjectChanges { project: number("project")?, path: opt("path") },
             "thread.list" => Self::ThreadList { project: number("project")?, state: opt("state") },
             "thread.get" => Self::ThreadGet { thread: number("thread")? },
@@ -767,6 +784,27 @@ mod tests {
         assert_eq!(Command::parse(&json!({ "command": "control.info" })), Ok(Command::ControlInfo));
         assert_eq!(Command::parse(&json!({ "command": "agent.list" })), Ok(Command::AgentList));
         assert_eq!(Command::parse(&json!({ "command": "project.list" })), Ok(Command::ProjectList));
+        // Issue commands carry their request on to be read where the issues are.
+        let get = Command::parse(&json!({ "command": "issue.get", "issue": "PO-1" })).unwrap();
+        assert_eq!((get.name(), get.family(), get.scope(), get.writes()), ("issue.get", Family::Project, Scope::Viewer, false));
+        let update = Command::parse(&json!({ "command": "issue.update", "issue": "PO-1", "status": "done" })).unwrap();
+        assert_eq!((update.name(), update.scope(), update.writes()), ("issue.update", Scope::Orchestrate, true));
+        // Starting a thread on an issue takes the reach of an isolated thread, and a thread of one's own.
+        let work = Command::parse(&json!({ "command": "issue.work", "issue": "PO-1" })).unwrap();
+        assert_eq!((work.scope(), work.needs_parent()), (Scope::Global, true));
+        // What can't be taken back needs the reach of closing a project; editing does not.
+        for name in ["issue.delete", "epic.delete", "label.remove", "issue.import_todos"] {
+            let command = Command::parse(&json!({ "command": name })).unwrap();
+            assert_eq!((command.scope(), command.writes(), command.needs_parent()), (Scope::Global, true, false), "{name}");
+        }
+        assert_eq!(Command::parse(&json!({ "command": "label.define" })).unwrap().scope(), Scope::Orchestrate);
+        assert_eq!(Command::parse(&json!({ "command": "label.list" })).unwrap().scope(), Scope::Viewer);
+        let viewer = Grant::default();
+        let orchestrator = Grant { scope: Scope::Orchestrate, ..Grant::default() };
+        assert!(!orchestrator.allows(&work, Relation::Own) && Grant { scope: Scope::Global, ..Grant::default() }.allows(&work, Relation::Own));
+        assert!(viewer.allows(&get, Relation::Own) && !viewer.allows(&update, Relation::Own));
+        assert!(orchestrator.allows(&update, Relation::Own) && Grant::user().allows(&update, Relation::NoThread));
+        assert!(Command::parse(&json!({ "command": "issue.destroy" })).is_err());
         assert_eq!(Command::parse(&json!({ "command": "project.changes", "path": "a.rs" })), Ok(Command::ProjectChanges { project: None, path: Some("a.rs".into()) }));
         assert_eq!(Command::parse(&json!({ "command": "project.changes", "project": 2 })), Ok(Command::ProjectChanges { project: Some(2), path: None }));
         assert_eq!(Command::parse(&json!({ "command": "thread.get", "thread": 7 })), Ok(Command::ThreadGet { thread: Some(7) }));
