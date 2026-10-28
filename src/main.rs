@@ -4700,7 +4700,13 @@ impl Reader {
     /// the issue to In Progress with the branch linked.
     fn work_on_issue(&mut self, number: u64, window: &mut Window, cx: &mut Context<Self>) {
         self.follow_issues();
-        let Some(prompt) = issues::api::work_prompt(&issues::shared::watch().borrow().tracker, number) else {
+        let tracker = issues::shared::watch().borrow().tracker.clone();
+        if let Err(message) = issues::api::check_workable(&tracker, number) {
+            self.worktree_status = Some(message);
+            cx.notify();
+            return;
+        }
+        let Some(prompt) = issues::api::work_prompt(&tracker, number) else {
             return;
         };
         // Another worktree is being made or merged, or there is no agent to start: nothing would
@@ -4731,6 +4737,16 @@ impl Reader {
     fn show_issues(&mut self, id: u64, args: &serde_json::Value, window: &mut Window, cx: &mut Context<Self>) -> command::Reply {
         if self.project_of(id).is_some_and(|project| project != self.project_id) {
             return Err("that project is not on screen; the issues page shows the one that is".into());
+        }
+        // Like any move of what the user is looking at, it is the thread on screen's to make, and
+        // not while the user is typing or scrolling.
+        if self.threads_all().any(|thread| thread.id == id) {
+            if self.thread.id != id {
+                return Err("only the thread on screen can put the issues page up".into());
+            }
+            if self.last_input.elapsed() < QUIET {
+                return Err("the user is typing or scrolling; ask again in a moment".into());
+            }
         }
         self.follow_issues();
         let nav = issues::api::show_nav(&issues::shared::watch().borrow().tracker, args)?;

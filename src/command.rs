@@ -423,9 +423,10 @@ impl Command {
             Self::ThreadCreate { .. } | Self::ThreadSend { .. } | Self::ThreadCancel { .. } | Self::ThreadClose { .. } | Self::ThreadWait { .. } | Self::ThreadAnswer { .. } => Scope::Orchestrate,
             Self::ThreadFind { .. } => Scope::Viewer,
             // Reading the issues is a viewer's; changing them takes the orchestrator's reach.
-            // Starting a worktree thread is the reach `thread.create_isolated` has.
+            // Starting a worktree thread is the reach `thread.create_isolated` has, and what can't
+            // be taken back (deleting, importing a file) is the reach of closing a project.
             Self::Issues { op, .. } => {
-                if op.starts_thread() {
+                if op.starts_thread() || op.destructive() {
                     Scope::Global
                 } else if op.writes() {
                     Scope::Orchestrate
@@ -791,8 +792,12 @@ mod tests {
         // Starting a thread on an issue takes the reach of an isolated thread, and a thread of one's own.
         let work = Command::parse(&json!({ "command": "issue.work", "issue": "PO-1" })).unwrap();
         assert_eq!((work.scope(), work.needs_parent()), (Scope::Global, true));
-        let delete = Command::parse(&json!({ "command": "issue.delete", "issue": "PO-1" })).unwrap();
-        assert_eq!((delete.scope(), delete.writes()), (Scope::Orchestrate, true));
+        // What can't be taken back needs the reach of closing a project; editing does not.
+        for name in ["issue.delete", "epic.delete", "label.remove", "issue.import_todos"] {
+            let command = Command::parse(&json!({ "command": name })).unwrap();
+            assert_eq!((command.scope(), command.writes(), command.needs_parent()), (Scope::Global, true, false), "{name}");
+        }
+        assert_eq!(Command::parse(&json!({ "command": "label.define" })).unwrap().scope(), Scope::Orchestrate);
         assert_eq!(Command::parse(&json!({ "command": "label.list" })).unwrap().scope(), Scope::Viewer);
         let viewer = Grant::default();
         let orchestrator = Grant { scope: Scope::Orchestrate, ..Grant::default() };

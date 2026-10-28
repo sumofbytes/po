@@ -45,9 +45,32 @@ pub fn read(path: &Path) -> Vec<Item> {
     serde_json::from_str::<Value>(&text).map(|value| items(&value["items"], true)).unwrap_or_default()
 }
 
-/// Whether the old list has anything to bring in.
-pub fn available() -> bool {
-    !read(&file()).is_empty()
+/// Where it is noted that the old list has been dealt with: imported somewhere, or dismissed. It
+/// is offered once, to one project, so importing in two does not make the list twice.
+pub fn marker() -> PathBuf {
+    crate::config::data_dir().join("todos.json.handled")
+}
+
+/// How many todos `todos` holds that are still on offer: none once `marker` exists.
+pub fn on_offer_at(todos: &Path, marker: &Path) -> usize {
+    fn count(items: &[Item]) -> usize {
+        items.iter().map(|item| usize::from(!item.header) + count(&item.children)).sum()
+    }
+    if marker.exists() { 0 } else { count(&read(todos)) }
+}
+
+/// How many todos of the old list are still on offer.
+pub fn on_offer() -> usize {
+    on_offer_at(&file(), &marker())
+}
+
+/// Notes that the old list has been dealt with (`how` says what was done), so it is not offered
+/// again.
+pub fn handled(how: &str) {
+    let marker = marker();
+    if let Err(error) = marker.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|()| std::fs::write(&marker, how)) {
+        log::warn!("writing {}: {error}", marker.display());
+    }
 }
 
 /// Adds every todo of `old` to `tracker` as an issue: still to do is Todo, checked off is Done,
@@ -109,6 +132,19 @@ mod tests {
         assert_eq!((tag.parent, tag.status), (Some(ship.number), Status::Done));
         assert_eq!((milk.parent, milk.labels.len()), (None, 0));
         assert_eq!(tracker.config.labels.len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_old_list_is_on_offer_until_it_has_been_dealt_with() {
+        let dir = std::env::temp_dir().join(format!("po-import-offer-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (todos, marker) = (dir.join("todos.json"), dir.join("todos.json.handled"));
+        assert_eq!(on_offer_at(&todos, &marker), 0, "no file, nothing to offer");
+        std::fs::write(&todos, OLD).unwrap();
+        assert_eq!(on_offer_at(&todos, &marker), 3, "headers are not todos");
+        std::fs::write(&marker, "dismissed").unwrap();
+        assert_eq!(on_offer_at(&todos, &marker), 0, "once handled, not again, in any project");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

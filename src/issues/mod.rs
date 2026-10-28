@@ -1,7 +1,6 @@
 //! Issues and epics: a small tracker that lives in the repo, under `.po/`. This is the model, with
 //! no I/O: [`Tracker`] holds what a repo has and answers questions about it, and [`store`] reads
-//! and writes the files. The page that shows it comes later, so nothing here is used yet.
-#![allow(dead_code)]
+//! and writes the files; [`api`] is what agents ask, [`shared`] the copy the app follows.
 pub mod api;
 pub mod import;
 pub mod query;
@@ -514,11 +513,6 @@ impl Progress {
             progress
         })
     }
-
-    /// 0 to 1; nothing to do is 0.
-    pub fn fraction(self) -> f32 {
-        if self.all == 0 { 0. } else { self.done as f32 / self.all as f32 }
-    }
 }
 
 /// What changed since the store last wrote, so it writes only that.
@@ -791,10 +785,15 @@ impl Tracker {
             return false;
         }
         new.updated = now;
+        // Only a milestone that went can leave an issue pointing at nothing; looking at every
+        // issue for each letter typed in an epic's name would be wasted work.
+        let lost_milestone = old.milestones.iter().any(|before| new.milestones.iter().all(|after| after.id != before.id));
         let at = self.epics.iter().position(|epic| epic.id == id).expect("found above");
         self.epics[at] = new;
         self.dirty.epics.insert(id.to_string());
-        self.mend_issues(now);
+        if lost_milestone {
+            self.mend_issues(now);
+        }
         true
     }
 
@@ -938,8 +937,6 @@ mod tests {
         t.update(numbers[2], 3, |issue| issue.status = Status::InReview);
         let progress = t.epic_progress(&e);
         assert_eq!(progress, Progress { done: 1, started: 1, all: 3 });
-        assert!((progress.fraction() - 1. / 3.).abs() < 1e-6);
-        assert_eq!(Progress::default().fraction(), 0.);
     }
 
     #[test]

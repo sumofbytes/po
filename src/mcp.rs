@@ -562,14 +562,14 @@ fn tools() -> Vec<(&'static str, &'static str, &'static str, Value, Scope)> {
             "Delete an issue for good: its file goes, and its sub-issues become top-level. To drop \
              an issue and keep the record, set its status to canceled instead.",
             json!({ "type": "object", "properties": { "issue": string("The issue's key, such as PO-12.") }, "required": ["issue"] }),
-            Scope::Orchestrate,
+            Scope::Global,
         ),
         (
             "delete_epic",
             "epic.delete",
             "Delete an epic and its milestones. Its issues stay, out of any epic.",
             json!({ "type": "object", "properties": { "epic": string("The epic's id, as list_epics says.") }, "required": ["epic"] }),
-            Scope::Orchestrate,
+            Scope::Global,
         ),
         (
             "list_labels",
@@ -594,7 +594,7 @@ fn tools() -> Vec<(&'static str, &'static str, &'static str, Value, Scope)> {
             "label.remove",
             "Delete a label, and take it off the issues that have it.",
             json!({ "type": "object", "properties": { "name": string("The label's name.") }, "required": ["name"] }),
-            Scope::Orchestrate,
+            Scope::Global,
         ),
         (
             "import_todos",
@@ -603,7 +603,7 @@ fn tools() -> Vec<(&'static str, &'static str, &'static str, Value, Scope)> {
              along, and a header becomes the label of the tasks under it. The todo list is left as \
              it is. Refused if the project already has issues, unless `force` is set.",
             json!({ "type": "object", "properties": { "force": json!({ "type": "boolean" }) } }),
-            Scope::Orchestrate,
+            Scope::Global,
         ),
         (
             "show_issues",

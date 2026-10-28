@@ -43,11 +43,6 @@ impl Filter {
                 [key, &issue.title, &issue.description].iter().any(|text| text.to_lowercase().contains(&word)) || issue.labels.iter().any(|l| l.to_lowercase().contains(&word))
             })
     }
-
-    /// Nothing but the default scope is asked for.
-    pub fn is_plain(&self) -> bool {
-        *self == Self { scope: self.scope, ..Self::default() }
-    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
@@ -191,7 +186,6 @@ mod tests {
         assert_eq!(shown(&Filter { epic: Some("launch".into()), ..Default::default() }), [1]);
         assert_eq!(shown(&Filter { priority: Some(Priority::Urgent), ..Default::default() }), [2]);
         assert_eq!(shown(&Filter { late: true, scope: Scope::All, ..Default::default() }), [2]);
-        assert!(Filter::default().is_plain() && !Filter { late: true, ..Default::default() }.is_plain());
     }
 
     #[test]

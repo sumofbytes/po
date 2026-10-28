@@ -8,11 +8,17 @@
 //!
 //! The folder is always the primary checkout's: a worktree made for a thread has its own copy of
 //! the repo but shares the issues, so every thread sees the same ones. Writes go to a temp file
-//! and are renamed over, a file that can't be read is moved aside as `.bak` rather than written
-//! over, and a file is only rewritten when its contents change.
+//! and are renamed over, and a file is only rewritten when its contents change. A new issue's file
+//! is linked into place, which fails if the number is taken, so two windows never share one.
+//!
+//! Reading never changes the folder. A file that can't be read is left as it is, reported in
+//! [`Store::problems`], and moved aside as `.bak` only at the moment something has to be written
+//! in its place.
+use std::collections::BTreeSet;
 use std::collections::hash_map::DefaultHasher;
+use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
-use std::io;
+use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
@@ -41,14 +47,30 @@ pub struct Store {
     /// The `.po` folder.
     dir: PathBuf,
     pub tracker: Tracker,
-    /// What was wrong with the files when they were read: skipped, moved aside, or mended.
+    /// What was wrong with the files when they were read: skipped, unreadable, or mended.
     pub problems: Vec<String>,
     /// What the files looked like when they were last read or written.
     seen: u64,
+    /// Files that couldn't be read, which are moved aside before anything is written over them.
+    unreadable: HashSet<PathBuf>,
+}
+
+/// What reading a `.po` folder gave.
+pub struct Loaded {
+    tracker: Tracker,
+    problems: Vec<String>,
+    unreadable: HashSet<PathBuf>,
+}
+
+/// Reads the folder `dir`, and returns with it what the files looked like just before, so a write
+/// that lands meanwhile shows up as a change next time. Takes no lock and changes nothing.
+pub fn load(dir: &Path, fallback_prefix: &str) -> (Loaded, u64) {
+    let seen = fingerprint(dir);
+    (read(dir, fallback_prefix), seen)
 }
 
 /// A number that changes when a file under `dir` is added, removed, or written.
-fn fingerprint(dir: &Path) -> u64 {
+pub fn fingerprint(dir: &Path) -> u64 {
     let mut hasher = DefaultHasher::new();
     for folder in ["", "issues", "epics"] {
         let mut entries: Vec<_> = std::fs::read_dir(dir.join(folder)).into_iter().flatten().flatten().filter(|entry| entry.path().extension().is_some_and(|ext| ext == "json")).collect();
@@ -68,9 +90,26 @@ impl Store {
         let root = primary_root(project);
         let dir = root.join(".po");
         let name = root.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
-        let (tracker, problems) = read(&dir, &default_prefix(&name));
-        let seen = fingerprint(&dir);
-        Self { dir, tracker, problems, seen }
+        let (Loaded { tracker, problems, unreadable }, seen) = load(&dir, &default_prefix(&name));
+        Self { dir, tracker, problems, seen, unreadable }
+    }
+
+    /// What a poller needs to see whether the files changed without holding the store: where they
+    /// are, the prefix to read them with, and how they looked when last read.
+    pub fn watch_state(&self) -> (PathBuf, String, u64) {
+        (self.dir.clone(), self.tracker.config.prefix.clone(), self.seen)
+    }
+
+    /// Takes a reading made by [`load`] while the files looked like `seen`, if nothing has
+    /// happened to this store since: no write, and no change waiting to be written. Returns
+    /// whether it did.
+    pub fn install(&mut self, loaded: Loaded, seen: u64, read_at: u64) -> bool {
+        if self.seen != seen || !self.tracker.dirty.is_empty() {
+            return false;
+        }
+        (self.tracker, self.problems, self.unreadable) = (loaded.tracker, loaded.problems, loaded.unreadable);
+        self.seen = read_at;
+        true
     }
 
     /// The checkout the issues belong to.
@@ -88,8 +127,8 @@ impl Store {
     /// are lost, so this is for after a [`Store::flush`].
     pub fn reload(&mut self) {
         let fallback = self.tracker.config.prefix.clone();
-        (self.tracker, self.problems) = read(&self.dir, &fallback);
-        self.seen = fingerprint(&self.dir);
+        let (Loaded { tracker, problems, unreadable }, seen) = load(&self.dir, &fallback);
+        (self.tracker, self.problems, self.unreadable, self.seen) = (tracker, problems, unreadable, seen);
     }
 
     pub fn dir(&self) -> &Path {
@@ -108,17 +147,54 @@ impl Store {
                 true
             }
         };
-        // A made issue whose number is already a file on disk lost the race to another window
-        // that made one at the same moment. Theirs stays; this one takes the next number.
+        // A made issue's file is linked into place, which fails when the number is already a file:
+        // another window made one at the same moment. Theirs stays; this one takes the next number.
         let made: Vec<u64> = self.tracker.dirty.created.iter().copied().collect();
-        for number in made {
-            if self.dir.join("issues").join(format!("{}.json", self.tracker.key(number))).exists() {
-                let floor = highest_on_disk(&self.dir, &self.tracker.config.prefix) + 1;
-                let new = self.tracker.renumber(number, floor);
-                log::warn!("{} was taken by another window; this issue is now {}", self.tracker.key(number), self.tracker.key(new));
+        let mut failed_new = BTreeSet::new();
+        for mut number in made {
+            self.tracker.dirty.created.remove(&number);
+            while let Some(issue) = self.tracker.issue(number) {
+                let path = self.dir.join("issues").join(format!("{}.json", self.tracker.key(number)));
+                match create_new(&path, &issue.to_json()) {
+                    Ok(()) => {
+                        // Written whole: nothing more to do for it unless it changes again.
+                        self.tracker.dirty.issues.remove(&number);
+                        break;
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                        let floor = highest_on_disk(&self.dir, &self.tracker.config.prefix) + 1;
+                        let new = self.tracker.renumber(number, floor);
+                        self.tracker.dirty.created.remove(&new);
+                        log::warn!("{} was taken by another window; this issue is now {}", self.tracker.key(number), self.tracker.key(new));
+                        number = new;
+                    }
+                    Err(error) => {
+                        note(Err(error));
+                        failed_new.insert(number);
+                        break;
+                    }
+                }
             }
         }
-        let dirty = std::mem::take(&mut self.tracker.dirty);
+        // A file that couldn't be read is moved aside before it is written over.
+        if !self.unreadable.is_empty() {
+            let dirty = &self.tracker.dirty;
+            let mut paths = vec![];
+            if dirty.config {
+                paths.push(self.dir.join("config.json"));
+            }
+            paths.extend(dirty.epics.iter().map(|id| self.dir.join("epics").join(format!("{id}.json"))));
+            paths.extend(dirty.issues.iter().map(|number| self.dir.join("issues").join(format!("{}.json", self.tracker.key(*number)))));
+            for path in paths {
+                if self.unreadable.remove(&path)
+                    && let Err(error) = std::fs::rename(&path, path.with_extension("json.bak"))
+                {
+                    log::warn!("keeping {}: {error}", path.display());
+                }
+            }
+        }
+        let mut dirty = std::mem::take(&mut self.tracker.dirty);
+        dirty.created = failed_new;
         let tracker = &self.tracker;
         let mut left = super::Dirty::default();
         if dirty.config && !note(write(&self.dir.join("config.json"), &tracker.config.to_json())) {
@@ -126,11 +202,12 @@ impl Store {
         }
         for number in dirty.issues {
             let Some(issue) = tracker.issue(number) else { continue };
-            if !note(write(&self.dir.join("issues").join(format!("{}.json", tracker.key(number))), &issue.to_json())) {
+            // One whose creation failed is tried as a creation again, never written over a file.
+            if dirty.created.contains(&number) {
                 left.issues.insert(number);
-                if dirty.created.contains(&number) {
-                    left.created.insert(number);
-                }
+                left.created.insert(number);
+            } else if !note(write(&self.dir.join("issues").join(format!("{}.json", tracker.key(number))), &issue.to_json())) {
+                left.issues.insert(number);
             }
         }
         for number in dirty.removed {
@@ -177,6 +254,23 @@ fn write(path: &Path, value: &Value) -> io::Result<()> {
     std::fs::rename(&temp, path)
 }
 
+/// Writes `value` to `path` only if nothing is there, all at once: the file is made whole under
+/// another name and linked into place, so no reader sees half of it and a file already there is
+/// never replaced (`AlreadyExists`). Where files can't be linked, it is created exclusively.
+fn create_new(path: &Path, value: &Value) -> io::Result<()> {
+    let mut bytes = serde_json::to_vec_pretty(value)?;
+    bytes.push(b'\n');
+    std::fs::create_dir_all(path.parent().ok_or_else(|| io::Error::other("no directory"))?)?;
+    let temp = path.with_extension(format!("json.{}.new", std::process::id()));
+    std::fs::write(&temp, &bytes)?;
+    let linked = std::fs::hard_link(&temp, path);
+    let _ = std::fs::remove_file(&temp);
+    match linked {
+        Err(error) if error.kind() != io::ErrorKind::AlreadyExists => std::fs::OpenOptions::new().write(true).create_new(true).open(path)?.write_all(&bytes),
+        other => other,
+    }
+}
+
 fn remove(path: &Path) -> io::Result<()> {
     match std::fs::remove_file(path) {
         Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
@@ -184,9 +278,9 @@ fn remove(path: &Path) -> io::Result<()> {
     }
 }
 
-/// The JSON in `path`. A file that isn't is moved aside as `.bak`, so the first change doesn't
-/// write over it.
-fn read_json(path: &Path, problems: &mut Vec<String>) -> Option<Value> {
+/// The JSON in `path`. A file that isn't is left alone and noted, to be moved aside only if
+/// something has to be written in its place: a merge in progress may be holding it.
+fn read_json(path: &Path, problems: &mut Vec<String>, unreadable: &mut HashSet<PathBuf>) -> Option<Value> {
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
         Err(error) => {
@@ -199,10 +293,8 @@ fn read_json(path: &Path, problems: &mut Vec<String>) -> Option<Value> {
     match serde_json::from_str(&text) {
         Ok(value) => Some(value),
         Err(error) => {
-            problems.push(format!("{}: {error}; kept as a .bak", path.display()));
-            if let Err(error) = std::fs::rename(path, path.with_extension("json.bak")) {
-                log::warn!("keeping {}: {error}", path.display());
-            }
+            problems.push(format!("{}: {error}; left as it is, and not shown", path.display()));
+            unreadable.insert(path.to_path_buf());
             None
         }
     }
@@ -222,9 +314,10 @@ fn json_files(dir: &Path) -> Vec<(String, PathBuf)> {
     files
 }
 
-fn read(dir: &Path, fallback_prefix: &str) -> (Tracker, Vec<String>) {
+fn read(dir: &Path, fallback_prefix: &str) -> Loaded {
     let mut problems = vec![];
-    let config = read_json(&dir.join("config.json"), &mut problems).map_or_else(|| Config::new(fallback_prefix.to_string()), |value| Config::from_json(&value, fallback_prefix));
+    let mut unreadable = HashSet::new();
+    let config = read_json(&dir.join("config.json"), &mut problems, &mut unreadable).map_or_else(|| Config::new(fallback_prefix.to_string()), |value| Config::from_json(&value, fallback_prefix));
     let mut issues = vec![];
     for (stem, path) in json_files(&dir.join("issues")) {
         let number = stem.strip_prefix(config.prefix.as_str()).and_then(|rest| rest.strip_prefix('-')).and_then(|n| n.parse::<u64>().ok()).filter(|n| *n > 0);
@@ -232,7 +325,7 @@ fn read(dir: &Path, fallback_prefix: &str) -> (Tracker, Vec<String>) {
             problems.push(format!("{}: not named {}-<number>; skipped", path.display(), config.prefix));
             continue;
         };
-        let Some(value) = read_json(&path, &mut problems) else { continue };
+        let Some(value) = read_json(&path, &mut problems, &mut unreadable) else { continue };
         match Issue::from_json(number, &value) {
             Some(issue) => issues.push(issue),
             None => problems.push(format!("{}: no title; skipped", path.display())),
@@ -244,7 +337,7 @@ fn read(dir: &Path, fallback_prefix: &str) -> (Tracker, Vec<String>) {
             problems.push(format!("{}: not a lowercase name; skipped", path.display()));
             continue;
         }
-        let Some(value) = read_json(&path, &mut problems) else { continue };
+        let Some(value) = read_json(&path, &mut problems, &mut unreadable) else { continue };
         match Epic::from_json(id, &value) {
             Some(epic) => epics.push(epic),
             None => problems.push(format!("{}: no name; skipped", path.display())),
@@ -252,7 +345,7 @@ fn read(dir: &Path, fallback_prefix: &str) -> (Tracker, Vec<String>) {
     }
     let (tracker, mended) = Tracker::from_parts(config, issues, epics);
     problems.extend(mended);
-    (tracker, problems)
+    Loaded { tracker, problems, unreadable }
 }
 
 #[cfg(test)]
@@ -405,12 +498,30 @@ mod tests {
         assert_eq!(store.tracker.issues().map(|i| i.title.as_str()).collect::<Vec<_>>(), ["fine"]);
         assert_eq!(store.tracker.epics().len(), 1);
         assert_eq!(store.problems.len(), 5, "{:?}", store.problems);
-        assert!(repo.0.join(".po/issues/PO-2.json.bak").exists() && !repo.0.join(".po/issues/PO-2.json").exists());
-        // A bad config is kept too, and the prefix falls back to the repo's.
+        // Reading leaves the folder as it was: a file a merge is holding stays where it is.
+        assert!(repo.0.join(".po/issues/PO-2.json").exists() && !repo.0.join(".po/issues/PO-2.json.bak").exists());
+        // The number it holds is not handed out again; and an epic of the same name as a bad
+        // file moves that file aside rather than writing over it.
+        std::fs::write(repo.0.join(".po/epics/launch.json"), "<<<<<<< HEAD").unwrap();
+        let mut store = Store::open(&repo.0);
+        assert!(store.tracker.epics().is_empty());
+        store.tracker.create_epic("Launch", 9);
+        store.tracker.create("new", 9);
+        store.flush().unwrap();
+        assert_eq!(std::fs::read_to_string(repo.0.join(".po/epics/launch.json.bak")).unwrap(), "<<<<<<< HEAD");
+        let new = store.tracker.issues().find(|issue| issue.title == "new").unwrap();
+        assert!(new.number > 3, "PO-2 and PO-3 are taken on disk, whatever they hold: {}", new.number);
+        assert!(repo.0.join(".po/issues/PO-2.json").exists(), "the unreadable PO-2 was not replaced");
+        // A bad config is read as the defaults, and left alone until something is written over it.
         std::fs::write(repo.0.join(".po/config.json"), "nope").unwrap();
-        let store = Store::open(&repo.0);
-        assert!(repo.0.join(".po/config.json.bak").exists());
-        assert_eq!((store.tracker.config.prefix.as_str(), store.tracker.config.next), ("PO", 2));
+        let mut store = Store::open(&repo.0);
+        assert!(repo.0.join(".po/config.json").exists() && !repo.0.join(".po/config.json.bak").exists());
+        // The counter is read past the issues that are there (PO-1 and the renumbered new one).
+        assert_eq!((store.tracker.config.prefix.as_str(), store.tracker.config.next), ("PO", 5));
+        store.tracker.define_label("bug", "");
+        store.flush().unwrap();
+        assert_eq!(std::fs::read_to_string(repo.0.join(".po/config.json.bak")).unwrap(), "nope", "set aside, not lost");
+        assert!(Store::open(&repo.0).problems.len() >= 4, "the other files are still there to be reported");
     }
 
     #[test]

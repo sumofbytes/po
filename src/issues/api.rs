@@ -83,9 +83,10 @@ impl Op {
         self == Op::IssueWork
     }
 
-    /// Whether the window has to run it, for it touches threads or the screen.
-    pub fn needs_window(self) -> bool {
-        matches!(self, Op::IssueWork | Op::IssueShow)
+    /// Whether it can't be taken back: files are deleted, or a pile of issues made from a file
+    /// outside the repo. These take the reach that closing a project or merging a worktree does.
+    pub fn destructive(self) -> bool {
+        matches!(self, Op::IssueDelete | Op::EpicDelete | Op::LabelRemove | Op::ImportTodos)
     }
 }
 
@@ -416,7 +417,25 @@ pub fn work_prompt(tracker: &Tracker, number: u64) -> Option<String> {
 
 /// The issue `issue.work` names.
 pub fn work_issue(tracker: &Tracker, args: &Value) -> Result<u64, String> {
-    issue_number(tracker, args, "issue")
+    let number = issue_number(tracker, args, "issue")?;
+    check_workable(tracker, number)?;
+    Ok(number)
+}
+
+/// Refuses an issue that is finished, or that already has a thread's branch: starting it twice
+/// would make a second worktree and thread on the same work.
+pub fn check_workable(tracker: &Tracker, number: u64) -> Result<(), String> {
+    let Some(issue) = tracker.issue(number) else { return Err("that issue is gone".into()) };
+    let key = tracker.key(number);
+    if !issue.status.is_open() {
+        return Err(format!("{key} is {}; reopen it to work on it", issue.status.slug()));
+    }
+    if (issue.status == Status::InProgress || issue.status == Status::InReview)
+        && let Some(branch) = issue.links.iter().find_map(|link| if let Link::Branch(branch) = link { Some(branch) } else { None })
+    {
+        return Err(format!("{key} is already {} on branch {branch}; take that link off or move it back to todo to start again", issue.status.slug()));
+    }
+    Ok(())
 }
 
 /// Runs `op` with `args` on `tracker`. Anything it changes is noted in the tracker for the store
@@ -486,14 +505,20 @@ pub fn run(op: Op, args: &Value, tracker: &mut Tracker, now: u64, today: Date) -
             Ok(json!({ "deleted": key, "sub_issues_now_top_level": freed }))
         }
         Op::ImportTodos => {
-            if tracker.issues().next().is_some() && args["force"].as_bool() != Some(true) {
+            let forced = args["force"].as_bool() == Some(true);
+            if tracker.issues().next().is_some() && !forced {
                 return Err("the project already has issues; pass `force` to import the todos anyway".into());
+            }
+            if super::import::marker().exists() && !forced {
+                return Err("the old todo list was already imported or dismissed; pass `force` to import it again".into());
             }
             let old = super::import::read(&super::import::file());
             if old.is_empty() {
                 return Err("there is no old todo list to import".into());
             }
-            Ok(json!({ "imported": super::import::from_items(&old, tracker, now) }))
+            let made = super::import::from_items(&old, tracker, now);
+            super::import::handled("imported");
+            Ok(json!({ "imported": made }))
         }
         Op::EpicDelete => {
             let id = string(args, "epic")?.ok_or("needs `epic`, an epic's id")?;
@@ -814,7 +839,21 @@ mod tests {
         assert_eq!(work_issue(&t, &json!({ "issue": "1" })), Ok(1));
         assert!(work_issue(&t, &json!({ "issue": "PO-4" })).is_err());
         assert!(run(Op::IssueWork, &json!({}), &mut t, 1, today()).unwrap_err().contains("run by the window"));
-        assert!(Op::IssueWork.starts_thread() && Op::IssueWork.needs_window() && Op::IssueShow.needs_window() && !Op::IssueShow.starts_thread());
+        assert!(Op::IssueWork.starts_thread() && !Op::IssueShow.starts_thread());
+        // An issue already being worked, or finished, is not started again.
+        run_on(&mut t, Op::IssueUpdate, json!({ "issue": "1", "status": "in-progress", "link": { "branch": "po/x" } })).unwrap();
+        let error = work_issue(&t, &json!({ "issue": "PO-1" })).unwrap_err();
+        assert!(error.contains("already in-progress on branch po/x"), "{error}");
+        run_on(&mut t, Op::IssueUpdate, json!({ "issue": "1", "unlink": { "branch": "po/x" } })).unwrap();
+        assert_eq!(work_issue(&t, &json!({ "issue": "PO-1" })), Ok(1), "without a branch it can be started");
+        run_on(&mut t, Op::IssueUpdate, json!({ "issue": "1", "status": "done" })).unwrap();
+        assert!(work_issue(&t, &json!({ "issue": "PO-1" })).unwrap_err().contains("is done"));
+    }
+
+    #[test]
+    fn what_cannot_be_taken_back_is_marked() {
+        let destructive: Vec<_> = Op::ALL.iter().filter(|op| op.destructive()).map(|op| op.name()).collect();
+        assert_eq!(destructive, ["issue.delete", "issue.import_todos", "epic.delete", "label.remove"]);
     }
 
     #[test]

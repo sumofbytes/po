@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use tokio::sync::watch;
 
-use super::store::{Store, primary_root};
+use super::store::{Store, fingerprint, load, primary_root};
 use super::{Config, Tracker};
 use crate::date::today;
 
@@ -56,27 +56,38 @@ pub fn watch() -> watch::Receiver<View> {
 /// Shows the issues of the repo `project` is a checkout of. Cheap when it is the one already shown.
 pub fn set_project(project: &Path) {
     let root = primary_root(project);
-    {
-        let mut store = lock();
-        if store.as_ref().is_some_and(|store| store.root() == root) {
-            return;
-        }
-        let opened = Store::open(project);
-        publish(&opened);
-        *store = Some(opened);
+    if lock().as_ref().is_some_and(|store| store.root() == root) {
+        return;
     }
+    // The folder is read before the lock is taken, so a slow disk holds up no one else.
+    let opened = Store::open(project);
+    publish(&opened);
+    *lock() = Some(opened);
     POLLER.call_once(|| {
         std::thread::spawn(|| {
             loop {
                 std::thread::sleep(Duration::from_millis(1500));
-                let mut store = lock();
-                if let Some(store) = store.as_mut().filter(|store| store.changed_on_disk() && store.tracker.dirty.is_empty()) {
-                    store.reload();
-                    publish(store);
-                }
+                poll();
             }
         });
     });
+}
+
+/// Notices files that changed underneath (git, another window) and reads them in. The checking
+/// and the reading are done without the lock; it is held only to see that nothing happened to the
+/// store meanwhile and to swap the reading in.
+fn poll() {
+    let Some((dir, prefix, seen)) = lock().as_ref().map(Store::watch_state) else { return };
+    if fingerprint(&dir) == seen {
+        return;
+    }
+    let (loaded, read_at) = load(&dir, &prefix);
+    let mut guard = lock();
+    if let Some(store) = guard.as_mut().filter(|store| store.dir() == dir)
+        && store.install(loaded, seen, read_at)
+    {
+        publish(store);
+    }
 }
 
 /// Changes the issues with `f`, which is given the time to stamp them with, saves, and tells

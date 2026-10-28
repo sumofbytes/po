@@ -52,8 +52,28 @@ pub struct State {
     pub board_width: Signal<f32>,
     /// The delete button of the page on screen has been pressed once.
     pub arm_delete: Signal<bool>,
+    /// How many todos of the old list are still on offer.
+    pub old_todos: Signal<usize>,
+    /// Fields typed in and not saved yet, and which typing the pending save belongs to.
+    pub edited: Signal<Edited>,
+    pub pending: Signal<u64>,
     pub add_field: ElementRef,
 }
+
+/// The fields of the page on screen that were typed in since they were last saved.
+#[derive(Clone, Copy, PartialEq, Default)]
+pub struct Edited {
+    pub title: bool,
+    pub description: bool,
+    pub due: bool,
+    pub parent: bool,
+    pub epic_name: bool,
+    pub epic_description: bool,
+    pub epic_target: bool,
+}
+
+/// How long typing pauses before what was typed is written to the issue's file.
+const SAVE_AFTER: std::time::Duration = std::time::Duration::from_millis(300);
 
 impl State {
     fn new() -> Self {
@@ -80,6 +100,9 @@ impl State {
             milestone_due: s(),
             board_width: signal(0.),
             arm_delete: signal(false),
+            old_todos: signal(crate::issues::import::on_offer()),
+            edited: signal(Edited::default()),
+            pending: signal(0),
             add_field: element_ref(),
         }
     }
@@ -119,6 +142,7 @@ impl State {
 
     /// Opens an issue's page, with its fields holding what it has.
     pub fn open_issue(self, number: u64) {
+        self.flush();
         let from = self.page.get_untracked();
         if !matches!(from, Page::Issue(_)) {
             self.back_to.set(from);
@@ -139,7 +163,61 @@ impl State {
     }
 
     pub fn go(self, page: Page) {
+        self.flush();
         self.page.set(page);
+    }
+
+    /// Notes that a field was typed in, and saves what was typed once the typing pauses: a write
+    /// per letter would rewrite the file, scan the folder and re-draw every other window's list
+    /// for each one.
+    pub fn touch(self, mark: impl FnOnce(&mut Edited)) {
+        self.edited.update(mark);
+        let typing = self.pending.get_untracked() + 1;
+        self.pending.set(typing);
+        spawn(async move {
+            timer(SAVE_AFTER).await;
+            if self.pending.get_untracked() == typing {
+                self.flush();
+            }
+        });
+    }
+
+    /// Saves, now, the fields typed in since they were last saved: on Enter, and before the page
+    /// is left.
+    pub fn flush(self) {
+        let edited = self.edited.get_untracked();
+        if edited == Edited::default() {
+            return;
+        }
+        self.edited.set(Edited::default());
+        match self.page.get_untracked() {
+            Page::Issue(number) => {
+                if edited.title {
+                    self.save_title(number);
+                }
+                if edited.description {
+                    self.save_description(number);
+                }
+                if edited.due {
+                    self.save_due(number);
+                }
+                if edited.parent {
+                    self.save_parent(number);
+                }
+            }
+            Page::Epic(id) => {
+                if edited.epic_name {
+                    self.save_epic_name(&id);
+                }
+                if edited.epic_description {
+                    self.save_epic_description(&id);
+                }
+                if edited.epic_target {
+                    self.save_epic_target(&id);
+                }
+            }
+            _ => {}
+        }
     }
 
     pub fn back(self) {
@@ -278,6 +356,7 @@ pub fn Issues() -> impl IntoElement {
         .flex_1()
         .bg(Colors::popover())
         .child(header(state))
+        .child(problems_banner(state))
         .child(dynamic(move || match state.page.get() {
             Page::List => list_page(state).into_element(),
             Page::Board => board_page(state).into_element(),
@@ -493,6 +572,30 @@ fn header(state: State) -> View {
         .child(icon_button(IconName::Close, rems(0.875), "Close (Esc)", || send(Cmd::CloseIssues)))
 }
 
+/// What was wrong with the files in `.po` when they were read: one that can't be read is left
+/// as it is and not shown, so the page says so rather than letting an issue quietly go missing.
+fn problems_banner(state: State) -> View {
+    let problems = move || state.data.with(|data| data.problems.len());
+    let summary = move || {
+        state.data.with(|data| {
+            let first = data.problems.first().cloned().unwrap_or_default();
+            match data.problems.len() {
+                1 => format!("A problem with the files in .po: {first}"),
+                n => format!("{n} problems with the files in .po; the first: {first}"),
+            }
+        })
+    };
+    view().child(when(move || problems() > 0, move || {
+        view()
+            .px(rems(1.))
+            .py(rems(0.375))
+            .bg(Colors::input_background())
+            .border_b_1()
+            .border_color(Colors::border())
+            .child(text(summary).number_of_lines(2).text_size(text_xs()).text_color(Colors::warning()))
+    }).otherwise(|| {}))
+}
+
 fn no_project() -> View {
     view().py(rems(1.5)).items_center().child(text("Open a project to see its issues.").text_size(text_sm()).text_color(Colors::muted()))
 }
@@ -524,10 +627,40 @@ fn list_page(state: State) -> View {
                         ),
                     )),
                 )
+                .child(todo_offer(state))
                 .child(filter_bar(state))
                 .child(scroll().flex_shrink(1.).child(dynamic(move || rows(state))))
         })
         .otherwise(no_project))
+}
+
+/// The old todo list, offered once, for this project to take: Po's todo page is gone, and the
+/// list it kept is still in `todos.json`. Taking it or dismissing it ends the offer everywhere.
+fn todo_offer(state: State) -> View {
+    let offered = move || state.old_todos.get() > 0;
+    view().child(when(offered, move || {
+        view()
+            .flex_row()
+            .items_center()
+            .gap(rems(0.75))
+            .mx(rems(1.))
+            .mb(rems(0.5))
+            .px(rems(0.75))
+            .py(rems(0.5))
+            .rounded(Colors::radius())
+            .border_1()
+            .border_color(Colors::border())
+            .child(text(move || format!("Your old todo list has {} items. Bring them in as issues here?", state.old_todos.get())).flex_1().text_size(text_sm()).text_color(Colors::foreground()))
+            .child(super::button("Import here", true, move || {
+                shared::change(|tracker, now| crate::issues::import::from_items(&crate::issues::import::read(&crate::issues::import::file()), tracker, now));
+                crate::issues::import::handled("imported");
+                state.old_todos.set(0);
+            }))
+            .child(super::button("Dismiss", false, move || {
+                crate::issues::import::handled("dismissed");
+                state.old_todos.set(0);
+            }))
+    }).otherwise(|| {}))
 }
 
 fn filter_bar(state: State) -> View {
@@ -604,20 +737,7 @@ fn rows(state: State) -> View {
     }
     if out.is_empty() {
         let message = if empty { "No issues yet. Add one above." } else { "Nothing matches." };
-        let old_todos = empty && crate::issues::import::available();
-        out.push(
-            view()
-                .py(rems(1.5))
-                .gap(rems(0.75))
-                .items_center()
-                .child(text(message).text_size(text_sm()).text_color(Colors::muted()))
-                // The old checklist can come along, once, into an empty tracker.
-                .child(old_todos.then(|| {
-                    super::button("Import my old todos", false, || {
-                        shared::change(|tracker, now| crate::issues::import::from_items(&crate::issues::import::read(&crate::issues::import::file()), tracker, now));
-                    })
-                })),
-        );
+        out.push(view().py(rems(1.5)).items_center().child(text(message).text_size(text_sm()).text_color(Colors::muted())));
     }
     view().gap(rems(0.125)).px(rems(0.75)).pb(rems(0.75)).child(out)
 }
@@ -900,22 +1020,22 @@ fn issue_body(state: State, number: u64) -> AnyElement {
                     .child(super::button("Work on this", true, move || send(Cmd::WorkOnIssue(number))))
                     .child(delete_button(state, "Delete issue", move || state.delete(number))),
             )
-            .child(boxed(IconName::Pencil, line_input("issue-title", state.title, "Title", move || state.save_title(number)).on_change(move |text: &str| {
+            .child(boxed(IconName::Pencil, line_input("issue-title", state.title, "Title", move || state.flush()).on_change(move |text: &str| {
                 state.title.set(text.to_string());
-                state.save_title(number);
+                state.touch(|edited| edited.title = true);
             }), None))
             .child(text_area("issue-description", state.description, "Description (markdown)", move |text| {
                 state.description.set(text.to_string());
-                state.save_description(number);
+                state.touch(|edited| edited.description = true);
             }))
             .child(dynamic(sections))
-            .child(property("Due", vec![view().flex_1().child(boxed(IconName::Calendar, line_input("issue-due", state.due, DUE_HINT, move || state.save_due(number)).on_change(move |text: &str| {
+            .child(property("Due", vec![view().flex_1().child(boxed(IconName::Calendar, line_input("issue-due", state.due, DUE_HINT, move || state.flush()).on_change(move |text: &str| {
                 state.due.set(text.to_string());
-                state.save_due(number);
+                state.touch(|edited| edited.due = true);
             }), Some(due_hint(state.due))))]))
-            .child(property("Sub-issue of", vec![boxed(IconName::CornerDownRight, line_input("issue-parent", state.parent, "Key, e.g. PO-3 (empty for none)", move || state.save_parent(number)).on_change(move |text: &str| {
+            .child(property("Sub-issue of", vec![boxed(IconName::CornerDownRight, line_input("issue-parent", state.parent, "Key, e.g. PO-3 (empty for none)", move || state.flush()).on_change(move |text: &str| {
                 state.parent.set(text.to_string());
-                state.save_parent(number);
+                state.touch(|edited| edited.parent = true);
             }), None)]))
             .child(property("Add label", vec![boxed(IconName::Tag, line_input("issue-label", state.new_label, "New label", move || {
                 let name = state.new_label.get_untracked().trim().to_string();
@@ -1017,7 +1137,9 @@ mod tests {
         app.submit("id:issue-sub").unwrap();
         app.settle();
         assert_eq!(issue(2).parent, Some(1));
-        // Fields are saved as they are typed: nothing waits for Back.
+        // Fields are saved once typing pauses: nothing waits for Back.
+        app.wait(std::time::Duration::from_millis(400)).unwrap();
+        app.settle();
         assert_eq!((issue(1).title.as_str(), issue(1).description.as_str()), ("Fix the login", "Users can't sign in."));
         // An agent adds a note while the page is open; going back with the fields untouched
         // since keeps it.
@@ -1078,6 +1200,32 @@ mod tests {
         app.settle();
         assert_eq!(issue(3).epic.as_deref(), Some("launch"));
         assert!(app.shows("0/1"), "the epic counts its issue");
+
+        // An agent can put the page somewhere: a view, an issue, an epic, and a filter.
+        let nav = |target, filter, group| shared::navigate(shared::Nav { target, filter, group });
+        nav(shared::Target::Board, None, None);
+        app.settle();
+        assert_eq!(app.screen().count("id:column-todo").unwrap(), 1);
+        nav(shared::Target::Issue(1), None, None);
+        app.settle();
+        assert!(app.shows("Add sub-issue"));
+        nav(shared::Target::Epic("launch".into()), None, None);
+        app.settle();
+        assert!(app.shows("Milestones"));
+        nav(shared::Target::List, Some(Filter { text: "zzz".into(), ..Default::default() }), Some(Group::Priority));
+        app.settle();
+        assert!(app.shows("Nothing matches."));
+        nav(shared::Target::List, Some(Filter::default()), None);
+        app.settle();
+        assert!(app.shows("Fix the login"));
+
+        // Typing and leaving at once does not lose what was typed.
+        app.press("id:issue-1").unwrap();
+        app.settle();
+        app.type_text("id:issue-title", " now").unwrap();
+        app.press("role:button[Back (Esc)]").unwrap();
+        app.settle();
+        assert_eq!(issue(1).title, "Fix the login now");
 
         // With nothing open, Esc asks the frame to close.
         app.press_key("escape").unwrap();
