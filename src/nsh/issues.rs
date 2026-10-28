@@ -5,7 +5,7 @@ use nsh_core::prelude::*;
 
 use super::bus::{Cmd, send};
 use super::overlay::{self, Height};
-use super::{Colors, icon, icon_button, on_hover, rems, text_sm, text_xs};
+use super::{Colors, body, caption, icon, icon_button, note, on_hover, rems, text_sm, text_xs};
 use crate::issues::query::{self, Filter, Group, parse_quick};
 use crate::issues::shared::{self, View as Data};
 use crate::issues::{Issue, Link, Priority, Status};
@@ -526,8 +526,8 @@ pub fn due_hint(value: Signal<String>) -> View {
 }
 
 /// A small muted caption for a group of controls.
-pub fn caption(label: &'static str) -> Text {
-    text(label).text_size(text_xs()).font_weight(FontWeight::MEDIUM).text_color(Colors::muted())
+pub fn legend(label: &'static str) -> Text {
+    caption(label).font_weight(FontWeight::MEDIUM)
 }
 
 fn header(state: State) -> View {
@@ -597,7 +597,7 @@ fn problems_banner(state: State) -> View {
 }
 
 fn no_project() -> View {
-    view().py(rems(1.5)).items_center().child(text("Open a project to see its issues.").text_size(text_sm()).text_color(Colors::muted()))
+    view().py(rems(1.5)).items_center().child(note("Open a project to see its issues."))
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -650,7 +650,7 @@ fn todo_offer(state: State) -> View {
             .rounded(Colors::radius())
             .border_1()
             .border_color(Colors::border())
-            .child(text(move || format!("Your old todo list has {} items. Bring them in as issues here?", state.old_todos.get())).flex_1().text_size(text_sm()).text_color(Colors::foreground()))
+            .child(body(move || format!("Your old todo list has {} items. Bring them in as issues here?", state.old_todos.get())).flex_1())
             .child(super::button("Import here", true, move || {
                 shared::change(|tracker, now| crate::issues::import::from_items(&crate::issues::import::read(&crate::issues::import::file()), tracker, now));
                 crate::issues::import::handled("imported");
@@ -706,7 +706,7 @@ fn filter_bar(state: State) -> View {
                 .items_center()
                 .flex_wrap()
                 .gap(rems(0.25))
-                .child(caption("Group").mr(rems(0.25)))
+                .child(legend("Group").mr(rems(0.25)))
                 .child(Group::ALL.map(group).to_vec())
                 .child(view().w(rems(0.75)))
                 .child(dynamic(labels)),
@@ -729,15 +729,15 @@ fn rows(state: State) -> View {
                     .gap(rems(0.5))
                     .mt(rems(0.75))
                     .px(rems(0.625))
-                    .child(text(section.title.clone()).font_weight(FontWeight::SEMIBOLD).text_size(text_sm()).text_color(Colors::foreground()))
-                    .child(text(section.issues.len().to_string()).text_size(text_xs()).text_color(Colors::muted())),
+                    .child(body(section.title.clone()).font_weight(FontWeight::SEMIBOLD))
+                    .child(caption(section.issues.len().to_string())),
             );
         }
         out.extend(section.issues.iter().map(|number| issue_row(state, *number)));
     }
     if out.is_empty() {
         let message = if empty { "No issues yet. Add one above." } else { "Nothing matches." };
-        out.push(view().py(rems(1.5)).items_center().child(text(message).text_size(text_sm()).text_color(Colors::muted())));
+        out.push(view().py(rems(1.5)).items_center().child(note(message)));
     }
     view().gap(rems(0.125)).px(rems(0.75)).pb(rems(0.75)).child(out)
 }
@@ -771,11 +771,11 @@ pub fn issue_row(state: State, number: u64) -> View {
         .on_press(move || state.open_issue(number))
         .child(view().role(AccessibilityRole::Button).label(format!("Status: {}", status.name())).flex_none().on_press(move || state.advance(number)).child(icon(status_icon(status), rems(0.875), move || status_tint(status))))
         .child(icon(IconName::Signal, rems(0.75), move || priority_tint(priority)))
-        .child(text(key).flex_none().text_size(text_xs()).text_color(Colors::muted()))
+        .child(caption(key).flex_none())
         .child(text(issue.title.clone()).flex_1().number_of_lines(1).style_when(closed, |s| s.line_through()).text_color(if closed { Colors::muted()() } else { Colors::foreground()() }))
-        .child(parent.map(|parent| text(format!("↳ {parent}")).flex_none().text_size(text_xs()).text_color(Colors::muted())))
-        .child((progress.all > 0).then(|| text(format!("{}/{}", progress.done, progress.all)).flex_none().text_size(text_xs()).text_color(Colors::muted())))
-        .child(issue.labels.iter().map(|label| text(format!("#{label}")).flex_none().text_size(text_xs()).text_color(Colors::muted())).collect::<Vec<_>>())
+        .child(parent.map(|parent| caption(format!("↳ {parent}")).flex_none()))
+        .child((progress.all > 0).then(|| caption(format!("{}/{}", progress.done, progress.all)).flex_none()))
+        .child(issue.labels.iter().map(|label| caption(format!("#{label}")).flex_none()).collect::<Vec<_>>())
         .child(text(due.map(|(due, today)| due_label(due, today)).unwrap_or_default()).flex_none().text_size(text_xs()).text_color(move || due_tint))
 }
 
@@ -843,7 +843,7 @@ fn column(status: Status, count: usize, cards: Vec<View>) -> View {
                 .px(rems(0.25))
                 .child(icon(status_icon(status), rems(0.75), move || status_tint(status)))
                 .child(text(status.name()).text_size(text_xs()).font_weight(FontWeight::SEMIBOLD).number_of_lines(1).text_color(Colors::foreground()))
-                .child(text(count.to_string()).text_size(text_xs()).text_color(Colors::muted())),
+                .child(caption(count.to_string())),
         )
         .child(cards)
 }
@@ -880,11 +880,11 @@ fn card(state: State, issue: &Issue, key: String) -> View {
                 .items_center()
                 .gap(rems(0.375))
                 .child(icon(IconName::Signal, rems(0.625), move || priority_tint(priority)))
-                .child(text(key).flex_1().text_size(text_xs()).text_color(Colors::muted()))
+                .child(caption(key).flex_1())
                 .child(left.map(|to| on_hover(icon_button(IconName::ChevronLeft, rems(0.625), "Move left", move || state.set_status(number, to)))))
                 .child(right.map(|to| on_hover(icon_button(IconName::ChevronRight, rems(0.625), "Move right", move || state.set_status(number, to))))),
         )
-        .child(text(issue.title.clone()).text_size(text_sm()).text_color(Colors::foreground()))
+        .child(body(issue.title.clone()))
         .child(
             issue.due.map(|due| {
                 let late = issue.status.is_open() && due < today();
@@ -905,7 +905,7 @@ fn issue_page(state: State, number: u64) -> View {
 
 /// A labelled row of properties.
 fn property(label: &'static str, body: Vec<View>) -> View {
-    view().flex_row().items_start().gap(rems(0.75)).child(view().w(rems(5.5)).flex_none().pt(rems(0.25)).child(caption(label))).child(view().flex_1().flex_row().flex_wrap().items_center().gap(rems(0.25)).child(body))
+    view().flex_row().items_start().gap(rems(0.75)).child(view().w(rems(5.5)).flex_none().pt(rems(0.25)).child(legend(label))).child(view().flex_1().flex_row().flex_wrap().items_center().gap(rems(0.25)).child(body))
 }
 
 fn issue_body(state: State, number: u64) -> AnyElement {
@@ -977,7 +977,7 @@ fn issue_body(state: State, number: u64) -> AnyElement {
                         .hover(|st| st.bg(Colors::hover()))
                         .on_press(move || state.open_issue(n))
                         .child(icon(status_icon(s), rems(0.75), move || status_tint(s)))
-                        .child(text(data.tracker.key(n)).flex_none().text_size(text_xs()).text_color(Colors::muted()))
+                        .child(caption(data.tracker.key(n)).flex_none())
                         .child(text(c.title.clone()).flex_1().number_of_lines(1).text_color(Colors::foreground()))
                 })
                 .collect();
@@ -990,7 +990,7 @@ fn issue_body(state: State, number: u64) -> AnyElement {
                         Link::Branch(branch) => (IconName::GitBranch, branch.clone()),
                         Link::Pr(pr) => (IconName::GitBranch, format!("PR #{pr}")),
                     };
-                    view().flex_row().items_center().gap(rems(0.375)).child(icon(name, rems(0.75), Colors::muted())).child(text(label).text_size(text_xs()).text_color(Colors::muted()))
+                    view().flex_row().items_center().gap(rems(0.375)).child(icon(name, rems(0.75), Colors::muted())).child(caption(label))
                 })
                 .collect();
             (labels, epics, milestones, links, subs)
@@ -1016,7 +1016,7 @@ fn issue_body(state: State, number: u64) -> AnyElement {
                     .items_center()
                     .gap(rems(0.5))
                     .child(icon_button(IconName::ChevronLeft, rems(0.875), "Back (Esc)", move || state.back()))
-                    .child(text(key).flex_1().text_size(text_sm()).text_color(Colors::muted()))
+                    .child(note(key).flex_1())
                     .child(super::button("Work on this", true, move || send(Cmd::WorkOnIssue(number))))
                     .child(delete_button(state, "Delete issue", move || state.delete(number))),
             )

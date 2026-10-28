@@ -7,7 +7,7 @@ use nsh_core::prelude::*;
 use tokio::sync::watch;
 
 use super::bus::{Cmd, send};
-use super::{Colors, field_with, rems, text_sm, text_xs, tooltip};
+use super::{Colors, body, caption, field_with, rems, text_xs, tooltip};
 
 /// The strip a PR-reviewed project shows, or the way to review one.
 #[derive(Clone, PartialEq, Debug)]
@@ -69,7 +69,7 @@ fn small_button(label: impl IntoReactive<SharedString> + Clone + 'static, outlin
             .flex()
             .items_center()
             .justify_center()
-            .child(text(label).text_size(text_sm()).text_color(Colors::foreground())),
+            .child(body(label)),
     )
 }
 
@@ -83,7 +83,7 @@ fn pr_strip(pr: Pr, spec: Signal<String>, on_open: impl Fn() + Clone + 'static) 
             .py(rems(0.5))
             .border_b_1()
             .border_color(Colors::border())
-            .child(text(label).flex_1().min_w_0().number_of_lines(1).text_size(text_xs()).text_color(Colors::muted()))
+            .child(caption(label).flex_1().min_w_0().number_of_lines(1))
             .child(small_button("Close", false, Some("Return to this repository, forgetting the review"), move || send(Cmd::ClosePr))),
         Pr::Asking { status, opening } => {
             let submit = on_open.clone();

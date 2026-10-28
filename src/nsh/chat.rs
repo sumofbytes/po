@@ -11,7 +11,7 @@ use tokio::sync::watch;
 
 use super::header::{Control, pane_header};
 use super::source::Shared;
-use super::{Colors, icon, mono_size, rems, text_base, text_sm, text_xs, tooltip};
+use super::{Colors, body, caption, icon, mono_size, note, rems, text_base, text_sm, tooltip};
 use crate::ui::icon::IconName;
 
 /// Whether a step of the agent's is waiting, going, done or failed: a tool call, the plan's
@@ -353,7 +353,7 @@ fn menu_trigger(label: String, tip: &'static str) -> View {
                 .flex_row()
                 .items_center()
                 .gap(rems(0.25))
-                .child(text(label).font_weight(FontWeight::MEDIUM).text_size(text_sm()).text_color(Colors::foreground()))
+                .child(body(label).font_weight(FontWeight::MEDIUM))
                 .child(icon(IconName::ChevronDown, rems(0.75), Colors::muted())),
         )
 }
@@ -372,7 +372,7 @@ fn item(what: String, on_press: impl Fn() + 'static) -> AnyElement {
 
 /// A line in a header, like `3 threads · 1 asking`.
 fn status_line(line: String) -> Text {
-    text(line).number_of_lines(1).text_size(text_xs()).text_color(Colors::muted())
+    caption(line).number_of_lines(1)
 }
 
 /// The pane header of the conversation: the title, the statuses, the history button, the Control
@@ -394,7 +394,7 @@ fn pane(title: String, snap: &Snapshot) -> View {
                 .hover(|s| s.bg(Colors::hover()))
                 .on_press(|| tell(Cmd::History))
                 .tooltip(tooltip("Resume an earlier session (Ctrl+Shift+H)"))
-                .child(text("History").text_size(text_sm()).text_color(Colors::foreground())),
+                .child(body("History")),
         );
     }
     // The Control menu, once the thread's agent may do more than talk.
@@ -428,7 +428,7 @@ fn grant_menu(grant: Grant) -> AnyElement {
         menu = menu.child(item(choice("May answer its threads' permission asks".to_string(), grant.approvals), move || tell(Cmd::Grant(GrantChange::Approvals))));
     }
     menu = menu.child(separator());
-    menu = menu.child(menu_item().disabled(true).px(rems(0.75)).py(rems(0.375)).child(text("A raise takes effect when the agent restarts").text_size(text_sm()).text_color(Colors::muted())).into_element());
+    menu = menu.child(menu_item().disabled(true).px(rems(0.75)).py(rems(0.375)).child(note("A raise takes effect when the agent restarts")).into_element());
     if active {
         menu = menu.child(item("Stop agent control".to_string(), move || tell(Cmd::Grant(GrantChange::Stop))));
     }
@@ -614,7 +614,7 @@ fn run_row(message: usize, at: usize, count: usize, phase: Phase, folded: bool) 
         .hover(|s| s.bg(Colors::hover()))
         .on_press(move || tell(Cmd::Fold { message, block: at, folded: !folded }))
         .child(step_glyph(phase))
-        .child(text(label).flex_1().text_sm().text_color(Colors::muted()))
+        .child(note(label).flex_1())
         .child(icon(if folded { IconName::ChevronRight } else { IconName::ChevronDown }, rems(0.75), Colors::muted()))
         .into_element()
 }
@@ -655,19 +655,19 @@ fn ask_row(message: usize, at: usize, title: &str, options: &[AskOption], answer
         .px(rems(0.75))
         .rounded(Colors::radius())
         .border_1()
-        .border_color(move || if waiting { Colors::warning()().opacity(0.4) } else { Colors::border()() })
+        .border_color(move || if waiting { Colors::warning()().opacity(crate::theme::tokens::ALERT_BORDER) } else { Colors::border()() })
         .child(
             view()
                 .flex_row()
                 .items_start()
                 .gap(rems(0.5))
-                .child(text("Permission").flex_none().text_xs().font_weight(FontWeight::MEDIUM).text_color(Colors::muted()))
+                .child(caption("Permission").flex_none().font_weight(FontWeight::MEDIUM))
                 .child(view().flex_1().min_w_0().child(text_view().markdown(title).text_sm().text_color(Colors::foreground()))),
         );
     match answered {
         Some(given) => {
             let said = format!("→ {given}");
-            card = card.child(text(said).text_sm().text_color(Colors::muted()));
+            card = card.child(note(said));
         }
         None => {
             let mut row = view().flex_row().flex_wrap().gap(rems(0.375));
@@ -708,13 +708,13 @@ fn approve_row(message: usize, at: usize, question: &str, lines: &[String], answ
         .px(rems(0.75))
         .rounded(Colors::radius())
         .border_1()
-        .border_color(move || if waiting { Colors::warning()().opacity(0.4) } else { Colors::border()() })
+        .border_color(move || if waiting { Colors::warning()().opacity(crate::theme::tokens::ALERT_BORDER) } else { Colors::border()() })
         .child(
             view()
                 .flex_row()
                 .items_start()
                 .gap(rems(0.5))
-                .child(text("Approve").flex_none().text_xs().font_weight(FontWeight::MEDIUM).text_color(Colors::muted()))
+                .child(caption("Approve").flex_none().font_weight(FontWeight::MEDIUM))
                 .child(view().flex_1().min_w_0().child(text_view().markdown(title).text_sm().text_color(Colors::foreground()))),
         )
         .children((!lines.is_empty()).then(|| {
@@ -741,7 +741,7 @@ fn approve_row(message: usize, at: usize, question: &str, lines: &[String], answ
     match answered {
         Some(said) => {
             let said = format!("→ {said}");
-            card = card.child(text(said).text_sm().text_color(Colors::muted()));
+            card = card.child(note(said));
         }
         None => {
             card = card.child(
@@ -773,7 +773,7 @@ fn approve_row(message: usize, at: usize, question: &str, lines: &[String], answ
                             .border_color(Colors::input_border())
                             .hover(|s| s.bg(Colors::hover()))
                             .on_press(move || tell(Cmd::Approve { message, block: at, yes: false }))
-                            .child(text("Leave out").text_sm().text_color(Colors::foreground())),
+                            .child(body("Leave out")),
                     ),
             );
         }
@@ -805,7 +805,7 @@ fn agent_row(message: usize, blocks: &[Block]) -> AnyElement {
     let mut column = view().flex_col().min_w_0().gap(rems(0.75));
     let mut skip = 0;
     if blocks.is_empty() {
-        column = column.child(text("Thinking…").text_sm().text_color(Colors::muted()));
+        column = column.child(note("Thinking…"));
     }
     for block in blocks {
         if skip > 0 {
@@ -883,7 +883,7 @@ fn pictures_row(pictures: &[Picture]) -> AnyElement {
                                 .top(rems(-0.25))
                                 .right(rems(-0.25))
                                 .p(rems(0.125))
-                                .rounded_full()
+                                .rounded(super::pill())
                                 .bg(Colors::background())
                                 .border_1()
                                 .border_color(Colors::border())
@@ -910,13 +910,13 @@ fn queue_row(queued: Queued) -> AnyElement {
         .rounded(Colors::radius())
         .bg(Colors::selected());
     row = if queued.kind.is_empty() {
-        row.child(text("Queued").flex_none().text_xs().font_weight(FontWeight::MEDIUM).text_color(Colors::muted()))
+        row.child(caption("Queued").flex_none().font_weight(FontWeight::MEDIUM))
     } else {
-        row.child(text(queued.kind.clone()).flex_none().text_xs().font_weight(FontWeight::MEDIUM).text_color(Colors::muted()))
+        row.child(caption(queued.kind.clone()).flex_none().font_weight(FontWeight::MEDIUM))
     };
     row = if queued.text.is_empty() {
         let word = if queued.pictures == 1 { "1 picture".to_string() } else { format!("{} pictures", queued.pictures) };
-        row.child(text(word).flex_1().min_w_0().text_sm().text_color(Colors::muted()))
+        row.child(note(word).flex_1().min_w_0())
     } else {
         row.child(text_view().markdown(queued.text.clone()).flex_1().min_w_0().text_sm().text_color(Colors::foreground()))
     };
@@ -927,7 +927,7 @@ fn queue_row(queued: Queued) -> AnyElement {
                 .label("Take back into the draft")
                 .flex_none()
                 .p(rems(0.125))
-                .rounded_full()
+                .rounded(super::pill())
                 .cursor_pointer()
                 .hover(|s| s.bg(Colors::hover()))
                 .on_press(move || tell(Cmd::Recall(queued.at)))
@@ -942,14 +942,14 @@ fn note_row(note: &str) -> AnyElement {
         .flex_row()
         .items_center()
         .gap(rems(0.5))
-        .child(text(note.to_string()).flex_1().min_w_0().text_xs().text_color(Colors::muted()))
+        .child(caption(note.to_string()).flex_1().min_w_0())
         .child(
             view()
                 .role(AccessibilityRole::Button)
                 .label("Dismiss")
                 .flex_none()
                 .p(rems(0.125))
-                .rounded_full()
+                .rounded(super::pill())
                 .cursor_pointer()
                 .hover(|s| s.bg(Colors::hover()))
                 .on_press(|| tell(Cmd::DismissNote))
@@ -979,8 +979,8 @@ fn picker(picking: &Picking) -> AnyElement {
                         .cursor_pointer()
                         .hover(|s| s.bg(Colors::hover()))
                         .on_press(move || tell(Cmd::Resume(id.clone())))
-                        .child(text(label).flex_1().min_w_0().number_of_lines(1).text_sm().text_color(Colors::foreground()))
-                        .child(text(when).flex_none().text_xs().text_color(Colors::muted())),
+                        .child(body(label).flex_1().min_w_0().number_of_lines(1))
+                        .child(caption(when).flex_none()),
                 );
             }
             column.into_element()
@@ -1002,14 +1002,14 @@ fn picker(picking: &Picking) -> AnyElement {
                 .items_center()
                 .px(rems(0.375))
                 .pb(rems(0.25))
-                .child(text(title).flex_1().text_xs().font_weight(FontWeight::MEDIUM).text_color(Colors::muted()))
+                .child(caption(title).flex_1().font_weight(FontWeight::MEDIUM))
                 .child(
                     view()
                         .role(AccessibilityRole::Button)
                         .label("Close")
                         .flex_none()
                         .p(rems(0.125))
-                        .rounded_full()
+                        .rounded(super::pill())
                         .cursor_pointer()
                         .hover(|s| s.bg(Colors::hover()))
                         .on_press(|| tell(Cmd::ClosePicker))
@@ -1062,7 +1062,7 @@ fn setup(snap: &Snapshot) -> AnyElement {
                 .gap(rems(0.25))
                 .px(rems(0.5))
                 .py(rems(0.25))
-                .rounded_full()
+                .rounded(super::pill())
                 .border_1()
                 .border_color(Colors::input_border())
                 .cursor_pointer()
@@ -1089,7 +1089,7 @@ fn settings_rows(settings: &[Setting], busy: bool) -> AnyElement {
                 .iter()
                 .map(|setting| {
                     if busy {
-                        return menu_trigger(setting.current_name(), "Available when the agent is idle").opacity(0.5).into_element();
+                        return menu_trigger(setting.current_name(), "Available when the agent is idle").opacity(crate::theme::tokens::DISABLED).into_element();
                     }
                     let mut menu = menu().popup_class(MENU).trigger(menu_trigger(setting.current_name(), "What the session uses"));
                     for (value, name) in &setting.choices {
@@ -1134,11 +1134,11 @@ fn steer_button(steer: bool, draft: Signal<String>, has_pictures: bool) -> AnyEl
         .justify_center()
         .w(rems(1.75))
         .h(rems(1.75))
-        .rounded_full()
+        .rounded(super::pill())
         .border_1()
         .border_color(Colors::input_border())
         .cursor_pointer()
-        .style_when(move || typed.get().trim().is_empty() && !has_pictures, |s| s.opacity(0.4))
+        .style_when(move || typed.get().trim().is_empty() && !has_pictures, |s| s.opacity(crate::theme::tokens::DISABLED))
         .hover(|s| s.bg(Colors::hover()))
         .tooltip(tooltip(tip))
         .on_press(move || {
@@ -1172,13 +1172,13 @@ fn send_button(snap: Snapshot, draft: Signal<String>) -> AnyElement {
         .justify_center()
         .w(rems(1.75))
         .h(rems(1.75))
-        .rounded_full()
+        .rounded(super::pill())
         .cursor_pointer()
         .style_when(
             move || !busy && draft.get_untracked().trim().is_empty(),
-            |s| s.opacity(0.4),
+            |s| s.opacity(crate::theme::tokens::DISABLED),
         )
-        .hover(|s| s.opacity(0.85))
+        .hover(|s| s.opacity(crate::theme::tokens::HOVER))
         .bg(Colors::primary())
         .tooltip(tooltip(tip))
         .on_press(move || {
@@ -1263,7 +1263,7 @@ fn bar(snap: Snapshot, draft: Signal<String>, field_ref: ElementRef) -> AnyEleme
             .as_ref()
             .map(|id| snap.agents.iter().find(|(_, key)| key == id).map_or(id.clone(), |(name, _)| name.clone()))
             .unwrap_or_else(|| "Agent".to_string());
-        chips = chips.child(text(name).px(rems(0.5)).text_sm().text_color(Colors::muted()));
+        chips = chips.child(note(name).px(rems(0.5)));
     }
     if !snap.settings.is_empty() {
         chips = chips.child(settings_rows(&snap.settings, snap.busy));
@@ -1404,7 +1404,7 @@ pub fn Chat() -> impl IntoElement {
                 .justify_center()
                 .gap(rems(0.75))
                 .px(rems(1.))
-                .children([text("What is this thread about?").text_base().text_color(Colors::muted()), text("Message an agent to begin.").text_sm().text_color(Colors::muted())])
+                .children([text("What is this thread about?").text_base().text_color(Colors::muted()), note("Message an agent to begin.")])
                 .into_element()
         } else {
             transcript(&snap.items, scrolled.clone(), at_end)

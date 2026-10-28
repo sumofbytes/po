@@ -8,7 +8,7 @@ use tokio::sync::watch;
 
 use super::bus::{Cmd, send};
 use super::header::{Control, header_button, pane_header, status, toggle_button};
-use super::{Colors, icon_button, rems, text_sm};
+use super::{Colors, icon_button, note, rems};
 use crate::ui::icon::IconName;
 
 /// A file's text, compared by identity so a snapshot that holds the same text costs nothing to
@@ -68,7 +68,7 @@ pub fn publish(snapshot: Snapshot) {
 }
 
 fn centered(message: String) -> View {
-    view().flex_1().items_center().justify_center().px(rems(1.)).child(text(message).text_size(text_sm()).text_color(Colors::muted()))
+    view().flex_1().items_center().justify_center().px(rems(1.)).child(note(message))
 }
 
 #[component]

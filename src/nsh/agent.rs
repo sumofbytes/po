@@ -10,7 +10,7 @@ use tokio::sync::watch;
 use super::bus::{Cmd, send};
 use super::header::{Control, pane_header, status};
 use super::source::Shared;
-use super::{Colors, field_height, rems, text_base, text_sm};
+use super::{Colors, body, field_height, note, rems, text_base, text_sm};
 use serde_json::{Map, Value};
 
 /// One field of the form on screen.
@@ -130,7 +130,7 @@ fn field_row(at: usize, field: &Field, drafts: Signal<Vec<String>>) -> View {
                     .hover(|s| s.bg(Colors::hover()))
                     .style_when(picked, |s| s.bg(Colors::selected()))
                     .on_press(move || drafts.update(|values| values[at] = selected.clone()))
-                    .child(text(option.clone()).text_size(text_sm()).text_color(Colors::foreground()))
+                    .child(body(option.clone()))
             }))
             .into_element()
     };
@@ -142,7 +142,7 @@ fn field_row(at: usize, field: &Field, drafts: Signal<Vec<String>>) -> View {
             view()
                 .w(rems(9.))
                 .flex_none()
-                .child(text(field.label.clone()).number_of_lines(1).text_size(text_sm()).text_color(Colors::muted())),
+                .child(note(field.label.clone()).number_of_lines(1)),
         )
         .child(widget)
 }
@@ -237,7 +237,7 @@ pub fn Agent() -> impl IntoElement {
                         .child(if answered {
                             // The agent has the answers; the button could be pressed again, but
                             // answers nothing.
-                            submit_button("Answered", move || answer()).flex_none().opacity(0.5).into_element()
+                            submit_button("Answered", move || answer()).flex_none().opacity(crate::theme::tokens::DISABLED).into_element()
                         } else {
                             submit_button(submit.clone(), move || answer()).into_element()
                         }),
