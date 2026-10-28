@@ -1193,7 +1193,7 @@ fn send_button(snap: Snapshot, draft: Signal<String>) -> AnyElement {
 }
 
 /// The field the draft is typed in, reporting what the user pasted:
-/// the pictures and files it came with, and the text it says.
+/// the pictures and files it came with; the text it says is inserted by the field itself.
 fn draft_field(draft: &Signal<String>, field_ref: ElementRef) -> Input {
     let held = draft.clone();
     input()
@@ -1211,7 +1211,6 @@ fn draft_field(draft: &Signal<String>, field_ref: ElementRef) -> Input {
         .placeholder("Message the agent")
         .placeholder_color(Colors::one(Colors::muted()))
         .submit_behavior(nsh_core::element::SubmitBehavior::Submit)
-        .paste_behavior(nsh_core::element::PasteBehavior::Report)
         .on_change(move |text: &str| {
             let text = text.to_string();
             held.set(text.clone());
