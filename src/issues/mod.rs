@@ -526,6 +526,9 @@ impl Progress {
 pub(crate) struct Dirty {
     pub config: bool,
     pub issues: BTreeSet<u64>,
+    /// Issues made since the last write, whose files must not be there already: another window
+    /// may have used the number.
+    pub created: BTreeSet<u64>,
     pub removed: BTreeSet<u64>,
     pub epics: BTreeSet<String>,
     pub removed_epics: BTreeSet<String>,
@@ -533,7 +536,7 @@ pub(crate) struct Dirty {
 
 impl Dirty {
     pub fn is_empty(&self) -> bool {
-        !self.config && self.issues.is_empty() && self.removed.is_empty() && self.epics.is_empty() && self.removed_epics.is_empty()
+        !self.config && self.issues.is_empty() && self.created.is_empty() && self.removed.is_empty() && self.epics.is_empty() && self.removed_epics.is_empty()
     }
 }
 
@@ -680,7 +683,32 @@ impl Tracker {
         self.issues.insert(number, Issue::new(number, title.trim().to_string(), now));
         self.dirty.config = true;
         self.dirty.issues.insert(number);
+        self.dirty.created.insert(number);
         number
+    }
+
+    /// Gives a made issue that has not been written a new number, from `floor` or the counter,
+    /// whichever is higher, with its sub-issues following it. For when its number turns out to be
+    /// taken on disk by an issue this tracker has not seen.
+    pub(crate) fn renumber(&mut self, old: u64, floor: u64) -> u64 {
+        let new = self.config.next.max(floor);
+        self.config.next = new + 1;
+        self.dirty.config = true;
+        let Some(mut issue) = self.issues.remove(&old) else { return old };
+        issue.number = new;
+        self.issues.insert(new, issue);
+        let kids: Vec<u64> = self.children(old).map(|child| child.number).collect();
+        for kid in kids {
+            if let Some(kid) = self.issues.get_mut(&kid) {
+                kid.parent = Some(new);
+            }
+            self.dirty.issues.insert(kid);
+        }
+        self.dirty.issues.remove(&old);
+        self.dirty.created.remove(&old);
+        self.dirty.issues.insert(new);
+        self.dirty.created.insert(new);
+        new
     }
 
     /// An epic and milestone that exist, and the milestone in that epic: what an issue may refer to.
@@ -728,7 +756,11 @@ impl Tracker {
             return;
         }
         self.dirty.issues.remove(&number);
-        self.dirty.removed.insert(number);
+        // One never written has no file of its own to delete: a file of that name is another
+        // window's.
+        if !self.dirty.created.remove(&number) {
+            self.dirty.removed.insert(number);
+        }
         let orphans: Vec<u64> = self.children(number).map(|issue| issue.number).collect();
         for child in orphans {
             self.update(child, now, |issue| issue.parent = None);
@@ -885,6 +917,8 @@ mod tests {
         t.update(c, 4, |issue| issue.status = Status::Done);
         t.update(b, 4, |issue| issue.status = Status::InProgress);
         assert_eq!(t.progress(a), Progress { done: 1, started: 1, all: 2 });
+        // As if all were written, so the deletion has a file to delete.
+        t.dirty = Dirty::default();
         t.remove(a, 5);
         assert_eq!(t.issue(b).unwrap().parent, None);
         assert_eq!(t.issue(c).unwrap().parent, Some(b));

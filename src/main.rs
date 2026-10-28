@@ -1203,7 +1203,7 @@ struct Reader {
     issues: Entity<nsh::overlay::Overlay>,
     issues_open: bool,
     /// The project whose issues [`issues::shared`] holds, so it is only switched when this changes.
-    issues_root: PathBuf,
+    issues_root: std::cell::RefCell<PathBuf>,
     /// An issue "Work on this" is making a worktree for, to link its branch once it exists.
     issue_for_worktree: Option<u64>,
     /// Progress or failure of the last attempt to open a PR.
@@ -1436,7 +1436,7 @@ impl Reader {
             todos_open: false,
             issues,
             issues_open: false,
-            issues_root: PathBuf::new(),
+            issues_root: Default::default(),
             issue_for_worktree: None,
             pr_status: None,
             opening: false,
@@ -4670,10 +4670,12 @@ impl Reader {
         cx.notify();
     }
 
-    /// Points the shared issues at the project on screen, if it isn't already.
-    fn follow_issues(&mut self) {
-        if self.issues_root != self.project.root {
-            self.issues_root = self.project.root.clone();
+    /// Points the shared issues at the project on screen, if it isn't already. The sidebar's
+    /// snapshot does this, so the page and the counts follow the project whatever switched it.
+    fn follow_issues(&self) {
+        let mut shown = self.issues_root.borrow_mut();
+        if *shown != self.project.root {
+            *shown = self.project.root.clone();
             issues::shared::set_project(&self.project.root);
         }
     }
@@ -4694,15 +4696,24 @@ impl Reader {
         }) else {
             return;
         };
+        // Another worktree is being made or merged, or there is no agent to start: nothing would
+        // begin, so the issue is left as it is.
+        if self.finishing || self.chosen().is_none() {
+            return;
+        }
         self.hide_issues(window, cx);
         self.new_blank_thread(window, cx);
         self.thread.isolate = true;
         self.issue_for_worktree = Some(number);
         let out = Outgoing { text: prompt, origin: Origin::User, images: vec![] };
         self.start_thread(out, false, window, cx);
-        // No worktree is being made: it went ahead in the project itself.
-        if !self.finishing && let Some(number) = self.issue_for_worktree.take() {
-            self.issue_started(number, None);
+        // With a worktree being made, the issue waits for its branch. Without one the thread
+        // went ahead in the project itself, if it started at all.
+        if !self.finishing {
+            self.issue_for_worktree = None;
+            if !self.thread.blank {
+                self.issue_started(number, None);
+            }
         }
         cx.notify();
     }
@@ -5341,7 +5352,10 @@ impl Reader {
             todos_open: self.todos_open,
             todos: todo::summary(),
             issues_open: self.issues_open,
-            issues: issues::shared::summary(),
+            issues: {
+                self.follow_issues();
+                issues::shared::summary()
+            },
         }
     }
 

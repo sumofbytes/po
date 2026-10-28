@@ -108,6 +108,16 @@ impl Store {
                 true
             }
         };
+        // A made issue whose number is already a file on disk lost the race to another window
+        // that made one at the same moment. Theirs stays; this one takes the next number.
+        let made: Vec<u64> = self.tracker.dirty.created.iter().copied().collect();
+        for number in made {
+            if self.dir.join("issues").join(format!("{}.json", self.tracker.key(number))).exists() {
+                let floor = highest_on_disk(&self.dir, &self.tracker.config.prefix) + 1;
+                let new = self.tracker.renumber(number, floor);
+                log::warn!("{} was taken by another window; this issue is now {}", self.tracker.key(number), self.tracker.key(new));
+            }
+        }
         let dirty = std::mem::take(&mut self.tracker.dirty);
         let tracker = &self.tracker;
         let mut left = super::Dirty::default();
@@ -118,6 +128,9 @@ impl Store {
             let Some(issue) = tracker.issue(number) else { continue };
             if !note(write(&self.dir.join("issues").join(format!("{}.json", tracker.key(number))), &issue.to_json())) {
                 left.issues.insert(number);
+                if dirty.created.contains(&number) {
+                    left.created.insert(number);
+                }
             }
         }
         for number in dirty.removed {
@@ -140,6 +153,15 @@ impl Store {
         self.seen = fingerprint(&self.dir);
         first.map_or(Ok(()), Err)
     }
+}
+
+/// The highest issue number any file under `dir` holds, or 0.
+fn highest_on_disk(dir: &Path, prefix: &str) -> u64 {
+    json_files(&dir.join("issues"))
+        .iter()
+        .filter_map(|(stem, _)| stem.strip_prefix(prefix)?.strip_prefix('-')?.parse::<u64>().ok())
+        .max()
+        .unwrap_or(0)
 }
 
 /// Writes `value` to `path`, through a temp file, unless the file already holds it.
@@ -416,6 +438,31 @@ mod tests {
         assert_eq!(primary_root(&tree.0), tree.0);
         std::fs::remove_file(tree.0.join(".git")).unwrap();
         assert_eq!(primary_root(&tree.0), tree.0);
+    }
+
+    #[test]
+    fn an_issue_made_in_two_windows_at_once_takes_the_next_number_and_keeps_its_sub_issues() {
+        let repo = Temp::new("po");
+        let (mut a, mut b) = (Store::open(&repo.0), Store::open(&repo.0));
+        a.tracker.create("from a", 1);
+        a.flush().unwrap();
+        // b has not seen PO-1: it makes a parent and a sub-issue, and its PO-1 is taken.
+        let parent = b.tracker.create("parent from b", 2);
+        let child = b.tracker.create("child from b", 2);
+        b.tracker.update(child, 3, |issue| issue.parent = Some(parent));
+        b.flush().unwrap();
+        let all = Store::open(&repo.0);
+        let titles: Vec<_> = all.tracker.issues().map(|i| (i.number, i.title.as_str(), i.parent)).collect();
+        assert_eq!(titles, [(1, "from a", None), (2, "child from b", Some(3)), (3, "parent from b", None)]);
+        assert_eq!(all.tracker.config.next, 4);
+        assert!(all.problems.is_empty(), "{:?}", all.problems);
+        // Deleting an issue never written does not delete another window's file of that number.
+        let mut c = Store::open(&repo.0);
+        let n = c.tracker.create("gone", 4);
+        std::fs::write(repo.0.join(format!(".po/issues/PO-{n}.json")), r#"{"title":"theirs"}"#).unwrap();
+        c.tracker.remove(n, 5);
+        c.flush().unwrap();
+        assert!(repo.0.join(format!(".po/issues/PO-{n}.json")).exists());
     }
 
     #[test]

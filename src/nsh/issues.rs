@@ -50,6 +50,8 @@ pub struct State {
     pub milestone_name: Signal<String>,
     pub milestone_due: Signal<String>,
     pub board_width: Signal<f32>,
+    /// The delete button of the page on screen has been pressed once.
+    pub arm_delete: Signal<bool>,
     pub add_field: ElementRef,
 }
 
@@ -77,6 +79,7 @@ impl State {
             milestone_name: s(),
             milestone_due: s(),
             board_width: signal(0.),
+            arm_delete: signal(false),
             add_field: element_ref(),
         }
     }
@@ -116,7 +119,6 @@ impl State {
 
     /// Opens an issue's page, with its fields holding what it has.
     pub fn open_issue(self, number: u64) {
-        self.leave();
         let from = self.page.get_untracked();
         if !matches!(from, Page::Issue(_)) {
             self.back_to.set(from);
@@ -132,20 +134,11 @@ impl State {
         self.parent.set(parent);
         self.new_label.set(String::new());
         self.new_sub.set(String::new());
+        self.arm_delete.set(false);
         self.page.set(Page::Issue(number));
     }
 
-    /// Keeps what the page's fields hold, as the page is left.
-    pub fn leave(self) {
-        match self.page.get_untracked() {
-            Page::Issue(number) => self.commit_issue(number),
-            Page::Epic(id) => self.commit_epic(&id),
-            _ => {}
-        }
-    }
-
     pub fn go(self, page: Page) {
-        self.leave();
         self.page.set(page);
     }
 
@@ -155,26 +148,36 @@ impl State {
         self.go(to);
     }
 
-    /// Writes the issue page's fields to the issue. A due date or parent that can't be read is left as it was.
-    pub fn commit_issue(self, number: u64) {
-        let (title, description) = (self.title.get_untracked().trim().to_string(), self.description.get_untracked());
-        let due = parse_due(&self.due.get_untracked(), today());
-        let parent_text = self.parent.get_untracked();
-        let parent = self.read(|data| if parent_text.trim().is_empty() { Some(None) } else { data.tracker.parse_key(&parent_text).filter(|p| data.tracker.issue(*p).is_some()).map(Some) });
-        shared::change(|tracker, now| {
-            tracker.update(number, now, |issue| {
-                if !title.is_empty() {
-                    issue.title = title;
-                }
-                issue.description = description;
-                if let Some(due) = due {
-                    issue.due = due;
-                }
-                if let Some(parent) = parent {
-                    issue.parent = parent;
-                }
-            });
-        });
+    // The fields of an issue's page are saved as they change, each one alone, so that closing the
+    // page loses nothing, and a field the user has not touched is never written over what an
+    // agent or git changed meanwhile. A title, due date or parent that can't be read yet is
+    // skipped until it can.
+
+    pub fn save_title(self, number: u64) {
+        let title = self.title.get_untracked().trim().to_string();
+        if !title.is_empty() {
+            shared::change(|tracker, now| tracker.update(number, now, |issue| issue.title = title));
+        }
+    }
+
+    pub fn save_description(self, number: u64) {
+        let description = self.description.get_untracked();
+        shared::change(|tracker, now| tracker.update(number, now, |issue| issue.description = description));
+    }
+
+    pub fn save_due(self, number: u64) {
+        if let Some(due) = parse_due(&self.due.get_untracked(), today()) {
+            shared::change(|tracker, now| tracker.update(number, now, |issue| issue.due = due));
+        }
+    }
+
+    /// Empty clears the parent; a key of an issue there is sets it. Anything else waits.
+    pub fn save_parent(self, number: u64) {
+        let text = self.parent.get_untracked();
+        let parent = self.read(|data| if text.trim().is_empty() { Some(None) } else { data.tracker.parse_key(&text).filter(|p| data.tracker.issue(*p).is_some()).map(Some) });
+        if let Some(parent) = parent {
+            shared::change(|tracker, now| tracker.update(number, now, |issue| issue.parent = parent));
+        }
     }
 
     pub fn set_status(self, number: u64, status: Status) {
@@ -195,10 +198,14 @@ impl State {
         }
     }
 
+    /// Deletes an issue, from its own page, on the second press: the first arms the button.
     pub fn delete(self, number: u64) {
+        if !self.arm_delete.get_untracked() {
+            return self.arm_delete.set(true);
+        }
+        self.arm_delete.set(false);
         if self.page.get_untracked() == Page::Issue(number) {
-            self.back_to.set(Page::List);
-            self.page.set(self.back_to.get_untracked());
+            self.back();
         }
         shared::change(|tracker, now| tracker.remove(number, now));
     }
@@ -325,23 +332,31 @@ pub fn icon_chip(name: IconName, tint: AdaptiveColor, label: impl Into<String>, 
 
 /// A line of text, filling its row, that reports Enter.
 pub fn line_input(id: &str, value: Signal<String>, placeholder: &'static str, on_submit: impl Fn() + 'static) -> nsh_base::Input {
-    nsh_core::element::input()
-        .test_id(id)
-        .value(move || value.get())
-        .placeholder(placeholder)
-        .placeholder_color(Colors::one(Colors::muted()))
-        .selection_color(Colors::one(Colors::caret()))
-        .text_color(Colors::foreground())
-        .auto_correct(false)
-        .submit_behavior(nsh_core::element::SubmitBehavior::Submit)
-        .on_change(move |text: &str| value.set(text.to_string()))
-        .on_submit(move |_: &str| on_submit())
-        .flex_1()
-        .min_w(Points(0.))
+    super::text_input(id, value, placeholder, on_submit).min_w(Points(0.))
 }
 
-/// Several lines of text, growing to a height, where Enter makes a new line.
-pub fn text_area(id: &str, value: Signal<String>, placeholder: &'static str) -> View {
+/// A button that deletes on the second press: the first changes its label to ask.
+pub fn delete_button(state: State, label: &'static str, on_press: impl Fn() + 'static) -> View {
+    view()
+        .role(AccessibilityRole::Button)
+        .label(label)
+        .flex_none()
+        .px(rems(0.5))
+        .py(rems(0.25))
+        .rounded(Colors::radius())
+        .cursor_pointer()
+        .hover(|s| s.bg(Colors::hover()))
+        .on_press(on_press)
+        .child(
+            text(move || if state.arm_delete.get() { "Press again to delete".to_string() } else { "Delete".to_string() })
+                .text_size(text_sm())
+                .text_color(move || if state.arm_delete.get() { Colors::danger()() } else { Colors::muted()() }),
+        )
+}
+
+/// Several lines of text, growing to a height, where Enter makes a new line. `on_change` hears
+/// every edit and is to set `value`.
+pub fn text_area(id: &str, value: Signal<String>, placeholder: &'static str, on_change: impl Fn(&str) + 'static) -> View {
     view()
         .px(rems(0.625))
         .py(rems(0.5))
@@ -360,7 +375,7 @@ pub fn text_area(id: &str, value: Signal<String>, placeholder: &'static str) -> 
                 .text_color(Colors::foreground())
                 .auto_correct(false)
                 .multiline(true)
-                .on_change(move |text: &str| value.set(text.to_string()))
+                .on_change(move |text: &str| on_change(text))
                 .flex_1()
                 .min_w(Points(0.))
                 .max_h(rems(24.)),
@@ -605,7 +620,6 @@ pub fn issue_row(state: State, number: u64) -> View {
         .child((progress.all > 0).then(|| text(format!("{}/{}", progress.done, progress.all)).flex_none().text_size(text_xs()).text_color(Colors::muted())))
         .child(issue.labels.iter().map(|label| text(format!("#{label}")).flex_none().text_size(text_xs()).text_color(Colors::muted())).collect::<Vec<_>>())
         .child(text(due.map(|(due, today)| due_label(due, today)).unwrap_or_default()).flex_none().text_size(text_xs()).text_color(move || due_tint))
-        .child(on_hover(icon_button(IconName::Close, rems(0.75), "Delete issue", move || state.delete(number))))
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -751,7 +765,7 @@ fn issue_body(state: State, number: u64) -> AnyElement {
                 icon_chip(IconName::Signal, priority_tint(p), p.name(), move || priority == p, move || { shared::change(|t, now| t.update(number, now, |i| i.priority = p)); })
             })
             .collect();
-        let (labels, epics, milestones, children, links, subs) = state.read(|data| {
+        let (labels, epics, milestones, links, subs) = state.read(|data| {
             let labels: Vec<View> = data
                 .tracker
                 .config
@@ -822,9 +836,8 @@ fn issue_body(state: State, number: u64) -> AnyElement {
                     view().flex_row().items_center().gap(rems(0.375)).child(icon(name, rems(0.75), Colors::muted())).child(text(label).text_size(text_xs()).text_color(Colors::muted()))
                 })
                 .collect();
-            (labels, epics, milestones, children, links, subs)
+            (labels, epics, milestones, links, subs)
         });
-        let _ = children;
         view()
             .gap(rems(0.75))
             .child(property("Status", statuses))
@@ -847,14 +860,26 @@ fn issue_body(state: State, number: u64) -> AnyElement {
                     .gap(rems(0.5))
                     .child(icon_button(IconName::ChevronLeft, rems(0.875), "Back (Esc)", move || state.back()))
                     .child(text(key).flex_1().text_size(text_sm()).text_color(Colors::muted()))
-                    .child(super::button("Work on this", true, move || { state.leave(); send(Cmd::WorkOnIssue(number)) }))
-                    .child(icon_button(IconName::Close, rems(0.875), "Delete issue", move || state.delete(number))),
+                    .child(super::button("Work on this", true, move || send(Cmd::WorkOnIssue(number))))
+                    .child(delete_button(state, "Delete issue", move || state.delete(number))),
             )
-            .child(boxed(IconName::Pencil, line_input("issue-title", state.title, "Title", move || state.commit_issue(number)), None))
-            .child(text_area("issue-description", state.description, "Description (markdown)"))
+            .child(boxed(IconName::Pencil, line_input("issue-title", state.title, "Title", move || state.save_title(number)).on_change(move |text: &str| {
+                state.title.set(text.to_string());
+                state.save_title(number);
+            }), None))
+            .child(text_area("issue-description", state.description, "Description (markdown)", move |text| {
+                state.description.set(text.to_string());
+                state.save_description(number);
+            }))
             .child(dynamic(sections))
-            .child(property("Due", vec![view().flex_1().child(boxed(IconName::Calendar, line_input("issue-due", state.due, DUE_HINT, move || state.commit_issue(number)), Some(due_hint(state.due))))]))
-            .child(property("Sub-issue of", vec![boxed(IconName::CornerDownRight, line_input("issue-parent", state.parent, "Key, e.g. PO-3 (empty for none)", move || state.commit_issue(number)), None)]))
+            .child(property("Due", vec![view().flex_1().child(boxed(IconName::Calendar, line_input("issue-due", state.due, DUE_HINT, move || state.save_due(number)).on_change(move |text: &str| {
+                state.due.set(text.to_string());
+                state.save_due(number);
+            }), Some(due_hint(state.due))))]))
+            .child(property("Sub-issue of", vec![boxed(IconName::CornerDownRight, line_input("issue-parent", state.parent, "Key, e.g. PO-3 (empty for none)", move || state.save_parent(number)).on_change(move |text: &str| {
+                state.parent.set(text.to_string());
+                state.save_parent(number);
+            }), None)]))
             .child(property("Add label", vec![boxed(IconName::Tag, line_input("issue-label", state.new_label, "New label", move || {
                 let name = state.new_label.get_untracked().trim().to_string();
                 if !name.is_empty() {
@@ -955,11 +980,28 @@ mod tests {
         app.submit("id:issue-sub").unwrap();
         app.settle();
         assert_eq!(issue(2).parent, Some(1));
+        // Fields are saved as they are typed: nothing waits for Back.
+        assert_eq!((issue(1).title.as_str(), issue(1).description.as_str()), ("Fix the login", "Users can't sign in."));
+        // An agent adds a note while the page is open; going back with the fields untouched
+        // since keeps it.
+        shared::change(|tracker, now| tracker.update(1, now, |issue| issue.description.push_str(" Agent: found the cause.")));
         app.press("role:button[Back (Esc)]").unwrap();
         app.settle();
         let first = issue(1);
-        assert_eq!((first.title.as_str(), first.description.as_str(), first.labels.as_slice()), ("Fix the login", "Users can't sign in.", ["bug".to_string()].as_slice()));
+        assert_eq!((first.title.as_str(), first.description.as_str(), first.labels.as_slice()), ("Fix the login", "Users can't sign in. Agent: found the cause.", ["bug".to_string()].as_slice()));
         assert!(app.shows("PG-1") && app.shows("0/1"), "the parent counts its sub-issue");
+
+        // Deleting takes two presses, and goes back to the list.
+        app.press("id:issue-2").unwrap();
+        app.settle();
+        app.press("role:button[Delete issue]").unwrap();
+        app.settle();
+        assert!(shared::watch().borrow().tracker.issue(2).is_some());
+        assert!(app.shows("Press again to delete"));
+        app.press("role:button[Delete issue]").unwrap();
+        app.settle();
+        assert!(shared::watch().borrow().tracker.issue(2).is_none());
+        assert!(app.shows("Fix the login") && !app.shows("Press again to delete"), "back at the list");
 
         // Filtering by words narrows the list.
         app.type_text("id:issue-search", "nothing like it").unwrap();

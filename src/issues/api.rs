@@ -275,6 +275,31 @@ impl Link {
     }
 }
 
+/// Refuses an epic that doesn't exist, or a milestone that isn't in the issue's epic (the one
+/// being set, else the one it has). The tracker would quietly drop either, and the caller would
+/// think the issue was filed where it asked.
+fn check_refs(tracker: &Tracker, current: Option<&Issue>, edit: &Edit) -> Result<(), String> {
+    if let Some(Some(id)) = &edit.epic
+        && tracker.epic(id).is_none()
+    {
+        return Err(format!("no epic `{id}`; epic.list has them"));
+    }
+    if let Some(Some(milestone)) = &edit.milestone {
+        let epic = match &edit.epic {
+            Some(epic) => epic.clone(),
+            None => current.and_then(|issue| issue.epic.clone()),
+        };
+        let found = epic.as_deref().and_then(|id| tracker.epic(id)).is_some_and(|epic| epic.milestone(milestone).is_some());
+        if !found {
+            return Err(match epic {
+                Some(epic) => format!("no milestone `{milestone}` in epic `{epic}`"),
+                None => "`milestone` needs an `epic` to be in".to_string(),
+            });
+        }
+    }
+    Ok(())
+}
+
 /// Runs `op` with `args` on `tracker`. Anything it changes is noted in the tracker for the store
 /// to write.
 pub fn run(op: Op, args: &Value, tracker: &mut Tracker, now: u64, today: Date) -> Result<Value, String> {
@@ -313,6 +338,7 @@ pub fn run(op: Op, args: &Value, tracker: &mut Tracker, now: u64, today: Date) -
         }
         Op::IssueCreate => {
             let edit = Edit::read(tracker, args, today)?;
+            check_refs(tracker, None, &edit)?;
             let title = edit.title.clone().filter(|title| !title.is_empty()).ok_or("issue.create needs a `title`")?;
             let number = tracker.create(&title, now);
             // A new issue to be worked is a todo unless it says otherwise.
@@ -324,6 +350,7 @@ pub fn run(op: Op, args: &Value, tracker: &mut Tracker, now: u64, today: Date) -
         Op::IssueUpdate => {
             let number = issue_number(tracker, args, "issue")?;
             let edit = Edit::read(tracker, args, today)?;
+            check_refs(tracker, tracker.issue(number), &edit)?;
             if let Some(Some(parent)) = edit.parent
                 && tracker.would_loop(number, parent)
             {
@@ -465,6 +492,24 @@ mod tests {
             assert!(error.contains(wanted), "{args}: {error}");
         }
         assert!(t.dirty.is_empty(), "nothing was written");
+        // An epic or milestone that isn't there is said, not dropped; and nothing is made.
+        run_on(&mut t, Op::EpicCreate, json!({ "name": "Launch", "add_milestone": "Beta" })).unwrap();
+        t.dirty = Default::default();
+        let before = t.issues().count();
+        for (args, wanted) in [
+            (json!({ "title": "x", "epic": "lauch" }), "no epic"),
+            (json!({ "title": "x", "milestone": "beta" }), "needs an `epic`"),
+            (json!({ "title": "x", "epic": "launch", "milestone": "gamma" }), "no milestone"),
+        ] {
+            let error = run_on(&mut t, Op::IssueCreate, args.clone()).unwrap_err();
+            assert!(error.contains(wanted), "{args}: {error}");
+        }
+        assert_eq!(t.issues().count(), before);
+        assert!(run_on(&mut t, Op::IssueUpdate, json!({ "issue": "PO-1", "milestone": "beta" })).unwrap_err().contains("needs an `epic`"));
+        run_on(&mut t, Op::IssueUpdate, json!({ "issue": "PO-1", "epic": "launch", "milestone": "beta" })).unwrap();
+        // With the epic already set, a milestone of it alone is enough.
+        assert!(run_on(&mut t, Op::IssueUpdate, json!({ "issue": "PO-1", "milestone": "beta" })).is_ok());
+        t.dirty = Default::default();
         assert!(run_on(&mut t, Op::IssueCreate, json!({ "status": "done" })).unwrap_err().contains("needs a `title`"));
     }
 

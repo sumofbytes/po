@@ -84,12 +84,23 @@ pub fn set_project(project: &Path) {
 pub fn change<R>(f: impl FnOnce(&mut Tracker, u64) -> R) -> Option<R> {
     let mut guard = lock();
     let store = guard.as_mut()?;
+    let out = apply(store, f);
+    publish(store);
+    Some(out)
+}
+
+/// Runs `f` on the store's issues and saves them. Files changed underneath since they were read
+/// (another window, git) are read first, so a number another window has just used is not handed
+/// out again.
+fn apply<R>(store: &mut Store, f: impl FnOnce(&mut Tracker, u64) -> R) -> R {
+    if store.tracker.dirty.is_empty() && store.changed_on_disk() {
+        store.reload();
+    }
     let out = f(&mut store.tracker, crate::now_ms());
     if let Err(error) = store.flush() {
         log::warn!("saving {}: {error}", store.dir().display());
     }
-    publish(store);
-    Some(out)
+    out
 }
 
 /// Changes the issues of the repo `root` belongs to with `f`. The repo on screen is changed
@@ -100,20 +111,12 @@ pub fn change_repo<R>(root: &Path, f: impl FnOnce(&mut Tracker, u64) -> R) -> R 
     {
         let mut guard = lock();
         if let Some(store) = guard.as_mut().filter(|store| store.root() == primary) {
-            let out = f(&mut store.tracker, crate::now_ms());
-            if let Err(error) = store.flush() {
-                log::warn!("saving {}: {error}", store.dir().display());
-            }
+            let out = apply(store, f);
             publish(store);
             return out;
         }
     }
-    let mut store = Store::open(root);
-    let out = f(&mut store.tracker, crate::now_ms());
-    if let Err(error) = store.flush() {
-        log::warn!("saving {}: {error}", store.dir().display());
-    }
-    out
+    apply(&mut Store::open(root), f)
 }
 
 /// How many issues are open, and how many of those are late, for the sidebar's row.
@@ -124,8 +127,7 @@ pub fn summary() -> (usize, usize) {
 
 /// Moves the issues linked to `branch` to Done: the branch was merged.
 pub fn branch_merged(project: &Path, branch: &str) {
-    set_project(project);
-    change(|tracker, now| {
+    change_repo(project, |tracker, now| {
         let linked: Vec<u64> = tracker.issues().filter(|issue| issue.status.is_open() && issue.links.iter().any(|link| matches!(link, super::Link::Branch(name) if name == branch))).map(|issue| issue.number).collect();
         for number in linked {
             tracker.update(number, now, |issue| issue.status = super::Status::Done);
@@ -169,6 +171,24 @@ mod tests {
     use super::testing::{Repo, turn};
     use super::*;
     use crate::issues::{Link, Status};
+
+    #[test]
+    fn a_change_first_reads_what_another_window_wrote() {
+        let _turn = turn();
+        let repo = Repo::new("shared-c");
+        set_project(&repo.0);
+        change(|t, now| t.create("mine", now)).unwrap();
+        let prefix = VIEW.borrow().tracker.config.prefix.clone();
+        // Another window made PO-5 and has not been heard from yet.
+        std::fs::write(repo.0.join(format!(".po/issues/{prefix}-5.json")), r#"{"title":"theirs"}"#).unwrap();
+        assert_eq!(change(|t, now| t.create("next", now)), Some(6));
+        let view = VIEW.borrow().clone();
+        assert_eq!(view.tracker.issues().map(|i| i.title.as_str()).collect::<Vec<_>>(), ["mine", "theirs", "next"]);
+        // Changing a repo that is not the one shown works on its own copy.
+        let other = Repo::new("shared-d");
+        assert_eq!(change_repo(&other.0, |t, now| t.create("elsewhere", now)), 1);
+        assert_eq!(VIEW.borrow().tracker.issues().count(), 3);
+    }
 
     #[test]
     fn changes_are_saved_and_followed_and_a_merged_branch_finishes_its_issues() {

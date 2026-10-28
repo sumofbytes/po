@@ -2,7 +2,7 @@
 //! milestones and issues. Drawn with [`crate::nsh::issues`]'s pieces and state.
 use nsh_core::prelude::*;
 
-use super::issues::{State, Page, boxed, caption, chip, due_hint, issue_row, line_input, text_area};
+use super::issues::{State, Page, boxed, caption, chip, delete_button, due_hint, issue_row, line_input, text_area};
 use super::{Colors, icon, icon_button, rems, text_sm, text_xs};
 use crate::issues::shared;
 use crate::issues::{EpicStatus, Progress};
@@ -14,7 +14,6 @@ const DUE_HINT: &str = "Due: fri, nov 2, 2026-12-01…";
 impl State {
     /// Opens an epic's page, with its fields holding what it has.
     pub fn open_epic(self, id: &str) {
-        self.leave();
         let from = self.page.get_untracked();
         if !matches!(from, Page::Epic(_)) {
             self.back_to.set(from);
@@ -25,25 +24,39 @@ impl State {
         self.epic_target.set(target);
         self.milestone_name.set(String::new());
         self.milestone_due.set(String::new());
+        self.arm_delete.set(false);
         self.page.set(Page::Epic(id.to_string()));
     }
 
-    /// Writes the epic page's fields to the epic. A date that can't be read is left as it was.
-    pub fn commit_epic(self, id: &str) {
+    // As for an issue's page, each field is saved alone as it changes.
+
+    fn save_epic_name(self, id: &str) {
         let name = self.epic_name.get_untracked().trim().to_string();
+        if !name.is_empty() {
+            shared::change(|tracker, now| tracker.update_epic(id, now, |epic| epic.name = name));
+        }
+    }
+
+    fn save_epic_description(self, id: &str) {
         let description = self.epic_description.get_untracked();
-        let target = parse_due(&self.epic_target.get_untracked(), today());
-        shared::change(|tracker, now| {
-            tracker.update_epic(id, now, |epic| {
-                if !name.is_empty() {
-                    epic.name = name;
-                }
-                epic.description = description;
-                if let Some(target) = target {
-                    epic.target = target;
-                }
-            });
-        });
+        shared::change(|tracker, now| tracker.update_epic(id, now, |epic| epic.description = description));
+    }
+
+    fn save_epic_target(self, id: &str) {
+        if let Some(target) = parse_due(&self.epic_target.get_untracked(), today()) {
+            shared::change(|tracker, now| tracker.update_epic(id, now, |epic| epic.target = target));
+        }
+    }
+
+    /// Deletes an epic on the second press, as an issue is.
+    fn delete_epic(self, id: &str) {
+        if !self.arm_delete.get_untracked() {
+            return self.arm_delete.set(true);
+        }
+        self.arm_delete.set(false);
+        self.back_to.set(Page::Epics);
+        self.back();
+        shared::change(|tracker, now| tracker.remove_epic(id, now));
     }
 
     fn add_epic(self) {
@@ -203,7 +216,7 @@ fn epic_body(state: State, id: String) -> AnyElement {
             },
         )
     };
-    let (back_id, delete_id, add_id, ms_id, label_id) = (id.clone(), id.clone(), id.clone(), id.clone(), id.clone());
+    let (delete_id, add_id, ms_id) = (id.clone(), id.clone(), id.clone());
     let add_milestone = move || {
         let name = state.milestone_name.get_untracked().trim().to_string();
         let Some(due) = parse_due(&state.milestone_due.get_untracked(), today()) else { return };
@@ -215,7 +228,6 @@ fn epic_body(state: State, id: String) -> AnyElement {
         state.milestone_due.set(String::new());
     };
     let add_milestone_due = add_milestone.clone();
-    let _ = (back_id, label_id);
     scroll().flex_shrink(1.).child(
         view()
             .gap(rems(0.75))
@@ -228,23 +240,37 @@ fn epic_body(state: State, id: String) -> AnyElement {
                     .gap(rems(0.5))
                     .child(icon_button(IconName::ChevronLeft, rems(0.875), "Back (Esc)", move || state.back()))
                     .child(text(id.clone()).flex_1().text_size(text_sm()).text_color(Colors::muted()))
-                    .child(icon_button(IconName::Close, rems(0.875), "Delete epic", move || {
-                        state.back_to.set(Page::Epics);
-                        state.page.set(Page::Epics);
-                        shared::change(|t, n| t.remove_epic(&delete_id, n));
-                    })),
+                    .child(delete_button(state, "Delete epic", move || state.delete_epic(&delete_id))),
             )
             .child(boxed(IconName::Pencil, line_input("epic-name", state.epic_name, "Name", {
                 let id = id.clone();
-                move || state.commit_epic(&id)
+                move || state.save_epic_name(&id)
+            }).on_change({
+                let id = id.clone();
+                move |text: &str| {
+                    state.epic_name.set(text.to_string());
+                    state.save_epic_name(&id);
+                }
             }), None))
-            .child(text_area("epic-description", state.epic_description, "Description (markdown)"))
+            .child(text_area("epic-description", state.epic_description, "Description (markdown)", {
+                let id = id.clone();
+                move |text| {
+                    state.epic_description.set(text.to_string());
+                    state.save_epic_description(&id);
+                }
+            }))
             .child(view().flex_row().items_center().gap(rems(0.75)).child(view().w(rems(5.5)).flex_none().child(caption("Status"))).child(dynamic(statuses)))
             .child(
                 view().flex_row().items_center().gap(rems(0.75)).child(view().w(rems(5.5)).flex_none().child(caption("Target"))).child(
                     view().flex_1().child(boxed(IconName::Calendar, line_input("epic-target", state.epic_target, DUE_HINT, {
                         let id = id.clone();
-                        move || state.commit_epic(&id)
+                        move || state.save_epic_target(&id)
+                    }).on_change({
+                        let id = id.clone();
+                        move |text: &str| {
+                            state.epic_target.set(text.to_string());
+                            state.save_epic_target(&id);
+                        }
                     }), Some(due_hint(state.epic_target)))),
                 ),
             )
