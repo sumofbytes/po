@@ -76,6 +76,21 @@ checkout's issues.
 | `issue.update` `{issue, …the same, add_labels, remove_labels, note, link}` | `update_issue` | Orchestrate |
 | `epic.create` `{name, description, status, lead, start, target, add_milestone}` | `create_epic` | Orchestrate |
 | `epic.update` `{epic, …the same, remove_milestone}` | `update_epic` | Orchestrate |
+| `issue.delete` `{issue}` | `delete_issue` | Orchestrate |
+| `epic.delete` `{epic}` | `delete_epic` | Orchestrate |
+| `label.list` | `list_labels` | Viewer |
+| `label.define` `{name, color}`, `label.remove` `{name}` | `define_label`, `remove_label` | Orchestrate |
+| `issue.import_todos` `{force}` | `import_todos` | Orchestrate |
+| `issue.show` `{view, issue, epic, scope, text, label, filter_epic, priority, late, group}` | `show_issues` | Orchestrate |
+| `issue.work` `{issue, agent, notify}` | `work_on_issue` | Global, from a thread |
+
+`issue.update` also takes `unlink`, the form of `link`, to take a link off. `issue.show` puts the
+issues page on screen for the project that is showing, at a view, an issue or an epic, with a
+filter and grouping; it is the one command that moves the user's screen. `issue.work` is the
+"Work on this" button for an agent: a thread in a worktree of its own (as `thread.create_isolated`
+makes), the issue moved to In Progress and its branch linked once the worktree is up. Merging that
+worktree, which the user confirms, moves the issue to Done. Everything the UI does to issues can be
+done through these commands; a drag on the board is `issue.update` with a new `status`.
 
 An issue is named by its key (`PO-12`, or just `12`). In `issue.update` a field left out is left
 alone, and `null` clears an assignee, parent, epic, milestone, due date or estimate. `note` is

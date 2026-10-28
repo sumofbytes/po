@@ -12,13 +12,41 @@ pub enum Op {
     IssueGet,
     IssueCreate,
     IssueUpdate,
+    IssueDelete,
+    /// Starts a thread on an issue in a worktree of its own. Run by the window, not [`run`].
+    IssueWork,
+    /// Puts the issues page on screen, at a view, an issue or an epic, with a filter. Run by the
+    /// window, not [`run`].
+    IssueShow,
+    /// Brings the todo list in as issues.
+    ImportTodos,
     EpicList,
     EpicCreate,
     EpicUpdate,
+    EpicDelete,
+    LabelList,
+    LabelDefine,
+    LabelRemove,
 }
 
 impl Op {
-    pub const ALL: [Op; 7] = [Op::IssueList, Op::IssueGet, Op::IssueCreate, Op::IssueUpdate, Op::EpicList, Op::EpicCreate, Op::EpicUpdate];
+    pub const ALL: [Op; 15] = [
+        Op::IssueList,
+        Op::IssueGet,
+        Op::IssueCreate,
+        Op::IssueUpdate,
+        Op::IssueDelete,
+        Op::IssueWork,
+        Op::IssueShow,
+        Op::ImportTodos,
+        Op::EpicList,
+        Op::EpicCreate,
+        Op::EpicUpdate,
+        Op::EpicDelete,
+        Op::LabelList,
+        Op::LabelDefine,
+        Op::LabelRemove,
+    ];
 
     pub fn name(self) -> &'static str {
         match self {
@@ -26,9 +54,17 @@ impl Op {
             Op::IssueGet => "issue.get",
             Op::IssueCreate => "issue.create",
             Op::IssueUpdate => "issue.update",
+            Op::IssueDelete => "issue.delete",
+            Op::IssueWork => "issue.work",
+            Op::IssueShow => "issue.show",
+            Op::ImportTodos => "issue.import_todos",
             Op::EpicList => "epic.list",
             Op::EpicCreate => "epic.create",
             Op::EpicUpdate => "epic.update",
+            Op::EpicDelete => "epic.delete",
+            Op::LabelList => "label.list",
+            Op::LabelDefine => "label.define",
+            Op::LabelRemove => "label.remove",
         }
     }
 
@@ -36,8 +72,20 @@ impl Op {
         Self::ALL.into_iter().find(|op| op.name() == name)
     }
 
+    /// Whether it changes anything, on disk or on screen.
     pub fn writes(self) -> bool {
-        matches!(self, Op::IssueCreate | Op::IssueUpdate | Op::EpicCreate | Op::EpicUpdate)
+        !matches!(self, Op::IssueList | Op::IssueGet | Op::EpicList | Op::LabelList)
+    }
+
+    /// Whether it starts a thread, which only an agent that is itself a thread may do, and which
+    /// takes the reach `thread.create_isolated` does.
+    pub fn starts_thread(self) -> bool {
+        self == Op::IssueWork
+    }
+
+    /// Whether the window has to run it, for it touches threads or the screen.
+    pub fn needs_window(self) -> bool {
+        matches!(self, Op::IssueWork | Op::IssueShow)
     }
 }
 
@@ -176,6 +224,7 @@ struct Edit {
     due: Option<Option<Date>>,
     estimate: Option<Option<u32>>,
     link: Option<Link>,
+    unlink: Option<Link>,
 }
 
 impl Edit {
@@ -194,6 +243,10 @@ impl Edit {
             Value::Null => None,
             link => Some(Link::from_json_value(link).ok_or("`link` is {\"thread\": session}, {\"branch\": name} or {\"pr\": number}")?),
         };
+        let unlink = match &args["unlink"] {
+            Value::Null => None,
+            link => Some(Link::from_json_value(link).ok_or("`unlink` is {\"thread\": session}, {\"branch\": name} or {\"pr\": number}")?),
+        };
         Ok(Self {
             title: string(args, "title")?.map(|t| limited(t.trim().to_string(), "title", MAX_TITLE)).transpose()?,
             description: string(args, "description")?.map(|t| limited(t, "description", MAX_TEXT)).transpose()?,
@@ -210,6 +263,7 @@ impl Edit {
             due: when(args, "due", today)?,
             estimate,
             link,
+            unlink,
         })
     }
 
@@ -264,6 +318,9 @@ impl Edit {
             {
                 issue.links.push(link);
             }
+            if let Some(link) = self.unlink {
+                issue.links.retain(|l| *l != link);
+            }
         });
     }
 }
@@ -298,6 +355,68 @@ fn check_refs(tracker: &Tracker, current: Option<&Issue>, edit: &Edit) -> Result
         }
     }
     Ok(())
+}
+
+/// What `issue.show` asks of the page: a view, an issue or an epic, and a filter and grouping.
+pub fn show_nav(tracker: &Tracker, args: &Value) -> Result<super::shared::Nav, String> {
+    use super::shared::{Nav, Target};
+    let issue = string(args, "issue")?;
+    let epic = string(args, "epic")?;
+    let view = string(args, "view")?;
+    let target = match (&issue, &epic, view.as_deref()) {
+        (Some(_), Some(_), _) => return Err("`issue` and `epic` name different pages; give one".into()),
+        (Some(_), None, _) => Target::Issue(issue_number(tracker, args, "issue")?),
+        (None, Some(id), _) if tracker.epic(id).is_some() => Target::Epic(id.clone()),
+        (None, Some(id), _) => return Err(format!("no epic `{id}`; epic.list has them")),
+        (None, None, None | Some("list")) => Target::List,
+        (None, None, Some("board")) => Target::Board,
+        (None, None, Some("epics")) => Target::Epics,
+        (None, None, Some(other)) => return Err(format!("`{other}` is not a view; list, board or epics")),
+    };
+    let asked = ["scope", "text", "label", "filter_epic", "priority", "late"].iter().any(|key| args.get(*key).is_some_and(|v| !v.is_null()));
+    let filter = if asked {
+        Some(Filter {
+            scope: match string(args, "scope")?.as_deref() {
+                None | Some("open") => Scope::Open,
+                Some("all") => Scope::All,
+                Some("closed") => Scope::Closed,
+                Some(other) => return Err(format!("`{other}` is not a scope; open, closed or all")),
+            },
+            text: string(args, "text")?.unwrap_or_default(),
+            label: string(args, "label")?,
+            epic: string(args, "filter_epic")?,
+            priority: string(args, "priority")?.map(|p| priority(&p)).transpose()?,
+            late: args["late"].as_bool().unwrap_or(false),
+        })
+    } else {
+        None
+    };
+    let group = match string(args, "group")?.as_deref() {
+        None => None,
+        Some("status") => Some(Group::Status),
+        Some("priority") => Some(Group::Priority),
+        Some("epic") => Some(Group::Epic),
+        Some("none") => Some(Group::None),
+        Some(other) => return Err(format!("`{other}` is not a grouping; status, priority, epic or none")),
+    };
+    Ok(Nav { target, filter, group })
+}
+
+/// The first message of a thread started on an issue.
+pub fn work_prompt(tracker: &Tracker, number: u64) -> Option<String> {
+    let issue = tracker.issue(number)?;
+    let key = tracker.key(number);
+    let mut prompt = format!("Work on {key}: {}", issue.title);
+    if !issue.description.trim().is_empty() {
+        prompt.push_str(&format!("\n\n{}", issue.description.trim()));
+    }
+    prompt.push_str(&format!("\n\nThis issue is tracked in .po/issues/{key}.json. Keep its status up to date as you go."));
+    Some(prompt)
+}
+
+/// The issue `issue.work` names.
+pub fn work_issue(tracker: &Tracker, args: &Value) -> Result<u64, String> {
+    issue_number(tracker, args, "issue")
 }
 
 /// Runs `op` with `args` on `tracker`. Anything it changes is noted in the tracker for the store
@@ -359,6 +478,58 @@ pub fn run(op: Op, args: &Value, tracker: &mut Tracker, now: u64, today: Date) -
             edit.apply(tracker, number, now, today);
             Ok(issue_json(tracker, tracker.issue(number).expect("checked above"), true))
         }
+        Op::IssueDelete => {
+            let number = issue_number(tracker, args, "issue")?;
+            let key = tracker.key(number);
+            let freed: Vec<String> = tracker.children(number).map(|child| tracker.key(child.number)).collect();
+            tracker.remove(number, now);
+            Ok(json!({ "deleted": key, "sub_issues_now_top_level": freed }))
+        }
+        Op::ImportTodos => {
+            if tracker.issues().next().is_some() && args["force"].as_bool() != Some(true) {
+                return Err("the project already has issues; pass `force` to import the todos anyway".into());
+            }
+            let made = super::import::from_tasks(&crate::todo::watch().borrow(), tracker, now);
+            Ok(json!({ "imported": made }))
+        }
+        Op::EpicDelete => {
+            let id = string(args, "epic")?.ok_or("needs `epic`, an epic's id")?;
+            if tracker.epic(&id).is_none() {
+                return Err(format!("no epic `{id}`; epic.list has them"));
+            }
+            let released = tracker.issues().filter(|issue| issue.epic.as_deref() == Some(&id)).count();
+            tracker.remove_epic(&id, now);
+            Ok(json!({ "deleted": id, "issues_released": released }))
+        }
+        Op::LabelList => {
+            let labels: Vec<Value> = tracker
+                .config
+                .labels
+                .iter()
+                .map(|label| json!({ "name": label.name, "color": label.color, "issues": tracker.issues().filter(|issue| issue.labels.contains(&label.name)).count() }))
+                .collect();
+            Ok(json!({ "labels": labels }))
+        }
+        Op::LabelDefine => {
+            let name = string(args, "name")?.map(|n| n.trim().to_string()).filter(|n| !n.is_empty()).ok_or("label.define needs a `name`")?;
+            let name = limited(name, "name", 100)?;
+            let color = string(args, "color")?.unwrap_or_default();
+            if !color.is_empty() && !(color.len() == 7 && color.starts_with('#') && color[1..].chars().all(|c| c.is_ascii_hexdigit())) {
+                return Err("`color` is #rrggbb, or empty for the default".into());
+            }
+            tracker.define_label(&name, &color);
+            Ok(json!({ "label": name, "color": color }))
+        }
+        Op::LabelRemove => {
+            let name = string(args, "name")?.map(|n| n.trim().to_string()).ok_or("label.remove needs a `name`")?;
+            let used = tracker.issues().filter(|issue| issue.labels.contains(&name)).count();
+            if used == 0 && !tracker.config.labels.iter().any(|label| label.name == name) {
+                return Err(format!("no label `{name}`; label.list has them"));
+            }
+            tracker.remove_label(&name, now);
+            Ok(json!({ "removed": name, "taken_off_issues": used }))
+        }
+        Op::IssueWork | Op::IssueShow => Err(format!("{} is run by the window", op.name())),
         Op::EpicList => Ok(json!({ "epics": tracker.epics().iter().map(|epic| epic_json(tracker, epic)).collect::<Vec<_>>() })),
         Op::EpicCreate => {
             let name = string(args, "name")?.map(|n| n.trim().to_string()).filter(|n| !n.is_empty()).ok_or("epic.create needs a `name`")?;
@@ -566,11 +737,90 @@ mod tests {
     }
 
     #[test]
-    fn op_names_round_trip_and_only_some_write() {
+    fn issues_and_epics_can_be_deleted_and_links_taken_off() {
+        let mut t = tracker();
+        run_on(&mut t, Op::EpicCreate, json!({ "name": "Launch" })).unwrap();
+        run_on(&mut t, Op::IssueCreate, json!({ "title": "parent", "epic": "launch", "link": { "pr": 7 } })).unwrap();
+        run_on(&mut t, Op::IssueCreate, json!({ "title": "child", "parent": "PO-1" })).unwrap();
+        let unlinked = run_on(&mut t, Op::IssueUpdate, json!({ "issue": "PO-1", "unlink": { "pr": 7 } })).unwrap();
+        assert_eq!(unlinked["links"], json!([]));
+        assert!(run_on(&mut t, Op::IssueUpdate, json!({ "issue": "PO-1", "unlink": { "pr": 1, "branch": "x" } })).is_err());
+        let epic = run_on(&mut t, Op::EpicDelete, json!({ "epic": "launch" })).unwrap();
+        assert_eq!((epic["deleted"].as_str(), epic["issues_released"].clone()), (Some("launch"), json!(1)));
+        assert_eq!(t.issue(1).unwrap().epic, None);
+        assert!(run_on(&mut t, Op::EpicDelete, json!({ "epic": "launch" })).unwrap_err().contains("no epic"));
+        let gone = run_on(&mut t, Op::IssueDelete, json!({ "issue": "PO-1" })).unwrap();
+        assert_eq!((gone["deleted"].as_str(), gone["sub_issues_now_top_level"].clone()), (Some("PO-1"), json!(["PO-2"])));
+        assert!(t.issue(1).is_none() && t.issue(2).unwrap().parent.is_none());
+        assert!(run_on(&mut t, Op::IssueDelete, json!({ "issue": "PO-1" })).unwrap_err().contains("no issue"));
+    }
+
+    #[test]
+    fn labels_are_listed_defined_recolored_and_removed() {
+        let mut t = tracker();
+        run_on(&mut t, Op::IssueCreate, json!({ "title": "a", "labels": ["bug"] })).unwrap();
+        assert!(run_on(&mut t, Op::LabelDefine, json!({ "name": "ui", "color": "red" })).unwrap_err().contains("#rrggbb"));
+        run_on(&mut t, Op::LabelDefine, json!({ "name": "ui", "color": "#3366ff" })).unwrap();
+        run_on(&mut t, Op::LabelDefine, json!({ "name": "bug", "color": "#e5484d" })).unwrap();
+        let labels = run_on(&mut t, Op::LabelList, json!({})).unwrap()["labels"].clone();
+        assert_eq!(labels, json!([{ "name": "bug", "color": "#e5484d", "issues": 1 }, { "name": "ui", "color": "#3366ff", "issues": 0 }]));
+        let removed = run_on(&mut t, Op::LabelRemove, json!({ "name": "bug" })).unwrap();
+        assert_eq!(removed["taken_off_issues"], 1);
+        assert!(t.issue(1).unwrap().labels.is_empty());
+        assert!(run_on(&mut t, Op::LabelRemove, json!({ "name": "bug" })).unwrap_err().contains("no label"));
+        assert!(run_on(&mut t, Op::LabelDefine, json!({})).is_err());
+    }
+
+    #[test]
+    fn the_todos_are_only_imported_into_an_empty_project_unless_forced() {
+        let mut t = tracker();
+        run_on(&mut t, Op::IssueCreate, json!({ "title": "a" })).unwrap();
+        assert!(run_on(&mut t, Op::ImportTodos, json!({})).unwrap_err().contains("force"));
+    }
+
+    #[test]
+    fn a_request_to_show_the_page_names_a_view_an_issue_or_an_epic_and_a_filter() {
+        use crate::issues::shared::Target;
+        let mut t = tracker();
+        run_on(&mut t, Op::EpicCreate, json!({ "name": "Launch" })).unwrap();
+        run_on(&mut t, Op::IssueCreate, json!({ "title": "a" })).unwrap();
+        let nav = |args: Value| show_nav(&t, &args);
+        assert_eq!(nav(json!({})).unwrap().target, Target::List);
+        assert_eq!(nav(json!({ "view": "board" })).unwrap().target, Target::Board);
+        assert_eq!(nav(json!({ "view": "epics" })).unwrap().target, Target::Epics);
+        assert_eq!(nav(json!({ "issue": "po-1" })).unwrap().target, Target::Issue(1));
+        assert_eq!(nav(json!({ "epic": "launch" })).unwrap().target, Target::Epic("launch".into()));
+        let shown = nav(json!({ "text": "login", "label": "bug", "scope": "all", "late": true, "group": "priority" })).unwrap();
+        let filter = shown.filter.unwrap();
+        assert_eq!((filter.text.as_str(), filter.label.as_deref(), filter.scope, filter.late), ("login", Some("bug"), Scope::All, true));
+        assert_eq!(shown.group, Some(Group::Priority));
+        assert!(nav(json!({})).unwrap().filter.is_none(), "no filter asked for leaves the page's own");
+        for (args, wanted) in [(json!({ "issue": "PO-9" }), "no issue"), (json!({ "epic": "nope" }), "no epic"), (json!({ "issue": "PO-1", "epic": "launch" }), "give one"), (json!({ "view": "map" }), "not a view"), (json!({ "group": "x" }), "not a grouping")] {
+            let error = nav(args.clone()).unwrap_err();
+            assert!(error.contains(wanted), "{args}: {error}");
+        }
+    }
+
+    #[test]
+    fn a_thread_on_an_issue_starts_from_its_title_and_description() {
+        let mut t = tracker();
+        run_on(&mut t, Op::IssueCreate, json!({ "title": "Fix login", "description": "It breaks." })).unwrap();
+        let prompt = work_prompt(&t, 1).unwrap();
+        assert!(prompt.starts_with("Work on PO-1: Fix login\n\nIt breaks."), "{prompt}");
+        assert!(prompt.contains(".po/issues/PO-1.json"));
+        assert_eq!(work_issue(&t, &json!({ "issue": "1" })), Ok(1));
+        assert!(work_issue(&t, &json!({ "issue": "PO-4" })).is_err());
+        assert!(run(Op::IssueWork, &json!({}), &mut t, 1, today()).unwrap_err().contains("run by the window"));
+        assert!(Op::IssueWork.starts_thread() && Op::IssueWork.needs_window() && Op::IssueShow.needs_window() && !Op::IssueShow.starts_thread());
+    }
+
+    #[test]
+    fn op_names_round_trip_and_only_the_reads_do_not_write() {
         for op in Op::ALL {
             assert_eq!(Op::from_name(op.name()), Some(op));
         }
-        assert_eq!(Op::ALL.iter().filter(|op| op.writes()).count(), 4);
-        assert_eq!(Op::from_name("issue.delete"), None);
+        let reads: Vec<_> = Op::ALL.iter().filter(|op| !op.writes()).map(|op| op.name()).collect();
+        assert_eq!(reads, ["issue.list", "issue.get", "epic.list", "label.list"]);
+        assert_eq!(Op::from_name("issue.destroy"), None);
     }
 }

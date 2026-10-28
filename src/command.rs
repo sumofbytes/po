@@ -423,7 +423,16 @@ impl Command {
             Self::ThreadCreate { .. } | Self::ThreadSend { .. } | Self::ThreadCancel { .. } | Self::ThreadClose { .. } | Self::ThreadWait { .. } | Self::ThreadAnswer { .. } => Scope::Orchestrate,
             Self::ThreadFind { .. } => Scope::Viewer,
             // Reading the issues is a viewer's; changing them takes the orchestrator's reach.
-            Self::Issues { op, .. } => if op.writes() { Scope::Orchestrate } else { Scope::Viewer },
+            // Starting a worktree thread is the reach `thread.create_isolated` has.
+            Self::Issues { op, .. } => {
+                if op.starts_thread() {
+                    Scope::Global
+                } else if op.writes() {
+                    Scope::Orchestrate
+                } else {
+                    Scope::Viewer
+                }
+            }
             Self::WindowInfo | Self::AuditList { .. } | Self::EventsSubscribe => Scope::Global,
             Self::ProjectOpen { .. } | Self::ProjectClose { .. } | Self::ProjectOffer { .. } | Self::ThreadCreateIsolated { .. } | Self::WorktreeMerge { .. } => Scope::Global,
         }
@@ -452,7 +461,7 @@ impl Command {
     /// Whether it acts as a parent (starts, steers or waits on a thread of the caller's own),
     /// which the user's connection, with no thread of its own, cannot.
     pub fn needs_parent(&self) -> bool {
-        matches!(self, Self::ThreadCreate { .. } | Self::ThreadCreateIsolated { .. } | Self::ThreadSend { .. } | Self::ThreadWait { .. })
+        matches!(self, Self::ThreadCreate { .. } | Self::ThreadCreateIsolated { .. } | Self::ThreadSend { .. } | Self::ThreadWait { .. }) || matches!(self, Self::Issues { op, .. } if op.starts_thread())
     }
 
     /// Whether running it changes something, as opposed to only reading. Reading another
@@ -779,11 +788,18 @@ mod tests {
         assert_eq!((get.name(), get.family(), get.scope(), get.writes()), ("issue.get", Family::Project, Scope::Viewer, false));
         let update = Command::parse(&json!({ "command": "issue.update", "issue": "PO-1", "status": "done" })).unwrap();
         assert_eq!((update.name(), update.scope(), update.writes()), ("issue.update", Scope::Orchestrate, true));
+        // Starting a thread on an issue takes the reach of an isolated thread, and a thread of one's own.
+        let work = Command::parse(&json!({ "command": "issue.work", "issue": "PO-1" })).unwrap();
+        assert_eq!((work.scope(), work.needs_parent()), (Scope::Global, true));
+        let delete = Command::parse(&json!({ "command": "issue.delete", "issue": "PO-1" })).unwrap();
+        assert_eq!((delete.scope(), delete.writes()), (Scope::Orchestrate, true));
+        assert_eq!(Command::parse(&json!({ "command": "label.list" })).unwrap().scope(), Scope::Viewer);
         let viewer = Grant::default();
         let orchestrator = Grant { scope: Scope::Orchestrate, ..Grant::default() };
+        assert!(!orchestrator.allows(&work, Relation::Own) && Grant { scope: Scope::Global, ..Grant::default() }.allows(&work, Relation::Own));
         assert!(viewer.allows(&get, Relation::Own) && !viewer.allows(&update, Relation::Own));
         assert!(orchestrator.allows(&update, Relation::Own) && Grant::user().allows(&update, Relation::NoThread));
-        assert!(Command::parse(&json!({ "command": "issue.delete" })).is_err());
+        assert!(Command::parse(&json!({ "command": "issue.destroy" })).is_err());
         assert_eq!(Command::parse(&json!({ "command": "project.changes", "path": "a.rs" })), Ok(Command::ProjectChanges { project: None, path: Some("a.rs".into()) }));
         assert_eq!(Command::parse(&json!({ "command": "project.changes", "project": 2 })), Ok(Command::ProjectChanges { project: Some(2), path: None }));
         assert_eq!(Command::parse(&json!({ "command": "thread.get", "thread": 7 })), Ok(Command::ThreadGet { thread: Some(7) }));

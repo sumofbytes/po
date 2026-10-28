@@ -503,6 +503,7 @@ fn tools() -> Vec<(&'static str, &'static str, &'static str, Value, Scope)> {
                     "due": json!({ "type": ["string", "null"] }),
                     "estimate": json!({ "type": ["integer", "null"] }),
                     "link": json!({ "type": "object", "description": "One of {thread: session}, {branch: name}, {pr: number}." }),
+                    "unlink": json!({ "type": "object", "description": "A link to take off, in the same form." }),
                 },
                 "required": ["issue"],
             }),
@@ -554,6 +555,96 @@ fn tools() -> Vec<(&'static str, &'static str, &'static str, Value, Scope)> {
                 "required": ["epic"],
             }),
             Scope::Orchestrate,
+        ),
+        (
+            "delete_issue",
+            "issue.delete",
+            "Delete an issue for good: its file goes, and its sub-issues become top-level. To drop \
+             an issue and keep the record, set its status to canceled instead.",
+            json!({ "type": "object", "properties": { "issue": string("The issue's key, such as PO-12.") }, "required": ["issue"] }),
+            Scope::Orchestrate,
+        ),
+        (
+            "delete_epic",
+            "epic.delete",
+            "Delete an epic and its milestones. Its issues stay, out of any epic.",
+            json!({ "type": "object", "properties": { "epic": string("The epic's id, as list_epics says.") }, "required": ["epic"] }),
+            Scope::Orchestrate,
+        ),
+        (
+            "list_labels",
+            "label.list",
+            "The project's labels, with their colors and how many issues have each.",
+            json!({ "type": "object", "properties": {} }),
+            Scope::Viewer,
+        ),
+        (
+            "define_label",
+            "label.define",
+            "Add a label, or change the color of the one by that name.",
+            json!({
+                "type": "object",
+                "properties": { "name": string("The label's name."), "color": string("#rrggbb, or leave out for the default.") },
+                "required": ["name"],
+            }),
+            Scope::Orchestrate,
+        ),
+        (
+            "remove_label",
+            "label.remove",
+            "Delete a label, and take it off the issues that have it.",
+            json!({ "type": "object", "properties": { "name": string("The label's name.") }, "required": ["name"] }),
+            Scope::Orchestrate,
+        ),
+        (
+            "import_todos",
+            "issue.import_todos",
+            "Bring the user's todo list in as issues: nesting, due dates and checked-off tasks come \
+             along, and a header becomes the label of the tasks under it. The todo list is left as \
+             it is. Refused if the project already has issues, unless `force` is set.",
+            json!({ "type": "object", "properties": { "force": json!({ "type": "boolean" }) } }),
+            Scope::Orchestrate,
+        ),
+        (
+            "show_issues",
+            "issue.show",
+            "Put the issues page in front of the user, for the project on screen: the list, the \
+             board or the epics, or one issue or epic, with a filter and grouping. The user \
+             decides what they look at, so use it to show what you are talking about.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "view": string("list (default), board or epics."),
+                    "issue": string("An issue's key: open its page."),
+                    "epic": string("An epic's id: open its page."),
+                    "scope": string("open (default), closed or all."),
+                    "text": string("Words to filter the list by."),
+                    "label": string("A label's name."),
+                    "filter_epic": string("An epic's id to list the issues of."),
+                    "priority": string("urgent, high, medium or low."),
+                    "late": json!({ "type": "boolean" }),
+                    "group": string("status, priority, epic or none."),
+                },
+            }),
+            Scope::Orchestrate,
+        ),
+        (
+            "work_on_issue",
+            "issue.work",
+            "Start a thread on an issue in a git worktree of its own, as create_isolated_thread \
+             does, with the issue as its first message. The issue moves to in-progress and the \
+             worktree's branch is linked to it once the worktree is up; merging that worktree \
+             moves it to done.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "issue": string("The issue's key, such as PO-12."),
+                    "agent": string("The agent's id, as list_agents says."),
+                    "notify": string("done (default), all or never."),
+                },
+                "required": ["issue"],
+            }),
+            Scope::Global,
         ),
         (
             "offer_project",

@@ -119,6 +119,43 @@ pub fn change_repo<R>(root: &Path, f: impl FnOnce(&mut Tracker, u64) -> R) -> R 
     apply(&mut Store::open(root), f)
 }
 
+/// Where the issues page is to go.
+#[derive(Clone, PartialEq, Debug)]
+pub enum Target {
+    List,
+    Board,
+    Epics,
+    Issue(u64),
+    Epic(String),
+}
+
+/// A request to put the issues page somewhere, with a filter and a grouping if it names them.
+#[derive(Clone, PartialEq, Debug)]
+pub struct Nav {
+    pub target: Target,
+    pub filter: Option<super::query::Filter>,
+    pub group: Option<super::query::Group>,
+}
+
+static PENDING: Mutex<Option<Nav>> = Mutex::new(None);
+static NUDGE: LazyLock<watch::Sender<u64>> = LazyLock::new(|| watch::Sender::new(0));
+
+/// Asks the page to go to `nav`, as soon as it is on screen.
+pub fn navigate(nav: Nav) {
+    *PENDING.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(nav);
+    NUDGE.send_modify(|count| *count += 1);
+}
+
+/// The request waiting for the page, if there is one; the page takes it once.
+pub fn take_nav() -> Option<Nav> {
+    PENDING.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take()
+}
+
+/// Ticks whenever [`navigate`] is called.
+pub fn nav_watch() -> watch::Receiver<u64> {
+    NUDGE.subscribe()
+}
+
 /// How many issues are open, and how many of those are late, for the sidebar's row.
 pub fn summary() -> (usize, usize) {
     let view = VIEW.borrow();

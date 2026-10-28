@@ -210,6 +210,31 @@ impl State {
         shared::change(|tracker, now| tracker.remove(number, now));
     }
 
+    /// Goes where an agent asked the page to go, with the filter and grouping it named.
+    fn go_to(self, nav: shared::Nav) {
+        if let Some(filter) = nav.filter {
+            self.search.set(filter.text.clone());
+            self.filter.set(filter);
+        }
+        if let Some(group) = nav.group {
+            self.group.set(group);
+        }
+        self.back_to.set(Page::List);
+        match nav.target {
+            shared::Target::List => self.page.set(Page::List),
+            shared::Target::Board => self.page.set(Page::Board),
+            shared::Target::Epics => self.page.set(Page::Epics),
+            shared::Target::Issue(number) => {
+                self.page.set(Page::List);
+                self.open_issue(number);
+            }
+            shared::Target::Epic(id) => {
+                self.page.set(Page::Epics);
+                self.open_epic(&id);
+            }
+        }
+    }
+
     /// Esc steps back, else empties the search, else closes the page.
     fn escape(self) {
         if !matches!(self.page.get_untracked(), Page::List | Page::Board | Page::Epics) {
@@ -233,6 +258,18 @@ pub fn Issues() -> impl IntoElement {
         while changes.changed().await.is_ok() {
             let now = changes.borrow_and_update().clone();
             state.data.set(now);
+        }
+    });
+    // An agent may have asked for the page to open somewhere, or may ask while it is open.
+    if let Some(nav) = shared::take_nav() {
+        state.go_to(nav);
+    }
+    spawn(async move {
+        let mut nudges = shared::nav_watch();
+        while nudges.changed().await.is_ok() {
+            if let Some(nav) = shared::take_nav() {
+                state.go_to(nav);
+            }
         }
     });
     on_key_with("escape", KeyOptions { when: nsh_core::keymap::When::Always, repeat: false }, move |_| state.escape());

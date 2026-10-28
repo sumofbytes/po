@@ -1205,7 +1205,7 @@ struct Reader {
     /// The project whose issues [`issues::shared`] holds, so it is only switched when this changes.
     issues_root: std::cell::RefCell<PathBuf>,
     /// An issue "Work on this" is making a worktree for, to link its branch once it exists.
-    issue_for_worktree: Option<u64>,
+    issue_for_worktree: Option<(PathBuf, u64)>,
     /// Progress or failure of the last attempt to open a PR.
     pr_status: Option<String>,
     opening: bool,
@@ -1986,8 +1986,8 @@ impl Reader {
 
     fn open_worktree(&mut self, wt: worktree::Worktree, agent: String, first: Option<(Outgoing, (u64, u64))>, window: &mut Window, cx: &mut Context<Self>) {
         log::info!("worktree: {} for {agent}", wt.spec.branch);
-        if let Some(number) = self.issue_for_worktree.take() {
-            self.issue_started(number, Some(wt.spec.branch.clone()));
+        if let Some((root, number)) = self.issue_for_worktree.take() {
+            Self::issue_started(&root, number, Some(wt.spec.branch.clone()));
         }
         let mut project = Self::build_project(wt.spec.path.clone(), None, vec![]);
         project.base = wt.spec.base.clone();
@@ -2539,6 +2539,8 @@ impl Reader {
         use command::Command;
         use serde_json::json;
         match command {
+            Command::Issues { op: issues::api::Op::IssueWork, args } => self.work_issue(id, &args, window, cx),
+            Command::Issues { op: issues::api::Op::IssueShow, args } => self.show_issues(id, &args, window, cx),
             Command::Issues { op, args } => self.run_issues(id, op, &args),
             Command::ProjectOpen { path: None, pr: Some(spec) } => {
                 // Reviewed from the checkout the caller is in, as the PR strip does.
@@ -2596,9 +2598,15 @@ impl Reader {
     /// The issue and epic commands, on the issues of the repo the caller works in (the project on
     /// screen for the user's own `po ctl`).
     fn run_issues(&self, id: u64, op: issues::api::Op, args: &serde_json::Value) -> command::Reply {
-        let root = self.own_project(id).and_then(|project| self.views().iter().find(|view| view.id == project).map(|view| view.project.root.clone())).unwrap_or_else(|| self.project.root.clone());
+        let root = self.issues_root_of(id);
         let today = todo::today();
         issues::shared::change_repo(&root, |tracker, now| issues::api::run(op, args, tracker, now, today))
+    }
+
+    /// The project the caller works in, whose issues its commands act on; the one on screen for
+    /// the user's own `po ctl`.
+    fn issues_root_of(&self, id: u64) -> PathBuf {
+        self.own_project(id).and_then(|project| self.views().iter().find(|view| view.id == project).map(|view| view.project.root.clone())).unwrap_or_else(|| self.project.root.clone())
     }
 
     /// `thread.create_isolated`: the worktree is made off the UI thread, then the thread starts
@@ -2607,6 +2615,27 @@ impl Reader {
         let command::Command::ThreadCreateIsolated { prompt, agent, options, notify } = command else {
             return Err("not a thread.create_isolated".into());
         };
+        self.create_isolated_for(id, prompt, agent, options, notify, None, window, cx)
+    }
+
+    /// `issue.work`: a thread in a worktree of its own on an issue, whose branch is linked to the
+    /// issue and which is moved to In Progress once the worktree is up.
+    fn work_issue(&mut self, id: u64, args: &serde_json::Value, window: &mut Window, cx: &mut Context<Self>) -> command::Reply {
+        let root = self.issues_root_of(id);
+        let (number, prompt, key) = issues::shared::change_repo(&root, |tracker, _| {
+            let number = issues::api::work_issue(tracker, args)?;
+            Ok::<_, String>((number, issues::api::work_prompt(tracker, number).ok_or("that issue is gone")?, tracker.key(number)))
+        })?;
+        let options = args["options"].as_object().map(|options| options.iter().filter_map(|(id, value)| value.as_str().map(|value| (id.clone(), value.to_string()))).collect()).unwrap_or_default();
+        let agent = args["agent"].as_str().map(String::from);
+        let notify = args["notify"].as_str().map(String::from);
+        let mut reply = self.create_isolated_for(id, prompt, agent, options, notify, Some((root, number)), window, cx)?;
+        reply["issue"] = serde_json::json!(key);
+        Ok(reply)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn create_isolated_for(&mut self, id: u64, prompt: String, agent: Option<String>, options: Vec<(String, String)>, notify: Option<String>, issue: Option<(PathBuf, u64)>, window: &mut Window, cx: &mut Context<Self>) -> command::Reply {
         let key = self.child_agent(id, agent)?;
         let project = self.project_of(id).ok_or("that thread is gone")?;
         if self.finishing || self.isolating {
@@ -2631,7 +2660,14 @@ impl Reader {
                     this.update(cx, |reader, cx| {
                         reader.isolating = false;
                         let told = match made {
-                            Ok(wt) => reader.start_isolated(id, wt, key, prompt, options, notify, window, cx),
+                            Ok(wt) => {
+                                let branch = wt.spec.branch.clone();
+                                let started = reader.start_isolated(id, wt, key, prompt, options, notify, window, cx);
+                                if let (Ok(_), Some((root, number))) = (&started, &issue) {
+                                    Self::issue_started(root, *number, Some(branch));
+                                }
+                                started
+                            }
                             Err(error) => Err(error),
                         };
                         let text = match told {
@@ -4684,16 +4720,7 @@ impl Reader {
     /// the issue to In Progress with the branch linked.
     fn work_on_issue(&mut self, number: u64, window: &mut Window, cx: &mut Context<Self>) {
         self.follow_issues();
-        let Some(prompt) = issues::shared::watch().borrow().tracker.issue(number).map(|issue| {
-            let tracker = issues::shared::watch().borrow().tracker.clone();
-            let key = tracker.key(number);
-            let mut prompt = format!("Work on {key}: {}", issue.title);
-            if !issue.description.trim().is_empty() {
-                prompt.push_str(&format!("\n\n{}", issue.description.trim()));
-            }
-            prompt.push_str(&format!("\n\nThis issue is tracked in .po/issues/{key}.json. Keep its status up to date as you go."));
-            prompt
-        }) else {
+        let Some(prompt) = issues::api::work_prompt(&issues::shared::watch().borrow().tracker, number) else {
             return;
         };
         // Another worktree is being made or merged, or there is no agent to start: nothing would
@@ -4704,7 +4731,8 @@ impl Reader {
         self.hide_issues(window, cx);
         self.new_blank_thread(window, cx);
         self.thread.isolate = true;
-        self.issue_for_worktree = Some(number);
+        let root = self.project.root.clone();
+        self.issue_for_worktree = Some((root.clone(), number));
         let out = Outgoing { text: prompt, origin: Origin::User, images: vec![] };
         self.start_thread(out, false, window, cx);
         // With a worktree being made, the issue waits for its branch. Without one the thread
@@ -4712,15 +4740,32 @@ impl Reader {
         if !self.finishing {
             self.issue_for_worktree = None;
             if !self.thread.blank {
-                self.issue_started(number, None);
+                Self::issue_started(&root, number, None);
             }
         }
         cx.notify();
     }
 
-    /// An issue's work has begun: In Progress, and the branch it is on.
-    fn issue_started(&mut self, number: u64, branch: Option<String>) {
-        issues::shared::change(|tracker, now| {
+    /// `issue.show`: puts the issues page on screen where the request says. Only for the project
+    /// on screen, since the page shows that one.
+    fn show_issues(&mut self, id: u64, args: &serde_json::Value, window: &mut Window, cx: &mut Context<Self>) -> command::Reply {
+        if self.project_of(id).is_some_and(|project| project != self.project_id) {
+            return Err("that project is not on screen; the issues page shows the one that is".into());
+        }
+        self.follow_issues();
+        let nav = issues::api::show_nav(&issues::shared::watch().borrow().tracker, args)?;
+        self.hide_todos(window, cx);
+        if !self.issues_open {
+            self.toggle_issues(window, cx);
+        }
+        issues::shared::navigate(nav);
+        Ok(serde_json::json!({ "shown": true }))
+    }
+
+    /// An issue's work has begun: In Progress, and the branch it is on. In the issues of the repo
+    /// `root` belongs to, which need not be the one on screen.
+    fn issue_started(root: &std::path::Path, number: u64, branch: Option<String>) {
+        issues::shared::change_repo(root, |tracker, now| {
             tracker.update(number, now, |issue| {
                 if issue.status.is_open() && issue.status != issues::Status::InReview {
                     issue.status = issues::Status::InProgress;
