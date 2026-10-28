@@ -6,7 +6,7 @@ use super::issues::{State, Page, boxed, caption, chip, delete_button, due_hint, 
 use super::{Colors, icon, icon_button, rems, text_sm, text_xs};
 use crate::issues::shared;
 use crate::issues::{EpicStatus, Progress};
-use crate::todo::{Date, due_label, parse_due, today};
+use crate::date::{Date, due_label, parse_due, today};
 use crate::ui::icon::IconName;
 
 const DUE_HINT: &str = "Due: fri, nov 2, 2026-12-01…";

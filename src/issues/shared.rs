@@ -9,7 +9,7 @@ use tokio::sync::watch;
 
 use super::store::{Store, primary_root};
 use super::{Config, Tracker};
-use crate::todo::today;
+use crate::date::today;
 
 /// What a screen sees of the repo's issues.
 #[derive(Clone, PartialEq, Debug)]

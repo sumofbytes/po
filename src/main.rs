@@ -19,7 +19,7 @@ mod schemes;
 mod settings;
 mod theme;
 mod state;
-mod todo;
+mod date;
 mod trace;
 mod ui;
 mod update;
@@ -1196,10 +1196,7 @@ struct Reader {
     chat_reset: std::cell::Cell<u64>,
     /// What [`nsh::chat::Snapshot::focus`] carries next.
     chat_focus: std::cell::Cell<u64>,
-    /// The todos page, shown in place of the conversation while `todos_open`; the sidebar has a row for it.
-    todos: Entity<nsh::overlay::Overlay>,
-    todos_open: bool,
-    /// The issues page, shown in the same place as the todos page, one at a time.
+    /// The issues page, shown in place of the conversation while `issues_open`; the sidebar has a row for it.
     issues: Entity<nsh::overlay::Overlay>,
     issues_open: bool,
     /// The project whose issues [`issues::shared`] holds, so it is only switched when this changes.
@@ -1303,7 +1300,6 @@ impl Reader {
         let (explorer_pane, explorer_theme) = nsh::mount(nsh_platform_gpui::Root::of::<nsh::explorer::Explorer>(), window, cx);
         let finder_window = cx.new(|cx| nsh::overlay::Overlay::new(560., 8., || nsh_platform_gpui::Root::of::<nsh::finder::Finder>(), &nsh::finder::HEIGHT, cx));
         let settings_window = cx.new(|cx| nsh::overlay::Overlay::new(680., 24., || nsh_platform_gpui::Root::of::<nsh::settings::Settings>(), &nsh::settings::HEIGHT, cx));
-        let todos = cx.new(|cx| nsh::overlay::Overlay::page(760., || nsh_platform_gpui::Root::of::<nsh::todos::Todos>(), &nsh::todos::HEIGHT, cx));
         let issues = cx.new(|cx| nsh::overlay::Overlay::page(1000., || nsh_platform_gpui::Root::of::<nsh::issues::Issues>(), &nsh::issues::HEIGHT, cx));
         let sidebars = cx.new(|_| SidebarsState::new(px(280.0), px(560.0)));
         let tree_cols = cx.new(|_| SidebarsState::new(px(TREE_WIDTH), px(0.0)));
@@ -1322,9 +1318,6 @@ impl Reader {
             }),
             cx.subscribe_in(&settings_window, window, |reader, _, event: &nsh::overlay::OverlayEvent, window, cx| match event {
                 nsh::overlay::OverlayEvent::Close => reader.hide_settings(window, cx),
-            }),
-            cx.subscribe_in(&todos, window, |reader, _, event: &nsh::overlay::OverlayEvent, window, cx| match event {
-                nsh::overlay::OverlayEvent::Close => reader.hide_todos(window, cx),
             }),
             cx.subscribe_in(&issues, window, |reader, _, event: &nsh::overlay::OverlayEvent, window, cx| match event {
                 nsh::overlay::OverlayEvent::Close => reader.hide_issues(window, cx),
@@ -1432,8 +1425,6 @@ impl Reader {
             chat_follow_soft: std::cell::Cell::new(0),
             chat_reset: std::cell::Cell::new(0),
             chat_focus: std::cell::Cell::new(0),
-            todos,
-            todos_open: false,
             issues,
             issues_open: false,
             issues_root: Default::default(),
@@ -1525,17 +1516,7 @@ impl Reader {
             })
             .detach();
         }
-        // The sidebar's count of todos follows the list, whoever changes it.
-        let mut todo_changes = todo::watch();
-        cx.spawn(async move |this, cx| {
-            while todo_changes.changed().await.is_ok() {
-                if this.update(cx, |_, cx| cx.notify()).is_err() {
-                    break;
-                }
-            }
-        })
-        .detach();
-        // So is its count of issues.
+        // The sidebar's count of issues follows them, whoever changes them.
         let mut issue_changes = issues::shared::watch();
         cx.spawn(async move |this, cx| {
             while issue_changes.changed().await.is_ok() {
@@ -2599,7 +2580,7 @@ impl Reader {
     /// screen for the user's own `po ctl`).
     fn run_issues(&self, id: u64, op: issues::api::Op, args: &serde_json::Value) -> command::Reply {
         let root = self.issues_root_of(id);
-        let today = todo::today();
+        let today = date::today();
         issues::shared::change_repo(&root, |tracker, now| issues::api::run(op, args, tracker, now, today))
     }
 
@@ -4689,7 +4670,6 @@ impl Reader {
         if self.issues_open {
             return self.hide_issues(window, cx);
         }
-        self.hide_todos(window, cx);
         self.follow_issues();
         self.issues_open = true;
         self.issues.update(cx, |issues, cx| issues.open(window, cx));
@@ -4754,7 +4734,6 @@ impl Reader {
         }
         self.follow_issues();
         let nav = issues::api::show_nav(&issues::shared::watch().borrow().tracker, args)?;
-        self.hide_todos(window, cx);
         if !self.issues_open {
             self.toggle_issues(window, cx);
         }
@@ -4778,27 +4757,6 @@ impl Reader {
                 }
             });
         });
-    }
-
-    fn toggle_todos(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.todos_open {
-            return self.hide_todos(window, cx);
-        }
-        self.hide_issues(window, cx);
-        self.todos_open = true;
-        self.todos.update(cx, |todos, cx| todos.open(window, cx));
-        cx.notify();
-    }
-
-    fn hide_todos(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.hide_issues(window, cx);
-        if !self.todos_open {
-            return;
-        }
-        self.todos_open = false;
-        self.todos.update(cx, |todos, _| todos.close());
-        self.focus.focus(window, cx);
-        cx.notify();
     }
 
     fn hide_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -5293,7 +5251,7 @@ impl Reader {
             controlled: self.grants.get(&thread.id).is_some_and(|grant| *grant != command::Grant::default()),
             day: None,
         };
-        let today = todo::today();
+        let today = date::today();
         // Filtering keeps a project whose name matches, with all its threads, and any project with a
         // thread that does. A thread waiting on the user is in Needs you instead.
         let project_hit = |view: &View<'_>| view.project.name().to_lowercase().contains(&query);
@@ -5349,7 +5307,7 @@ impl Reader {
                         recent
                             .into_iter()
                             .map(|t| {
-                                let day = match today.days_since(todo::Date::of_ms(t.active_at)) {
+                                let day = match today.days_since(date::Date::of_ms(t.active_at)) {
                                     ..=0 => "",
                                     1 => "Yesterday",
                                     2..=6 => "Previous 7 days",
@@ -5394,8 +5352,6 @@ impl Reader {
             suggestions,
             status: self.worktree_status.clone(),
             searching,
-            todos_open: self.todos_open,
-            todos: todo::summary(),
             issues_open: self.issues_open,
             issues: {
                 self.follow_issues();
@@ -5606,8 +5562,6 @@ impl Reader {
             Cmd::AddProject => self.pick_project(window, cx),
             Cmd::NewThread => self.new_blank_thread(window, cx),
             Cmd::OpenSettings => self.toggle_settings(window, cx),
-            Cmd::ToggleTodos => self.toggle_todos(window, cx),
-            Cmd::CloseTodos => self.hide_todos(window, cx),
             Cmd::ToggleIssues => self.toggle_issues(window, cx),
             Cmd::CloseIssues => self.hide_issues(window, cx),
             Cmd::WorkOnIssue(number) => self.work_on_issue(number, window, cx),
@@ -6208,8 +6162,6 @@ impl Render for Reader {
         let hidden = || div().size_full().into_any_element();
         let (middle, side) = if self.issues_open {
             (self.issues.clone().into_any_element(), hidden())
-        } else if self.todos_open {
-            (self.todos.clone().into_any_element(), hidden())
         } else if !side_open {
             // Only the conversation shows, and the viewer's button waits on the side it opens.
             let chat_lead = vec![Control::Sidebar(left_open), Control::Viewer(side_open)];
@@ -6230,7 +6182,7 @@ impl Render for Reader {
             controls(vec![], trail_all);
             (floating(self.chat_pane(vec![Control::Sidebar(left_open)], vec![], cx), cx), self.pane(cx))
         };
-        let right_open = side_open && !focus && !self.todos_open && !self.issues_open;
+        let right_open = side_open && !focus && !self.issues_open;
         div()
             .size_full()
             .flex()
@@ -6243,11 +6195,11 @@ impl Render for Reader {
             .on_scroll_wheel(cx.listener(|reader, _, _, _| reader.last_input = Instant::now()))
             .on_mouse_down(gpui::MouseButton::Left, cx.listener(|reader, _, _, _| reader.last_input = Instant::now()))
             .on_action(cx.listener(|reader, _: &ShowFinder, window, cx| {
-                reader.hide_todos(window, cx);
+                reader.hide_issues(window, cx);
                 reader.show_finder(window, cx)
             }))
             .on_action(cx.listener(|reader, _: &ShowSettings, window, cx| {
-                reader.hide_todos(window, cx);
+                reader.hide_issues(window, cx);
                 reader.toggle_settings(window, cx)
             }))
             .on_action(cx.listener(|reader, _: &CloseSettings, window, cx| reader.hide_settings(window, cx)))
@@ -6264,11 +6216,11 @@ impl Render for Reader {
             .on_action(cx.listener(|reader, _: &ToggleSplit, _, cx| reader.set_split(!reader.split, cx)))
             .on_action(cx.listener(|reader, _: &ToggleRendered, _, cx| reader.toggle_rendered(cx)))
             .on_action(cx.listener(|reader, _: &OpenProject, window, cx| {
-                reader.hide_todos(window, cx);
+                reader.hide_issues(window, cx);
                 reader.pick_project(window, cx)
             }))
             .on_action(cx.listener(|reader, _: &NewThread, window, cx| {
-                reader.hide_todos(window, cx);
+                reader.hide_issues(window, cx);
                 reader.new_blank_thread(window, cx);
             }))
             // macOS draws no titlebar of its own (see `main`): this strip clears the traffic lights

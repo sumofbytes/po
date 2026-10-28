@@ -105,8 +105,9 @@ can't be applied (an unknown key, a parent that would make a loop) changes nothi
   priority or epic, filtered by words, label, lateness and scope), board (drag a card across, or use
   its arrows), an issue's page (status, priority, labels, epic, milestone, due date, parent,
   sub-issues, description), and epics with milestones and progress. The add field takes
-  `Fix login !high #bug @epic`. **Todos** is the old checklist; an empty tracker offers to
-  import it.
+  `Fix login !high #bug @epic`. Issues are Po's only tracker: the old todo list is gone, and an
+  empty tracker offers to import `todos.json` (an old list is read, not changed). Things that
+  belong to no project go in whichever project is open.
 - **Work on this** (on an issue's page) starts a thread on the issue in a worktree of its own,
   moves the issue to In Progress and links the branch. Merging that worktree moves the issues
   linked to its branch to Done.

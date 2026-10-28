@@ -4,7 +4,7 @@ use serde_json::{Value, json};
 
 use super::query::{self, Filter, Group, Scope};
 use super::{Issue, Link, Priority, Status, Tracker};
-use crate::todo::{Date, parse_due};
+use crate::date::{Date, parse_due};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Op {
@@ -489,8 +489,11 @@ pub fn run(op: Op, args: &Value, tracker: &mut Tracker, now: u64, today: Date) -
             if tracker.issues().next().is_some() && args["force"].as_bool() != Some(true) {
                 return Err("the project already has issues; pass `force` to import the todos anyway".into());
             }
-            let made = super::import::from_tasks(&crate::todo::watch().borrow(), tracker, now);
-            Ok(json!({ "imported": made }))
+            let old = super::import::read(&super::import::file());
+            if old.is_empty() {
+                return Err("there is no old todo list to import".into());
+            }
+            Ok(json!({ "imported": super::import::from_items(&old, tracker, now) }))
         }
         Op::EpicDelete => {
             let id = string(args, "epic")?.ok_or("needs `epic`, an epic's id")?;

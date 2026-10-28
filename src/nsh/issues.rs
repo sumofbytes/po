@@ -9,7 +9,7 @@ use super::{Colors, icon, icon_button, on_hover, rems, text_sm, text_xs};
 use crate::issues::query::{self, Filter, Group, parse_quick};
 use crate::issues::shared::{self, View as Data};
 use crate::issues::{Issue, Link, Priority, Status};
-use crate::todo::{due_label, parse_due, today};
+use crate::date::{due_label, parse_due, today};
 use crate::ui::icon::IconName;
 
 /// The page fills the space it is given, so the height it measures is not used.
@@ -125,7 +125,7 @@ impl State {
         }
         let (title, description, due, parent) = self.read(|data| {
             data.tracker.issue(number).map_or_else(Default::default, |issue| {
-                (issue.title.clone(), issue.description.clone(), issue.due.map(crate::todo::Date::iso).unwrap_or_default(), issue.parent.map(|p| data.tracker.key(p)).unwrap_or_default())
+                (issue.title.clone(), issue.description.clone(), issue.due.map(crate::date::Date::iso).unwrap_or_default(), issue.parent.map(|p| data.tracker.key(p)).unwrap_or_default())
             })
         });
         self.title.set(title);
@@ -604,7 +604,7 @@ fn rows(state: State) -> View {
     }
     if out.is_empty() {
         let message = if empty { "No issues yet. Add one above." } else { "Nothing matches." };
-        let tasks = crate::todo::watch().borrow().items.len();
+        let old_todos = empty && crate::issues::import::available();
         out.push(
             view()
                 .py(rems(1.5))
@@ -612,9 +612,9 @@ fn rows(state: State) -> View {
                 .items_center()
                 .child(text(message).text_size(text_sm()).text_color(Colors::muted()))
                 // The old checklist can come along, once, into an empty tracker.
-                .child((empty && tasks > 0).then(|| {
-                    super::button("Import my tasks", false, || {
-                        shared::change(|tracker, now| crate::issues::import::from_tasks(&crate::todo::watch().borrow(), tracker, now));
+                .child(old_todos.then(|| {
+                    super::button("Import my old todos", false, || {
+                        shared::change(|tracker, now| crate::issues::import::from_items(&crate::issues::import::read(&crate::issues::import::file()), tracker, now));
                     })
                 })),
         );

@@ -1,4 +1,4 @@
-//! The left side: New, Search, Todos, what needs the user, and every project with its threads.
+//! The left side: New, Search, Issues, what needs the user, and every project with its threads.
 //! [`Snapshot`] is what [`crate::Reader`] publishes (already filtered by the search); the screen
 //! only draws it, and what is pressed goes back as a [`Cmd`].
 use std::sync::LazyLock;
@@ -81,9 +81,6 @@ pub struct Snapshot {
     /// What a worktree is doing, under the Projects header.
     pub status: Option<String>,
     pub searching: bool,
-    pub todos_open: bool,
-    /// How many todos are left, and how many of those are late.
-    pub todos: (usize, usize),
     pub issues_open: bool,
     /// How many of the project's issues are open, and how many of those are late.
     pub issues: (usize, usize),
@@ -386,20 +383,6 @@ pub fn Sidebar() -> impl IntoElement {
     };
 
     let glass = move || state.with(|s| s.glass);
-    let todos = move || {
-        let (left, late) = state.with(|s| s.todos);
-        let open = state.with(|s| s.todos_open);
-        let count = (left > 0).then(|| {
-            view()
-                .min_w(rems(1.25))
-                .flex_none()
-                .items_center()
-                .justify_center()
-                .tooltip(super::tooltip(if late > 0 { "Some are late" } else { "Todos left" }))
-                .child(text(left.to_string()).text_size(text_sm()).text_color(if late > 0 { Colors::danger()() } else { Colors::muted()() }))
-        });
-        action(IconName::SquareCheck, "Todos", "Todos", Some(open), || send(Cmd::ToggleTodos)).child(count)
-    };
     let issues = move || {
         let (left, late) = state.with(|s| s.issues);
         let open = state.with(|s| s.issues_open);
@@ -469,8 +452,7 @@ pub fn Sidebar() -> impl IntoElement {
                 .pt(space::actions_top())
                 .child(action(IconName::Plus, "New", "New thread (Ctrl+N)", None, || send(Cmd::NewThread)))
                 .child(dynamic(search))
-                .child(dynamic(issues))
-                .child(dynamic(todos)),
+                .child(dynamic(issues)),
         )
         .child(dynamic(waiting))
         .child(
@@ -539,13 +521,12 @@ mod tests {
                 Project { id: 2, name: "other".into(), branch: None, active: false, collapsed: true, closable: true, threads: vec![], fold: None },
             ],
             suggestions: vec![Suggestion { id: 7, text: "“Fix the build” wants to open /tmp/x".into(), yes: "Open" }],
-            todos: (3, 1),
             issues_open: false,
             issues: (2, 0),
             ..Snapshot::default()
         });
         let mut app = start();
-        for shown in ["Needs you · 1", "Fix the build", "Port the sidebar", "Old idea", "3 more", "po", "nsh", "Projects", "Open", "Not now", "3"] {
+        for shown in ["Needs you · 1", "Fix the build", "Port the sidebar", "Old idea", "3 more", "po", "nsh", "Projects", "Open", "Not now", "Issues", "2"] {
             assert!(app.shows(shown), "{shown} is on screen: {:?}", app.screen().texts());
         }
         let mut next = |app: &mut Headless| {
@@ -567,8 +548,6 @@ mod tests {
         assert_eq!(next(&mut app), [Cmd::NewThread]);
         app.press("text:Settings").unwrap();
         assert_eq!(next(&mut app), [Cmd::OpenSettings]);
-        app.press("text:Todos").unwrap();
-        assert_eq!(next(&mut app), [Cmd::ToggleTodos]);
         app.press("text:Issues").unwrap();
         assert_eq!(next(&mut app), [Cmd::ToggleIssues]);
         app.press("label:Add a project: open a folder (Ctrl+Shift+O)").unwrap();

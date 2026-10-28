@@ -1,7 +1,7 @@
 //! What a screen asks of a [`Tracker`]: which issues to show, how they group, and what a line
 //! typed into the add field means.
 use super::{Issue, Priority, Status, Tracker};
-use crate::todo::Date;
+use crate::date::Date;
 
 /// Which issues the list shows by how far along they are.
 #[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]

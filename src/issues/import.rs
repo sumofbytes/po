@@ -1,12 +1,60 @@
-//! Brings the old checklist (`todos.json`, the Todos page) in as issues.
-use super::{Status, Tracker};
-use crate::todo::Todos;
+//! Brings the old todo list in as issues. Po used to keep one checklist for all projects in
+//! `todos.json`; issues replaced it, and this reads what it left behind.
+use std::path::{Path, PathBuf};
 
-/// Adds every task of `tasks` to `tracker` as an issue: still to do is Todo, checked off is Done,
-/// the due date is kept, a task under another is its sub-issue, and a header becomes the label of
-/// the tasks under it. Returns how many issues were made. The checklist itself is left as it is.
-pub fn from_tasks(tasks: &Todos, tracker: &mut Tracker, now: u64) -> usize {
-    fn add(items: &[crate::todo::Item], parent: Option<u64>, label: Option<&str>, tracker: &mut Tracker, now: u64) -> usize {
+use serde_json::Value;
+
+use super::{Status, Tracker};
+use crate::date::Date;
+
+/// One line of the old list: a todo, or a header that grouped the todos under it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Item {
+    pub text: String,
+    pub header: bool,
+    pub done: bool,
+    pub due: Option<Date>,
+    pub children: Vec<Item>,
+}
+
+/// Where the old list was kept.
+pub fn file() -> PathBuf {
+    crate::config::data_dir().join("todos.json")
+}
+
+fn items(list: &Value, top: bool) -> Vec<Item> {
+    list.as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| {
+            Some(Item {
+                text: entry["text"].as_str()?.to_string(),
+                // Headers were only ever at the top.
+                header: top && entry["header"].as_bool().unwrap_or(false),
+                done: entry["done"].as_bool().unwrap_or(false),
+                due: entry["due"].as_str().and_then(Date::from_iso),
+                children: items(&entry["children"], false),
+            })
+        })
+        .collect()
+}
+
+/// The old list in `path`; nothing if there is none or it can't be read.
+pub fn read(path: &Path) -> Vec<Item> {
+    let Ok(text) = std::fs::read_to_string(path) else { return vec![] };
+    serde_json::from_str::<Value>(&text).map(|value| items(&value["items"], true)).unwrap_or_default()
+}
+
+/// Whether the old list has anything to bring in.
+pub fn available() -> bool {
+    !read(&file()).is_empty()
+}
+
+/// Adds every todo of `old` to `tracker` as an issue: still to do is Todo, checked off is Done,
+/// the due date is kept, a todo under another is its sub-issue, and a header becomes the label of
+/// the todos under it. Returns how many issues were made. The old list is left as it is.
+pub fn from_items(old: &[Item], tracker: &mut Tracker, now: u64) -> usize {
+    fn add(items: &[Item], parent: Option<u64>, label: Option<&str>, tracker: &mut Tracker, now: u64) -> usize {
         let mut made = 0;
         for item in items {
             if item.header {
@@ -30,31 +78,47 @@ pub fn from_tasks(tasks: &Todos, tracker: &mut Tracker, now: u64) -> usize {
         }
         made
     }
-    add(&tasks.items, None, None, tracker, now)
+    add(old, None, None, tracker, now)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::issues::Config;
-    use crate::todo::Date;
+
+    const OLD: &str = r#"{ "version": 1, "items": [
+        { "text": "Work", "header": true, "done": false, "due": null, "folded": false, "children": [
+            { "text": "Ship", "header": false, "done": false, "due": "2026-11-02", "folded": false, "children": [
+                { "text": "Tag", "header": false, "done": true, "due": null, "folded": false, "children": [] } ] } ] },
+        { "text": "Milk", "header": false, "done": false, "due": null, "folded": false, "children": [] } ] }"#;
 
     #[test]
-    fn tasks_become_issues_with_their_nesting_headers_dates_and_checks() {
-        let mut tasks = Todos::default();
-        let due = Date::from_ymd(2026, 11, 2).unwrap();
-        let work = tasks.add(None, "Work".into(), None, true);
-        let ship = tasks.add(Some(work), "Ship".into(), Some(due), false);
-        let tag = tasks.add(Some(ship), "Tag".into(), None, false);
-        tasks.add(None, "Milk".into(), None, false);
-        tasks.toggle(tag);
+    fn the_old_file_becomes_issues_with_its_nesting_headers_dates_and_checks() {
+        let dir = std::env::temp_dir().join(format!("po-import-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("todos.json");
+        std::fs::write(&path, OLD).unwrap();
+        let old = read(&path);
+        assert_eq!(old.len(), 2);
         let mut tracker = Tracker::new(Config::new("PO".into()));
-        assert_eq!(from_tasks(&tasks, &mut tracker, 5), 3);
+        assert_eq!(from_items(&old, &mut tracker, 5), 3);
         let by_title = |title: &str| tracker.issues().find(|issue| issue.title == title).cloned().unwrap();
         let (ship, tag, milk) = (by_title("Ship"), by_title("Tag"), by_title("Milk"));
+        let due = Date::from_ymd(2026, 11, 2).unwrap();
         assert_eq!((ship.status, ship.due, ship.labels.as_slice()), (Status::Todo, Some(due), ["Work".to_string()].as_slice()));
         assert_eq!((tag.parent, tag.status), (Some(ship.number), Status::Done));
         assert_eq!((milk.parent, milk.labels.len()), (None, 0));
         assert_eq!(tracker.config.labels.len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_missing_or_broken_file_has_nothing_to_bring_in() {
+        let dir = std::env::temp_dir().join(format!("po-import-none-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(read(&dir.join("todos.json")).is_empty());
+        std::fs::write(dir.join("todos.json"), "{ not json").unwrap();
+        assert!(read(&dir.join("todos.json")).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

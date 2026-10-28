@@ -42,8 +42,17 @@ cargo run --release
 
 Screens are moving to [NSH](https://nsh.dev): each runs as an NSH app (a Rust
 root, no JavaScript) inside Po's window through `nsh-platform-gpui`, which draws
-with the same GPUI. The Todos window is the first (`src/nsh/`); its headless
-test runs with `cargo test`.
+with the same GPUI. The chat, sidebar, settings and issues page are drawn this
+way (`src/nsh/`); their headless tests run with `cargo test`.
+
+## Issues
+
+Each project has a lightweight issue and epic tracker, kept as JSON files in the
+repo's `.po/` folder so it travels with git. Open it from **Issues** in the
+sidebar: a list, a board, issue pages and epics with milestones. Agents can read
+and keep the same issues through Po's control tools. The format and the commands
+are in [`docs/issues-format.md`](docs/issues-format.md). The old todo list is
+gone; an empty tracker offers to import `todos.json`.
 
 ## Usage
 

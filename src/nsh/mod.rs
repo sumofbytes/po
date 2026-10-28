@@ -16,7 +16,6 @@ pub mod source;
 pub mod sidebar;
 pub mod strip;
 pub mod tabs;
-pub mod todos;
 
 use base64::Engine as _;
 use gpui::{AppContext as _, Entity, Hsla, Subscription, Window};
