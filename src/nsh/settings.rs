@@ -6,7 +6,7 @@ use nsh_core::prelude::*;
 
 use super::bus::{Cmd, send};
 use super::overlay::{self, Height};
-use super::{Colors, button, field, field_height, rems, text_sm, text_xs};
+use super::{Colors, body, button, caption, field, field_height, scale, text_xs};
 use crate::schemes;
 use crate::settings::{AgentForm, Form};
 
@@ -30,16 +30,7 @@ struct Agent {
 }
 
 fn section(title: &'static str) -> View {
-    view().pt(rems(0.75)).pb(rems(0.25)).child(text(title.to_uppercase()).text_size(text_xs()).text_color(Colors::muted()))
-}
-
-/// A cell of a row of fields: `width` wide, or what the others leave. A fixed one doesn't also grow,
-/// since a growing view's basis would stay at nothing and the width be ignored.
-fn sized(width: Option<f32>) -> View {
-    match width {
-        Some(width) => view().w(Points(width)).flex_none(),
-        None => view().w(Points(0.)).flex_1(),
-    }
+    view().pt(scale::s3()).pb(scale::s1()).child(caption(title.to_uppercase()))
 }
 
 /// A label on the left and its control on the right.
@@ -47,14 +38,14 @@ fn row(label: &'static str, hint: &'static str, control: impl IntoElement) -> Vi
     view()
         .flex_row()
         .items_center()
-        .gap(rems(0.75))
-        .py(rems(0.25))
+        .gap(scale::s3())
+        .py(scale::s1())
         .child(
             view()
                 .w(Points(200.))
                 .flex_none()
-                .child(text(label).text_size(text_sm()).text_color(Colors::foreground()))
-                .child(text(hint).text_size(text_xs()).text_color(Colors::muted())),
+                .child(body(label))
+                .child(caption(hint)),
         )
         .child(view().flex_1().child(control))
 }
@@ -66,8 +57,8 @@ fn toggle(on: Signal<bool>, labels: (&'static str, &'static str), highlight: boo
         .role(AccessibilityRole::Button)
         .label(shown)
         .flex_none()
-        .px(rems(0.75))
-        .py(rems(0.375))
+        .px(scale::s3())
+        .py(scale::s1_5())
         .rounded(Colors::radius())
         .border_1()
         .border_color(Colors::input_border())
@@ -75,7 +66,7 @@ fn toggle(on: Signal<bool>, labels: (&'static str, &'static str), highlight: boo
         .hover(|s| s.bg(Colors::hover()))
         .style_when(move || highlight && on.get(), |s| s.bg(Colors::selected()))
         .on_press(move || on.update(|on| *on = !*on))
-        .child(text(shown).text_size(text_sm()).text_color(Colors::foreground()));
+        .child(body(shown));
     view().flex_row().justify_end().child(button)
 }
 
@@ -149,44 +140,35 @@ pub fn Settings() -> impl IntoElement {
     };
     let agent_row = move |agent: ReadSignal<Agent>, _: ReadSignal<usize>| {
         let key = agent.get_untracked().key;
-        let input = move |id: &str, width: Option<f32>, placeholder: &'static str, value: fn(&AgentForm) -> String, change: fn(&mut AgentForm, String)| {
-            // The box is a view and the input fills it, as in [`field`]: the box's width is what the
-            // row gives it, and what is typed stays inside.
-            sized(width).child(
-                view()
-                    .w_full()
+        let input = move |id: &str, placeholder: &'static str, value: fn(&AgentForm) -> String, change: fn(&mut AgentForm, String)| {
+            view().w(Points(0.)).flex_1().child(
+                nsh_core::element::input()
+                    .test_id(&format!("agent-{key}-{id}"))
+                    .value(move || value(&agent.get().form))
+                    .placeholder(placeholder)
+                    .placeholder_color(Colors::one(Colors::muted()))
+                    .selection_color(Colors::one(Colors::caret()))
+                    .text_color(Colors::foreground())
+                    .auto_correct(false)
+                    .on_change(edit(key, change))
                     .h(field_height())
-                    .flex_row()
-                    .items_center()
-                    .px(rems(0.625))
+                    .px(scale::s2_5())
                     .rounded(Colors::radius())
                     .border_1()
                     .border_color(Colors::input_border())
-                    .bg(Colors::input_background())
-                    .child(
-                        nsh_core::element::input()
-                            .test_id(&format!("agent-{key}-{id}"))
-                            .value(move || value(&agent.get().form))
-                            .placeholder(placeholder)
-                            .placeholder_color(Colors::one(Colors::muted()))
-                            .selection_color(Colors::one(Colors::caret()))
-                            .text_color(Colors::foreground())
-                            .auto_correct(false)
-                            .on_change(edit(key, change))
-                            .flex_1(),
-                    ),
+                    .bg(Colors::input_background()),
             )
         };
         view()
             .flex_row()
             .items_center()
-            .gap(rems(0.5))
-            .py(rems(0.25))
-            .child(input("id", Some(90.), "id", |a| a.id.clone(), |a, t| a.id = t))
-            .child(input("name", Some(120.), "Name", |a| a.name.clone(), |a, t| a.name = t))
-            .child(input("command", None, "command --acp", |a| a.command.clone(), |a, t| a.command = t))
+            .gap(scale::s2())
+            .py(scale::s1())
+            .child(input("id", "id", |a| a.id.clone(), |a, t| a.id = t).flex_none().w(Points(90.)))
+            .child(input("name", "Name", |a| a.name.clone(), |a, t| a.name = t).flex_none().w(Points(120.)))
+            .child(input("command", "command --acp", |a| a.command.clone(), |a, t| a.command = t))
             .child(
-                super::icon_button(crate::ui::icon::IconName::Close, rems(0.75), "Remove", move || agents.update(|list| list.retain(|a| a.key != key))),
+                super::icon_button(crate::ui::icon::IconName::Close, scale::s3(), "Remove", move || agents.update(|list| list.retain(|a| a.key != key))),
             )
     };
 
@@ -195,8 +177,8 @@ pub fn Settings() -> impl IntoElement {
         .bg(Colors::popover())
         .child(
             view()
-                .px(rems(1.))
-                .py(rems(0.5))
+                .px(scale::s4())
+                .py(scale::s2())
                 .border_b_1()
                 .border_color(Colors::border())
                 .on_layout(measure(0))
@@ -205,28 +187,28 @@ pub fn Settings() -> impl IntoElement {
         .child(
             scroll().flex_shrink(1.).child(
                 view()
-                    .px(rems(1.))
-                    .pb(rems(0.75))
+                    .px(scale::s4())
+                    .pb(scale::s3())
                     .on_layout(measure(1))
                     .child(section("Appearance"))
                     .child(row("Theme", "A colour scheme name or theme file", field("settings-theme", theme, "Rose Pine", || {})))
                     .child(dynamic(move || {
                         let names = matches();
                         (!names.is_empty()).then(|| {
-                            view().pb(rems(0.25)).child(
+                            view().pb(scale::s1()).child(
                                 names
                                     .into_iter()
                                     .map(|name| {
                                         view()
                                             .role(AccessibilityRole::Button)
                                             .label(name)
-                                            .px(rems(0.75))
-                                            .py(rems(0.25))
+                                            .px(scale::s3())
+                                            .py(scale::s1())
                                             .rounded(Colors::radius())
                                             .cursor_pointer()
                                             .hover(|s| s.bg(Colors::hover()))
                                             .on_press(move || theme.set(name.to_string()))
-                                            .child(text(name).text_size(text_sm()).text_color(Colors::foreground()))
+                                            .child(body(name))
                                     })
                                     .collect::<Vec<_>>(),
                             )
@@ -248,10 +230,10 @@ pub fn Settings() -> impl IntoElement {
                         text("Added to the bundled agents; the same id replaces one. A new command asks before it first runs.")
                             .text_size(text_xs())
                             .text_color(Colors::muted())
-                            .pb(rems(0.25)),
+                            .pb(scale::s1()),
                     )
                     .child(each(agents, |agent: &Agent| agent.key, agent_row))
-                    .child(view().pt(rems(0.25)).flex_row().child(button("Add agent", false, move || {
+                    .child(view().pt(scale::s1()).flex_row().child(button("Add agent", false, move || {
                         let key = next_key.replace(next_key.get() + 1);
                         agents.update(|list| list.push(Agent { key, form: AgentForm { id: String::new(), name: String::new(), command: String::new(), extra: Default::default() } }));
                     }))),
@@ -261,9 +243,9 @@ pub fn Settings() -> impl IntoElement {
             view()
                 .flex_row()
                 .items_center()
-                .gap(rems(0.5))
-                .px(rems(1.))
-                .py(rems(0.5))
+                .gap(scale::s2())
+                .px(scale::s4())
+                .py(scale::s2())
                 .border_t_1()
                 .border_color(Colors::border())
                 .on_layout(measure(2))

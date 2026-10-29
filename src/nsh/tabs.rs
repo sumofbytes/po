@@ -7,7 +7,7 @@ use nsh_core::prelude::*;
 use tokio::sync::watch;
 
 use super::bus::{Cmd, send};
-use super::{Colors, rems, text_sm};
+use super::{Colors, body, scale, text_sm};
 use crate::ui::icon::IconName;
 
 #[derive(Clone, PartialEq, Debug)]
@@ -45,12 +45,12 @@ fn tab_button(label: String, selected: bool, on_press: impl Fn() + 'static) -> V
         .role(AccessibilityRole::Button)
         .label(label.clone())
         .flex_none()
-        .px(rems(0.5))
-        .py(rems(0.25))
+        .px(scale::s2())
+        .py(scale::s1())
         .rounded(Colors::radius())
         .cursor_pointer()
         .on_press(on_press)
-        .child(text(label).number_of_lines(1).text_size(text_sm()).text_color(Colors::foreground()));
+        .child(body(label).number_of_lines(1));
     if selected { b.bg(Colors::selected()) } else { b.hover(|s| s.bg(Colors::hover())) }
 }
 
@@ -70,9 +70,9 @@ pub fn Tabs() -> impl IntoElement {
     view()
         .flex_row()
         .items_center()
-        .gap(rems(0.25))
-        .px(rems(0.5))
-        .py(rems(0.25))
+        .gap(scale::s1())
+        .px(scale::s2())
+        .py(scale::s1())
         .border_b_1()
         .border_color(Colors::border())
         .child(dynamic(move || {
@@ -81,7 +81,7 @@ pub fn Tabs() -> impl IntoElement {
         }))
         .child(dynamic(move || {
             let (tabs, shown) = state.with(|s| (s.tabs.clone(), s.shown.clone()));
-            view().flex_row().items_center().gap(rems(0.25)).child(
+            view().flex_row().items_center().gap(scale::s1()).child(
                 tabs.into_iter()
                     .map(|tab| {
                         let (open, close) = (tab.id.clone(), tab.id.clone());
@@ -89,7 +89,7 @@ pub fn Tabs() -> impl IntoElement {
                             .flex_row()
                             .items_center()
                             .child(tab_button(tab.title, shown.as_deref() == Some(&tab.id), move || send(Cmd::ShowView(open.clone()))))
-                            .child(super::icon_button(IconName::Close, rems(0.625), "Close this view", move || send(Cmd::CloseView(close.clone()))))
+                            .child(super::icon_button(IconName::Close, scale::s2_5(), "Close this view", move || send(Cmd::CloseView(close.clone()))))
                     })
                     .collect::<Vec<_>>(),
             )
@@ -102,8 +102,8 @@ pub fn Tabs() -> impl IntoElement {
                     .role(AccessibilityRole::Button)
                     .label(label.clone())
                     .flex_none()
-                    .px(rems(0.5))
-                    .py(rems(0.25))
+                    .px(scale::s2())
+                    .py(scale::s1())
                     .rounded(Colors::radius())
                     .cursor_pointer()
                     .bg(Colors::primary())

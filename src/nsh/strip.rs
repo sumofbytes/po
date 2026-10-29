@@ -7,7 +7,7 @@ use nsh_core::prelude::*;
 use tokio::sync::watch;
 
 use super::bus::{Cmd, send};
-use super::{Colors, field_with, rems, text_sm, text_xs, tooltip};
+use super::{Colors, body, caption, field_with, scale, text_xs, tooltip};
 
 /// The strip a PR-reviewed project shows, or the way to review one.
 #[derive(Clone, PartialEq, Debug)]
@@ -55,8 +55,8 @@ fn small_button(label: impl IntoReactive<SharedString> + Clone + 'static, outlin
         .role(AccessibilityRole::Button)
         .label(label.clone())
         .flex_none()
-        .h(rems(1.5))
-        .px(rems(0.5))
+        .h(scale::s6())
+        .px(scale::s2())
         .rounded(Colors::radius())
         .cursor_pointer()
         .hover(|s| s.bg(Colors::hover()))
@@ -69,7 +69,7 @@ fn small_button(label: impl IntoReactive<SharedString> + Clone + 'static, outlin
             .flex()
             .items_center()
             .justify_center()
-            .child(text(label).text_size(text_sm()).text_color(Colors::foreground())),
+            .child(body(label)),
     )
 }
 
@@ -78,27 +78,27 @@ fn pr_strip(pr: Pr, spec: Signal<String>, on_open: impl Fn() + Clone + 'static) 
         Pr::Opened { label } => view()
             .flex_row()
             .items_center()
-            .gap(rems(0.5))
-            .px(rems(0.75))
-            .py(rems(0.5))
+            .gap(scale::s2())
+            .px(scale::s3())
+            .py(scale::s2())
             .border_b_1()
             .border_color(Colors::border())
-            .child(text(label).flex_1().min_w_0().number_of_lines(1).text_size(text_xs()).text_color(Colors::muted()))
+            .child(caption(label).flex_1().min_w_0().number_of_lines(1))
             .child(small_button("Close", false, Some("Return to this repository, forgetting the review"), move || send(Cmd::ClosePr))),
         Pr::Asking { status, opening } => {
             let submit = on_open.clone();
             view()
                 .flex_col()
-                .gap(rems(0.25))
-                .px(rems(0.75))
-                .py(rems(0.5))
+                .gap(scale::s1())
+                .px(scale::s3())
+                .py(scale::s2())
                 .border_b_1()
                 .border_color(Colors::border())
                 .child(
                     view()
                         .flex_row()
                         .items_center()
-                        .gap(rems(0.5))
+                        .gap(scale::s2())
                         .min_w_0()
                         .child(field_with("pr-spec", spec, "PR number or URL", submit, |input| input).flex_1().min_w_0())
                         .child(small_button(if opening { "…" } else { "Open" }, true, None, on_open)),
@@ -116,9 +116,9 @@ fn pr_strip(pr: Pr, spec: Signal<String>, on_open: impl Fn() + Clone + 'static) 
 fn worktree_strip(wt: Worktree) -> View {
     view()
         .flex_col()
-        .gap(rems(0.25))
-        .px(rems(0.75))
-        .py(rems(0.5))
+        .gap(scale::s1())
+        .px(scale::s3())
+        .py(scale::s2())
         .border_b_1()
         .border_color(Colors::border())
         .child(
@@ -132,7 +132,7 @@ fn worktree_strip(wt: Worktree) -> View {
         .child(
             view()
                 .flex_row()
-                .gap(rems(0.5))
+                .gap(scale::s2())
                 .child(small_button("Merge", true, Some("Commit this branch's work and merge it into the checkout it came from"), || send(Cmd::MergeWorktree)))
                 .child(small_button(
                     if wt.confirm_discard { "Discard everything?" } else { "Discard" },

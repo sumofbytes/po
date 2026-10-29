@@ -8,7 +8,7 @@ use tokio::sync::watch;
 
 use super::bus::{Cmd, send};
 use super::header::{Control, header_button, pane_header, status, toggle_button};
-use super::{Colors, icon_button, rems, text_sm};
+use super::{Colors, icon_button, note, scale};
 use crate::ui::icon::IconName;
 
 /// A file's text, compared by identity so a snapshot that holds the same text costs nothing to
@@ -68,7 +68,7 @@ pub fn publish(snapshot: Snapshot) {
 }
 
 fn centered(message: String) -> View {
-    view().flex_1().items_center().justify_center().px(rems(1.)).child(text(message).text_size(text_sm()).text_color(Colors::muted()))
+    view().flex_1().items_center().justify_center().px(scale::s4()).child(note(message))
 }
 
 #[component]
@@ -118,9 +118,9 @@ pub fn Source() -> impl IntoElement {
             view()
                 .flex_row()
                 .items_center()
-                .gap(rems(0.5))
-                .px(rems(0.75))
-                .py(rems(0.375))
+                .gap(scale::s2())
+                .px(scale::s3())
+                .py(scale::s1_5())
                 .border_b_1()
                 .border_color(Colors::border())
                 .child(super::field_with("source-find", query, "Find", move || run(nsh_base::EditorCommand::FindNext), move |input| input.element_ref(&find_field).auto_focus(true)).flex_1())
@@ -138,9 +138,9 @@ pub fn Source() -> impl IntoElement {
                     .text_size(super::text_xs())
                     .text_color(Colors::muted()),
                 )
-                .child(icon_button(IconName::ChevronLeft, rems(0.75), "Previous match", move || run(nsh_base::EditorCommand::FindPrevious)))
-                .child(icon_button(IconName::ChevronRight, rems(0.75), "Next match", move || run(nsh_base::EditorCommand::FindNext)))
-                .child(icon_button(IconName::Close, rems(0.75), "Close (Esc)", move || finding.set(false)))
+                .child(icon_button(IconName::ChevronLeft, scale::s3(), "Previous match", move || run(nsh_base::EditorCommand::FindPrevious)))
+                .child(icon_button(IconName::ChevronRight, scale::s3(), "Next match", move || run(nsh_base::EditorCommand::FindNext)))
+                .child(icon_button(IconName::Close, scale::s3(), "Close (Esc)", move || finding.set(false)))
         })
     };
 
@@ -152,7 +152,7 @@ pub fn Source() -> impl IntoElement {
                 text_view()
                     .markdown(text.0.to_string())
                     .on_link_press(|press: &nsh_base::TextViewLinkPressEvent| send(Cmd::OpenUrl(press.url.to_string())))
-                    .p(rems(1.))
+                    .p(scale::s4())
                     .text_size(super::text_base())
                     .text_color(Colors::foreground()),
             )
@@ -184,7 +184,7 @@ pub fn Source() -> impl IntoElement {
         view()
             .flex_row()
             .items_center()
-            .gap(rems(0.5))
+            .gap(scale::s2())
             .child(status(state.with(|s| s.language.clone())))
             .child(state.with(|s| s.preview).map(|rendered| {
                 header_button(

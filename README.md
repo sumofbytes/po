@@ -42,8 +42,17 @@ cargo run --release
 
 Screens are moving to [NSH](https://nsh.dev): each runs as an NSH app (a Rust
 root, no JavaScript) inside Po's window through `nsh-platform-gpui`, which draws
-with the same GPUI. The Tasks window is the first (`src/nsh/`); its headless
-test runs with `cargo test`.
+with the same GPUI. The chat, sidebar, settings and issues page are drawn this
+way (`src/nsh/`); their headless tests run with `cargo test`.
+
+## Issues
+
+Each project has a lightweight issue and epic tracker, kept as JSON files in the
+repo's `.po/` folder so it travels with git. Open it from **Issues** in the
+sidebar: a list, a board, issue pages and epics with milestones. Agents can read
+and keep the same issues through Po's control tools. The format and the commands
+are in [`docs/issues-format.md`](docs/issues-format.md). The old todo list is
+gone; an empty tracker offers to import `todos.json`.
 
 ## Usage
 
@@ -191,6 +200,9 @@ file's header goes back to it.
 Which side of the conversation the viewer is on is a setting, not a button: **Viewer position**
 on the settings page, or `"viewer_position": "left"` in `config.json`. Ctrl+Shift+S flips it.
 
+The **terminal** (Ctrl+`) opens a shell in the project's folder as a tab of the viewer, drawn with libghostty;
+Ctrl+Shift+V pastes. Building Po needs Zig 0.15.2 for it (`mise install` reads `mise.toml`).
+
 Three shortcuts set how the layout is used:
 
 - **Browse** (Ctrl+1): the viewer open on files. It opens wide, since reading
@@ -286,8 +298,6 @@ and sizes. `family` and `mono_family` take a name or a list tried in order
 skipped. Without one, the monospace font is the system's `monospace` (fontconfig
 on Linux), then a well-known one for the platform, then the bundled Fira Mono.
 `size` also scales the UI's spacing, since layout is measured in units of it.
-`transcript_family` and `transcript_size` set the font of the agent's replies on their
-own (same forms as `family` and `size`); without them the conversation follows the UI font.
 Edits to `config.json` and to theme files apply without a restart.
 
 Ctrl+, (Cmd+, on macOS) opens a settings page for the theme, fonts, glass,

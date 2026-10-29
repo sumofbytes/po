@@ -5,16 +5,17 @@ pub mod agent;
 pub mod chat;
 pub mod bus;
 pub mod diff;
+pub mod epics;
 pub mod explorer;
 pub mod finder;
 pub mod header;
+pub mod issues;
 pub mod overlay;
 pub mod settings;
 pub mod source;
 pub mod sidebar;
 pub mod strip;
 pub mod tabs;
-pub mod tasks;
 
 use base64::Engine as _;
 use gpui::{AppContext as _, Entity, Hsla, Subscription, Window};
@@ -96,12 +97,6 @@ fn theme(palette: &Palette) -> nsh_platform_gpui::Theme {
     theme.set_number("mono-size", f32::from(palette.mono_font_size));
     theme.set_font(nsh_core::element::FONT_SANS, palette.font_family.to_string());
     theme.set_font(nsh_core::element::FONT_MONO, palette.mono_font_family.to_string());
-    if let Some(family) = &palette.transcript_font_family {
-        theme.set_font("transcript", family.to_string());
-    }
-    if let Some(size) = palette.transcript_font_size {
-        theme.set_number("transcript-size", f32::from(size));
-    }
     theme
 }
 
@@ -196,9 +191,54 @@ impl Colors {
     }
 }
 
-/// `n` rems, a rem being Po's UI font size, as GPUI's `rems` are in the rest of the window.
-pub fn rems(n: f32) -> Points {
+/// `n` rems, a rem being Po's UI font size, as GPUI's `rems` are in the rest of the window. Only
+/// [`scale`] calls it: a screen takes its lengths from there, so spacing stays on one scale.
+fn rems(n: f32) -> Points {
     Points(n * nsh_base::theme().number("rem").unwrap_or(14.))
+}
+
+/// The lengths of the screens: spacing, padding, gaps and sizes in rems. Each step `sN` is N quarter
+/// rems (`s1_5` is one and a half), a 2px grid at the default font size; use these, not `rems`, so
+/// every screen spaces itself the same way. The named sizes below are one element's own measure.
+pub mod scale {
+    use super::{Points, rems};
+
+    pub fn s0() -> Points { rems(0.0) }
+    pub fn s0_5() -> Points { rems(0.125) }
+    pub fn s1() -> Points { rems(0.25) }
+    pub fn s1_5() -> Points { rems(0.375) }
+    pub fn s2() -> Points { rems(0.5) }
+    pub fn s2_5() -> Points { rems(0.625) }
+    pub fn s3() -> Points { rems(0.75) }
+    pub fn s3_5() -> Points { rems(0.875) }
+    pub fn s4() -> Points { rems(1.0) }
+    pub fn s5() -> Points { rems(1.25) }
+    pub fn s6() -> Points { rems(1.5) }
+    pub fn s7() -> Points { rems(1.75) }
+    pub fn s8() -> Points { rems(2.0) }
+    pub fn s10() -> Points { rems(2.5) }
+
+    /// The label column of a legend row: Status, Target, Progress, and an issue's fields.
+    pub fn legend_width() -> Points { rems(5.5) }
+    /// The label column of an agent's form, whose labels are the agent's own words and run longer.
+    pub fn form_label_width() -> Points { rems(9.0) }
+    /// A row's progress bar, in the epics list and in an epic's milestones.
+    pub fn bar_width() -> Points { rems(8.0) }
+    /// A row's count column, as `3/5`.
+    pub fn count_width() -> Points { rems(4.0) }
+    /// A row's due-date column.
+    pub fn due_width() -> Points { rems(4.5) }
+    /// The due-date entry beside a new issue or milestone: its field and the date it reads.
+    pub fn due_entry_width() -> Points { rems(13.0) }
+    /// From the composer card's edge to its text: the card's padding and the field's, and the
+    /// border, which is a point wide whatever the font size.
+    pub fn composer_text_inset() -> Points { s2() + s2() + Points(1.) }
+    /// `n` lines of small text, whose line is 1.25rem tall: a text area's minimum, a note's maximum.
+    pub fn lines(n: f32) -> Points { rems(1.25 * n) }
+    /// The least width of a project's name in the sidebar.
+    pub fn project_name_min_width() -> Points { rems(6.0) }
+    /// The least width of a project's branch in the sidebar.
+    pub fn branch_name_min_width() -> Points { rems(4.0) }
 }
 
 /// The monospace font's size, in points.
@@ -206,24 +246,14 @@ pub fn mono_size() -> f32 {
     nsh_base::theme().number("mono-size").unwrap_or(13.)
 }
 
-/// The size of the conversation's text: its own setting, or the UI font's.
-pub fn transcript_size() -> Points {
-    Points(nsh_base::theme().number("transcript-size").unwrap_or_else(|| rems(1.).0))
-}
-
-/// The conversation's font family when it has one of its own.
-pub fn transcript_family() -> Option<nsh_core::element::SharedString> {
-    nsh_base::theme().font("transcript").map(|family| family.to_string().into())
-}
-
 /// The text of a row's label, GPUI's `text_base`.
 pub fn text_base() -> Points {
-    rems(1.)
+    scale::s4()
 }
 
 /// A field's height.
 pub fn field_height() -> Points {
-    rems(2.)
+    scale::s8()
 }
 
 /// A pane header's height, GPUI's `h_11`.
@@ -233,12 +263,53 @@ pub fn header_height() -> Points {
 
 /// Small text, GPUI's `text_xs`: dates and counts.
 pub fn text_xs() -> Points {
-    rems(0.75)
+    scale::s3()
 }
 
 /// GPUI's `text_sm`: the footer and quiet notes.
 pub fn text_sm() -> Points {
-    rems(0.875)
+    scale::s3_5()
+}
+
+/// Quiet small text: dates, counts, secondary labels.
+pub fn caption(content: impl IntoReactive<SharedString>) -> Text {
+    text(content).text_size(text_xs()).text_color(Colors::muted())
+}
+
+/// Small text in the foreground color: short labels and marks.
+pub fn small(content: impl IntoReactive<SharedString>) -> Text {
+    text(content).text_size(text_xs()).text_color(Colors::foreground())
+}
+
+/// Quiet text: notes, empty states, hints.
+pub fn note(content: impl IntoReactive<SharedString>) -> Text {
+    text(content).text_size(text_sm()).text_color(Colors::muted())
+}
+
+/// Text of a row or control, in the foreground color.
+pub fn body(content: impl IntoReactive<SharedString>) -> Text {
+    text(content).text_size(text_sm()).text_color(Colors::foreground())
+}
+
+/// A radius that makes a pill or dot of anything square.
+pub fn pill() -> Points {
+    Points(999.)
+}
+
+/// The corner of a card or panel, which holds controls of the base radius: twice that radius.
+pub fn card_radius() -> Points {
+    Colors::radius() * 2.
+}
+
+/// The corner of the big surfaces of the chat column, the composer, the user's messages and the
+/// queue: three times the base radius.
+pub fn surface_radius() -> Points {
+    Colors::radius() * 3.
+}
+
+/// The small radius of a swatch or marker.
+pub fn swatch_radius() -> Points {
+    Points(2.)
 }
 
 /// One of Po's Lucide icons, tinted.
@@ -248,10 +319,8 @@ pub fn icon(name: IconName, size: Points, tint: impl Fn() -> AdaptiveColor + 'st
 }
 
 /// A tooltip in Po's look: a small popover with a line of text.
-pub fn tooltip(label: impl Into<String>) -> Text {
-    text(label.into())
-        .text_size(text_xs())
-        .text_color(Colors::foreground())
+pub fn tooltip(label: &'static str) -> Text {
+    small(label)
         .bg(Colors::popover())
         .border_1()
         .border_color(Colors::border())
@@ -271,7 +340,7 @@ pub fn icon_button(name: IconName, size: Points, label: &'static str, on_press: 
         .role(AccessibilityRole::Button)
         .label(label)
         .flex_none()
-        .p(rems(0.25))
+        .p(scale::s1())
         .rounded(Colors::radius())
         .cursor_pointer()
         .hover(|s| s.bg(Colors::hover()))
@@ -286,8 +355,8 @@ pub fn button(label: &'static str, primary: bool, on_press: impl Fn() + 'static)
         .role(AccessibilityRole::Button)
         .label(label)
         .flex_none()
-        .px(rems(0.75))
-        .py(rems(0.375))
+        .px(scale::s3())
+        .py(scale::s1_5())
         .rounded(Colors::radius())
         .cursor_pointer()
         .on_press(on_press)
@@ -295,14 +364,9 @@ pub fn button(label: &'static str, primary: bool, on_press: impl Fn() + 'static)
     if primary { b.bg(Colors::primary()) } else { b.border_1().border_color(Colors::input_border()).hover(|s| s.bg(Colors::hover())) }
 }
 
-/// A line of text in a bordered box, as the settings page has them. `id` names it for tests.
-pub fn field(id: &str, value: Signal<String>, placeholder: &'static str, on_submit: impl Fn() + 'static) -> View {
-    field_with(id, value, placeholder, on_submit, |input| input)
-}
-
-/// [`field`], with `more` done to its input (a ref, focus).
-pub fn field_with(id: &str, value: Signal<String>, placeholder: &'static str, on_submit: impl Fn() + 'static, more: impl FnOnce(nsh_base::Input) -> nsh_base::Input) -> View {
-    let input = more(nsh_core::element::input()
+/// A single line of text for `value`, filling its row; Enter calls `on_submit`. `id` names it for tests.
+pub fn text_input(id: &str, value: Signal<String>, placeholder: &'static str, on_submit: impl Fn() + 'static) -> nsh_base::Input {
+    nsh_core::element::input()
         .test_id(id)
         .value(move || value.get())
         .placeholder(placeholder)
@@ -313,12 +377,22 @@ pub fn field_with(id: &str, value: Signal<String>, placeholder: &'static str, on
         .submit_behavior(nsh_core::element::SubmitBehavior::Submit)
         .on_change(move |text: &str| value.set(text.to_string()))
         .on_submit(move |_: &str| on_submit())
-        .flex_1());
+        .flex_1()
+}
+
+/// A line of text in a bordered box, as the settings page has them. `id` names it for tests.
+pub fn field(id: &str, value: Signal<String>, placeholder: &'static str, on_submit: impl Fn() + 'static) -> View {
+    field_with(id, value, placeholder, on_submit, |input| input)
+}
+
+/// [`field`], with `more` done to its input (a ref, focus).
+pub fn field_with(id: &str, value: Signal<String>, placeholder: &'static str, on_submit: impl Fn() + 'static, more: impl FnOnce(nsh_base::Input) -> nsh_base::Input) -> View {
+    let input = more(text_input(id, value, placeholder, on_submit));
     view()
         .h(field_height())
         .flex_row()
         .items_center()
-        .px(rems(0.625))
+        .px(scale::s2_5())
         .rounded(Colors::radius())
         .border_1()
         .border_color(Colors::input_border())

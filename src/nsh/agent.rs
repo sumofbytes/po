@@ -10,7 +10,7 @@ use tokio::sync::watch;
 use super::bus::{Cmd, send};
 use super::header::{Control, pane_header, status};
 use super::source::Shared;
-use super::{Colors, field_height, rems, text_base, text_sm};
+use super::{Colors, body, field_height, note, scale, text_base, text_sm};
 use serde_json::{Map, Value};
 
 /// One field of the form on screen.
@@ -76,8 +76,8 @@ fn submit_button(label: impl IntoReactive<SharedString> + Clone + 'static, on_pr
         .role(AccessibilityRole::Button)
         .label(label.clone())
         .flex_none()
-        .px(rems(0.75))
-        .py(rems(0.375))
+        .px(scale::s3())
+        .py(scale::s1_5())
         .rounded(Colors::radius())
         .cursor_pointer()
         .on_press(on_press)
@@ -103,7 +103,7 @@ fn field_row(at: usize, field: &Field, drafts: Signal<Vec<String>>) -> View {
                     .auto_correct(false)
                     .on_change(move |typed: &str| drafts.update(|values| values[at] = typed.to_string()))
                     .h(field_height())
-                    .px(rems(0.625))
+                    .px(scale::s2_5())
                     .rounded(Colors::radius())
                     .border_1()
                     .border_color(Colors::input_border())
@@ -114,7 +114,7 @@ fn field_row(at: usize, field: &Field, drafts: Signal<Vec<String>>) -> View {
         view()
             .flex_1()
             .flex_wrap()
-            .gap(rems(0.25))
+            .gap(scale::s1())
             .children(field.options.iter().map(|option| {
                 let option = option.clone();
                 let alternative = option.clone();
@@ -123,26 +123,26 @@ fn field_row(at: usize, field: &Field, drafts: Signal<Vec<String>>) -> View {
                 view()
                     .role(AccessibilityRole::Button)
                     .label(option.clone())
-                    .px(rems(0.75))
-                    .py(rems(0.25))
+                    .px(scale::s3())
+                    .py(scale::s1())
                     .rounded(Colors::radius())
                     .cursor_pointer()
                     .hover(|s| s.bg(Colors::hover()))
                     .style_when(picked, |s| s.bg(Colors::selected()))
                     .on_press(move || drafts.update(|values| values[at] = selected.clone()))
-                    .child(text(option.clone()).text_size(text_sm()).text_color(Colors::foreground()))
+                    .child(body(option.clone()))
             }))
             .into_element()
     };
     view()
         .flex_row()
         .items_center()
-        .gap(rems(0.5))
+        .gap(scale::s2())
         .child(
             view()
-                .w(rems(9.))
+                .w(scale::form_label_width())
                 .flex_none()
-                .child(text(field.label.clone()).number_of_lines(1).text_size(text_sm()).text_color(Colors::muted())),
+                .child(note(field.label.clone()).number_of_lines(1)),
         )
         .child(widget)
 }
@@ -208,9 +208,9 @@ pub fn Agent() -> impl IntoElement {
                         view()
                             .w_full()
                             .max_w(px(820.))
-                            .px(rems(1.))
-                            .pt(rems(1.))
-                            .pb(rems(1.25))
+                            .px(scale::s4())
+                            .pt(scale::s4())
+                            .pb(scale::s5())
                             .child(markdown_text(shared.clone())),
                     )
                     .into_element(),
@@ -221,8 +221,8 @@ pub fn Agent() -> impl IntoElement {
                 .w_full()
                 .max_w(px(640.))
                 .flex_col()
-                .gap(rems(0.75))
-                .px(rems(1.))
+                .gap(scale::s3())
+                .px(scale::s4())
                 .children(doc.map(|doc| markdown_text(doc)))
                 .children(fields.iter().enumerate().map(move |(index, field)| {
                     field_row(index, field, drafts)
@@ -231,20 +231,20 @@ pub fn Agent() -> impl IntoElement {
                     view()
                         .flex_row()
                         .justify_end()
-                        .pt(rems(0.5))
+                        .pt(scale::s2())
                         .border_t_1()
                         .border_color(Colors::border())
                         .child(if answered {
                             // The agent has the answers; the button could be pressed again, but
                             // answers nothing.
-                            submit_button("Answered", move || answer()).flex_none().opacity(0.5).into_element()
+                            submit_button("Answered", move || answer()).flex_none().opacity(crate::theme::tokens::DISABLED).into_element()
                         } else {
                             submit_button(submit.clone(), move || answer()).into_element()
                         }),
                 );
             scroll()
                 .flex_1()
-                .child(view().flex_col().items_center().py(rems(1.)).child(column))
+                .child(view().flex_col().items_center().py(scale::s4()).child(column))
                 .into_element()
         }
     };

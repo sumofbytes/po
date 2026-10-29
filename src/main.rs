@@ -11,14 +11,17 @@ mod dex;
 mod diff;
 mod explorer;
 mod fonts;
+mod issues;
 mod mcp;
 mod nsh;
 mod pr;
 mod schemes;
 mod settings;
+mod terminal;
+mod terminal_view;
 mod theme;
 mod state;
-mod task;
+mod date;
 mod trace;
 mod ui;
 mod update;
@@ -44,12 +47,16 @@ use futures::StreamExt;
 use serde_json::Value;
 
 use gpui::{
+    Focusable as _,
     AnyElement, App, Pixels, TitlebarOptions, WindowControlArea, point, Bounds, Context, Entity, IntoElement, ParentElement,
     Render, Styled, Subscription, Task, Window, WindowBackgroundAppearance, WindowBounds, WindowOptions, div,
     prelude::*, px, rems, size, KeyBinding,
 };
 
-gpui::actions!(po, [ToggleTools, ToggleThoughts, ToggleLeft, ToggleRight, ShowSource, ShowChanges, ShowChat, SwapPanes, ShowHistory, ToggleSplit, ToggleRendered, NewThread, OpenProject, ShowFinder, ToggleFocus, ShowSettings, CloseSettings, CloseWindow]);
+gpui::actions!(po, [ToggleTools, ToggleThoughts, ToggleLeft, ToggleRight, ShowSource, ShowChanges, ShowChat, SwapPanes, ShowHistory, ToggleSplit, ToggleRendered, NewThread, OpenProject, ShowFinder, ToggleFocus, ShowSettings, CloseSettings, CloseWindow, ToggleTerminal]);
+
+/// The id the viewer's tabs know the terminal by.
+const TERMINAL_TAB: &str = "po:terminal";
 
 const SKIP: [&str; 5] = ["target", "node_modules", "dist", "build", "__pycache__"];
 const MAX_FILES: usize = 5000;
@@ -552,6 +559,10 @@ struct Project {
     files_tree: FileTree,
     /// Set when this is a thread's own checkout, made from another project's repository.
     worktree: Option<worktree::Worktree>,
+    /// The project's shell, started the first time the terminal is opened, and whether the viewer
+    /// shows it.
+    terminal: Option<Entity<terminal_view::TerminalView>>,
+    terminal_shown: bool,
 }
 
 impl Project {
@@ -1193,13 +1204,15 @@ struct Reader {
     chat_follow_soft: std::cell::Cell<u64>,
     /// What [`Snapshot::draft_reset`] carries next, bumped whenever the app writes the draft itself.
     chat_reset: std::cell::Cell<u64>,
-    /// Where the caret goes with the next reset, if the reset names a place (a file mentioned).
-    chat_caret: std::cell::Cell<Option<u32>>,
     /// What [`nsh::chat::Snapshot::focus`] carries next.
     chat_focus: std::cell::Cell<u64>,
-    /// The tasks page, shown in place of the conversation while `tasks_open`; the sidebar has a row for it.
-    tasks: Entity<nsh::overlay::Overlay>,
-    tasks_open: bool,
+    /// The issues page, shown in place of the conversation while `issues_open`; the sidebar has a row for it.
+    issues: Entity<nsh::overlay::Overlay>,
+    issues_open: bool,
+    /// The project whose issues [`issues::shared`] holds, so it is only switched when this changes.
+    issues_root: std::cell::RefCell<PathBuf>,
+    /// An issue "Work on this" is making a worktree for, to link its branch once it exists.
+    issue_for_worktree: Option<(PathBuf, u64)>,
     /// Progress or failure of the last attempt to open a PR.
     pr_status: Option<String>,
     opening: bool,
@@ -1297,7 +1310,7 @@ impl Reader {
         let (explorer_pane, explorer_theme) = nsh::mount(nsh_platform_gpui::Root::of::<nsh::explorer::Explorer>(), window, cx);
         let finder_window = cx.new(|cx| nsh::overlay::Overlay::new(560., 8., || nsh_platform_gpui::Root::of::<nsh::finder::Finder>(), &nsh::finder::HEIGHT, cx));
         let settings_window = cx.new(|cx| nsh::overlay::Overlay::new(680., 24., || nsh_platform_gpui::Root::of::<nsh::settings::Settings>(), &nsh::settings::HEIGHT, cx));
-        let tasks = cx.new(|cx| nsh::overlay::Overlay::page(760., || nsh_platform_gpui::Root::of::<nsh::tasks::Tasks>(), &nsh::tasks::HEIGHT, cx));
+        let issues = cx.new(|cx| nsh::overlay::Overlay::page(1000., || nsh_platform_gpui::Root::of::<nsh::issues::Issues>(), &nsh::issues::HEIGHT, cx));
         let sidebars = cx.new(|_| SidebarsState::new(px(280.0), px(560.0)));
         let tree_cols = cx.new(|_| SidebarsState::new(px(TREE_WIDTH), px(0.0)));
         let subscriptions = vec![
@@ -1316,8 +1329,8 @@ impl Reader {
             cx.subscribe_in(&settings_window, window, |reader, _, event: &nsh::overlay::OverlayEvent, window, cx| match event {
                 nsh::overlay::OverlayEvent::Close => reader.hide_settings(window, cx),
             }),
-            cx.subscribe_in(&tasks, window, |reader, _, event: &nsh::overlay::OverlayEvent, window, cx| match event {
-                nsh::overlay::OverlayEvent::Close => reader.hide_tasks(window, cx),
+            cx.subscribe_in(&issues, window, |reader, _, event: &nsh::overlay::OverlayEvent, window, cx| match event {
+                nsh::overlay::OverlayEvent::Close => reader.hide_issues(window, cx),
             }),
         ];
         let settings = config::load();
@@ -1421,10 +1434,11 @@ impl Reader {
             chat_follow: std::cell::Cell::new(0),
             chat_follow_soft: std::cell::Cell::new(0),
             chat_reset: std::cell::Cell::new(0),
-            chat_caret: std::cell::Cell::new(None),
             chat_focus: std::cell::Cell::new(0),
-            tasks,
-            tasks_open: false,
+            issues,
+            issues_open: false,
+            issues_root: Default::default(),
+            issue_for_worktree: None,
             pr_status: None,
             opening: false,
             worktree_status: None,
@@ -1512,10 +1526,10 @@ impl Reader {
             })
             .detach();
         }
-        // The sidebar's count of tasks follows the list, whoever changes it.
-        let mut task_changes = task::watch();
+        // The sidebar's count of issues follows them, whoever changes them.
+        let mut issue_changes = issues::shared::watch();
         cx.spawn(async move |this, cx| {
-            while task_changes.changed().await.is_ok() {
+            while issue_changes.changed().await.is_ok() {
                 if this.update(cx, |_, cx| cx.notify()).is_err() {
                     break;
                 }
@@ -1623,6 +1637,8 @@ impl Reader {
             notice: None,
             files_tree,
             worktree: None,
+            terminal: None,
+            terminal_shown: false,
         }
     }
 
@@ -1863,7 +1879,6 @@ impl Reader {
         if !self.slots.iter().any(|slot| slot.id == id) {
             return;
         }
-        self.hide_tasks(window, cx);
         // Leaving a session listing unused drops it.
         if self.thread.is_listing() {
             self.close_thread(self.thread.id, window, cx);
@@ -1947,6 +1962,7 @@ impl Reader {
                             }
                             Err(error) => {
                                 log::warn!("worktree: {error}");
+                                reader.issue_for_worktree = None;
                                 reader.worktree_status = Some(error);
                                 if let Some((_, (_, tid))) = first {
                                     reader.with_thread(tid, |reader, _| reader.thread.status.clear());
@@ -1963,6 +1979,9 @@ impl Reader {
 
     fn open_worktree(&mut self, wt: worktree::Worktree, agent: String, first: Option<(Outgoing, (u64, u64))>, window: &mut Window, cx: &mut Context<Self>) {
         log::info!("worktree: {} for {agent}", wt.spec.branch);
+        if let Some((root, number)) = self.issue_for_worktree.take() {
+            Self::issue_started(&root, number, Some(wt.spec.branch.clone()));
+        }
         let mut project = Self::build_project(wt.spec.path.clone(), None, vec![]);
         project.base = wt.spec.base.clone();
         project.worktree = Some(wt);
@@ -2032,6 +2051,11 @@ impl Reader {
                         reader.finishing = false;
                         let told = match result {
                             Ok(into) => {
+                                // A merged branch finishes the issues linked to it.
+                                let landed = into.is_some().then(|| reader.project_by_id(id).and_then(|p| p.worktree.as_ref()).map(|wt| (wt.spec.repo.clone(), wt.spec.branch.clone()))).flatten();
+                                if let Some((repo, branch)) = landed {
+                                    issues::shared::branch_merged(&repo, &branch);
+                                }
                                 reader.close_worktree_project(id, window, cx);
                                 reader.api_projects.remove(&id);
                                 let status = match into {
@@ -2359,6 +2383,7 @@ impl Reader {
                     .collect();
                 Ok(json!({ "agents": agents, "default": self.chosen_agent }))
             }
+            Command::Issues { op, args } => self.run_issues(id, op, &args),
             Command::ProjectList => {
                 let own = self.own_project(id);
                 let projects: Vec<Value> = self
@@ -2507,6 +2532,9 @@ impl Reader {
         use command::Command;
         use serde_json::json;
         match command {
+            Command::Issues { op: issues::api::Op::IssueWork, args } => self.work_issue(id, &args, window, cx),
+            Command::Issues { op: issues::api::Op::IssueShow, args } => self.show_issues(id, &args, window, cx),
+            Command::Issues { op, args } => self.run_issues(id, op, &args),
             Command::ProjectOpen { path: None, pr: Some(spec) } => {
                 // Reviewed from the checkout the caller is in, as the PR strip does.
                 let from = self.project_of(id).and_then(|project| self.project_by_id(project).map(|project| project.root.clone())).unwrap_or_else(|| self.home.clone());
@@ -2560,12 +2588,47 @@ impl Reader {
         }
     }
 
+    /// The issue and epic commands, on the issues of the repo the caller works in (the project on
+    /// screen for the user's own `po ctl`).
+    fn run_issues(&self, id: u64, op: issues::api::Op, args: &serde_json::Value) -> command::Reply {
+        let root = self.issues_root_of(id);
+        let today = date::today();
+        issues::shared::change_repo(&root, |tracker, now| issues::api::run(op, args, tracker, now, today))
+    }
+
+    /// The project the caller works in, whose issues its commands act on; the one on screen for
+    /// the user's own `po ctl`.
+    fn issues_root_of(&self, id: u64) -> PathBuf {
+        self.own_project(id).and_then(|project| self.views().iter().find(|view| view.id == project).map(|view| view.project.root.clone())).unwrap_or_else(|| self.project.root.clone())
+    }
+
     /// `thread.create_isolated`: the worktree is made off the UI thread, then the thread starts
     /// in a project of its own, and the caller is told how it went.
     fn create_isolated(&mut self, id: u64, command: command::Command, window: &mut Window, cx: &mut Context<Self>) -> command::Reply {
         let command::Command::ThreadCreateIsolated { prompt, agent, options, notify } = command else {
             return Err("not a thread.create_isolated".into());
         };
+        self.create_isolated_for(id, prompt, agent, options, notify, None, window, cx)
+    }
+
+    /// `issue.work`: a thread in a worktree of its own on an issue, whose branch is linked to the
+    /// issue and which is moved to In Progress once the worktree is up.
+    fn work_issue(&mut self, id: u64, args: &serde_json::Value, window: &mut Window, cx: &mut Context<Self>) -> command::Reply {
+        let root = self.issues_root_of(id);
+        let (number, prompt, key) = issues::shared::change_repo(&root, |tracker, _| {
+            let number = issues::api::work_issue(tracker, args)?;
+            Ok::<_, String>((number, issues::api::work_prompt(tracker, number).ok_or("that issue is gone")?, tracker.key(number)))
+        })?;
+        let options = args["options"].as_object().map(|options| options.iter().filter_map(|(id, value)| value.as_str().map(|value| (id.clone(), value.to_string()))).collect()).unwrap_or_default();
+        let agent = args["agent"].as_str().map(String::from);
+        let notify = args["notify"].as_str().map(String::from);
+        let mut reply = self.create_isolated_for(id, prompt, agent, options, notify, Some((root, number)), window, cx)?;
+        reply["issue"] = serde_json::json!(key);
+        Ok(reply)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn create_isolated_for(&mut self, id: u64, prompt: String, agent: Option<String>, options: Vec<(String, String)>, notify: Option<String>, issue: Option<(PathBuf, u64)>, window: &mut Window, cx: &mut Context<Self>) -> command::Reply {
         let key = self.child_agent(id, agent)?;
         let project = self.project_of(id).ok_or("that thread is gone")?;
         if self.finishing || self.isolating {
@@ -2590,7 +2653,14 @@ impl Reader {
                     this.update(cx, |reader, cx| {
                         reader.isolating = false;
                         let told = match made {
-                            Ok(wt) => reader.start_isolated(id, wt, key, prompt, options, notify, window, cx),
+                            Ok(wt) => {
+                                let branch = wt.spec.branch.clone();
+                                let started = reader.start_isolated(id, wt, key, prompt, options, notify, window, cx);
+                                if let (Ok(_), Some((root, number))) = (&started, &issue) {
+                                    Self::issue_started(root, *number, Some(branch));
+                                }
+                                started
+                            }
                             Err(error) => Err(error),
                         };
                         let text = match told {
@@ -3197,6 +3267,7 @@ impl Reader {
     fn show_agent_view(&mut self, id: &str, cx: &mut Context<Self>) {
         self.thread.shown = Some(id.to_string());
         self.thread.offered = None;
+        self.project.terminal_shown = false;
         self.open_viewer_wide(cx);
         cx.notify();
     }
@@ -3345,8 +3416,61 @@ impl Reader {
     /// since looking at code or a diff wants room; if it is open its width is left as it was.
     fn show_viewer(&mut self, mode: Mode, cx: &mut Context<Self>) {
         self.thread.shown = None;
+        self.project.terminal_shown = false;
         self.set_mode(mode, cx);
         self.open_viewer_wide(cx);
+    }
+
+    /// The terminal in the viewer, started if the project has none yet, or back to the files if it
+    /// is what the viewer shows.
+    fn toggle_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.project.terminal_shown && self.side_open {
+            self.project.terminal_shown = false;
+            window.focus(&self.focus, cx);
+            cx.notify();
+            return;
+        }
+        let root = self.project.root.clone();
+        if self.project.terminal.is_none() {
+            let view = cx.new(|cx| terminal_view::TerminalView::new(root, cx));
+            // A shell that ends (Ctrl+D, `exit`) takes its tab with it, in whichever project it was.
+            cx.subscribe_in(&view, window, |reader, view, _: &terminal_view::Exited, window, cx| reader.terminal_exited(&view, window, cx)).detach();
+            self.project.terminal = Some(view);
+        }
+        let terminal = self.project.terminal.clone().expect("just made");
+        self.project.terminal_shown = true;
+        self.thread.offered = None;
+        self.open_viewer_wide(cx);
+        // The view is not in the tree until it draws; the focus follows.
+        cx.defer_in(window, move |_, window, cx| terminal.update(cx, |terminal, cx| terminal.focus(window, cx)));
+    }
+
+    /// The terminal's tab was pressed: show it, which never hides it.
+    fn toggle_terminal_on(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.project.terminal_shown = false;
+        self.toggle_terminal(window, cx);
+    }
+
+    /// `view`'s shell ended: its tab closes.
+    fn terminal_exited(&mut self, view: &Entity<terminal_view::TerminalView>, window: &mut Window, cx: &mut Context<Self>) {
+        if view.focus_handle(cx).is_focused(window) {
+            window.focus(&self.focus, cx);
+        }
+        for project in std::iter::once(&mut self.project).chain(self.slots.iter_mut().map(|slot| &mut slot.project)) {
+            if project.terminal.as_ref() == Some(view) {
+                project.terminal = None;
+                project.terminal_shown = false;
+            }
+        }
+        cx.notify();
+    }
+
+    /// The terminal's tab was closed: the shell ends with its view.
+    fn close_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.project.terminal = None;
+        self.project.terminal_shown = false;
+        window.focus(&self.focus, cx);
+        cx.notify();
     }
 
     /// Opens the viewer if it is closed, wide since looking at code or a diff wants room; if it is
@@ -3385,6 +3509,7 @@ impl Reader {
     /// Shows `path` where it is most useful: its diff if it has changes, the file otherwise.
     fn reveal(&mut self, path: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.thread.shown = None;
+        self.project.terminal_shown = false;
         let full = Path::new(path);
         let relative = full.strip_prefix(&self.project.root).unwrap_or(full).to_string_lossy().replace('\\', "/");
         if self.project.changes.iter().any(|change| change.path == relative) {
@@ -3395,23 +3520,6 @@ impl Reader {
             self.open(&relative, window, cx);
         }
         self.reveal_side(cx);
-    }
-
-    /// A link of the agent's text to a file: shown in the viewer, at its line if it has one, and
-    /// the way the agent's own `file.open` would, so a link can't lead out of the project.
-    fn open_link(&mut self, path: &str, line: Option<usize>, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(line) = line else {
-            // Without a line, a changed file shows its diff.
-            if self.check_move(command::Command::FileOpen { path: path.into(), line: None }).is_ok() {
-                self.reveal(path, window, cx);
-            }
-            return;
-        };
-        if let Ok(command) = self.check_move(command::Command::FileOpen { path: path.into(), line: Some(line) }) {
-            self.thread.shown = None;
-            self.apply_move(command, window, cx);
-            self.reveal_side(cx);
-        }
     }
 
     fn set_split(&mut self, split: bool, cx: &mut Context<Self>) {
@@ -3666,7 +3774,6 @@ impl Reader {
     /// can be chosen first. The thread on screen keeps running in the background; if it is
     /// itself still blank it is used instead.
     fn new_blank_thread(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.hide_tasks(window, cx);
         if !self.thread.blank {
             self.add_thread();
         }
@@ -4313,7 +4420,6 @@ impl Reader {
 
     /// Brings up thread `tid` of project `pid`, whichever is on screen.
     fn open_thread(&mut self, pid: u64, tid: u64, window: &mut Window, cx: &mut Context<Self>) {
-        self.hide_tasks(window, cx);
         if pid == self.project_id {
             self.show_thread(tid, window, cx);
         } else {
@@ -4607,6 +4713,7 @@ impl Reader {
     /// Opens `path` in the viewer and closes the finder.
     fn accept_path(&mut self, path: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.thread.shown = None;
+        self.project.terminal_shown = false;
         self.open(path, window, cx);
         // A file that can't be shown leaves the finder up so the query isn't lost.
         if self.project.notice.is_none() {
@@ -4627,23 +4734,113 @@ impl Reader {
         cx.notify();
     }
 
-    fn toggle_tasks(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.tasks_open {
-            return self.hide_tasks(window, cx);
+    fn toggle_issues(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.issues_open {
+            return self.hide_issues(window, cx);
         }
-        self.tasks_open = true;
-        self.tasks.update(cx, |tasks, cx| tasks.open(window, cx));
+        self.follow_issues();
+        self.issues_open = true;
+        self.issues.update(cx, |issues, cx| issues.open(window, cx));
         cx.notify();
     }
 
-    fn hide_tasks(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.tasks_open {
+    fn hide_issues(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.issues_open {
             return;
         }
-        self.tasks_open = false;
-        self.tasks.update(cx, |tasks, _| tasks.close());
+        self.issues_open = false;
+        self.issues.update(cx, |issues, _| issues.close());
         self.focus.focus(window, cx);
         cx.notify();
+    }
+
+    /// Points the shared issues at the project on screen, if it isn't already. The sidebar's
+    /// snapshot does this, so the page and the counts follow the project whatever switched it.
+    fn follow_issues(&self) {
+        let mut shown = self.issues_root.borrow_mut();
+        if *shown != self.project.root {
+            *shown = self.project.root.clone();
+            issues::shared::set_project(&self.project.root);
+        }
+    }
+
+    /// Starts a thread on an issue, in a worktree of its own when the project is a repo, and moves
+    /// the issue to In Progress with the branch linked.
+    fn work_on_issue(&mut self, number: u64, window: &mut Window, cx: &mut Context<Self>) {
+        self.follow_issues();
+        let tracker = issues::shared::watch().borrow().tracker.clone();
+        if let Err(message) = issues::api::check_workable(&tracker, number) {
+            self.worktree_status = Some(message);
+            cx.notify();
+            return;
+        }
+        let Some(prompt) = issues::api::work_prompt(&tracker, number) else {
+            return;
+        };
+        // Another worktree is being made or merged, or there is no agent to start: nothing would
+        // begin, so the issue is left as it is.
+        if self.finishing || self.chosen().is_none() {
+            return;
+        }
+        self.hide_issues(window, cx);
+        self.new_blank_thread(window, cx);
+        self.thread.isolate = true;
+        let root = self.project.root.clone();
+        self.issue_for_worktree = Some((root.clone(), number));
+        let out = Outgoing { text: prompt, origin: Origin::User, images: vec![] };
+        self.start_thread(out, false, window, cx);
+        // With a worktree being made, the issue waits for its branch. Without one the thread
+        // went ahead in the project itself, if it started at all.
+        if !self.finishing {
+            self.issue_for_worktree = None;
+            if !self.thread.blank {
+                Self::issue_started(&root, number, None);
+            }
+        }
+        cx.notify();
+    }
+
+    /// `issue.show`: puts the issues page on screen where the request says. Only for the project
+    /// on screen, since the page shows that one.
+    fn show_issues(&mut self, id: u64, args: &serde_json::Value, window: &mut Window, cx: &mut Context<Self>) -> command::Reply {
+        if self.project_of(id).is_some_and(|project| project != self.project_id) {
+            return Err("that project is not on screen; the issues page shows the one that is".into());
+        }
+        // Like any move of what the user is looking at, it is the thread on screen's to make, and
+        // not while the user is typing or scrolling.
+        if self.threads_all().any(|thread| thread.id == id) {
+            if self.thread.id != id {
+                return Err("only the thread on screen can put the issues page up".into());
+            }
+            if self.last_input.elapsed() < QUIET {
+                return Err("the user is typing or scrolling; ask again in a moment".into());
+            }
+        }
+        self.follow_issues();
+        let nav = issues::api::show_nav(&issues::shared::watch().borrow().tracker, args)?;
+        if !self.issues_open {
+            self.toggle_issues(window, cx);
+        }
+        issues::shared::navigate(nav);
+        Ok(serde_json::json!({ "shown": true }))
+    }
+
+    /// An issue's work has begun: In Progress, and the branch it is on. In the issues of the repo
+    /// `root` belongs to, which need not be the one on screen.
+    fn issue_started(root: &std::path::Path, number: u64, branch: Option<String>) {
+        issues::shared::change_repo(root, |tracker, now| {
+            tracker.update(number, now, |issue| {
+                if issue.status.is_open() && issue.status != issues::Status::InReview {
+                    issue.status = issues::Status::InProgress;
+                }
+                if let Some(branch) = &branch {
+                    let link = issues::Link::Branch(branch.clone());
+                    if !issue.links.contains(&link) {
+                        issue.links.push(link);
+                    }
+                }
+            });
+        });
     }
 
     fn hide_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -5077,6 +5274,7 @@ impl Reader {
                 // A file picked in the tree is what the viewer shows, not an agent's view.
                 if by_user {
                     self.thread.shown = None;
+                    self.project.terminal_shown = false;
                 }
                 if self.project.current.as_deref() != Some(&path) {
                     self.open(&path, window, cx);
@@ -5086,6 +5284,7 @@ impl Reader {
                 let Some(path) = self.project.changes_tree.selected_file().map(str::to_string) else { return };
                 if by_user {
                     self.thread.shown = None;
+                    self.project.terminal_shown = false;
                 }
                 if self.project.picked.as_deref() != Some(&path) {
                     self.pick(&path, cx);
@@ -5138,7 +5337,7 @@ impl Reader {
             controlled: self.grants.get(&thread.id).is_some_and(|grant| *grant != command::Grant::default()),
             day: None,
         };
-        let today = task::today();
+        let today = date::today();
         // Filtering keeps a project whose name matches, with all its threads, and any project with a
         // thread that does. A thread waiting on the user is in Needs you instead.
         let project_hit = |view: &View<'_>| view.project.name().to_lowercase().contains(&query);
@@ -5194,7 +5393,7 @@ impl Reader {
                         recent
                             .into_iter()
                             .map(|t| {
-                                let day = match today.days_since(task::Date::of_ms(t.active_at)) {
+                                let day = match today.days_since(date::Date::of_ms(t.active_at)) {
                                     ..=0 => "",
                                     1 => "Yesterday",
                                     2..=6 => "Previous 7 days",
@@ -5239,8 +5438,11 @@ impl Reader {
             suggestions,
             status: self.worktree_status.clone(),
             searching,
-            tasks_open: self.tasks_open,
-            tasks: task::summary(),
+            issues_open: self.issues_open,
+            issues: {
+                self.follow_issues();
+                issues::shared::summary()
+            },
         }
     }
 
@@ -5348,7 +5550,6 @@ impl Reader {
             picking,
             draft: thread.draft.clone(),
             draft_reset: self.chat_reset.get(),
-            draft_caret: self.chat_caret.take(),
             focus: self.chat_focus.get(),
             follow,
             follow_soft,
@@ -5377,17 +5578,6 @@ impl Reader {
             Chat::ToggleThought { message, block } => self.toggle_thought(message, block, cx),
             Chat::Fold { message, block, folded } => self.fold_run(message, block, folded, cx),
             Chat::Open(path) => self.reveal(&path, window, cx),
-            Chat::Mention(word) => {
-                let files = word.map(|word| match_files(&self.project.files, &word).into_iter().take(nsh::chat::MENTIONS_SHOWN).collect()).unwrap_or_default();
-                nsh::chat::publish_mentions(files);
-            }
-            Chat::SetDraft { text, caret } => {
-                self.thread.draft = text;
-                self.chat_reset.set(self.chat_reset.get() + 1);
-                self.chat_caret.set(Some(caret));
-                cx.notify();
-            }
-            Chat::OpenAt(path, line) => self.open_link(&path, line, window, cx),
             Chat::Resume(id) => self.resume_session(&id, window, cx),
             Chat::History => self.resume_thread(window, cx),
             Chat::PickAgent(id) => self.pick_agent(id, window, cx),
@@ -5458,8 +5648,9 @@ impl Reader {
             Cmd::AddProject => self.pick_project(window, cx),
             Cmd::NewThread => self.new_blank_thread(window, cx),
             Cmd::OpenSettings => self.toggle_settings(window, cx),
-            Cmd::ToggleTasks => self.toggle_tasks(window, cx),
-            Cmd::CloseTasks => self.hide_tasks(window, cx),
+            Cmd::ToggleIssues => self.toggle_issues(window, cx),
+            Cmd::CloseIssues => self.hide_issues(window, cx),
+            Cmd::WorkOnIssue(number) => self.work_on_issue(number, window, cx),
             Cmd::ToggleLeft => self.toggle_left(cx),
             Cmd::ToggleRight => self.toggle_right(cx),
             Cmd::ToggleFocus => self.toggle_focus(cx),
@@ -5468,8 +5659,12 @@ impl Reader {
             Cmd::SetSplit(split) => self.set_split(split, cx),
             Cmd::ShowHome => {
                 self.thread.shown = None;
+                self.project.terminal_shown = false;
+                window.focus(&self.focus, cx);
                 cx.notify();
             }
+            Cmd::ShowView(id) if id == TERMINAL_TAB => self.toggle_terminal_on(window, cx),
+            Cmd::CloseView(id) if id == TERMINAL_TAB => self.close_terminal(window, cx),
             Cmd::ShowView(id) => self.show_agent_view(&id, cx),
             Cmd::CloseView(id) => self.close_agent_view(&id, cx),
             Cmd::SetMode(diff) => self.set_mode(if diff { Mode::Diff } else { Mode::Source }, cx),
@@ -5535,7 +5730,8 @@ impl Reader {
             .shown
             .as_deref()
             .and_then(|id| self.thread.views.list().iter().find(|view| view.id == id));
-        let showing_agent = shown.is_some() || shown_form.is_some();
+        let showing_terminal = self.project.terminal_shown.then(|| self.project.terminal.clone()).flatten();
+        let showing_agent = shown.is_some() || shown_form.is_some() || showing_terminal.is_some();
         let with_tree = !showing_agent && self.tree_visible();
         // The window's own control goes in the leftmost header: the tree's, or the viewer's.
         // A pane too narrow for the tree beside the file takes turns: the explorer fills it until a
@@ -5551,6 +5747,10 @@ impl Reader {
         let tree_lead = if with_tree || explorer_only { lead_controls.clone() } else { vec![] };
         let body_controls = |lead: Vec<nsh::header::Control>| if with_tree || explorer_only { (vec![], trail_controls.clone()) } else if stacked { ([lead, vec![nsh::header::Control::Explorer]].concat(), trail_controls.clone()) } else { (lead, trail_controls.clone()) };
         let body = match (shown, shown_form, self.mode) {
+            _ if showing_terminal.is_some() => {
+                let background = cx.global::<Palette>().background;
+                div().size_full().bg(background).children(showing_terminal).into_any_element()
+            }
             _ if explorer_only => {
                 let background = cx.global::<Palette>().background;
                 div().size_full().when(!has_tabs, |d| d.bg(background)).child(self.explorer(tree_lead.clone(), trail_controls.clone(), cx)).into_any_element()
@@ -5636,7 +5836,7 @@ impl Reader {
     /// Files (or changes) and the agent's views as tabs, with a prompt for one it added while
     /// the user was busy. None while the agent has made no views.
     fn view_tabs(&self) -> Option<AnyElement> {
-        if self.thread.views.is_empty() && self.thread.forms.is_empty() {
+        if self.thread.views.is_empty() && self.thread.forms.is_empty() && self.project.terminal.is_none() {
             return None;
         }
         use nsh::tabs::{Snapshot, Tab};
@@ -5651,13 +5851,13 @@ impl Reader {
         };
         nsh::tabs::publish(Snapshot {
             home: if self.mode == Mode::Diff { "Changes" } else { "Files" }.into(),
-            shown: self.thread.shown.clone(),
+            shown: if self.project.terminal_shown { Some(TERMINAL_TAB.to_string()) } else { self.thread.shown.clone() },
             tabs: self
-                .thread
-                .views
-                .list()
+                .project
+                .terminal
                 .iter()
-                .map(|view| Tab { id: view.id.clone(), title: view.title.clone() })
+                .map(|_| Tab { id: TERMINAL_TAB.to_string(), title: "Terminal".into() })
+                .chain(self.thread.views.list().iter().map(|view| Tab { id: view.id.clone(), title: view.title.clone() }))
                 .chain(self.thread.forms.list().iter().map(|form| Tab { id: form.id.clone(), title: form.title.clone() }))
                 .collect(),
             offer: self.thread.offered.as_ref().and_then(titled),
@@ -6030,8 +6230,13 @@ fn approval_text(agent: &config::Agent, new_agent: bool, mcp: &[config::McpServe
 }
 
 impl Render for Reader {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.settle_agent_changes();
+        // A terminal that is no longer drawn must not keep the keys: they would go to a shell nobody sees.
+        if !self.project.terminal_shown && self.project.terminal.as_ref().is_some_and(|terminal| terminal.focus_handle(cx).is_focused(window)) {
+            let focus = self.focus.clone();
+            cx.defer_in(window, move |_, window, cx| window.focus(&focus, cx));
+        }
         if !self.painted {
             self.painted = true;
             trace::mark("first render");
@@ -6055,8 +6260,8 @@ impl Render for Reader {
         // The viewer pane is only built where it shows: a pane nobody sees would publish over the
         // one that is.
         let hidden = || div().size_full().into_any_element();
-        let (middle, side) = if self.tasks_open {
-            (self.tasks.clone().into_any_element(), hidden())
+        let (middle, side) = if self.issues_open {
+            (self.issues.clone().into_any_element(), hidden())
         } else if !side_open {
             // Only the conversation shows, and the viewer's button waits on the side it opens.
             let chat_lead = vec![Control::Sidebar(left_open), Control::Viewer(side_open)];
@@ -6077,7 +6282,7 @@ impl Render for Reader {
             controls(vec![], trail_all);
             (floating(self.chat_pane(vec![Control::Sidebar(left_open)], vec![], cx), cx), self.pane(cx))
         };
-        let right_open = side_open && !focus && !self.tasks_open;
+        let right_open = side_open && !focus && !self.issues_open;
         div()
             .size_full()
             .flex()
@@ -6090,11 +6295,11 @@ impl Render for Reader {
             .on_scroll_wheel(cx.listener(|reader, _, _, _| reader.last_input = Instant::now()))
             .on_mouse_down(gpui::MouseButton::Left, cx.listener(|reader, _, _, _| reader.last_input = Instant::now()))
             .on_action(cx.listener(|reader, _: &ShowFinder, window, cx| {
-                reader.hide_tasks(window, cx);
+                reader.hide_issues(window, cx);
                 reader.show_finder(window, cx)
             }))
             .on_action(cx.listener(|reader, _: &ShowSettings, window, cx| {
-                reader.hide_tasks(window, cx);
+                reader.hide_issues(window, cx);
                 reader.toggle_settings(window, cx)
             }))
             .on_action(cx.listener(|reader, _: &CloseSettings, window, cx| reader.hide_settings(window, cx)))
@@ -6107,15 +6312,16 @@ impl Render for Reader {
             .on_action(cx.listener(|reader, _: &ShowChat, _, cx| reader.show_chat(cx)))
             .on_action(cx.listener(|reader, _: &SwapPanes, _, cx| reader.swap_panes(cx)))
             .on_action(cx.listener(|reader, _: &ToggleFocus, _, cx| reader.toggle_focus(cx)))
+            .on_action(cx.listener(|reader, _: &ToggleTerminal, window, cx| reader.toggle_terminal(window, cx)))
             .on_action(cx.listener(|reader, _: &ShowHistory, window, cx| reader.resume_thread(window, cx)))
             .on_action(cx.listener(|reader, _: &ToggleSplit, _, cx| reader.set_split(!reader.split, cx)))
             .on_action(cx.listener(|reader, _: &ToggleRendered, _, cx| reader.toggle_rendered(cx)))
             .on_action(cx.listener(|reader, _: &OpenProject, window, cx| {
-                reader.hide_tasks(window, cx);
+                reader.hide_issues(window, cx);
                 reader.pick_project(window, cx)
             }))
             .on_action(cx.listener(|reader, _: &NewThread, window, cx| {
-                reader.hide_tasks(window, cx);
+                reader.hide_issues(window, cx);
                 reader.new_blank_thread(window, cx);
             }))
             // macOS draws no titlebar of its own (see `main`): this strip clears the traffic lights
@@ -6323,9 +6529,15 @@ fn main() {
             KeyBinding::new("secondary-p", ShowFinder, None),
             KeyBinding::new("secondary-,", ShowSettings, None),
             KeyBinding::new("secondary-w", CloseWindow, None),
+            KeyBinding::new("secondary-`", ToggleTerminal, None),
             KeyBinding::new("escape", CloseSettings, Some("Settings")),
             // The Input binds up/down itself and swallows them when single-line, so these name it.
         ]);
+        // Ctrl+O, T, B, N, P, W and \ are keys of readline, fzf and tmux: while the terminal has the
+        // focus they go to the shell and not to the window. (Where the window's keys are Cmd's, only
+        // the first two are Ctrl's.)
+        let shell_keys: &[&str] = if cfg!(target_os = "macos") { &["ctrl-o", "ctrl-t"] } else { &["ctrl-o", "ctrl-t", "ctrl-b", "ctrl-n", "ctrl-p", "ctrl-w", "ctrl-\\"] };
+        cx.bind_keys(shell_keys.iter().map(|key| KeyBinding::new(key, gpui::NoAction, Some("Terminal"))));
         cx.on_action(|_: &CloseWindow, cx| {
             if let Some(window) = cx.active_window() {
                 window.update(cx, |_, window, _| window.remove_window()).ok();
