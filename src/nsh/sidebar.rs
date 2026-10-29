@@ -243,13 +243,16 @@ fn project_group(project: &Project) -> View {
         .flex_row()
         .items_baseline()
         .gap(rems(0.5))
-        .child(text(project.name.clone()).number_of_lines(1).flex_shrink(1.).text_size(text_sm()).font_weight(FontWeight::SEMIBOLD).text_color(label))
+        .child(text(project.name.clone()).number_of_lines(1).flex_shrink(1.).min_w(rems(6.)).text_size(text_sm()).font_weight(FontWeight::SEMIBOLD).text_color(label))
         .child(project.branch.as_ref().map(|branch| {
             view()
                 .flex_row()
                 .items_baseline()
                 .gap(rems(0.25))
-                .child(caption(branch.name.clone()).number_of_lines(1).flex_shrink(1.))
+                .min_w(rems(4.))
+                .flex_shrink(10.)
+                .overflow_hidden()
+                .child(caption(branch.name.clone()).number_of_lines(1).flex_shrink(1.).min_w_0())
                 .child(branch.dirty.then(|| text("*").text_color(Colors::warning())))
         }));
     // Pressing the row opens the project and folds or unfolds its threads; the buttons on it are

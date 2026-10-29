@@ -11,7 +11,7 @@ use tokio::sync::watch;
 
 use super::header::{Control, pane_header};
 use super::source::Shared;
-use super::{Colors, body, caption, icon, mono_size, note, rems, text_base, text_sm, tooltip};
+use super::{Colors, body, caption, icon, mono_size, note, rems, text_sm, tooltip};
 use crate::ui::icon::IconName;
 
 /// Whether a step of the agent's is waiting, going, done or failed: a tool call, the plan's
@@ -294,6 +294,11 @@ fn tell(cmd: Cmd) {
     super::bus::send(super::bus::Cmd::Chat(cmd));
 }
 
+/// A link pressed in the transcript opens in the default browser.
+fn open_link(press: &nsh_base::TextViewLinkPressEvent) {
+    super::bus::send(super::bus::Cmd::OpenUrl(press.url.to_string()));
+}
+
 /// What a phase is drawn with: quiet while it waits, principal while it goes, and what it
 /// reached in the tone it had.
 fn phase_tint(phase: Phase) -> AdaptiveColor {
@@ -498,7 +503,7 @@ fn thought_row(message: usize, at: usize, text_: &str, open: bool) -> AnyElement
                     view()
                         .flex_1()
                         .min_w_0()
-                        .child(text_view().markdown(text_.to_string()).italic().text_sm().text_color(Colors::muted()).opacity(crate::theme::tokens::DIM)),
+                        .child(text_view().markdown(text_.to_string()).on_link_press(open_link).italic().text_sm().text_color(Colors::muted()).opacity(crate::theme::tokens::DIM)),
                 )
                 .child(
                     view()
@@ -511,6 +516,7 @@ fn thought_row(message: usize, at: usize, text_: &str, open: bool) -> AnyElement
         column = column.child(
             text_view()
                 .markdown(text_.to_string())
+                .on_link_press(open_link)
                 .italic()
                 .text_sm()
                 .px(rems(0.75))
@@ -634,6 +640,7 @@ fn plan_rows(entries: &[Entry]) -> AnyElement {
                 .child(
                     text_view()
                         .markdown(entry_text)
+                        .on_link_press(open_link)
                         .flex_1()
                         .min_w_0()
                         .text_sm()
@@ -787,6 +794,7 @@ fn block_row(message: usize, block: &Block) -> AnyElement {
     match block {
         Block::Markdown(markdown) => text_view()
             .markdown(markdown.0.to_string())
+            .on_link_press(open_link)
             .selectable(true)
             .text_base()
             .text_color(Colors::foreground())
@@ -1202,7 +1210,7 @@ fn draft_field(draft: &Signal<String>, field_ref: ElementRef) -> Input {
         .flex_1()
         .min_w_0()
         .max_h(px(160.))
-        .text_size(text_base())
+        .text_base()
         .multiline(true)
         .value(move || held.get())
         .text_color(Colors::foreground())
@@ -1317,6 +1325,8 @@ fn pressed_send(draft: &Signal<String>) {
 /// which follows what its [`Snapshot`] says as it changes.
 #[component]
 pub fn Chat() -> impl IntoElement {
+    // The transcript's links show the pointer rather than the text cursor of the selectable text.
+    provide_context(nsh_base::TextViewParts::new().part(nsh_base::TextViewPart::Link, |style| style.cursor_pointer()));
     let state = signal(SNAPSHOT.borrow().clone());
     spawn(async move {
         let mut snapshot = SNAPSHOT.subscribe();
