@@ -7,7 +7,7 @@ use std::rc::Rc;
 use futures::StreamExt as _;
 use gpui::{
     App, Bounds, Context, FocusHandle, Focusable, Font, FontStyle, FontWeight, Hsla, InteractiveElement as _, IntoElement, KeyDownEvent, MouseButton, ParentElement as _, Pixels, Render,
-    ScrollWheelEvent, Styled as _, StrikethroughStyle, TextRun, UnderlineStyle, Window, canvas, div, fill, point, px, size,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, ScrollWheelEvent, Styled as _, ClipboardItem, StrikethroughStyle, TextRun, UnderlineStyle, Window, canvas, div, fill, point, px, size,
 };
 
 use crate::terminal::{CursorShape, Frame, Key, KeyInput, Rgb, Session};
@@ -17,6 +17,10 @@ use crate::theme::Palette;
 const WHEEL_LINES: f32 = 3.0;
 /// Height of a line, as a multiple of the font size.
 const LINE_HEIGHT: f32 = 1.3;
+
+/// A selection in the visible cells: where the press was and where the pointer is now, as
+/// (column, row).
+type Selection = Option<((u16, u16), (u16, u16))>;
 
 /// The shell ended: the view has nothing left to show.
 pub struct Exited;
@@ -35,11 +39,16 @@ pub struct TerminalView {
     theme: Option<(Rgb, Rgb)>,
     /// The part of a line the wheel has turned and not yet scrolled: a touchpad sends fractions.
     wheel_rest: f32,
+    selection: Rc<Cell<Selection>>,
+    /// Whether the left button is down, selecting.
+    selecting: bool,
+    /// Where the cells start on the screen, as last painted.
+    origin: Rc<Cell<gpui::Point<Pixels>>>,
 }
 
 impl TerminalView {
     pub fn new(root: PathBuf, cx: &mut Context<Self>) -> Self {
-        let mut view = Self { root, focus: cx.focus_handle(), session: None, error: None, grid: Rc::new(Cell::new((80, 24, 8.0, 16.0))), measured: Rc::new(Cell::new(None)), theme: None, wheel_rest: 0.0 };
+        let mut view = Self { root, focus: cx.focus_handle(), session: None, error: None, grid: Rc::new(Cell::new((80, 24, 8.0, 16.0))), measured: Rc::new(Cell::new(None)), theme: None, wheel_rest: 0.0, selection: Rc::new(Cell::new(None)), selecting: false, origin: Rc::new(Cell::new(point(px(0.), px(0.)))) };
         view.start(cx);
         view
     }
@@ -105,6 +114,12 @@ impl TerminalView {
             cx.stop_propagation();
             return;
         }
+        // Copy is Ctrl+Shift+C, or Cmd+C: Ctrl+C stays the shell's interrupt.
+        if stroke.key == "c" && ((ctrl && shift) || (meta && !ctrl)) {
+            self.copy(cx);
+            cx.stop_propagation();
+            return;
+        }
         // Cmd keys are the app's, not the shell's.
         if meta {
             return;
@@ -115,10 +130,58 @@ impl TerminalView {
         if key == Key::Unidentified && text.is_none() {
             return;
         }
+        // Typing goes to the shell and ends the selection.
+        self.selection.set(None);
         if let Some(session) = &self.session {
             session.key(KeyInput { key, text, shift, alt, ctrl, meta });
         }
         cx.stop_propagation();
+    }
+
+    /// The cell under `position`, clamped to the screen.
+    fn cell_at(&self, position: gpui::Point<Pixels>) -> (u16, u16) {
+        let (cols, rows, cell_w, cell_h) = self.grid.get();
+        let origin = self.origin.get();
+        let col = (f32::from(position.x - origin.x) / cell_w).floor().clamp(0.0, f32::from(cols.saturating_sub(1)));
+        let row = (f32::from(position.y - origin.y) / cell_h).floor().clamp(0.0, f32::from(rows.saturating_sub(1)));
+        (col as u16, row as u16)
+    }
+
+    fn press(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        self.focus(window, cx);
+        let at = self.cell_at(event.position);
+        self.selecting = true;
+        // A click alone selects nothing, and drops what was selected.
+        self.selection.set(Some((at, at)));
+        cx.notify();
+    }
+
+    fn drag(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
+        if !self.selecting || event.pressed_button != Some(MouseButton::Left) {
+            return;
+        }
+        let at = self.cell_at(event.position);
+        if let Some((from, _)) = self.selection.get().filter(|(_, to)| *to != at) {
+            self.selection.set(Some((from, at)));
+            cx.notify();
+        }
+    }
+
+    fn release(&mut self, _: &MouseUpEvent, cx: &mut Context<Self>) {
+        self.selecting = false;
+        if self.selection.get().is_some_and(|(from, to)| from == to) {
+            self.selection.set(None);
+            cx.notify();
+        }
+    }
+
+    /// Puts the selected text on the clipboard.
+    fn copy(&self, cx: &mut Context<Self>) {
+        let (Some(session), Some((from, to))) = (&self.session, self.selection.get()) else { return };
+        let text = selected_text(&session.frame(), from, to);
+        if !text.is_empty() {
+            cx.write_to_clipboard(ClipboardItem::new_string(text));
+        }
     }
 
     fn wheel(&mut self, event: &ScrollWheelEvent) {
@@ -130,6 +193,10 @@ impl TerminalView {
         self.wheel_rest += lines;
         let step = self.wheel_rest.trunc();
         self.wheel_rest -= step;
+        if step != 0.0 {
+            // The lines under the selection move.
+            self.selection.set(None);
+        }
         if let (Some(session), true) = (&self.session, step != 0.0) {
             // A wheel turned up reads older lines, which is up in the history.
             session.scroll(-(step as isize));
@@ -165,6 +232,7 @@ impl Render for TerminalView {
                 .into_any_element();
         };
         let (grid, focus, measured) = (self.grid.clone(), self.focus.clone(), self.measured.clone());
+        let (selection, origin) = (self.selection.clone(), self.origin.clone());
         let caret = palette.caret;
         area.id("terminal")
             .key_context("Terminal")
@@ -174,13 +242,16 @@ impl Render for TerminalView {
                 this.wheel(event);
                 cx.stop_propagation();
             }))
-            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, window, cx| this.focus(window, cx)))
+            .on_mouse_down(MouseButton::Left, cx.listener(|this, event, window, cx| this.press(event, window, cx)))
+            .on_mouse_move(cx.listener(|this, event, _, cx| this.drag(event, cx)))
+            .on_mouse_up(MouseButton::Left, cx.listener(|this, event, _, cx| this.release(event, cx)))
             .child(
                 canvas(
                     {
-                        let (session, grid, measured) = (session.clone(), grid.clone(), measured.clone());
+                        let (session, grid, measured, origin) = (session.clone(), grid.clone(), measured.clone(), origin.clone());
                         let family = family.clone();
                         move |bounds, window, _| {
+                            origin.set(bounds.origin);
                             let (cell_w, cell_h) = match measured.take() {
                                 Some((name, size, cell)) if name == family && size == font_size => {
                                     measured.set(Some((name, size, cell)));
@@ -202,7 +273,7 @@ impl Render for TerminalView {
                     },
                     move |bounds, (), window, cx| {
                         let (_, _, cell_w, cell_h) = grid.get();
-                        paint(&session.frame(), bounds, (cell_w, cell_h), (&family, font_size), (caret, focus.is_focused(window)), window, cx);
+                        paint(&session.frame(), selection.get(), bounds, (cell_w, cell_h), (&family, font_size), (caret, focus.is_focused(window)), window, cx);
                     },
                 )
                 .size_full(),
@@ -240,7 +311,47 @@ fn cell_size(window: &Window, family: &gpui::SharedString, font_size: Pixels) ->
     (f32::from(width).max(1.0), (f32::from(font_size) * LINE_HEIGHT).round())
 }
 
-fn paint(frame: &Frame, bounds: Bounds<Pixels>, (cell_w, cell_h): (f32, f32), (family, font_size): (&gpui::SharedString, Pixels), (caret, focused): (Hsla, bool), window: &mut Window, cx: &mut App) {
+/// The cells of a row, each with what it shows: a wide character is in its first cell, and its
+/// second is empty. Cells no run covers are blank.
+fn row_cells(line: &[crate::terminal::Run], cols: u16) -> Vec<String> {
+    let mut cells = vec![" ".to_string(); usize::from(cols)];
+    for run in line {
+        let glyphs = run.text.chars().count();
+        if glyphs == usize::from(run.cells) {
+            for (i, c) in run.text.chars().enumerate() {
+                if let Some(cell) = cells.get_mut(usize::from(run.col) + i) {
+                    *cell = c.to_string();
+                }
+            }
+        } else if let Some(cell) = cells.get_mut(usize::from(run.col)) {
+            *cell = run.text.clone();
+            for i in 1..usize::from(run.cells) {
+                if let Some(cell) = cells.get_mut(usize::from(run.col) + i) {
+                    cell.clear();
+                }
+            }
+        }
+    }
+    cells
+}
+
+/// The text between two cells of the frame, in reading order: rows end where the selection does or
+/// where their text does, and are joined by newlines.
+fn selected_text(frame: &Frame, a: (u16, u16), b: (u16, u16)) -> String {
+    let (start, end) = if (a.1, a.0) <= (b.1, b.0) { (a, b) } else { (b, a) };
+    let mut out = Vec::new();
+    for row in start.1..=end.1 {
+        let Some(line) = frame.lines.get(usize::from(row)) else { break };
+        let cells = row_cells(line, frame.cols);
+        let from = if row == start.1 { usize::from(start.0) } else { 0 };
+        let to = if row == end.1 { usize::from(end.0) + 1 } else { cells.len() };
+        let text: String = cells.get(from..to.min(cells.len())).unwrap_or_default().concat();
+        out.push(text.trim_end().to_string());
+    }
+    out.join("\n")
+}
+
+fn paint(frame: &Frame, selection: Selection, bounds: Bounds<Pixels>, (cell_w, cell_h): (f32, f32), (family, font_size): (&gpui::SharedString, Pixels), (caret, focused): (Hsla, bool), window: &mut Window, cx: &mut App) {
     let origin = bounds.origin;
     let at = |col: u16, row: u16| point(origin.x + px(f32::from(col) * cell_w), origin.y + px(f32::from(row) * cell_h));
     let line_height = px(cell_h);
@@ -259,6 +370,14 @@ fn paint(frame: &Frame, bounds: Bounds<Pixels>, (cell_w, cell_h): (f32, f32), (f
         );
         let _ = shaped.paint(at(run.col, row), line_height, gpui::TextAlign::Left, None, window, cx);
     };
+    if let Some((a, b)) = selection {
+        let (start, end) = if (a.1, a.0) <= (b.1, b.0) { (a, b) } else { (b, a) };
+        for row in start.1..=end.1 {
+            let from = if row == start.1 { start.0 } else { 0 };
+            let to = if row == end.1 { end.0 + 1 } else { frame.cols };
+            window.paint_quad(fill(Bounds::new(at(from, row), size(px(f32::from(to.saturating_sub(from)) * cell_w), line_height)), caret.opacity(0.35)));
+        }
+    }
     for (row, line) in frame.lines.iter().enumerate() {
         let row = row as u16;
         for run in line.iter() {
@@ -355,6 +474,17 @@ fn key_of(name: &str) -> Option<Key> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+
+    #[test]
+    fn selected_text_follows_the_cells_and_trims_the_ends_of_rows() {
+        let run = |col, cells, text: &str| crate::terminal::Run { col, cells, text: text.into(), fg: Rgb(0, 0, 0), bg: None, bold: false, italic: false, underline: false, strike: false };
+        let frame = Frame { cols: 8, rows: 2, lines: vec![Arc::new(vec![run(0, 2, "ab"), run(3, 2, "中"), run(6, 1, "x")]), Arc::new(vec![run(1, 2, "yz")])], ..Frame::default() };
+        assert_eq!(selected_text(&frame, (0, 0), (7, 0)), "ab 中 x");
+        assert_eq!(selected_text(&frame, (1, 0), (2, 1)), "b 中 x\n yz");
+        // Dragged backwards, it is the same.
+        assert_eq!(selected_text(&frame, (2, 1), (1, 0)), "b 中 x\n yz");
+    }
 
     #[test]
     fn keys_are_named_the_way_the_encoder_wants() {
