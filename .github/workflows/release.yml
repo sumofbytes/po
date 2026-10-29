@@ -42,9 +42,11 @@ jobs:
             target: x86_64-unknown-linux-gnu
           - os: ubuntu-22.04-arm
             target: aarch64-unknown-linux-gnu
-          - os: macos-latest
+          # Pinned: macos-latest is now macOS 26, whose SDK Zig 0.15.2 can't
+          # link against (undefined libSystem symbols building libghostty-vt).
+          - os: macos-15
             target: aarch64-apple-darwin
-          - os: macos-latest
+          - os: macos-15
             target: x86_64-apple-darwin
           - os: windows-latest
             target: x86_64-pc-windows-msvc
