@@ -11,7 +11,7 @@ use tokio::sync::watch;
 
 use super::header::{Control, pane_header};
 use super::source::Shared;
-use super::{Colors, body, caption, icon, mono_size, note, rems, text_sm, tooltip};
+use super::{Colors, body, caption, icon, mono_size, note, scale, text_base, text_sm, tooltip};
 use crate::ui::icon::IconName;
 
 /// Whether a step of the agent's is waiting, going, done or failed: a tool call, the plan's
@@ -323,7 +323,7 @@ fn separator() -> AnyElement {
 /// The glyph that walks with it, in its tone.
 fn step_glyph(phase: Phase) -> View {
     // A fixed width, so the text beside it stays put as the glyph changes from one phase to the next.
-    view().flex_none().w(rems(1.)).flex_row().justify_center().child(text(phase.glyph().to_string()).text_color(phase_tint(phase)))
+    view().flex_none().w(scale::s4()).flex_row().justify_center().child(text(phase.glyph().to_string()).text_color(phase_tint(phase)))
 }
 
 /// The popovers of the menus: the theme's own surface, with a shadow.
@@ -346,9 +346,9 @@ fn menu_trigger(label: String, tip: &'static str) -> View {
         .flex_none()
         .flex_row()
         .items_center()
-        .gap(rems(0.25))
-        .px(rems(0.5))
-        .py(rems(0.25))
+        .gap(scale::s1())
+        .px(scale::s2())
+        .py(scale::s1())
         .rounded(Colors::radius())
         .cursor_pointer()
         .hover(|s| s.bg(Colors::hover()))
@@ -357,9 +357,9 @@ fn menu_trigger(label: String, tip: &'static str) -> View {
             view()
                 .flex_row()
                 .items_center()
-                .gap(rems(0.25))
+                .gap(scale::s1())
                 .child(body(label).font_weight(FontWeight::MEDIUM))
-                .child(icon(IconName::ChevronDown, rems(0.75), Colors::muted())),
+                .child(icon(IconName::ChevronDown, scale::s3(), Colors::muted())),
         )
 }
 
@@ -367,8 +367,8 @@ fn menu_trigger(label: String, tip: &'static str) -> View {
 fn item(what: String, on_press: impl Fn() + 'static) -> AnyElement {
     menu_item()
         .cursor_pointer()
-        .px(rems(0.75))
-        .py(rems(0.375))
+        .px(scale::s3())
+        .py(scale::s1_5())
         .hover(|s| s.bg(Colors::hover()))
         .on_select(on_press)
         .child(text(what).text_size(text_sm()))
@@ -383,7 +383,7 @@ fn status_line(line: String) -> Text {
 /// The pane header of the conversation: the title, the statuses, the history button, the Control
 /// menu, and the window's own controls at the ends.
 fn pane(title: String, snap: &Snapshot) -> View {
-    let mut right = view().flex_row().items_center().gap(rems(0.75));
+    let mut right = view().flex_row().items_center().gap(scale::s3());
     for line in &snap.statuses {
         right = right.child(status_line(line.clone()));
     }
@@ -392,8 +392,8 @@ fn pane(title: String, snap: &Snapshot) -> View {
             view()
                 .role(AccessibilityRole::Button)
                 .flex_none()
-                .px(rems(0.5))
-                .py(rems(0.25))
+                .px(scale::s2())
+                .py(scale::s1())
                 .rounded(Colors::radius())
                 .cursor_pointer()
                 .hover(|s| s.bg(Colors::hover()))
@@ -433,7 +433,7 @@ fn grant_menu(grant: Grant) -> AnyElement {
         menu = menu.child(item(choice("May answer its threads' permission asks".to_string(), grant.approvals), move || tell(Cmd::Grant(GrantChange::Approvals))));
     }
     menu = menu.child(separator());
-    menu = menu.child(menu_item().disabled(true).px(rems(0.75)).py(rems(0.375)).child(note("A raise takes effect when the agent restarts")).into_element());
+    menu = menu.child(menu_item().disabled(true).px(scale::s3()).py(scale::s1_5()).child(note("A raise takes effect when the agent restarts")).into_element());
     if active {
         menu = menu.child(item("Stop agent control".to_string(), move || tell(Cmd::Grant(GrantChange::Stop))));
     }
@@ -446,21 +446,20 @@ fn grant_menu(grant: Grant) -> AnyElement {
 
 /// The widths the conversation and the composer share, so the text of each starts and ends on
 /// the same lines: the column's, the space outside it, and from the composer card's edge to its
-/// text (the card's 1px border, its 0.5rem padding and the field's 0.5rem).
+/// text (the card's 1px border, its 0.5rem padding and the field's 0.5rem): `scale::s3` outside the
+/// column and `scale::composer_text_inset` inside.
 const COLUMN: f32 = 860.;
-const EDGE: f32 = 0.75;
-const TEXT_INSET: f32 = 1.0625;
 
 /// A message the user sent, in a rounded column at the right: its pictures, then its text.
 fn user_row(text_: &str, pictures: &[Picture]) -> AnyElement {
     let mut bubble = view()
         .flex_col()
-        .gap(rems(0.5))
+        .gap(scale::s2())
         .min_w_0()
         .flex_shrink(1.)
         .max_w(px(700.))
-        .px(rems(1.))
-        .py(rems(0.75))
+        .px(scale::s4())
+        .py(scale::s3())
         .rounded(super::surface_radius())
         .bg(Colors::selected())
         .children(
@@ -489,13 +488,13 @@ fn user_row(text_: &str, pictures: &[Picture]) -> AnyElement {
 fn thought_row(message: usize, at: usize, text_: &str, open: bool) -> AnyElement {
     let mut column = view()
         .flex_col()
-        .gap(rems(0.25))
+        .gap(scale::s1())
         .child(
             view()
                 .flex_row()
                 .items_start()
-                .gap(rems(0.5))
-                .py(rems(0.125))
+                .gap(scale::s2())
+                .py(scale::s0_5())
                 .cursor_pointer()
                 .rounded(Colors::radius())
                 .on_press(move || tell(Cmd::ToggleThought { message, block: at }))
@@ -508,8 +507,8 @@ fn thought_row(message: usize, at: usize, text_: &str, open: bool) -> AnyElement
                 .child(
                     view()
                         .flex_none()
-                        .pt(rems(0.125))
-                        .child(icon(if open { IconName::ChevronDown } else { IconName::ChevronRight }, rems(0.75), Colors::muted())),
+                        .pt(scale::s0_5())
+                        .child(icon(if open { IconName::ChevronDown } else { IconName::ChevronRight }, scale::s3(), Colors::muted())),
                 ),
         );
     if open {
@@ -519,9 +518,9 @@ fn thought_row(message: usize, at: usize, text_: &str, open: bool) -> AnyElement
                 .on_link_press(open_link)
                 .italic()
                 .text_sm()
-                .px(rems(0.75))
-                .py(rems(0.25))
-                .pl(rems(1.25))
+                .px(scale::s3())
+                .py(scale::s1())
+                .pl(scale::s5())
                 .opacity(crate::theme::tokens::DIM)
                 .text_color(Colors::muted()),
         );
@@ -536,21 +535,21 @@ fn tool_row(message: usize, at: usize, tool: &Tool) -> AnyElement {
     let title = tool.title.clone();
     let mut card = view()
         .flex_col()
-        .gap(rems(0.25))
-        .py(rems(0.25))
-        .px(rems(0.75))
+        .gap(scale::s1())
+        .py(scale::s1())
+        .px(scale::s3())
         .rounded(Colors::radius())
         .hover(|s| s.bg(Colors::hover()))
         .child(
             view()
                 .flex_row()
                 .items_center()
-                .gap(rems(0.5))
+                .gap(scale::s2())
                 .child(
                     view()
                         .flex_row()
                         .items_center()
-                        .gap(rems(0.5))
+                        .gap(scale::s2())
                         .flex_1()
                         .min_w_0()
                         .cursor_pointer()
@@ -570,13 +569,13 @@ fn tool_row(message: usize, at: usize, tool: &Tool) -> AnyElement {
                         .role(AccessibilityRole::Button)
                         .label("Open the file it changed")
                         .flex_none()
-                        .px(rems(0.5))
-                        .py(rems(0.125))
+                        .px(scale::s2())
+                        .py(scale::s0_5())
                         .rounded(Colors::radius())
                         .cursor_pointer()
                         .hover(|s| s.bg(Colors::hover()))
                         .on_press(move || tell(Cmd::Open(path.clone())))
-                        .child(icon(IconName::FileText, rems(0.75), Colors::muted()))
+                        .child(icon(IconName::FileText, scale::s3(), Colors::muted()))
                 })),
         );
     if tool.open {
@@ -589,7 +588,7 @@ fn tool_row(message: usize, at: usize, tool: &Tool) -> AnyElement {
                     .max_h(px(448.))
                     .border_l_1()
                     .border_color(Colors::border())
-                    .pl(rems(0.75))
+                    .pl(scale::s3())
                     .child(scroll().max_h(px(448.)).child(
                         text(piece.clone())
                             .text_color(Colors::muted())
@@ -612,16 +611,16 @@ fn run_row(message: usize, at: usize, count: usize, phase: Phase, folded: bool) 
         .label(label.clone())
         .flex_row()
         .items_center()
-        .gap(rems(0.5))
-        .py(rems(0.25))
-        .px(rems(0.75))
+        .gap(scale::s2())
+        .py(scale::s1())
+        .px(scale::s3())
         .rounded(Colors::radius())
         .cursor_pointer()
         .hover(|s| s.bg(Colors::hover()))
         .on_press(move || tell(Cmd::Fold { message, block: at, folded: !folded }))
         .child(step_glyph(phase))
         .child(text(label).flex_1().text_sm().text_color(Colors::muted()))
-        .child(icon(if folded { IconName::ChevronRight } else { IconName::ChevronDown }, rems(0.75), Colors::muted()))
+        .child(icon(if folded { IconName::ChevronRight } else { IconName::ChevronDown }, scale::s3(), Colors::muted()))
         .into_element()
 }
 
@@ -629,14 +628,14 @@ fn run_row(message: usize, at: usize, count: usize, phase: Phase, folded: bool) 
 fn plan_rows(entries: &[Entry]) -> AnyElement {
     view()
         .flex_col()
-        .gap(rems(0.375))
-        .py(rems(0.25))
+        .gap(scale::s1_5())
+        .py(scale::s1())
         .children(entries.iter().map(|entry| {
             let (entry_text, entry_phase) = (entry.text.clone(), entry.phase);
             view()
                 .flex_row()
                 .items_start()
-                .gap(rems(0.5))
+                .gap(scale::s2())
                 .child(
                     text_view()
                         .markdown(entry_text)
@@ -657,9 +656,9 @@ fn ask_row(message: usize, at: usize, title: &str, options: &[AskOption], answer
     let title = title.to_string();
     let mut card = view()
         .flex_col()
-        .gap(rems(0.5))
-        .py(rems(0.75))
-        .px(rems(0.75))
+        .gap(scale::s2())
+        .py(scale::s3())
+        .px(scale::s3())
         .rounded(super::card_radius())
         .border_1()
         .border_color(move || if waiting { Colors::warning()().opacity(crate::theme::tokens::ALERT_BORDER) } else { Colors::border()() })
@@ -667,7 +666,7 @@ fn ask_row(message: usize, at: usize, title: &str, options: &[AskOption], answer
             view()
                 .flex_row()
                 .items_start()
-                .gap(rems(0.5))
+                .gap(scale::s2())
                 .child(text("Permission").flex_none().text_xs().font_weight(FontWeight::MEDIUM).text_color(Colors::muted()))
                 .child(view().flex_1().min_w_0().child(text_view().markdown(title).text_sm().text_color(Colors::foreground()))),
         );
@@ -677,14 +676,14 @@ fn ask_row(message: usize, at: usize, title: &str, options: &[AskOption], answer
             card = card.child(text(said).text_sm().text_color(Colors::muted()));
         }
         None => {
-            let mut row = view().flex_row().flex_wrap().gap(rems(0.375));
+            let mut row = view().flex_row().flex_wrap().gap(scale::s1_5());
             for option in options {
                 let (way, label, primary) = (option.at, option.label.clone(), option.primary);
                 let mut reply = view()
                     .role(AccessibilityRole::Button)
                     .label(label.clone())
-                    .px(rems(0.75))
-                    .py(rems(0.25))
+                    .px(scale::s3())
+                    .py(scale::s1())
                     .rounded(Colors::radius())
                     .cursor_pointer()
                     .on_press(move || tell(Cmd::Answer { message, block: at, at: way }));
@@ -710,9 +709,9 @@ fn approve_row(message: usize, at: usize, question: &str, lines: &[String], answ
     let title = question.to_string();
     let mut card = view()
         .flex_col()
-        .gap(rems(0.5))
-        .py(rems(0.75))
-        .px(rems(0.75))
+        .gap(scale::s2())
+        .py(scale::s3())
+        .px(scale::s3())
         .rounded(super::card_radius())
         .border_1()
         .border_color(move || if waiting { Colors::warning()().opacity(crate::theme::tokens::ALERT_BORDER) } else { Colors::border()() })
@@ -720,7 +719,7 @@ fn approve_row(message: usize, at: usize, question: &str, lines: &[String], answ
             view()
                 .flex_row()
                 .items_start()
-                .gap(rems(0.5))
+                .gap(scale::s2())
                 .child(text("Approve").flex_none().text_xs().font_weight(FontWeight::MEDIUM).text_color(Colors::muted()))
                 .child(view().flex_1().min_w_0().child(text_view().markdown(title).text_sm().text_color(Colors::foreground()))),
         )
@@ -731,7 +730,7 @@ fn approve_row(message: usize, at: usize, question: &str, lines: &[String], answ
                 .overflow_hidden()
                 .border_l_1()
                 .border_color(Colors::border())
-                .pl(rems(0.75))
+                .pl(scale::s3())
                 .children(
                     lines
                         .iter()
@@ -755,13 +754,13 @@ fn approve_row(message: usize, at: usize, question: &str, lines: &[String], answ
                 view()
                     .flex_row()
                     .flex_wrap()
-                    .gap(rems(0.375))
+                    .gap(scale::s1_5())
                     .child(
                         view()
                             .role(AccessibilityRole::Button)
                             .label("Run the command")
-                            .px(rems(0.75))
-                            .py(rems(0.25))
+                            .px(scale::s3())
+                            .py(scale::s1())
                             .rounded(Colors::radius())
                             .cursor_pointer()
                             .bg(Colors::primary())
@@ -772,8 +771,8 @@ fn approve_row(message: usize, at: usize, question: &str, lines: &[String], answ
                         view()
                             .role(AccessibilityRole::Button)
                             .label("Leave the command out")
-                            .px(rems(0.75))
-                            .py(rems(0.25))
+                            .px(scale::s3())
+                            .py(scale::s1())
                             .rounded(Colors::radius())
                             .cursor_pointer()
                             .border_1()
@@ -810,7 +809,7 @@ fn block_row(message: usize, block: &Block) -> AnyElement {
 
 /// One message of the agent's: its blocks, a run's own row standing in for the tools it hides.
 fn agent_row(message: usize, blocks: &[Block]) -> AnyElement {
-    let mut column = view().flex_col().min_w_0().gap(rems(0.75));
+    let mut column = view().flex_col().min_w_0().gap(scale::s3());
     let mut skip = 0;
     if blocks.is_empty() {
         column = column.child(text("Thinking…").text_sm().text_color(Colors::muted()));
@@ -833,7 +832,7 @@ fn agent_row(message: usize, blocks: &[Block]) -> AnyElement {
 fn transcript(items: &[Item], slot: ElementRef, at_end: Signal<bool>) -> AnyElement {
     // The transcript's column is the composer card's width, and its text starts where the
     // composer's does: the card's border, its padding and the field's padding in (see [`bar`]).
-    let mut rows = view().w_full().min_w_0().max_w(px(COLUMN)).flex_col().gap(rems(1.5)).px(rems(TEXT_INSET)).py(rems(1.5));
+    let mut rows = view().w_full().min_w_0().max_w(px(COLUMN)).flex_col().gap(scale::s6()).px(scale::composer_text_inset()).py(scale::s6());
     for (message, item) in items.iter().enumerate() {
         let row = match item {
             Item::User { text, pictures } => user_row(text, pictures),
@@ -851,7 +850,7 @@ fn transcript(items: &[Item], slot: ElementRef, at_end: Signal<bool>) -> AnyElem
             scroll()
                 .size_full()
                 .on_scroll(move |event: &ScrollEvent| at_end.set(event.offset.y + event.size.height >= event.content_size.height - px(24.)))
-                .child(view().flex_col().items_center().w_full().min_w_0().px(rems(EDGE)).child(rows.into_element()))
+                .child(view().flex_col().items_center().w_full().min_w_0().px(scale::s3()).child(rows.into_element()))
                 .element_ref(&slot),
         )
         .into_element()
@@ -865,7 +864,7 @@ fn pictures_row(pictures: &[Picture]) -> AnyElement {
         .flex_row()
         .flex_wrap()
         .items_start()
-        .gap(rems(0.5))
+        .gap(scale::s2())
         .children(
             pictures
                 .iter()
@@ -888,9 +887,9 @@ fn pictures_row(pictures: &[Picture]) -> AnyElement {
                                 .role(AccessibilityRole::Button)
                                 .label("Remove the picture")
                                 .absolute()
-                                .top(rems(-0.25))
-                                .right(rems(-0.25))
-                                .p(rems(0.125))
+                                .top(-scale::s1())
+                                .right(-scale::s1())
+                                .p(scale::s0_5())
                                 .rounded(super::pill())
                                 .bg(Colors::background())
                                 .border_1()
@@ -898,7 +897,7 @@ fn pictures_row(pictures: &[Picture]) -> AnyElement {
                                 .cursor_pointer()
                                 .hover(|s| s.bg(Colors::hover()))
                                 .on_press(move || tell(Cmd::Detach(at)))
-                                .child(icon(IconName::Close, rems(0.625), Colors::muted())),
+                                .child(icon(IconName::Close, scale::s2_5(), Colors::muted())),
                         )
                 })
                 .collect::<Vec<_>>(),
@@ -912,9 +911,9 @@ fn queue_row(queued: Queued) -> AnyElement {
     let mut row = view()
         .flex_row()
         .items_center()
-        .gap(rems(0.5))
-        .px(rems(0.75))
-        .py(rems(0.375))
+        .gap(scale::s2())
+        .px(scale::s3())
+        .py(scale::s1_5())
         .rounded(super::surface_radius())
         .bg(Colors::selected());
     row = if queued.kind.is_empty() {
@@ -934,12 +933,12 @@ fn queue_row(queued: Queued) -> AnyElement {
                 .role(AccessibilityRole::Button)
                 .label("Take back into the draft")
                 .flex_none()
-                .p(rems(0.125))
+                .p(scale::s0_5())
                 .rounded(super::pill())
                 .cursor_pointer()
                 .hover(|s| s.bg(Colors::hover()))
                 .on_press(move || tell(Cmd::Recall(queued.at)))
-                .child(icon(IconName::Pencil, rems(0.625), Colors::muted())),
+                .child(icon(IconName::Pencil, scale::s2_5(), Colors::muted())),
         );
     row.into_element()
 }
@@ -949,19 +948,19 @@ fn note_row(note: &str) -> AnyElement {
     view()
         .flex_row()
         .items_center()
-        .gap(rems(0.5))
+        .gap(scale::s2())
         .child(text(note.to_string()).flex_1().min_w_0().text_xs().text_color(Colors::muted()))
         .child(
             view()
                 .role(AccessibilityRole::Button)
                 .label("Dismiss")
                 .flex_none()
-                .p(rems(0.125))
+                .p(scale::s0_5())
                 .rounded(super::pill())
                 .cursor_pointer()
                 .hover(|s| s.bg(Colors::hover()))
                 .on_press(|| tell(Cmd::DismissNote))
-                .child(icon(IconName::Close, rems(0.625), Colors::muted())),
+                .child(icon(IconName::Close, scale::s2_5(), Colors::muted())),
         )
         .into_element()
 }
@@ -980,9 +979,9 @@ fn picker(picking: &Picking) -> AnyElement {
                         .label(label.clone())
                         .flex_row()
                         .items_center()
-                        .gap(rems(0.75))
-                        .px(rems(0.75))
-                        .py(rems(0.375))
+                        .gap(scale::s3())
+                        .px(scale::s3())
+                        .py(scale::s1_5())
                         .rounded(Colors::radius())
                         .cursor_pointer()
                         .hover(|s| s.bg(Colors::hover()))
@@ -997,8 +996,8 @@ fn picker(picking: &Picking) -> AnyElement {
     };
     view()
         .flex_col()
-        .mb(rems(0.625))
-        .py(rems(0.375))
+        .mb(scale::s2_5())
+        .py(scale::s1_5())
         .rounded(super::card_radius())
         .border_1()
         .border_color(Colors::input_border())
@@ -1008,20 +1007,20 @@ fn picker(picking: &Picking) -> AnyElement {
             view()
                 .flex_row()
                 .items_center()
-                .px(rems(0.375))
-                .pb(rems(0.25))
+                .px(scale::s1_5())
+                .pb(scale::s1())
                 .child(text(title).flex_1().text_xs().font_weight(FontWeight::MEDIUM).text_color(Colors::muted()))
                 .child(
                     view()
                         .role(AccessibilityRole::Button)
                         .label("Close")
                         .flex_none()
-                        .p(rems(0.125))
+                        .p(scale::s0_5())
                         .rounded(super::pill())
                         .cursor_pointer()
                         .hover(|s| s.bg(Colors::hover()))
                         .on_press(|| tell(Cmd::ClosePicker))
-                        .child(icon(IconName::Close, rems(0.625), Colors::muted())),
+                        .child(icon(IconName::Close, scale::s2_5(), Colors::muted())),
                 ),
         )
         .child(scroll().max_h(px(320.)).child(rows))
@@ -1033,8 +1032,8 @@ fn worktree_label(tone: impl Fn() -> AdaptiveColor + Copy + 'static) -> AnyEleme
     view()
         .flex_row()
         .items_center()
-        .gap(rems(0.25))
-        .child(icon(IconName::GitBranch, rems(0.75), tone))
+        .gap(scale::s1())
+        .child(icon(IconName::GitBranch, scale::s3(), tone))
         .child(text("Worktree").font_weight(FontWeight::MEDIUM).text_size(text_sm()).text_color(tone))
         .into_element()
 }
@@ -1042,7 +1041,7 @@ fn worktree_label(tone: impl Fn() -> AdaptiveColor + Copy + 'static) -> AnyEleme
 /// What a thread waits on before it starts: the agent to run it, and a chip that, when on, starts
 /// it in a git worktree of its own. Both sit in the row of chips under the field.
 fn setup(snap: &Snapshot) -> AnyElement {
-    let mut row = view().flex_row().flex_wrap().items_center().gap(rems(0.5));
+    let mut row = view().flex_row().flex_wrap().items_center().gap(scale::s2());
     let name = snap
         .chosen
         .as_ref()
@@ -1067,9 +1066,9 @@ fn setup(snap: &Snapshot) -> AnyElement {
                 .flex_none()
                 .flex_row()
                 .items_center()
-                .gap(rems(0.25))
-                .px(rems(0.5))
-                .py(rems(0.25))
+                .gap(scale::s1())
+                .px(scale::s2())
+                .py(scale::s1())
                 .rounded(super::pill())
                 .border_1()
                 .border_color(Colors::input_border())
@@ -1091,7 +1090,7 @@ fn settings_rows(settings: &[Setting], busy: bool) -> AnyElement {
     view()
         .flex_row()
         .flex_wrap()
-        .gap(rems(0.5))
+        .gap(scale::s2())
         .children(
             settings
                 .iter()
@@ -1140,8 +1139,8 @@ fn steer_button(steer: bool, draft: Signal<String>, has_pictures: bool) -> AnyEl
         .flex_row()
         .items_center()
         .justify_center()
-        .w(rems(1.75))
-        .h(rems(1.75))
+        .w(scale::s7())
+        .h(scale::s7())
         .rounded(super::pill())
         .border_1()
         .border_color(Colors::input_border())
@@ -1156,7 +1155,7 @@ fn steer_button(steer: bool, draft: Signal<String>, has_pictures: bool) -> AnyEl
                 tell(Cmd::Send { later: false });
             }
         })
-        .child(icon(name, rems(0.875), Colors::foreground()))
+        .child(icon(name, scale::s3_5(), Colors::foreground()))
         .into_element()
 }
 
@@ -1178,8 +1177,8 @@ fn send_button(snap: Snapshot, draft: Signal<String>) -> AnyElement {
         .flex_row()
         .items_center()
         .justify_center()
-        .w(rems(1.75))
-        .h(rems(1.75))
+        .w(scale::s7())
+        .h(scale::s7())
         .rounded(super::pill())
         .cursor_pointer()
         .style_when(
@@ -1196,7 +1195,7 @@ fn send_button(snap: Snapshot, draft: Signal<String>) -> AnyElement {
                 pressed_send(&draft);
             }
         })
-        .child(icon(name, rems(0.875), Colors::primary_foreground()))
+        .child(icon(name, scale::s3_5(), Colors::primary_foreground()))
         .into_element()
 }
 
@@ -1245,7 +1244,7 @@ fn draft_field(draft: &Signal<String>, field_ref: ElementRef) -> Input {
 /// the draft it now holds: the row is one level deeper on every other reset, which makes it a new
 /// view rather than the one the user typed in.
 fn fresh_field(reset: u64, field: Input) -> AnyElement {
-    let row = view().px(rems(0.5)).py(rems(0.25)).flex_row().child(field);
+    let row = view().px(scale::s2()).py(scale::s1()).flex_row().child(field);
     if reset % 2 == 0 {
         row.into_element()
     } else {
@@ -1261,7 +1260,7 @@ fn bar(snap: Snapshot, draft: Signal<String>, field_ref: ElementRef) -> AnyEleme
     let has_pictures = !snap.pictures.is_empty();
     // The chips under the field: before the thread starts its agent is chosen here, after it the
     // agent is named; the settings and the Control menu follow, and the action ends the row.
-    let mut chips = view().flex_row().flex_wrap().items_center().gap(rems(0.5)).flex_1().min_w_0();
+    let mut chips = view().flex_row().flex_wrap().items_center().gap(scale::s2()).flex_1().min_w_0();
     if snap.blank {
         chips = chips.child(setup(&snap));
     } else {
@@ -1270,7 +1269,7 @@ fn bar(snap: Snapshot, draft: Signal<String>, field_ref: ElementRef) -> AnyEleme
             .as_ref()
             .map(|id| snap.agents.iter().find(|(_, key)| key == id).map_or(id.clone(), |(name, _)| name.clone()))
             .unwrap_or_else(|| "Agent".to_string());
-        chips = chips.child(text(name).px(rems(0.5)).text_sm().text_color(Colors::muted()));
+        chips = chips.child(text(name).px(scale::s2()).text_sm().text_color(Colors::muted()));
     }
     if !snap.settings.is_empty() {
         chips = chips.child(settings_rows(&snap.settings, snap.busy));
@@ -1280,10 +1279,10 @@ fn bar(snap: Snapshot, draft: Signal<String>, field_ref: ElementRef) -> AnyEleme
     }
     let card = view()
         .flex_col()
-        .gap(rems(0.5))
+        .gap(scale::s2())
         .w_full()
         .max_w(px(COLUMN))
-        .p(rems(0.5))
+        .p(scale::s2())
         .rounded(super::surface_radius())
         .border_1()
         .border_color(Colors::border())
@@ -1297,16 +1296,16 @@ fn bar(snap: Snapshot, draft: Signal<String>, field_ref: ElementRef) -> AnyEleme
                 .flex_row()
                 .items_center()
                 .justify_between()
-                .gap(rems(0.5))
+                .gap(scale::s2())
                 .child(chips)
-                .child(view().flex_row().flex_none().gap(rems(0.5)).children(snap.busy.then(|| steer_button(snap.steer, low.clone(), has_pictures))).child(send_button(snap.clone(), low))),
+                .child(view().flex_row().flex_none().gap(scale::s2()).children(snap.busy.then(|| steer_button(snap.steer, low.clone(), has_pictures))).child(send_button(snap.clone(), low))),
         );
-    let mut column = view().flex_none().flex_col().items_center().gap(rems(0.375)).px(rems(EDGE)).pt(rems(0.5)).pb(rems(0.75));
+    let mut column = view().flex_none().flex_col().items_center().gap(scale::s1_5()).px(scale::s3()).pt(scale::s2()).pb(scale::s3());
     if let Some(picking) = &snap.picking {
         column = column.child(view().w_full().max_w(px(COLUMN)).child(picker(picking)));
     }
     if !snap.queue.is_empty() {
-        column = column.child(view().w_full().max_w(px(COLUMN)).flex_col().gap(rems(0.25)).child(snap.queue.iter().cloned().map(queue_row).collect::<Vec<_>>()));
+        column = column.child(view().w_full().max_w(px(COLUMN)).flex_col().gap(scale::s1()).child(snap.queue.iter().cloned().map(queue_row).collect::<Vec<_>>()));
     }
     column = column.child(card);
     column.into_element()
@@ -1411,8 +1410,8 @@ pub fn Chat() -> impl IntoElement {
                 .flex_col()
                 .items_center()
                 .justify_center()
-                .gap(rems(0.75))
-                .px(rems(1.))
+                .gap(scale::s3())
+                .px(scale::s4())
                 .children([text("What is this thread about?").text_base().text_color(Colors::muted()), text("Message an agent to begin.").text_sm().text_color(Colors::muted())])
                 .into_element()
         } else {

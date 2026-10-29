@@ -3,7 +3,7 @@
 use nsh_core::prelude::*;
 
 use super::bus::{Cmd, send};
-use super::{Colors, body, caption, header_height, icon, rems, tooltip};
+use super::{Colors, body, caption, header_height, icon, scale, tooltip};
 use crate::ui::icon::IconName;
 
 /// One of the window's controls.
@@ -37,12 +37,12 @@ pub fn toggle_button(name: IconName, tip: &'static str, selected: bool, on_press
         .role(AccessibilityRole::Button)
         .label(tip)
         .flex_none()
-        .p(rems(0.375))
+        .p(scale::s1_5())
         .rounded(Colors::radius())
         .cursor_pointer()
         .tooltip(tooltip(tip))
         .on_press(on_press)
-        .child(icon(name, rems(0.875), move || if selected { Colors::foreground()() } else { Colors::muted()() }));
+        .child(icon(name, scale::s3_5(), move || if selected { Colors::foreground()() } else { Colors::muted()() }));
     if selected { b.bg(Colors::selected()) } else { b.hover(|s| s.bg(Colors::hover())) }
 }
 
@@ -62,18 +62,18 @@ pub fn pane_header(title: impl IntoReactive<SharedString>, right: impl IntoEleme
         .flex_row()
         .items_center()
         .justify_between()
-        .gap(rems(0.75))
-        .px(rems(0.75))
+        .gap(scale::s3())
+        .px(scale::s3())
         .child(
             view()
                 .flex_row()
                 .items_center()
-                .gap(rems(0.25))
+                .gap(scale::s1())
                 .flex_shrink(1.)
                 .child(controls(lead).collect::<Vec<_>>())
                 .child(body(title).number_of_lines(1).flex_shrink(1.).font_weight(FontWeight::MEDIUM)),
         )
-        .child(view().flex_row().items_center().gap(rems(0.5)).child(right).child(controls(trail).collect::<Vec<_>>()));
+        .child(view().flex_row().items_center().gap(scale::s2()).child(right).child(controls(trail).collect::<Vec<_>>()));
     if glass { bar } else { bar.border_b_1().border_color(Colors::border()) }
 }
 
@@ -88,8 +88,8 @@ pub fn header_button(label: &'static str, tip: &'static str, on_press: impl Fn()
         .role(AccessibilityRole::Button)
         .label(tip)
         .flex_none()
-        .px(rems(0.5))
-        .py(rems(0.25))
+        .px(scale::s2())
+        .py(scale::s1())
         .rounded(Colors::radius())
         .cursor_pointer()
         .tooltip(tooltip(tip))

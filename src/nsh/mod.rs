@@ -191,9 +191,54 @@ impl Colors {
     }
 }
 
-/// `n` rems, a rem being Po's UI font size, as GPUI's `rems` are in the rest of the window.
-pub fn rems(n: f32) -> Points {
+/// `n` rems, a rem being Po's UI font size, as GPUI's `rems` are in the rest of the window. Only
+/// [`scale`] calls it: a screen takes its lengths from there, so spacing stays on one scale.
+fn rems(n: f32) -> Points {
     Points(n * nsh_base::theme().number("rem").unwrap_or(14.))
+}
+
+/// The lengths of the screens: spacing, padding, gaps and sizes in rems. Each step `sN` is N quarter
+/// rems (`s1_5` is one and a half), a 2px grid at the default font size; use these, not `rems`, so
+/// every screen spaces itself the same way. The named sizes below are one element's own measure.
+pub mod scale {
+    use super::{Points, rems};
+
+    pub fn s0() -> Points { rems(0.0) }
+    pub fn s0_5() -> Points { rems(0.125) }
+    pub fn s1() -> Points { rems(0.25) }
+    pub fn s1_5() -> Points { rems(0.375) }
+    pub fn s2() -> Points { rems(0.5) }
+    pub fn s2_5() -> Points { rems(0.625) }
+    pub fn s3() -> Points { rems(0.75) }
+    pub fn s3_5() -> Points { rems(0.875) }
+    pub fn s4() -> Points { rems(1.0) }
+    pub fn s5() -> Points { rems(1.25) }
+    pub fn s6() -> Points { rems(1.5) }
+    pub fn s7() -> Points { rems(1.75) }
+    pub fn s8() -> Points { rems(2.0) }
+    pub fn s10() -> Points { rems(2.5) }
+
+    /// The label column of a legend row: Status, Target, Progress, and an issue's fields.
+    pub fn legend_width() -> Points { rems(5.5) }
+    /// The label column of an agent's form, whose labels are the agent's own words and run longer.
+    pub fn form_label_width() -> Points { rems(9.0) }
+    /// A row's progress bar, in the epics list and in an epic's milestones.
+    pub fn bar_width() -> Points { rems(8.0) }
+    /// A row's count column, as `3/5`.
+    pub fn count_width() -> Points { rems(4.0) }
+    /// A row's due-date column.
+    pub fn due_width() -> Points { rems(4.5) }
+    /// The due-date entry beside a new issue or milestone: its field and the date it reads.
+    pub fn due_entry_width() -> Points { rems(13.0) }
+    /// From the composer card's edge to its text: the card's padding and the field's, and the
+    /// border, which is a point wide whatever the font size.
+    pub fn composer_text_inset() -> Points { s2() + s2() + Points(1.) }
+    /// `n` lines of small text, whose line is 1.25rem tall: a text area's minimum, a note's maximum.
+    pub fn lines(n: f32) -> Points { rems(1.25 * n) }
+    /// The least width of a project's name in the sidebar.
+    pub fn project_name_min_width() -> Points { rems(6.0) }
+    /// The least width of a project's branch in the sidebar.
+    pub fn branch_name_min_width() -> Points { rems(4.0) }
 }
 
 /// The monospace font's size, in points.
@@ -203,12 +248,12 @@ pub fn mono_size() -> f32 {
 
 /// The text of a row's label, GPUI's `text_base`.
 pub fn text_base() -> Points {
-    rems(1.)
+    scale::s4()
 }
 
 /// A field's height.
 pub fn field_height() -> Points {
-    rems(2.)
+    scale::s8()
 }
 
 /// A pane header's height, GPUI's `h_11`.
@@ -218,12 +263,12 @@ pub fn header_height() -> Points {
 
 /// Small text, GPUI's `text_xs`: dates and counts.
 pub fn text_xs() -> Points {
-    rems(0.75)
+    scale::s3()
 }
 
 /// GPUI's `text_sm`: the footer and quiet notes.
 pub fn text_sm() -> Points {
-    rems(0.875)
+    scale::s3_5()
 }
 
 /// Quiet small text: dates, counts, secondary labels.
@@ -295,7 +340,7 @@ pub fn icon_button(name: IconName, size: Points, label: &'static str, on_press: 
         .role(AccessibilityRole::Button)
         .label(label)
         .flex_none()
-        .p(rems(0.25))
+        .p(scale::s1())
         .rounded(Colors::radius())
         .cursor_pointer()
         .hover(|s| s.bg(Colors::hover()))
@@ -310,8 +355,8 @@ pub fn button(label: &'static str, primary: bool, on_press: impl Fn() + 'static)
         .role(AccessibilityRole::Button)
         .label(label)
         .flex_none()
-        .px(rems(0.75))
-        .py(rems(0.375))
+        .px(scale::s3())
+        .py(scale::s1_5())
         .rounded(Colors::radius())
         .cursor_pointer()
         .on_press(on_press)
@@ -347,7 +392,7 @@ pub fn field_with(id: &str, value: Signal<String>, placeholder: &'static str, on
         .h(field_height())
         .flex_row()
         .items_center()
-        .px(rems(0.625))
+        .px(scale::s2_5())
         .rounded(Colors::radius())
         .border_1()
         .border_color(Colors::input_border())
