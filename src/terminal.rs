@@ -448,9 +448,9 @@ mod pty {
     impl Pty {
         pub fn spawn(cwd: &Path, cols: u16, rows: u16) -> io::Result<Self> {
             let (mut master, mut slave) = (0, 0);
-            let ws = size(cols, rows);
+            let mut ws = size(cols, rows);
             // SAFETY: both fds are out parameters, owned right after.
-            if unsafe { libc::openpty(&mut master, &mut slave, std::ptr::null_mut(), std::ptr::null(), &ws) } != 0 {
+            if unsafe { libc::openpty(&mut master, &mut slave, std::ptr::null_mut(), std::ptr::null_mut(), &mut ws) } != 0 {
                 return Err(io::Error::last_os_error());
             }
             // SAFETY: openpty just made these.
