@@ -5,7 +5,7 @@ use nsh_core::prelude::*;
 
 use super::bus::{Cmd, send};
 use super::overlay::{self, Height};
-use super::{Colors, body, caption, icon, icon_button, note, on_hover, rems, text_sm, text_xs};
+use super::{Colors, body, caption, icon, icon_button, note, on_hover, scale, text_sm, text_xs};
 use crate::issues::query::{self, Filter, Group, parse_quick};
 use crate::issues::shared::{self, View as Data};
 use crate::issues::{Issue, Link, Priority, Status};
@@ -409,8 +409,8 @@ pub fn chip(label: impl Into<String>, selected: impl Fn() -> bool + 'static, on_
         .role(AccessibilityRole::Button)
         .label(label.clone())
         .flex_none()
-        .px(rems(0.5))
-        .py(rems(0.125))
+        .px(scale::s2())
+        .py(scale::s0_5())
         .rounded(Colors::radius())
         .border_1()
         .border_color(Colors::border())
@@ -432,9 +432,9 @@ pub fn icon_chip(name: IconName, tint: AdaptiveColor, label: impl Into<String>, 
         .flex_none()
         .flex_row()
         .items_center()
-        .gap(rems(0.25))
-        .px(rems(0.5))
-        .py(rems(0.125))
+        .gap(scale::s1())
+        .px(scale::s2())
+        .py(scale::s0_5())
         .rounded(Colors::radius())
         .border_1()
         .border_color(Colors::border())
@@ -442,7 +442,7 @@ pub fn icon_chip(name: IconName, tint: AdaptiveColor, label: impl Into<String>, 
         .hover(|s| s.bg(Colors::hover()))
         .style_when(move || on(), |s| s.bg(Colors::selected()))
         .on_press(on_press)
-        .child(icon(name, rems(0.75), move || tint))
+        .child(icon(name, scale::s3(), move || tint))
         .child(text(label).text_size(text_xs()).text_color(move || if shown() { Colors::foreground()() } else { Colors::muted()() }))
 }
 
@@ -457,8 +457,8 @@ pub fn delete_button(state: State, label: &'static str, on_press: impl Fn() + 's
         .role(AccessibilityRole::Button)
         .label(label)
         .flex_none()
-        .px(rems(0.5))
-        .py(rems(0.25))
+        .px(scale::s2())
+        .py(scale::s1())
         .rounded(Colors::radius())
         .cursor_pointer()
         .hover(|s| s.bg(Colors::hover()))
@@ -474,9 +474,9 @@ pub fn delete_button(state: State, label: &'static str, on_press: impl Fn() + 's
 /// every edit and is to set `value`.
 pub fn text_area(id: &str, value: Signal<String>, placeholder: &'static str, on_change: impl Fn(&str) + 'static) -> View {
     view()
-        .px(rems(0.625))
-        .py(rems(0.5))
-        .min_h(rems(5.))
+        .px(scale::s2_5())
+        .py(scale::s2())
+        .min_h(scale::text_area_min_height())
         .rounded(Colors::radius())
         .border_1()
         .border_color(Colors::input_border())
@@ -494,23 +494,23 @@ pub fn text_area(id: &str, value: Signal<String>, placeholder: &'static str, on_
                 .on_change(move |text: &str| on_change(text))
                 .flex_1()
                 .min_w(Points(0.))
-                .max_h(rems(24.)),
+                .max_h(scale::popup_max_height()),
         )
 }
 
 /// A boxed single line with a lead icon, like the add field.
 pub fn boxed(lead: IconName, input: nsh_base::Input, hint: Option<View>) -> View {
     view()
-        .min_h(rems(2.5))
+        .min_h(scale::s10())
         .flex_row()
         .items_center()
-        .gap(rems(0.5))
-        .px(rems(0.625))
+        .gap(scale::s2())
+        .px(scale::s2_5())
         .rounded(Colors::radius())
         .border_1()
         .border_color(Colors::input_border())
         .bg(Colors::input_background())
-        .child(icon(lead, rems(0.875), Colors::muted()))
+        .child(icon(lead, scale::s3_5(), Colors::muted()))
         .child(input)
         .child(hint)
 }
@@ -544,32 +544,32 @@ fn header(state: State) -> View {
             .label(label)
             .flex_row()
             .items_center()
-            .gap(rems(0.375))
-            .px(rems(0.5))
-            .py(rems(0.25))
+            .gap(scale::s1_5())
+            .px(scale::s2())
+            .py(scale::s1())
             .rounded(Colors::radius())
             .cursor_pointer()
             .hover(|s| s.bg(Colors::hover()))
             .style_when(move || state.page.with(|now| on(now)), |s| s.bg(Colors::selected()))
             .on_press(move || state.go(target.clone()))
-            .child(icon(name, rems(0.875), Colors::muted()))
+            .child(icon(name, scale::s3_5(), Colors::muted()))
             .child(text(label).text_size(text_sm()).text_color(move || if state.page.with(|now| shown(now)) { Colors::foreground()() } else { Colors::muted()() }))
     };
     let name = move || state.data.with(|data| if data.name.is_empty() { "Issues".to_string() } else { format!("{} issues", data.name) });
     view()
         .flex_row()
         .items_center()
-        .gap(rems(0.25))
-        .px(rems(1.))
-        .py(rems(0.5))
+        .gap(scale::s1())
+        .px(scale::s4())
+        .py(scale::s2())
         .border_b_1()
         .border_color(Colors::border())
-        .child(text(name).number_of_lines(1).font_weight(FontWeight::SEMIBOLD).text_color(Colors::foreground()).mr(rems(0.75)))
+        .child(text(name).number_of_lines(1).font_weight(FontWeight::SEMIBOLD).text_color(Colors::foreground()).mr(scale::s3()))
         .child(tab("List", IconName::List, Page::List, |p| matches!(p, Page::Issue(_))))
         .child(tab("Board", IconName::SquareKanban, Page::Board, |_| false))
         .child(tab("Epics", IconName::Layers, Page::Epics, |p| matches!(p, Page::Epic(_))))
         .child(view().flex_1())
-        .child(icon_button(IconName::Close, rems(0.875), "Close (Esc)", || send(Cmd::CloseIssues)))
+        .child(icon_button(IconName::Close, scale::s3_5(), "Close (Esc)", || send(Cmd::CloseIssues)))
 }
 
 /// What was wrong with the files in `.po` when they were read: one that can't be read is left
@@ -587,8 +587,8 @@ fn problems_banner(state: State) -> View {
     };
     view().child(when(move || problems() > 0, move || {
         view()
-            .px(rems(1.))
-            .py(rems(0.375))
+            .px(scale::s4())
+            .py(scale::s1_5())
             .bg(Colors::input_background())
             .border_b_1()
             .border_color(Colors::border())
@@ -597,7 +597,7 @@ fn problems_banner(state: State) -> View {
 }
 
 fn no_project() -> View {
-    view().py(rems(1.5)).items_center().child(note("Open a project to see its issues."))
+    view().py(scale::s6()).items_center().child(note("Open a project to see its issues."))
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -611,17 +611,17 @@ fn list_page(state: State) -> View {
             view()
                 .flex_1()
                 .child(
-                    view().px(rems(1.)).pt(rems(0.75)).pb(rems(0.5)).child(boxed(
+                    view().px(scale::s4()).pt(scale::s3()).pb(scale::s2()).child(boxed(
                         IconName::Plus,
                         line_input("issue-new-title", state.new_title, "New issue — try: Fix login !high #bug @epic", move || state.add(None)).auto_focus(true).element_ref(&state.add_field),
                         Some(
                             view()
                                 .flex_none()
-                                .w(rems(13.))
+                                .w(scale::quick_add_width())
                                 .flex_row()
                                 .items_center()
-                                .gap(rems(0.5))
-                                .child(icon(IconName::Calendar, rems(0.875), Colors::muted()))
+                                .gap(scale::s2())
+                                .child(icon(IconName::Calendar, scale::s3_5(), Colors::muted()))
                                 .child(line_input("issue-new-due", state.new_due, DUE_HINT, move || state.add(None)))
                                 .child(due_hint(state.new_due)),
                         ),
@@ -642,11 +642,11 @@ fn todo_offer(state: State) -> View {
         view()
             .flex_row()
             .items_center()
-            .gap(rems(0.75))
-            .mx(rems(1.))
-            .mb(rems(0.5))
-            .px(rems(0.75))
-            .py(rems(0.5))
+            .gap(scale::s3())
+            .mx(scale::s4())
+            .mb(scale::s2())
+            .px(scale::s3())
+            .py(scale::s2())
             .rounded(super::card_radius())
             .border_1()
             .border_color(Colors::border())
@@ -668,7 +668,7 @@ fn filter_bar(state: State) -> View {
     let group = move |group: Group| chip(group.name(), move || state.group.get() == group, move || state.group.set(group));
     let labels = move || {
         let labels: Vec<String> = state.data.with(|data| data.tracker.config.labels.iter().map(|l| l.name.clone()).collect());
-        view().flex_row().flex_wrap().gap(rems(0.25)).child(
+        view().flex_row().flex_wrap().gap(scale::s1()).child(
             labels
                 .into_iter()
                 .map(|name| {
@@ -679,14 +679,14 @@ fn filter_bar(state: State) -> View {
         )
     };
     view()
-        .px(rems(1.))
-        .pb(rems(0.5))
-        .gap(rems(0.375))
+        .px(scale::s4())
+        .pb(scale::s2())
+        .gap(scale::s1_5())
         .child(
             view()
                 .flex_row()
                 .items_center()
-                .gap(rems(0.5))
+                .gap(scale::s2())
                 .child(
                     view()
                         .flex_1()
@@ -705,10 +705,10 @@ fn filter_bar(state: State) -> View {
                 .flex_row()
                 .items_center()
                 .flex_wrap()
-                .gap(rems(0.25))
-                .child(legend("Group").mr(rems(0.25)))
+                .gap(scale::s1())
+                .child(legend("Group").mr(scale::s1()))
                 .child(Group::ALL.map(group).to_vec())
-                .child(view().w(rems(0.75)))
+                .child(view().w(scale::s3()))
                 .child(dynamic(labels)),
         )
 }
@@ -726,9 +726,9 @@ fn rows(state: State) -> View {
                 view()
                     .flex_row()
                     .items_baseline()
-                    .gap(rems(0.5))
-                    .mt(rems(0.75))
-                    .px(rems(0.625))
+                    .gap(scale::s2())
+                    .mt(scale::s3())
+                    .px(scale::s2_5())
                     .child(body(section.title.clone()).font_weight(FontWeight::SEMIBOLD))
                     .child(caption(section.issues.len().to_string())),
             );
@@ -737,9 +737,9 @@ fn rows(state: State) -> View {
     }
     if out.is_empty() {
         let message = if empty { "No issues yet. Add one above." } else { "Nothing matches." };
-        out.push(view().py(rems(1.5)).items_center().child(note(message)));
+        out.push(view().py(scale::s6()).items_center().child(note(message)));
     }
-    view().gap(rems(0.125)).px(rems(0.75)).pb(rems(0.75)).child(out)
+    view().gap(scale::s0_5()).px(scale::s3()).pb(scale::s3()).child(out)
 }
 
 pub fn issue_row(state: State, number: u64) -> View {
@@ -760,17 +760,17 @@ pub fn issue_row(state: State, number: u64) -> View {
     view()
         .group()
         .test_id(&format!("issue-{number}"))
-        .h(rems(2.))
+        .h(scale::s8())
         .flex_row()
         .items_center()
-        .gap(rems(0.5))
-        .px(rems(0.625))
+        .gap(scale::s2())
+        .px(scale::s2_5())
         .rounded(Colors::radius())
         .cursor_pointer()
         .hover(|s| s.bg(Colors::hover()))
         .on_press(move || state.open_issue(number))
-        .child(view().role(AccessibilityRole::Button).label(format!("Status: {}", status.name())).flex_none().on_press(move || state.advance(number)).child(icon(status_icon(status), rems(0.875), move || status_tint(status))))
-        .child(icon(IconName::Signal, rems(0.75), move || priority_tint(priority)))
+        .child(view().role(AccessibilityRole::Button).label(format!("Status: {}", status.name())).flex_none().on_press(move || state.advance(number)).child(icon(status_icon(status), scale::s3_5(), move || status_tint(status))))
+        .child(icon(IconName::Signal, scale::s3(), move || priority_tint(priority)))
         .child(caption(key).flex_none())
         .child(text(issue.title.clone()).flex_1().number_of_lines(1).style_when(closed, |s| s.line_through()).text_color(if closed { Colors::muted()() } else { Colors::foreground()() }))
         .child(parent.map(|parent| caption(format!("↳ {parent}")).flex_none()))
@@ -801,9 +801,9 @@ fn board_page(state: State) -> View {
         scroll().flex_shrink(1.).child(
             view()
                 .flex_row()
-                .gap(rems(0.5))
-                .px(rems(0.75))
-                .py(rems(0.75))
+                .gap(scale::s2())
+                .px(scale::s3())
+                .py(scale::s3())
                 .on_layout(move |bounds: &Bounds<Points>| state.board_width.set(bounds.size.width.0))
                 .child(dynamic(move || {
                     let filter = Filter { scope: query::Scope::All, ..state.filter.get() };
@@ -820,7 +820,7 @@ fn board_page(state: State) -> View {
                             })
                             .collect()
                     });
-                    view().flex_1().flex_row().gap(rems(0.5)).child(columns)
+                    view().flex_1().flex_row().gap(scale::s2()).child(columns)
                 })),
         ),
     )
@@ -831,17 +831,17 @@ fn column(status: Status, count: usize, cards: Vec<View>) -> View {
         .test_id(&format!("column-{}", status.slug()))
         .flex_1()
         .min_w(Points(0.))
-        .gap(rems(0.375))
-        .p(rems(0.375))
+        .gap(scale::s1_5())
+        .p(scale::s1_5())
         .rounded(super::card_radius())
         .bg(Colors::input_background())
         .child(
             view()
                 .flex_row()
                 .items_center()
-                .gap(rems(0.375))
-                .px(rems(0.25))
-                .child(icon(status_icon(status), rems(0.75), move || status_tint(status)))
+                .gap(scale::s1_5())
+                .px(scale::s1())
+                .child(icon(status_icon(status), scale::s3(), move || status_tint(status)))
                 .child(text(status.name()).text_size(text_xs()).font_weight(FontWeight::SEMIBOLD).number_of_lines(1).text_color(Colors::foreground()))
                 .child(caption(count.to_string())),
         )
@@ -855,8 +855,8 @@ fn card(state: State, issue: &Issue, key: String) -> View {
     view()
         .group()
         .test_id(&format!("card-{number}"))
-        .gap(rems(0.25))
-        .p(rems(0.5))
+        .gap(scale::s1())
+        .p(scale::s2())
         .rounded(super::card_radius())
         .border_1()
         .border_color(Colors::border())
@@ -878,11 +878,11 @@ fn card(state: State, issue: &Issue, key: String) -> View {
             view()
                 .flex_row()
                 .items_center()
-                .gap(rems(0.375))
-                .child(icon(IconName::Signal, rems(0.625), move || priority_tint(priority)))
+                .gap(scale::s1_5())
+                .child(icon(IconName::Signal, scale::s2_5(), move || priority_tint(priority)))
                 .child(caption(key).flex_1())
-                .child(left.map(|to| on_hover(icon_button(IconName::ChevronLeft, rems(0.625), "Move left", move || state.set_status(number, to)))))
-                .child(right.map(|to| on_hover(icon_button(IconName::ChevronRight, rems(0.625), "Move right", move || state.set_status(number, to))))),
+                .child(left.map(|to| on_hover(icon_button(IconName::ChevronLeft, scale::s2_5(), "Move left", move || state.set_status(number, to)))))
+                .child(right.map(|to| on_hover(icon_button(IconName::ChevronRight, scale::s2_5(), "Move right", move || state.set_status(number, to))))),
         )
         .child(body(issue.title.clone()))
         .child(
@@ -899,13 +899,13 @@ fn card(state: State, issue: &Issue, key: String) -> View {
 fn issue_page(state: State, number: u64) -> View {
     let exists = move || state.data.with(|data| data.tracker.issue(number).is_some());
     view().flex_1().child(when(exists, move || issue_body(state, number)).otherwise(move || {
-        view().p(rems(1.5)).gap(rems(0.75)).items_center().child(text("This issue is gone.").text_color(Colors::muted())).child(super::button("Back", false, move || state.back()))
+        view().p(scale::s6()).gap(scale::s3()).items_center().child(text("This issue is gone.").text_color(Colors::muted())).child(super::button("Back", false, move || state.back()))
     }))
 }
 
 /// A labelled row of properties.
 fn property(label: &'static str, body: Vec<View>) -> View {
-    view().flex_row().items_start().gap(rems(0.75)).child(view().w(rems(5.5)).flex_none().pt(rems(0.25)).child(legend(label))).child(view().flex_1().flex_row().flex_wrap().items_center().gap(rems(0.25)).child(body))
+    view().flex_row().items_start().gap(scale::s3()).child(view().w(scale::legend_width()).flex_none().pt(scale::s1()).child(legend(label))).child(view().flex_1().flex_row().flex_wrap().items_center().gap(scale::s1()).child(body))
 }
 
 fn issue_body(state: State, number: u64) -> AnyElement {
@@ -967,16 +967,16 @@ fn issue_body(state: State, number: u64) -> AnyElement {
                     let (n, s) = (c.number, c.status);
                     view()
                         .test_id(&format!("sub-{n}"))
-                        .h(rems(1.75))
+                        .h(scale::s7())
                         .flex_row()
                         .items_center()
-                        .gap(rems(0.5))
-                        .px(rems(0.5))
+                        .gap(scale::s2())
+                        .px(scale::s2())
                         .rounded(Colors::radius())
                         .cursor_pointer()
                         .hover(|st| st.bg(Colors::hover()))
                         .on_press(move || state.open_issue(n))
-                        .child(icon(status_icon(s), rems(0.75), move || status_tint(s)))
+                        .child(icon(status_icon(s), scale::s3(), move || status_tint(s)))
                         .child(caption(data.tracker.key(n)).flex_none())
                         .child(text(c.title.clone()).flex_1().number_of_lines(1).text_color(Colors::foreground()))
                 })
@@ -990,32 +990,32 @@ fn issue_body(state: State, number: u64) -> AnyElement {
                         Link::Branch(branch) => (IconName::GitBranch, branch.clone()),
                         Link::Pr(pr) => (IconName::GitBranch, format!("PR #{pr}")),
                     };
-                    view().flex_row().items_center().gap(rems(0.375)).child(icon(name, rems(0.75), Colors::muted())).child(caption(label))
+                    view().flex_row().items_center().gap(scale::s1_5()).child(icon(name, scale::s3(), Colors::muted())).child(caption(label))
                 })
                 .collect();
             (labels, epics, milestones, links, subs)
         });
         view()
-            .gap(rems(0.75))
+            .gap(scale::s3())
             .child(property("Status", statuses))
             .child(property("Priority", priorities))
             .child(property("Labels", labels))
             .child(property("Epic", epics))
             .child((!milestones.is_empty()).then(|| property("Milestone", milestones)))
             .child((!links.is_empty()).then(|| property("Links", links)))
-            .child(property("Sub-issues", vec![view().w_full().gap(rems(0.125)).child(subs)]))
+            .child(property("Sub-issues", vec![view().w_full().gap(scale::s0_5()).child(subs)]))
     };
     scroll().flex_shrink(1.).child(
         view()
-            .gap(rems(0.75))
-            .px(rems(1.))
-            .py(rems(0.75))
+            .gap(scale::s3())
+            .px(scale::s4())
+            .py(scale::s3())
             .child(
                 view()
                     .flex_row()
                     .items_center()
-                    .gap(rems(0.5))
-                    .child(icon_button(IconName::ChevronLeft, rems(0.875), "Back (Esc)", move || state.back()))
+                    .gap(scale::s2())
+                    .child(icon_button(IconName::ChevronLeft, scale::s3_5(), "Back (Esc)", move || state.back()))
                     .child(note(key).flex_1())
                     .child(super::button("Work on this", true, move || send(Cmd::WorkOnIssue(number))))
                     .child(delete_button(state, "Delete issue", move || state.delete(number))),

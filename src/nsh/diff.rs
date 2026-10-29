@@ -10,7 +10,7 @@ use tokio::sync::watch;
 use super::bus::{Cmd, send};
 use super::header::{Control, pane_header};
 use super::source::Shared;
-use super::{Colors, note, rems, small, text_xs};
+use super::{Colors, note, scale, small, text_xs};
 
 #[derive(Clone, PartialEq, Debug)]
 pub enum Body {
@@ -57,7 +57,7 @@ pub fn publish(snapshot: Snapshot) {
 }
 
 fn centered(message: String) -> View {
-    view().flex_1().items_center().justify_center().px(rems(1.)).child(note(message))
+    view().flex_1().items_center().justify_center().px(scale::s4()).child(note(message))
 }
 
 /// One of the two layouts, as a button of the pair.
@@ -66,8 +66,8 @@ fn layout_button(label: &'static str, split: bool, current: Signal<Snapshot>) ->
     view()
         .role(AccessibilityRole::Button)
         .label(label)
-        .px(rems(0.5))
-        .py(rems(0.125))
+        .px(scale::s2())
+        .py(scale::s0_5())
         .rounded(Colors::radius())
         .cursor_pointer()
         .tooltip(super::tooltip("Toggle inline/split (Ctrl+\\)"))
@@ -95,11 +95,11 @@ pub fn Diff() -> impl IntoElement {
         view()
             .flex_row()
             .items_center()
-            .gap(rems(0.75))
+            .gap(scale::s3())
             .child(
                 view()
                     .flex_row()
-                    .gap(rems(0.5))
+                    .gap(scale::s2())
                     .child(text(format!("+{added}")).text_size(text_xs()).text_color(Colors::added()))
                     .child(text(format!("-{removed}")).text_size(text_xs()).text_color(Colors::danger())),
             )

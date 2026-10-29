@@ -6,7 +6,7 @@ use nsh_core::prelude::*;
 
 use super::bus::{Cmd, send};
 use super::overlay::{self, Height};
-use super::{Colors, body, button, caption, field, field_height, rems, text_xs};
+use super::{Colors, body, button, caption, field, field_height, scale, text_xs};
 use crate::schemes;
 use crate::settings::{AgentForm, Form};
 
@@ -30,7 +30,7 @@ struct Agent {
 }
 
 fn section(title: &'static str) -> View {
-    view().pt(rems(0.75)).pb(rems(0.25)).child(caption(title.to_uppercase()))
+    view().pt(scale::s3()).pb(scale::s1()).child(caption(title.to_uppercase()))
 }
 
 /// A label on the left and its control on the right.
@@ -38,8 +38,8 @@ fn row(label: &'static str, hint: &'static str, control: impl IntoElement) -> Vi
     view()
         .flex_row()
         .items_center()
-        .gap(rems(0.75))
-        .py(rems(0.25))
+        .gap(scale::s3())
+        .py(scale::s1())
         .child(
             view()
                 .w(Points(200.))
@@ -57,8 +57,8 @@ fn toggle(on: Signal<bool>, labels: (&'static str, &'static str), highlight: boo
         .role(AccessibilityRole::Button)
         .label(shown)
         .flex_none()
-        .px(rems(0.75))
-        .py(rems(0.375))
+        .px(scale::s3())
+        .py(scale::s1_5())
         .rounded(Colors::radius())
         .border_1()
         .border_color(Colors::input_border())
@@ -152,7 +152,7 @@ pub fn Settings() -> impl IntoElement {
                     .auto_correct(false)
                     .on_change(edit(key, change))
                     .h(field_height())
-                    .px(rems(0.625))
+                    .px(scale::s2_5())
                     .rounded(Colors::radius())
                     .border_1()
                     .border_color(Colors::input_border())
@@ -162,13 +162,13 @@ pub fn Settings() -> impl IntoElement {
         view()
             .flex_row()
             .items_center()
-            .gap(rems(0.5))
-            .py(rems(0.25))
+            .gap(scale::s2())
+            .py(scale::s1())
             .child(input("id", "id", |a| a.id.clone(), |a, t| a.id = t).flex_none().w(Points(90.)))
             .child(input("name", "Name", |a| a.name.clone(), |a, t| a.name = t).flex_none().w(Points(120.)))
             .child(input("command", "command --acp", |a| a.command.clone(), |a, t| a.command = t))
             .child(
-                super::icon_button(crate::ui::icon::IconName::Close, rems(0.75), "Remove", move || agents.update(|list| list.retain(|a| a.key != key))),
+                super::icon_button(crate::ui::icon::IconName::Close, scale::s3(), "Remove", move || agents.update(|list| list.retain(|a| a.key != key))),
             )
     };
 
@@ -177,8 +177,8 @@ pub fn Settings() -> impl IntoElement {
         .bg(Colors::popover())
         .child(
             view()
-                .px(rems(1.))
-                .py(rems(0.5))
+                .px(scale::s4())
+                .py(scale::s2())
                 .border_b_1()
                 .border_color(Colors::border())
                 .on_layout(measure(0))
@@ -187,23 +187,23 @@ pub fn Settings() -> impl IntoElement {
         .child(
             scroll().flex_shrink(1.).child(
                 view()
-                    .px(rems(1.))
-                    .pb(rems(0.75))
+                    .px(scale::s4())
+                    .pb(scale::s3())
                     .on_layout(measure(1))
                     .child(section("Appearance"))
                     .child(row("Theme", "A colour scheme name or theme file", field("settings-theme", theme, "Rose Pine", || {})))
                     .child(dynamic(move || {
                         let names = matches();
                         (!names.is_empty()).then(|| {
-                            view().pb(rems(0.25)).child(
+                            view().pb(scale::s1()).child(
                                 names
                                     .into_iter()
                                     .map(|name| {
                                         view()
                                             .role(AccessibilityRole::Button)
                                             .label(name)
-                                            .px(rems(0.75))
-                                            .py(rems(0.25))
+                                            .px(scale::s3())
+                                            .py(scale::s1())
                                             .rounded(Colors::radius())
                                             .cursor_pointer()
                                             .hover(|s| s.bg(Colors::hover()))
@@ -230,10 +230,10 @@ pub fn Settings() -> impl IntoElement {
                         text("Added to the bundled agents; the same id replaces one. A new command asks before it first runs.")
                             .text_size(text_xs())
                             .text_color(Colors::muted())
-                            .pb(rems(0.25)),
+                            .pb(scale::s1()),
                     )
                     .child(each(agents, |agent: &Agent| agent.key, agent_row))
-                    .child(view().pt(rems(0.25)).flex_row().child(button("Add agent", false, move || {
+                    .child(view().pt(scale::s1()).flex_row().child(button("Add agent", false, move || {
                         let key = next_key.replace(next_key.get() + 1);
                         agents.update(|list| list.push(Agent { key, form: AgentForm { id: String::new(), name: String::new(), command: String::new(), extra: Default::default() } }));
                     }))),
@@ -243,9 +243,9 @@ pub fn Settings() -> impl IntoElement {
             view()
                 .flex_row()
                 .items_center()
-                .gap(rems(0.5))
-                .px(rems(1.))
-                .py(rems(0.5))
+                .gap(scale::s2())
+                .px(scale::s4())
+                .py(scale::s2())
                 .border_t_1()
                 .border_color(Colors::border())
                 .on_layout(measure(2))

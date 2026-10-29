@@ -20,3 +20,11 @@ if [ -n "$nsh_bad" ]; then
     echo "$nsh_bad"
     exit 1
 fi
+
+# Lengths come from the scale in src/nsh/mod.rs, so every screen spaces itself the same way.
+rems_bad=$(grep -rnE '(^|[^_[:alnum:]])rems\(' src/nsh --include=*.rs | grep -v '^src/nsh/mod.rs' || true)
+if [ -n "$rems_bad" ]; then
+    echo "Raw rems in src/nsh/ (use scale::sN(), or add a named size to scale in src/nsh/mod.rs):"
+    echo "$rems_bad"
+    exit 1
+fi

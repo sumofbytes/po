@@ -7,7 +7,7 @@ use tokio::sync::watch;
 
 use super::bus::{Cmd, send};
 use super::overlay::{self, Height};
-use super::{Colors, field_with, rems, text_base};
+use super::{Colors, field_with, scale, text_base};
 
 /// The height the screen needs, which the overlay around it takes.
 pub static HEIGHT: Height = overlay::height();
@@ -110,9 +110,9 @@ pub fn Finder() -> impl IntoElement {
         view()
             .flex_row()
             .items_baseline()
-            .gap(rems(0.5))
-            .px(rems(0.75))
-            .py(rems(0.375))
+            .gap(scale::s2())
+            .px(scale::s3())
+            .py(scale::s1_5())
             .cursor_pointer()
             .hover(|s| s.bg(Colors::hover()))
             .style_when(move || selected.get() == at.index(), |s| s.bg(Colors::selected()))
@@ -150,7 +150,7 @@ pub fn Finder() -> impl IntoElement {
                 .child(
                     virtual_list(count, row)
                         .element_ref(&list)
-                        .estimated_item_size(rems(2.))
+                        .estimated_item_size(scale::s8())
                         .flex_1(),
                 )
                 .child(when(move || count() == 0, move || {
@@ -158,7 +158,7 @@ pub fn Finder() -> impl IntoElement {
                         .absolute()
                         .inset_0()
                         .items_center()
-                        .pt(rems(0.75))
+                        .pt(scale::s3())
                         .child(text("No matching files").text_color(Colors::muted()))
                 })),
         )
@@ -166,8 +166,8 @@ pub fn Finder() -> impl IntoElement {
             view()
                 .flex_row()
                 .justify_between()
-                .px(rems(0.75))
-                .py(rems(0.25))
+                .px(scale::s3())
+                .py(scale::s1())
                 .border_t_1()
                 .border_color(Colors::border())
                 .on_layout(measure(2))
