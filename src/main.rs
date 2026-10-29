@@ -17,6 +17,8 @@ mod nsh;
 mod pr;
 mod schemes;
 mod settings;
+mod terminal;
+mod terminal_view;
 mod theme;
 mod state;
 mod date;
@@ -45,12 +47,16 @@ use futures::StreamExt;
 use serde_json::Value;
 
 use gpui::{
+    Focusable as _,
     AnyElement, App, Pixels, TitlebarOptions, WindowControlArea, point, Bounds, Context, Entity, IntoElement, ParentElement,
     Render, Styled, Subscription, Task, Window, WindowBackgroundAppearance, WindowBounds, WindowOptions, div,
     prelude::*, px, rems, size, KeyBinding,
 };
 
-gpui::actions!(po, [ToggleTools, ToggleThoughts, ToggleLeft, ToggleRight, ShowSource, ShowChanges, ShowChat, SwapPanes, ShowHistory, ToggleSplit, ToggleRendered, NewThread, OpenProject, ShowFinder, ToggleFocus, ShowSettings, CloseSettings, CloseWindow]);
+gpui::actions!(po, [ToggleTools, ToggleThoughts, ToggleLeft, ToggleRight, ShowSource, ShowChanges, ShowChat, SwapPanes, ShowHistory, ToggleSplit, ToggleRendered, NewThread, OpenProject, ShowFinder, ToggleFocus, ShowSettings, CloseSettings, CloseWindow, ToggleTerminal]);
+
+/// The id the viewer's tabs know the terminal by.
+const TERMINAL_TAB: &str = "po:terminal";
 
 const SKIP: [&str; 5] = ["target", "node_modules", "dist", "build", "__pycache__"];
 const MAX_FILES: usize = 5000;
@@ -553,6 +559,10 @@ struct Project {
     files_tree: FileTree,
     /// Set when this is a thread's own checkout, made from another project's repository.
     worktree: Option<worktree::Worktree>,
+    /// The project's shell, started the first time the terminal is opened, and whether the viewer
+    /// shows it.
+    terminal: Option<Entity<terminal_view::TerminalView>>,
+    terminal_shown: bool,
 }
 
 impl Project {
@@ -1627,6 +1637,8 @@ impl Reader {
             notice: None,
             files_tree,
             worktree: None,
+            terminal: None,
+            terminal_shown: false,
         }
     }
 
@@ -3255,6 +3267,7 @@ impl Reader {
     fn show_agent_view(&mut self, id: &str, cx: &mut Context<Self>) {
         self.thread.shown = Some(id.to_string());
         self.thread.offered = None;
+        self.project.terminal_shown = false;
         self.open_viewer_wide(cx);
         cx.notify();
     }
@@ -3403,8 +3416,61 @@ impl Reader {
     /// since looking at code or a diff wants room; if it is open its width is left as it was.
     fn show_viewer(&mut self, mode: Mode, cx: &mut Context<Self>) {
         self.thread.shown = None;
+        self.project.terminal_shown = false;
         self.set_mode(mode, cx);
         self.open_viewer_wide(cx);
+    }
+
+    /// The terminal in the viewer, started if the project has none yet, or back to the files if it
+    /// is what the viewer shows.
+    fn toggle_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.project.terminal_shown && self.side_open {
+            self.project.terminal_shown = false;
+            window.focus(&self.focus, cx);
+            cx.notify();
+            return;
+        }
+        let root = self.project.root.clone();
+        if self.project.terminal.is_none() {
+            let view = cx.new(|cx| terminal_view::TerminalView::new(root, cx));
+            // A shell that ends (Ctrl+D, `exit`) takes its tab with it, in whichever project it was.
+            cx.subscribe_in(&view, window, |reader, view, _: &terminal_view::Exited, window, cx| reader.terminal_exited(&view, window, cx)).detach();
+            self.project.terminal = Some(view);
+        }
+        let terminal = self.project.terminal.clone().expect("just made");
+        self.project.terminal_shown = true;
+        self.thread.offered = None;
+        self.open_viewer_wide(cx);
+        // The view is not in the tree until it draws; the focus follows.
+        cx.defer_in(window, move |_, window, cx| terminal.update(cx, |terminal, cx| terminal.focus(window, cx)));
+    }
+
+    /// The terminal's tab was pressed: show it, which never hides it.
+    fn toggle_terminal_on(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.project.terminal_shown = false;
+        self.toggle_terminal(window, cx);
+    }
+
+    /// `view`'s shell ended: its tab closes.
+    fn terminal_exited(&mut self, view: &Entity<terminal_view::TerminalView>, window: &mut Window, cx: &mut Context<Self>) {
+        if view.focus_handle(cx).is_focused(window) {
+            window.focus(&self.focus, cx);
+        }
+        for project in std::iter::once(&mut self.project).chain(self.slots.iter_mut().map(|slot| &mut slot.project)) {
+            if project.terminal.as_ref() == Some(view) {
+                project.terminal = None;
+                project.terminal_shown = false;
+            }
+        }
+        cx.notify();
+    }
+
+    /// The terminal's tab was closed: the shell ends with its view.
+    fn close_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.project.terminal = None;
+        self.project.terminal_shown = false;
+        window.focus(&self.focus, cx);
+        cx.notify();
     }
 
     /// Opens the viewer if it is closed, wide since looking at code or a diff wants room; if it is
@@ -3443,6 +3509,7 @@ impl Reader {
     /// Shows `path` where it is most useful: its diff if it has changes, the file otherwise.
     fn reveal(&mut self, path: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.thread.shown = None;
+        self.project.terminal_shown = false;
         let full = Path::new(path);
         let relative = full.strip_prefix(&self.project.root).unwrap_or(full).to_string_lossy().replace('\\', "/");
         if self.project.changes.iter().any(|change| change.path == relative) {
@@ -4646,6 +4713,7 @@ impl Reader {
     /// Opens `path` in the viewer and closes the finder.
     fn accept_path(&mut self, path: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.thread.shown = None;
+        self.project.terminal_shown = false;
         self.open(path, window, cx);
         // A file that can't be shown leaves the finder up so the query isn't lost.
         if self.project.notice.is_none() {
@@ -5206,6 +5274,7 @@ impl Reader {
                 // A file picked in the tree is what the viewer shows, not an agent's view.
                 if by_user {
                     self.thread.shown = None;
+                    self.project.terminal_shown = false;
                 }
                 if self.project.current.as_deref() != Some(&path) {
                     self.open(&path, window, cx);
@@ -5215,6 +5284,7 @@ impl Reader {
                 let Some(path) = self.project.changes_tree.selected_file().map(str::to_string) else { return };
                 if by_user {
                     self.thread.shown = None;
+                    self.project.terminal_shown = false;
                 }
                 if self.project.picked.as_deref() != Some(&path) {
                     self.pick(&path, cx);
@@ -5589,8 +5659,12 @@ impl Reader {
             Cmd::SetSplit(split) => self.set_split(split, cx),
             Cmd::ShowHome => {
                 self.thread.shown = None;
+                self.project.terminal_shown = false;
+                window.focus(&self.focus, cx);
                 cx.notify();
             }
+            Cmd::ShowView(id) if id == TERMINAL_TAB => self.toggle_terminal_on(window, cx),
+            Cmd::CloseView(id) if id == TERMINAL_TAB => self.close_terminal(window, cx),
             Cmd::ShowView(id) => self.show_agent_view(&id, cx),
             Cmd::CloseView(id) => self.close_agent_view(&id, cx),
             Cmd::SetMode(diff) => self.set_mode(if diff { Mode::Diff } else { Mode::Source }, cx),
@@ -5656,7 +5730,8 @@ impl Reader {
             .shown
             .as_deref()
             .and_then(|id| self.thread.views.list().iter().find(|view| view.id == id));
-        let showing_agent = shown.is_some() || shown_form.is_some();
+        let showing_terminal = self.project.terminal_shown.then(|| self.project.terminal.clone()).flatten();
+        let showing_agent = shown.is_some() || shown_form.is_some() || showing_terminal.is_some();
         let with_tree = !showing_agent && self.tree_visible();
         // The window's own control goes in the leftmost header: the tree's, or the viewer's.
         // A pane too narrow for the tree beside the file takes turns: the explorer fills it until a
@@ -5672,6 +5747,10 @@ impl Reader {
         let tree_lead = if with_tree || explorer_only { lead_controls.clone() } else { vec![] };
         let body_controls = |lead: Vec<nsh::header::Control>| if with_tree || explorer_only { (vec![], trail_controls.clone()) } else if stacked { ([lead, vec![nsh::header::Control::Explorer]].concat(), trail_controls.clone()) } else { (lead, trail_controls.clone()) };
         let body = match (shown, shown_form, self.mode) {
+            _ if showing_terminal.is_some() => {
+                let background = cx.global::<Palette>().background;
+                div().size_full().bg(background).children(showing_terminal).into_any_element()
+            }
             _ if explorer_only => {
                 let background = cx.global::<Palette>().background;
                 div().size_full().when(!has_tabs, |d| d.bg(background)).child(self.explorer(tree_lead.clone(), trail_controls.clone(), cx)).into_any_element()
@@ -5757,7 +5836,7 @@ impl Reader {
     /// Files (or changes) and the agent's views as tabs, with a prompt for one it added while
     /// the user was busy. None while the agent has made no views.
     fn view_tabs(&self) -> Option<AnyElement> {
-        if self.thread.views.is_empty() && self.thread.forms.is_empty() {
+        if self.thread.views.is_empty() && self.thread.forms.is_empty() && self.project.terminal.is_none() {
             return None;
         }
         use nsh::tabs::{Snapshot, Tab};
@@ -5772,13 +5851,13 @@ impl Reader {
         };
         nsh::tabs::publish(Snapshot {
             home: if self.mode == Mode::Diff { "Changes" } else { "Files" }.into(),
-            shown: self.thread.shown.clone(),
+            shown: if self.project.terminal_shown { Some(TERMINAL_TAB.to_string()) } else { self.thread.shown.clone() },
             tabs: self
-                .thread
-                .views
-                .list()
+                .project
+                .terminal
                 .iter()
-                .map(|view| Tab { id: view.id.clone(), title: view.title.clone() })
+                .map(|_| Tab { id: TERMINAL_TAB.to_string(), title: "Terminal".into() })
+                .chain(self.thread.views.list().iter().map(|view| Tab { id: view.id.clone(), title: view.title.clone() }))
                 .chain(self.thread.forms.list().iter().map(|form| Tab { id: form.id.clone(), title: form.title.clone() }))
                 .collect(),
             offer: self.thread.offered.as_ref().and_then(titled),
@@ -6151,8 +6230,13 @@ fn approval_text(agent: &config::Agent, new_agent: bool, mcp: &[config::McpServe
 }
 
 impl Render for Reader {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.settle_agent_changes();
+        // A terminal that is no longer drawn must not keep the keys: they would go to a shell nobody sees.
+        if !self.project.terminal_shown && self.project.terminal.as_ref().is_some_and(|terminal| terminal.focus_handle(cx).is_focused(window)) {
+            let focus = self.focus.clone();
+            cx.defer_in(window, move |_, window, cx| window.focus(&focus, cx));
+        }
         if !self.painted {
             self.painted = true;
             trace::mark("first render");
@@ -6228,6 +6312,7 @@ impl Render for Reader {
             .on_action(cx.listener(|reader, _: &ShowChat, _, cx| reader.show_chat(cx)))
             .on_action(cx.listener(|reader, _: &SwapPanes, _, cx| reader.swap_panes(cx)))
             .on_action(cx.listener(|reader, _: &ToggleFocus, _, cx| reader.toggle_focus(cx)))
+            .on_action(cx.listener(|reader, _: &ToggleTerminal, window, cx| reader.toggle_terminal(window, cx)))
             .on_action(cx.listener(|reader, _: &ShowHistory, window, cx| reader.resume_thread(window, cx)))
             .on_action(cx.listener(|reader, _: &ToggleSplit, _, cx| reader.set_split(!reader.split, cx)))
             .on_action(cx.listener(|reader, _: &ToggleRendered, _, cx| reader.toggle_rendered(cx)))
@@ -6444,9 +6529,15 @@ fn main() {
             KeyBinding::new("secondary-p", ShowFinder, None),
             KeyBinding::new("secondary-,", ShowSettings, None),
             KeyBinding::new("secondary-w", CloseWindow, None),
+            KeyBinding::new("secondary-`", ToggleTerminal, None),
             KeyBinding::new("escape", CloseSettings, Some("Settings")),
             // The Input binds up/down itself and swallows them when single-line, so these name it.
         ]);
+        // Ctrl+O, T, B, N, P, W and \ are keys of readline, fzf and tmux: while the terminal has the
+        // focus they go to the shell and not to the window. (Where the window's keys are Cmd's, only
+        // the first two are Ctrl's.)
+        let shell_keys: &[&str] = if cfg!(target_os = "macos") { &["ctrl-o", "ctrl-t"] } else { &["ctrl-o", "ctrl-t", "ctrl-b", "ctrl-n", "ctrl-p", "ctrl-w", "ctrl-\\"] };
+        cx.bind_keys(shell_keys.iter().map(|key| KeyBinding::new(key, gpui::NoAction, Some("Terminal"))));
         cx.on_action(|_: &CloseWindow, cx| {
             if let Some(window) = cx.active_window() {
                 window.update(cx, |_, window, _| window.remove_window()).ok();

@@ -28,6 +28,8 @@ base64 = "0.22"
 # The todos store the window's NSH screen and the sidebar share.
 tokio = { version = "1", default-features = false, features = ["sync"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif"] }
+# The terminal: libghostty-vt's emulator, built from source with Zig 0.15.2 (see mise.toml).
+libghostty-vt = { version = "0.2.2", default-features = false }
 
 [dev-dependencies]
 # Headless runs of the NSH screens.

@@ -19,6 +19,8 @@ pub mod tokens {
     pub const DISABLED: f32 = 0.5;
     /// Alpha of a control while the pointer is on it.
     pub const HOVER: f32 = 0.85;
+    /// Alpha of the wash over selected text, which must stay readable beneath it.
+    pub const SELECTION: f32 = 0.35;
 }
 
 /// Where themes are picked from: `<config>/themes/`.
