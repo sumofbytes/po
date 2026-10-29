@@ -1,0 +1,48 @@
+name: debug-macos
+
+on:
+  push:
+    branches: [debug/macos-zig]
+  workflow_dispatch:
+
+jobs:
+  probe:
+    strategy:
+      matrix:
+        os: [macos-latest, macos-15-arm64, macos-26-arm64, macos-13-xlarge]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: OS info
+        run: |
+          sw_vers
+          xcodebuild -version
+          xcrun --show-sdk-path || true
+          echo "SDKROOT=$SDKROOT"
+          ls /usr/lib/libSystem.dylib 2>/dev/null && echo "libSystem.dylib on disk" || echo "no libSystem.dylib on disk"
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+      # Any `zig build` first links its own build runner natively; a trivial
+      # build reproduces the release failure without the whole project.
+      - name: Trivial zig build (no SDKROOT)
+        run: |
+          mkdir -p /tmp/zt && cd /tmp/zt
+          cat > build.zig <<'EOF'
+          const std = @import("std");
+          pub fn build(b: *std.Build) void {
+            const exe = b.addExecutable(.{ .name = "t", .root_module = b.createModule(.{ .root_source_file = b.path("t.zig"), .target = b.graph.host, .link_libc = true }) });
+            b.installArtifact(exe);
+          }
+          EOF
+          echo 'const std = @import("std"); pub fn main() void { std.debug.print("hi\n", .{}); }' > t.zig
+          zig build 2>&1 | tail -5 || echo "TRIVIAL BUILD FAILED"
+      - name: Trivial zig build (SDKROOT from xcrun)
+        run: |
+          cd /tmp/zt
+          SDKROOT="$(xcrun --show-sdk-path)" zig build 2>&1 | tail -5 || echo "SDKROOT BUILD FAILED"
+      - name: Trivial zig build (explicit SDK dir)
+        run: |
+          cd /tmp/zt
+          sdk=$(xcrun --show-sdk-path)
+          ls "$sdk/usr/lib/" | grep -iE "libSystem|libdispatch" | head
+          SDKROOT="$sdk" zig build 2>&1 | tail -3 || echo "EXPLICIT SDK BUILD FAILED"
