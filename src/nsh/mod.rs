@@ -251,6 +251,17 @@ pub fn pill() -> Points {
     Points(999.)
 }
 
+/// The corner of a card or panel, which holds controls of the base radius: twice that radius.
+pub fn card_radius() -> Points {
+    Colors::radius() * 2.
+}
+
+/// The corner of the big surfaces of the chat column, the composer, the user's messages and the
+/// queue: three times the base radius.
+pub fn surface_radius() -> Points {
+    Colors::radius() * 3.
+}
+
 /// The small radius of a swatch or marker.
 pub fn swatch_radius() -> Points {
     Points(2.)

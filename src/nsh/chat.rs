@@ -456,7 +456,7 @@ fn user_row(text_: &str, pictures: &[Picture]) -> AnyElement {
         .max_w(px(700.))
         .px(rems(1.))
         .py(rems(0.75))
-        .rounded(Colors::radius())
+        .rounded(super::surface_radius())
         .bg(Colors::selected())
         .children(
             pictures
@@ -653,7 +653,7 @@ fn ask_row(message: usize, at: usize, title: &str, options: &[AskOption], answer
         .gap(rems(0.5))
         .py(rems(0.75))
         .px(rems(0.75))
-        .rounded(Colors::radius())
+        .rounded(super::card_radius())
         .border_1()
         .border_color(move || if waiting { Colors::warning()().opacity(crate::theme::tokens::ALERT_BORDER) } else { Colors::border()() })
         .child(
@@ -706,7 +706,7 @@ fn approve_row(message: usize, at: usize, question: &str, lines: &[String], answ
         .gap(rems(0.5))
         .py(rems(0.75))
         .px(rems(0.75))
-        .rounded(Colors::radius())
+        .rounded(super::card_radius())
         .border_1()
         .border_color(move || if waiting { Colors::warning()().opacity(crate::theme::tokens::ALERT_BORDER) } else { Colors::border()() })
         .child(
@@ -907,7 +907,7 @@ fn queue_row(queued: Queued) -> AnyElement {
         .gap(rems(0.5))
         .px(rems(0.75))
         .py(rems(0.375))
-        .rounded(Colors::radius())
+        .rounded(super::surface_radius())
         .bg(Colors::selected());
     row = if queued.kind.is_empty() {
         row.child(text("Queued").flex_none().text_xs().font_weight(FontWeight::MEDIUM).text_color(Colors::muted()))
@@ -991,7 +991,7 @@ fn picker(picking: &Picking) -> AnyElement {
         .flex_col()
         .mb(rems(0.625))
         .py(rems(0.375))
-        .rounded(Colors::radius())
+        .rounded(super::card_radius())
         .border_1()
         .border_color(Colors::input_border())
         .bg(Colors::input_background())
@@ -1276,7 +1276,7 @@ fn bar(snap: Snapshot, draft: Signal<String>, field_ref: ElementRef) -> AnyEleme
         .w_full()
         .max_w(px(COLUMN))
         .p(rems(0.5))
-        .rounded(Colors::radius() * 3.)
+        .rounded(super::surface_radius())
         .border_1()
         .border_color(Colors::border())
         .bg(Colors::sidebar())
