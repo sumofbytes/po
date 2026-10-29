@@ -3425,6 +3425,7 @@ impl Reader {
     fn toggle_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.project.terminal_shown && self.side_open {
             self.project.terminal_shown = false;
+            window.focus(&self.focus, cx);
             cx.notify();
             return;
         }
@@ -3461,9 +3462,10 @@ impl Reader {
     }
 
     /// The terminal's tab was closed: the shell ends with its view.
-    fn close_terminal(&mut self, cx: &mut Context<Self>) {
+    fn close_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.project.terminal = None;
         self.project.terminal_shown = false;
+        window.focus(&self.focus, cx);
         cx.notify();
     }
 
@@ -3503,6 +3505,7 @@ impl Reader {
     /// Shows `path` where it is most useful: its diff if it has changes, the file otherwise.
     fn reveal(&mut self, path: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.thread.shown = None;
+        self.project.terminal_shown = false;
         let full = Path::new(path);
         let relative = full.strip_prefix(&self.project.root).unwrap_or(full).to_string_lossy().replace('\\', "/");
         if self.project.changes.iter().any(|change| change.path == relative) {
@@ -4706,6 +4709,7 @@ impl Reader {
     /// Opens `path` in the viewer and closes the finder.
     fn accept_path(&mut self, path: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.thread.shown = None;
+        self.project.terminal_shown = false;
         self.open(path, window, cx);
         // A file that can't be shown leaves the finder up so the query isn't lost.
         if self.project.notice.is_none() {
@@ -5266,6 +5270,7 @@ impl Reader {
                 // A file picked in the tree is what the viewer shows, not an agent's view.
                 if by_user {
                     self.thread.shown = None;
+                    self.project.terminal_shown = false;
                 }
                 if self.project.current.as_deref() != Some(&path) {
                     self.open(&path, window, cx);
@@ -5275,6 +5280,7 @@ impl Reader {
                 let Some(path) = self.project.changes_tree.selected_file().map(str::to_string) else { return };
                 if by_user {
                     self.thread.shown = None;
+                    self.project.terminal_shown = false;
                 }
                 if self.project.picked.as_deref() != Some(&path) {
                     self.pick(&path, cx);
@@ -5650,10 +5656,11 @@ impl Reader {
             Cmd::ShowHome => {
                 self.thread.shown = None;
                 self.project.terminal_shown = false;
+                window.focus(&self.focus, cx);
                 cx.notify();
             }
             Cmd::ShowView(id) if id == TERMINAL_TAB => self.toggle_terminal_on(window, cx),
-            Cmd::CloseView(id) if id == TERMINAL_TAB => self.close_terminal(cx),
+            Cmd::CloseView(id) if id == TERMINAL_TAB => self.close_terminal(window, cx),
             Cmd::ShowView(id) => self.show_agent_view(&id, cx),
             Cmd::CloseView(id) => self.close_agent_view(&id, cx),
             Cmd::SetMode(diff) => self.set_mode(if diff { Mode::Diff } else { Mode::Source }, cx),

@@ -4,6 +4,7 @@
 //! its own, which also encodes the keys and answers the shell's queries.
 use std::io;
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -11,6 +12,8 @@ use std::time::{Duration, Instant};
 /// The least time between two frames while output is streaming in.
 const FRAME: Duration = Duration::from_millis(8);
 const SCROLLBACK: usize = 10_000;
+/// The most output that waits to be emulated, in bytes.
+const BACKLOG: usize = 4 * 1024 * 1024;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Rgb(pub u8, pub u8, pub u8);
@@ -39,11 +42,13 @@ pub enum CursorShape {
     Underline,
 }
 
-#[derive(Clone, Copy, PartialEq, Debug)]
+#[derive(Clone, PartialEq, Debug)]
 pub struct Cursor {
     pub col: u16,
     pub row: u16,
     pub shape: CursorShape,
+    /// What the cell under it holds, to draw over a block.
+    pub under: String,
 }
 
 #[derive(Clone, PartialEq, Debug)]
@@ -109,6 +114,10 @@ impl Session {
 
         let reader = pty.reader()?;
         let output = tx.clone();
+        // Bytes read and not yet emulated: the reader waits when the emulator falls behind, so a
+        // runaway program can't fill memory.
+        let backlog = Arc::new(AtomicUsize::new(0));
+        let reading = backlog.clone();
         std::thread::Builder::new().name("terminal-read".into()).spawn({
             let pty = pty.clone();
             move || {
@@ -116,8 +125,20 @@ impl Session {
                 let mut reader = reader;
                 let mut buf = vec![0; 64 * 1024];
                 // A closed pty reads as an error on Linux, and as the end elsewhere.
-                while let Ok(n) = reader.read(&mut buf) {
-                    if n == 0 || output.send(Msg::Output(buf[..n].to_vec())).is_err() {
+                loop {
+                    let n = match reader.read(&mut buf) {
+                        Ok(n) => n,
+                        Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                        Err(_) => 0,
+                    };
+                    if n == 0 {
+                        break;
+                    }
+                    while reading.load(Ordering::Acquire) > BACKLOG {
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                    reading.fetch_add(n, Ordering::AcqRel);
+                    if output.send(Msg::Output(buf[..n].to_vec())).is_err() {
                         break;
                     }
                 }
@@ -125,9 +146,20 @@ impl Session {
             }
         })?;
 
-        let writer = pty.writer()?;
+        // What goes to the shell is written on a thread of its own: a program that isn't reading
+        // blocks the write, and the emulator must keep drawing meanwhile.
+        let (to_shell, written) = mpsc::channel::<Vec<u8>>();
+        let mut writer = pty.writer()?;
+        std::thread::Builder::new().name("terminal-write".into()).spawn(move || {
+            use std::io::Write as _;
+            while let Ok(bytes) = written.recv() {
+                if writer.write_all(&bytes).and_then(|()| writer.flush()).is_err() {
+                    break;
+                }
+            }
+        })?;
         let shared = frame.clone();
-        std::thread::Builder::new().name("terminal".into()).spawn(move || emulate(rx, writer, shared, (cols, rows), theme, wake))?;
+        std::thread::Builder::new().name("terminal".into()).spawn(move || emulate(rx, to_shell, backlog, shared, (cols, rows), theme, wake))?;
         Ok(Self { tx, frame, pty })
     }
 
@@ -168,7 +200,7 @@ impl Drop for Session {
     }
 }
 
-fn emulate(rx: mpsc::Receiver<Msg>, writer: impl std::io::Write + Send + 'static, shared: Arc<Mutex<Arc<Frame>>>, (cols, rows): (u16, u16), theme: (Rgb, Rgb), wake: impl Fn()) {
+fn emulate(rx: mpsc::Receiver<Msg>, to_shell: Sender<Vec<u8>>, backlog: Arc<AtomicUsize>, shared: Arc<Mutex<Arc<Frame>>>, (cols, rows): (u16, u16), theme: (Rgb, Rgb), wake: impl Fn()) {
     use libghostty_vt::key::{Action, Encoder, Event, Mods};
     use libghostty_vt::terminal::ScrollViewport;
     use libghostty_vt::{RenderState, Terminal, TerminalOptions};
@@ -179,12 +211,9 @@ fn emulate(rx: mpsc::Receiver<Msg>, writer: impl std::io::Write + Send + 'static
     };
     // The shell's queries (cursor position, device attributes) are answered through the same pipe
     // the keys go down.
-    let writer = Arc::new(Mutex::new(writer));
-    let reply = writer.clone();
+    let reply = to_shell.clone();
     let _ = terminal.on_pty_write(move |_, data| {
-        if let Ok(mut out) = reply.lock() {
-            let _ = out.write_all(data).and_then(|()| out.flush());
-        }
+        let _ = reply.send(data.to_vec());
     });
     let title = Arc::new(Mutex::new(String::new()));
     let named = title.clone();
@@ -204,9 +233,7 @@ fn emulate(rx: mpsc::Receiver<Msg>, writer: impl std::io::Write + Send + 'static
         return;
     };
     let send = |bytes: &[u8]| {
-        if let Ok(mut out) = writer.lock() {
-            let _ = out.write_all(bytes).and_then(|()| out.flush());
-        }
+        let _ = to_shell.send(bytes.to_vec());
     };
 
     let (mut dirty, mut last, mut exited) = (true, Instant::now() - FRAME, None);
@@ -228,7 +255,10 @@ fn emulate(rx: mpsc::Receiver<Msg>, writer: impl std::io::Write + Send + 'static
         if let Some(message) = message {
             dirty = true;
             match message {
-                Msg::Output(bytes) => terminal.vt_write(&bytes),
+                Msg::Output(bytes) => {
+                    terminal.vt_write(&bytes);
+                    backlog.fetch_sub(bytes.len(), Ordering::AcqRel);
+                }
                 Msg::Key(input) => {
                     // Typing scrolls back to where the shell is.
                     let mut mods = Mods::empty();
@@ -292,14 +322,18 @@ fn snapshot<'a>(terminal: &libghostty_vt::Terminal<'a, '_>, render: &mut libghos
     let mut cells = CellIterator::new().ok()?;
     let mut row_iter = rows.update(&snapshot).ok()?;
     let mut lines = Vec::new();
+    let at = snapshot.cursor_visible().ok().filter(|visible| *visible).and_then(|_| snapshot.cursor_viewport().ok().flatten());
+    let cursor_at = at.map(|at| (at.x, at.y));
+    let mut under = String::new();
     while let Some(row) = row_iter.next() {
+        let row_index = lines.len() as u16;
         let mut runs: Vec<Run> = Vec::new();
         let mut cell_iter = cells.update(row).ok()?;
-        let mut col = 0_u16;
+        let (mut col, mut after_wide) = (0_u16, false);
         while let Some(cell) = cell_iter.next() {
             let wide = cell.raw_cell().and_then(|c| c.wide()).unwrap_or(CellWide::Narrow);
+            // The wide cell before it already took the column.
             if matches!(wide, CellWide::SpacerTail | CellWide::SpacerHead) {
-                col += 1;
                 continue;
             }
             let style = cell.style().unwrap_or_default();
@@ -324,8 +358,14 @@ fn snapshot<'a>(terminal: &libghostty_vt::Terminal<'a, '_>, render: &mut libghos
             }
             let width = if wide == CellWide::Wide { 2 } else { 1 };
             let (underline, strike) = (style.underline != Underline::None, style.strikethrough);
+            // A wide character is a run of its own, so the text after it starts on its column.
+            let alone = width == 2 || after_wide;
+            after_wide = width == 2;
+            if cursor_at == Some((col, row_index)) {
+                under = text.clone();
+            }
             match runs.last_mut() {
-                Some(run) if run.col + run.cells == col && (run.fg, run.bg, run.bold, run.italic, run.underline, run.strike) == (fg, bg, style.bold, style.italic, underline, strike) => {
+                Some(run) if !alone && run.col + run.cells == col && (run.fg, run.bg, run.bold, run.italic, run.underline, run.strike) == (fg, bg, style.bold, style.italic, underline, strike) => {
                     run.text.push_str(&text);
                     run.cells += width;
                 }
@@ -337,14 +377,10 @@ fn snapshot<'a>(terminal: &libghostty_vt::Terminal<'a, '_>, render: &mut libghos
         runs.retain(|run| run.bg.is_some() || run.underline || run.strike || run.text.chars().any(|c| c != ' '));
         lines.push(runs);
     }
-    let cursor = snapshot
-        .cursor_visible()
-        .ok()
-        .filter(|visible| *visible)
-        .and_then(|_| snapshot.cursor_viewport().ok().flatten())
-        .map(|at| Cursor {
+    let cursor = at.map(|at| Cursor {
             col: at.x,
             row: at.y,
+            under,
             shape: match snapshot.cursor_visual_style() {
                 Ok(CursorVisualStyle::Bar) => CursorShape::Bar,
                 Ok(CursorVisualStyle::Underline) => CursorShape::Underline,
@@ -389,6 +425,12 @@ mod pty {
             }
             // SAFETY: openpty just made these.
             let (master, slave) = unsafe { (OwnedFd::from_raw_fd(master), OwnedFd::from_raw_fd(slave)) };
+            // Neither end belongs to anything else this process starts; the shell gets the slave
+            // as its stdio, which keeps it across the exec.
+            for fd in [&master, &slave] {
+                // SAFETY: a flag on an fd we own.
+                unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) };
+            }
             let shell = std::env::var("SHELL").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "/bin/sh".into());
             let mut command = Command::new(&shell);
             command
@@ -402,6 +444,14 @@ mod pty {
             // SAFETY: only async-signal-safe calls run between fork and exec.
             unsafe {
                 command.pre_exec(|| {
+                    // Whatever this process ignores or blocks, the shell inherits across the exec: a
+                    // shell that ignores the hangup never hangs up its jobs.
+                    for signal in [libc::SIGHUP, libc::SIGINT, libc::SIGQUIT, libc::SIGTERM, libc::SIGTSTP, libc::SIGTTIN, libc::SIGTTOU, libc::SIGCHLD, libc::SIGPIPE] {
+                        libc::signal(signal, libc::SIG_DFL);
+                    }
+                    let mut none: libc::sigset_t = std::mem::zeroed();
+                    libc::sigemptyset(&mut none);
+                    libc::sigprocmask(libc::SIG_SETMASK, &none, std::ptr::null_mut());
                     // A session of its own, with the pty as its terminal, so job control and ^C work.
                     if libc::setsid() < 0 || libc::ioctl(0, libc::TIOCSCTTY as _, 0) < 0 {
                         return Err(io::Error::last_os_error());
@@ -447,15 +497,54 @@ mod pty {
             }
         }
 
+        /// Ends the shell and what it started: the hangup a closing terminal sends, to the shell's
+        /// whole process group (it leads its own session) and to everything below it, since an
+        /// interactive shell puts its background jobs in groups of their own and may die before it
+        /// has hung them up; then a kill for what ignores it.
         pub fn kill(&self) {
-            if let Ok(mut child) = self.child.lock() {
-                // The hangup is what a closing terminal sends.
-                // SAFETY: a plain signal to our own child.
-                unsafe { libc::kill(child.id() as i32, libc::SIGHUP) };
-                let _ = child.kill();
-                let _ = child.wait();
+            let Ok(mut child) = self.child.lock() else { return };
+            let pid = child.id() as i32;
+            let below = descendants(pid);
+            let signal = |signal| {
+                // SAFETY: plain signals to our own child's group and its children.
+                unsafe {
+                    libc::kill(-pid, signal);
+                    for pid in &below {
+                        libc::kill(*pid, signal);
+                    }
+                }
+            };
+            signal(libc::SIGHUP);
+            for _ in 0..20 {
+                if child.try_wait().ok().flatten().is_some() {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
             }
+            signal(libc::SIGKILL);
+            let _ = child.wait();
         }
+    }
+
+    /// Every process below `root`, from the process table.
+    fn descendants(root: i32) -> Vec<i32> {
+        let Ok(table) = Command::new("ps").args(["-A", "-o", "pid=,ppid="]).output() else { return vec![] };
+        let pairs: Vec<(i32, i32)> = String::from_utf8_lossy(&table.stdout)
+            .lines()
+            .filter_map(|line| {
+                let mut ids = line.split_whitespace().map(str::parse::<i32>);
+                Some((ids.next()?.ok()?, ids.next()?.ok()?))
+            })
+            .collect();
+        let mut found = vec![root];
+        let mut next = 0;
+        while next < found.len() {
+            let parent = found[next];
+            found.extend(pairs.iter().filter(|(_, ppid)| *ppid == parent).map(|(pid, _)| *pid));
+            next += 1;
+        }
+        found.remove(0);
+        found
     }
 }
 
@@ -519,5 +608,56 @@ mod tests {
         let frame = until(&session, |f| text(f).contains("ghost42ty"));
         assert_eq!((frame.cols, frame.rows), (80, 24));
         assert!(frame.cursor.is_some());
+    }
+
+    #[test]
+    fn wide_characters_take_two_columns_and_the_text_after_them_follows() {
+        let dir = std::env::temp_dir();
+        let session = Session::spawn(&dir, 80, 24, (Rgb(220, 220, 220), Rgb(0, 0, 0)), || {}).expect("a shell");
+        for c in "printf '\\344\\270\\255XY\\n'\n".chars() {
+            let key = if c == '\n' { Key::Enter } else { Key::Unidentified };
+            let text = (c != '\n').then(|| c.to_string());
+            session.key(KeyInput { key, text, shift: false, alt: false, ctrl: false, meta: false });
+        }
+        let frame = until(&session, |f| f.lines.iter().flatten().any(|run| run.text == "中"));
+        let at = |text: &str| frame.lines.iter().flatten().find(|run| run.text.ends_with(text) && run.col > 0 || run.text == text).map(|run| (run.col, run.cells));
+        let wide = frame.lines.iter().flatten().find(|run| run.text == "中").expect("the wide character");
+        assert_eq!(wide.cells, 2);
+        let after = frame.lines.iter().flatten().find(|run| run.text.starts_with("XY")).unwrap_or_else(|| panic!("{:?}", at("XY")));
+        assert_eq!(after.col, wide.col + 2, "the text after a wide character starts right after its two cells");
+    }
+
+    #[test]
+    fn closing_the_terminal_ends_what_the_shell_left_running() {
+        let dir = std::env::temp_dir();
+        let marker = dir.join(format!("po-terminal-test-{}", std::process::id()));
+        let session = Session::spawn(&dir, 80, 24, (Rgb(220, 220, 220), Rgb(0, 0, 0)), || {}).expect("a shell");
+        let line = format!("sleep 31337 & echo $! > {}\n", marker.display());
+        for c in line.chars() {
+            let key = if c == '\n' { Key::Enter } else { Key::Unidentified };
+            let text = (c != '\n').then(|| c.to_string());
+            session.key(KeyInput { key, text, shift: false, alt: false, ctrl: false, meta: false });
+        }
+        let pid = (0..200)
+            .find_map(|_| {
+                std::thread::sleep(Duration::from_millis(25));
+                std::fs::read_to_string(&marker).ok().and_then(|p| p.trim().parse::<i32>().ok())
+            })
+            .expect("the background job started");
+        // A killed process nobody has reaped yet still answers signal 0, so Linux's state is read.
+        let alive = |pid: i32| {
+            // SAFETY: signal 0 only asks whether the process exists.
+            let exists = unsafe { libc::kill(pid, 0) == 0 };
+            let zombie = std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| stat.rsplit(')').next().is_some_and(|rest| rest.trim_start().starts_with('Z')));
+            exists && !zombie
+        };
+        assert!(alive(pid));
+        drop(session);
+        let gone = (0..100).any(|_| {
+            std::thread::sleep(Duration::from_millis(25));
+            !alive(pid)
+        });
+        let _ = std::fs::remove_file(&marker);
+        assert!(gone, "the background job outlived its terminal");
     }
 }

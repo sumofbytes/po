@@ -30,11 +30,13 @@ pub struct TerminalView {
     grid: Rc<Cell<(u16, u16, f32, f32)>>,
     /// The colors the session was last told of.
     theme: Option<(Rgb, Rgb)>,
+    /// The part of a line the wheel has turned and not yet scrolled: a touchpad sends fractions.
+    wheel_rest: f32,
 }
 
 impl TerminalView {
     pub fn new(root: PathBuf, cx: &mut Context<Self>) -> Self {
-        let mut view = Self { root, focus: cx.focus_handle(), session: None, error: None, grid: Rc::new(Cell::new((80, 24, 8.0, 16.0))), theme: None };
+        let mut view = Self { root, focus: cx.focus_handle(), session: None, error: None, grid: Rc::new(Cell::new((80, 24, 8.0, 16.0))), theme: None, wheel_rest: 0.0 };
         view.start(cx);
         view
     }
@@ -83,9 +85,8 @@ impl TerminalView {
 
     fn key_down(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
         let stroke = &event.keystroke;
-        let ended = self.session.as_ref().is_some_and(|s| s.frame().exited.is_some());
-        if ended || self.session.is_none() {
-            // Any key brings the shell back.
+        if self.session.is_none() {
+            // The shell could not start: any key tries again.
             self.start(cx);
             return;
         }
@@ -116,12 +117,12 @@ impl TerminalView {
             gpui::ScrollDelta::Lines(delta) => delta.y * WHEEL_LINES,
             gpui::ScrollDelta::Pixels(delta) => f32::from(delta.y) / line,
         };
-        if let Some(session) = &self.session {
-            let step = lines.round() as isize;
-            if step != 0 {
-                // A wheel turned up reads older lines, which is up in the history.
-                session.scroll(-step);
-            }
+        self.wheel_rest += lines;
+        let step = self.wheel_rest.trunc();
+        self.wheel_rest -= step;
+        if let (Some(session), true) = (&self.session, step != 0.0) {
+            // A wheel turned up reads older lines, which is up in the history.
+            session.scroll(-(step as isize));
         }
     }
 }
@@ -226,11 +227,15 @@ fn paint(frame: &Frame, bounds: Bounds<Pixels>, (cell_w, cell_h): (f32, f32), (f
     let text = |run: &crate::terminal::Run, color: Hsla, window: &mut Window, cx: &mut App, row: u16| {
         let underline = run.underline.then(|| UnderlineStyle { thickness: px(1.), color: Some(color), wavy: false });
         let strikethrough = run.strike.then(|| StrikethroughStyle { thickness: px(1.), color: Some(color) });
+        // Every glyph on its cell, whatever font it falls back to: a run of one-cell characters
+        // advances by a cell each, a wide character by two.
+        let glyphs = run.text.chars().count();
+        let advance = if glyphs == usize::from(run.cells) { Some(px(cell_w)) } else if glyphs == 1 { Some(px(f32::from(run.cells) * cell_w)) } else { None };
         let shaped = window.text_system().shape_line(
             run.text.clone().into(),
             font_size,
             &[TextRun { len: run.text.len(), font: font(family, run.bold, run.italic), color, background_color: None, underline, strikethrough }],
-            None,
+            advance,
         );
         let _ = shaped.paint(at(run.col, row), line_height, gpui::TextAlign::Left, None, window, cx);
     };
@@ -245,21 +250,16 @@ fn paint(frame: &Frame, bounds: Bounds<Pixels>, (cell_w, cell_h): (f32, f32), (f
             text(run, from_rgb(run.fg), window, cx, row);
         }
     }
-    let Some(cursor) = frame.cursor else { return };
+    let Some(cursor) = frame.cursor.as_ref() else { return };
     let cell = Bounds::new(at(cursor.col, cursor.row), size(px(cell_w), line_height));
     let thin = px(2.);
     match (cursor.shape, focused) {
         (CursorShape::Block, true) => {
             window.paint_quad(fill(cell, caret));
             // The character under it, in the background's color so it reads on the block.
-            if let Some(run) = frame.lines.get(usize::from(cursor.row)).and_then(|l| l.iter().find(|r| r.col <= cursor.col && cursor.col < r.col + r.cells)) {
-                let index = usize::from(cursor.col - run.col);
-                if run.text.chars().count() == usize::from(run.cells)
-                    && let Some(ch) = run.text.chars().nth(index).filter(|c| *c != ' ')
-                {
-                    let one = crate::terminal::Run { col: cursor.col, cells: 1, text: ch.to_string(), ..run.clone() };
-                    text(&one, from_rgb(frame.background), window, cx, cursor.row);
-                }
+            if !cursor.under.trim().is_empty() {
+                let one = crate::terminal::Run { col: cursor.col, cells: 1, text: cursor.under.clone(), fg: frame.background, bg: None, bold: false, italic: false, underline: false, strike: false };
+                text(&one, from_rgb(frame.background), window, cx, cursor.row);
             }
         }
         (CursorShape::Bar, true) => window.paint_quad(fill(Bounds::new(cell.origin, size(thin, cell.size.height)), caret)),
