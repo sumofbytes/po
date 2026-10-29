@@ -375,7 +375,7 @@ fn paint(frame: &Frame, selection: Selection, bounds: Bounds<Pixels>, (cell_w, c
         for row in start.1..=end.1 {
             let from = if row == start.1 { start.0 } else { 0 };
             let to = if row == end.1 { end.0 + 1 } else { frame.cols };
-            window.paint_quad(fill(Bounds::new(at(from, row), size(px(f32::from(to.saturating_sub(from)) * cell_w), line_height)), caret.opacity(0.35)));
+            window.paint_quad(fill(Bounds::new(at(from, row), size(px(f32::from(to.saturating_sub(from)) * cell_w), line_height)), caret.opacity(crate::theme::tokens::SELECTION)));
         }
     }
     for (row, line) in frame.lines.iter().enumerate() {
