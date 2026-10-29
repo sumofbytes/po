@@ -220,32 +220,21 @@ pub mod scale {
 
     /// The label column of a legend row: Status, Target, Progress, and an issue's fields.
     pub fn legend_width() -> Points { rems(5.5) }
-    /// A row's count column in the epics list.
-    pub fn count_width() -> Points { rems(4.0) }
-    /// A row's due-date column in the epics list.
-    pub fn due_width() -> Points { rems(4.5) }
-    /// A progress bar in an epic row.
-    pub fn bar_width() -> Points { rems(8.0) }
-    /// A progress bar in a milestone row, which sits one level in.
-    pub fn bar_width_narrow() -> Points { rems(7.0) }
-    /// The due-date field of a new milestone.
-    pub fn due_field_width() -> Points { rems(11.0) }
-    /// The quick-add row's controls on the issues page.
-    pub fn quick_add_width() -> Points { rems(13.0) }
-    /// The label column of an agent's form.
+    /// The label column of an agent's form, whose labels are the agent's own words and run longer.
     pub fn form_label_width() -> Points { rems(9.0) }
-    /// A multi-line field, before it has text.
-    pub fn text_area_min_height() -> Points { rems(5.0) }
-    /// The most height of a popup list before it scrolls.
-    pub fn popup_max_height() -> Points { rems(24.0) }
-    /// A row of the epics list.
-    pub fn epic_row_height() -> Points { rems(2.25) }
-    /// From the composer card's edge to its text: the 1px border, the card's padding and the field's.
-    pub fn composer_text_inset() -> Points { rems(1.0625) }
-    /// The most height of the Needs you note in the sidebar.
-    pub fn needs_you_max_height() -> Points { rems(5.0) }
-    /// The dot that marks a thread running or unread.
-    pub fn mark_dot() -> Points { rems(0.4375) }
+    /// A row's progress bar, in the epics list and in an epic's milestones.
+    pub fn bar_width() -> Points { rems(8.0) }
+    /// A row's count column, as `3/5`.
+    pub fn count_width() -> Points { rems(4.0) }
+    /// A row's due-date column.
+    pub fn due_width() -> Points { rems(4.5) }
+    /// The due-date entry beside a new issue or milestone: its field and the date it reads.
+    pub fn due_entry_width() -> Points { rems(13.0) }
+    /// From the composer card's edge to its text: the card's padding and the field's, and the
+    /// border, which is a point wide whatever the font size.
+    pub fn composer_text_inset() -> Points { s2() + s2() + Points(1.) }
+    /// `n` lines of small text, whose line is 1.25rem tall: a text area's minimum, a note's maximum.
+    pub fn lines(n: f32) -> Points { rems(1.25 * n) }
     /// The least width of a project's name in the sidebar.
     pub fn project_name_min_width() -> Points { rems(6.0) }
     /// The least width of a project's branch in the sidebar.

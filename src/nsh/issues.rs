@@ -328,6 +328,9 @@ impl State {
 
 use super::epics::{epic_page, epics_page};
 
+/// The most rows a popup list shows before it scrolls.
+const POPUP_ROWS: f32 = 12.;
+
 #[component]
 pub fn Issues() -> impl IntoElement {
     let state = State::new();
@@ -476,7 +479,7 @@ pub fn text_area(id: &str, value: Signal<String>, placeholder: &'static str, on_
     view()
         .px(scale::s2_5())
         .py(scale::s2())
-        .min_h(scale::text_area_min_height())
+        .min_h(scale::lines(4.))
         .rounded(Colors::radius())
         .border_1()
         .border_color(Colors::input_border())
@@ -494,7 +497,7 @@ pub fn text_area(id: &str, value: Signal<String>, placeholder: &'static str, on_
                 .on_change(move |text: &str| on_change(text))
                 .flex_1()
                 .min_w(Points(0.))
-                .max_h(scale::popup_max_height()),
+                .max_h(scale::s8() * POPUP_ROWS),
         )
 }
 
@@ -617,11 +620,11 @@ fn list_page(state: State) -> View {
                         Some(
                             view()
                                 .flex_none()
-                                .w(scale::quick_add_width())
+                                .w(scale::due_entry_width())
                                 .flex_row()
                                 .items_center()
                                 .gap(scale::s2())
-                                .child(icon(IconName::Calendar, scale::s3_5(), Colors::muted()))
+                                .child(icon(IconName::Calendar, scale::s3(), Colors::muted()))
                                 .child(line_input("issue-new-due", state.new_due, DUE_HINT, move || state.add(None)))
                                 .child(due_hint(state.new_due)),
                         ),

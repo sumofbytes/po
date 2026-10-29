@@ -147,7 +147,7 @@ fn lead(content: impl IntoElement) -> View {
 /// A thread's state, in the lead column under its project's chevron: a dot while it runs or has
 /// news, a ! when it asks, nothing when idle.
 fn mark(mark: Mark) -> View {
-    let size = scale::mark_dot();
+    let size = scale::s2();
     let dot = |color: fn() -> AdaptiveColor| view().w(size).h(size).rounded(super::pill()).bg(color);
     centered(match mark {
         Mark::Idle => view().into_element(),
@@ -467,7 +467,7 @@ pub fn Sidebar() -> impl IntoElement {
                 ))
                 .child(dynamic(move || {
                     state.with(|s| s.status.clone()).map(|status| {
-                        view().px(space::gutter() + space::inset()).py(scale::s1()).max_h(scale::needs_you_max_height()).child(note(status))
+                        view().px(space::gutter() + space::inset()).py(scale::s1()).max_h(scale::lines(4.)).child(note(status))
                     })
                 }))
                 .child(dynamic(move || state.with(|s| s.suggestions.clone()).iter().map(suggestion).collect::<Vec<_>>()))
