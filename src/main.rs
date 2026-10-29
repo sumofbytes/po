@@ -47,6 +47,7 @@ use futures::StreamExt;
 use serde_json::Value;
 
 use gpui::{
+    Focusable as _,
     AnyElement, App, Pixels, TitlebarOptions, WindowControlArea, point, Bounds, Context, Entity, IntoElement, ParentElement,
     Render, Styled, Subscription, Task, Window, WindowBackgroundAppearance, WindowBounds, WindowOptions, div,
     prelude::*, px, rems, size, KeyBinding,
@@ -3433,7 +3434,7 @@ impl Reader {
         if self.project.terminal.is_none() {
             let view = cx.new(|cx| terminal_view::TerminalView::new(root, cx));
             // A shell that ends (Ctrl+D, `exit`) takes its tab with it, in whichever project it was.
-            cx.subscribe(&view, |reader, view, _: &terminal_view::Exited, cx| reader.terminal_exited(&view, cx)).detach();
+            cx.subscribe_in(&view, window, |reader, view, _: &terminal_view::Exited, window, cx| reader.terminal_exited(&view, window, cx)).detach();
             self.project.terminal = Some(view);
         }
         let terminal = self.project.terminal.clone().expect("just made");
@@ -3451,7 +3452,10 @@ impl Reader {
     }
 
     /// `view`'s shell ended: its tab closes.
-    fn terminal_exited(&mut self, view: &Entity<terminal_view::TerminalView>, cx: &mut Context<Self>) {
+    fn terminal_exited(&mut self, view: &Entity<terminal_view::TerminalView>, window: &mut Window, cx: &mut Context<Self>) {
+        if view.focus_handle(cx).is_focused(window) {
+            window.focus(&self.focus, cx);
+        }
         for project in std::iter::once(&mut self.project).chain(self.slots.iter_mut().map(|slot| &mut slot.project)) {
             if project.terminal.as_ref() == Some(view) {
                 project.terminal = None;
@@ -6226,8 +6230,13 @@ fn approval_text(agent: &config::Agent, new_agent: bool, mcp: &[config::McpServe
 }
 
 impl Render for Reader {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.settle_agent_changes();
+        // A terminal that is no longer drawn must not keep the keys: they would go to a shell nobody sees.
+        if !self.project.terminal_shown && self.project.terminal.as_ref().is_some_and(|terminal| terminal.focus_handle(cx).is_focused(window)) {
+            let focus = self.focus.clone();
+            cx.defer_in(window, move |_, window, cx| window.focus(&focus, cx));
+        }
         if !self.painted {
             self.painted = true;
             trace::mark("first render");

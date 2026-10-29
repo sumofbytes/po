@@ -55,7 +55,8 @@ pub struct Cursor {
 pub struct Frame {
     pub cols: u16,
     pub rows: u16,
-    pub lines: Vec<Vec<Run>>,
+    /// Rows that did not change are shared with the frame before.
+    pub lines: Vec<Arc<Vec<Run>>>,
     pub background: Rgb,
     pub foreground: Rgb,
     pub cursor: Option<Cursor>,
@@ -159,7 +160,13 @@ impl Session {
             }
         })?;
         let shared = frame.clone();
-        std::thread::Builder::new().name("terminal".into()).spawn(move || emulate(rx, to_shell, backlog, shared, (cols, rows), theme, wake))?;
+        std::thread::Builder::new().name("terminal".into()).spawn(move || {
+            let released = backlog.clone();
+            emulate(rx, to_shell, backlog, shared, (cols, rows), theme, wake);
+            // Nothing will be emulated any more: a reader waiting for room must not wait for it.
+            // Its next send fails, which ends it.
+            released.store(0, Ordering::Release);
+        })?;
         Ok(Self { tx, frame, pty })
     }
 
@@ -196,7 +203,11 @@ impl Session {
 impl Drop for Session {
     fn drop(&mut self) {
         let _ = self.tx.send(Msg::Stop);
-        self.pty.kill();
+        // Ending the shell waits on it: not on the thread that draws.
+        let pty = self.pty.clone();
+        if std::thread::Builder::new().name("terminal-kill".into()).spawn(move || pty.kill()).is_err() {
+            log::warn!("terminal: could not end the shell");
+        }
     }
 }
 
@@ -238,6 +249,7 @@ fn emulate(rx: mpsc::Receiver<Msg>, to_shell: Sender<Vec<u8>>, backlog: Arc<Atom
 
     let (mut dirty, mut last, mut exited) = (true, Instant::now() - FRAME, None);
     let mut keys = Vec::new();
+    let mut cache = Cache::default();
     loop {
         let message = if dirty {
             match rx.recv_timeout(FRAME.saturating_sub(last.elapsed())) {
@@ -298,7 +310,7 @@ fn emulate(rx: mpsc::Receiver<Msg>, to_shell: Sender<Vec<u8>>, backlog: Arc<Atom
         }
         if dirty && (timed_out || exited.is_some() || last.elapsed() >= FRAME) {
             let name = title.lock().map(|t| t.clone()).unwrap_or_default();
-            if let Some(frame) = snapshot(&terminal, &mut render, name, exited) {
+            if let Some(frame) = snapshot(&terminal, &mut render, &mut cache, name, exited) {
                 if let Ok(mut slot) = shared.lock() {
                     *slot = Arc::new(frame);
                 }
@@ -309,7 +321,14 @@ fn emulate(rx: mpsc::Receiver<Msg>, to_shell: Sender<Vec<u8>>, backlog: Arc<Atom
     }
 }
 
-fn snapshot<'a>(terminal: &libghostty_vt::Terminal<'a, '_>, render: &mut libghostty_vt::RenderState<'a>, title: String, exited: Option<i32>) -> Option<Frame> {
+/// The rows of the last frame, so the rows that did not change are not built again.
+#[derive(Default)]
+struct Cache {
+    lines: Vec<Arc<Vec<Run>>>,
+    colors: Option<(Rgb, Rgb)>,
+}
+
+fn snapshot<'a>(terminal: &libghostty_vt::Terminal<'a, '_>, render: &mut libghostty_vt::RenderState<'a>, cache: &mut Cache, title: String, exited: Option<i32>) -> Option<Frame> {
     use libghostty_vt::render::{CellIterator, CursorVisualStyle, RowIterator};
     use libghostty_vt::screen::CellWide;
     use libghostty_vt::style::{RgbColor, Underline};
@@ -318,6 +337,10 @@ fn snapshot<'a>(terminal: &libghostty_vt::Terminal<'a, '_>, render: &mut libghos
     let snapshot = render.update(terminal).ok()?;
     let colors = snapshot.colors().ok()?;
     let (background, foreground) = (rgb(colors.background), rgb(colors.foreground));
+    // Anything but a partial change redraws it all, and so does a change of colors, which the
+    // cached runs have resolved.
+    let all = snapshot.dirty().ok() != Some(libghostty_vt::render::Dirty::Partial) || cache.colors != Some((background, foreground));
+    cache.colors = Some((background, foreground));
     let mut rows = RowIterator::new().ok()?;
     let mut cells = CellIterator::new().ok()?;
     let mut row_iter = rows.update(&snapshot).ok()?;
@@ -327,6 +350,13 @@ fn snapshot<'a>(terminal: &libghostty_vt::Terminal<'a, '_>, render: &mut libghos
     let mut under = String::new();
     while let Some(row) = row_iter.next() {
         let row_index = lines.len() as u16;
+        // The cursor's row is built again for the character under the cursor.
+        let kept = if all || row.dirty().unwrap_or(true) || at.is_some_and(|at| at.y == row_index) { None } else { cache.lines.get(usize::from(row_index)) };
+        if let Some(kept) = kept {
+            lines.push(kept.clone());
+            continue;
+        }
+        let _ = row.set_dirty(false);
         let mut runs: Vec<Run> = Vec::new();
         let mut cell_iter = cells.update(row).ok()?;
         let (mut col, mut after_wide) = (0_u16, false);
@@ -375,8 +405,9 @@ fn snapshot<'a>(terminal: &libghostty_vt::Terminal<'a, '_>, render: &mut libghos
         }
         // Blank stretches in the default background are what the terminal's own background shows.
         runs.retain(|run| run.bg.is_some() || run.underline || run.strike || run.text.chars().any(|c| c != ' '));
-        lines.push(runs);
+        lines.push(Arc::new(runs));
     }
+    cache.lines.clone_from(&lines);
     let cursor = at.map(|at| Cursor {
             col: at.x,
             row: at.y,
@@ -389,7 +420,6 @@ fn snapshot<'a>(terminal: &libghostty_vt::Terminal<'a, '_>, render: &mut libghos
             },
         });
     let (cols, row_count) = (snapshot.cols().ok()?, snapshot.rows().ok()?);
-    // The renderer's dirty flags are never read: every frame is the whole screen.
     let _ = snapshot.set_dirty(libghostty_vt::render::Dirty::Clean);
     Some(Frame { cols, rows: row_count, lines, background, foreground, cursor, title, exited })
 }
@@ -503,6 +533,10 @@ mod pty {
         /// has hung them up; then a kill for what ignores it.
         pub fn kill(&self) {
             let Ok(mut child) = self.child.lock() else { return };
+            // Once reaped, its pid may belong to someone else.
+            if child.try_wait().ok().flatten().is_some() {
+                return;
+            }
             let pid = child.id() as i32;
             let below = descendants(pid);
             let signal = |signal| {
@@ -526,16 +560,32 @@ mod pty {
         }
     }
 
+    /// The process table as (pid, ppid), read from /proc where there is no `ps`.
+    fn proc_table() -> Vec<(i32, i32)> {
+        let Ok(dir) = std::fs::read_dir("/proc") else { return vec![] };
+        dir.filter_map(|entry| {
+            let pid: i32 = entry.ok()?.file_name().to_str()?.parse().ok()?;
+            let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+            // The name is in parentheses and may hold anything: the fields start after the last one.
+            let rest = stat.rsplit_once(')')?.1;
+            let ppid = rest.split_whitespace().nth(1)?.parse().ok()?;
+            Some((pid, ppid))
+        })
+        .collect()
+    }
+
     /// Every process below `root`, from the process table.
     fn descendants(root: i32) -> Vec<i32> {
-        let Ok(table) = Command::new("ps").args(["-A", "-o", "pid=,ppid="]).output() else { return vec![] };
-        let pairs: Vec<(i32, i32)> = String::from_utf8_lossy(&table.stdout)
-            .lines()
-            .filter_map(|line| {
-                let mut ids = line.split_whitespace().map(str::parse::<i32>);
-                Some((ids.next()?.ok()?, ids.next()?.ok()?))
-            })
-            .collect();
+        let pairs = match Command::new("ps").args(["-A", "-o", "pid=,ppid="]).output() {
+            Ok(table) => String::from_utf8_lossy(&table.stdout)
+                .lines()
+                .filter_map(|line| {
+                    let mut ids = line.split_whitespace().map(str::parse::<i32>);
+                    Some((ids.next()?.ok()?, ids.next()?.ok()?))
+                })
+                .collect(),
+            Err(_) => proc_table(),
+        };
         let mut found = vec![root];
         let mut next = 0;
         while next < found.len() {
@@ -619,11 +669,11 @@ mod tests {
             let text = (c != '\n').then(|| c.to_string());
             session.key(KeyInput { key, text, shift: false, alt: false, ctrl: false, meta: false });
         }
-        let frame = until(&session, |f| f.lines.iter().flatten().any(|run| run.text == "中"));
-        let at = |text: &str| frame.lines.iter().flatten().find(|run| run.text.ends_with(text) && run.col > 0 || run.text == text).map(|run| (run.col, run.cells));
-        let wide = frame.lines.iter().flatten().find(|run| run.text == "中").expect("the wide character");
+        let frame = until(&session, |f| f.lines.iter().flat_map(|line| line.iter()).any(|run| run.text == "中"));
+        let at = |text: &str| frame.lines.iter().flat_map(|line| line.iter()).find(|run| run.text.ends_with(text) && run.col > 0 || run.text == text).map(|run| (run.col, run.cells));
+        let wide = frame.lines.iter().flat_map(|line| line.iter()).find(|run| run.text == "中").expect("the wide character");
         assert_eq!(wide.cells, 2);
-        let after = frame.lines.iter().flatten().find(|run| run.text.starts_with("XY")).unwrap_or_else(|| panic!("{:?}", at("XY")));
+        let after = frame.lines.iter().flat_map(|line| line.iter()).find(|run| run.text.starts_with("XY")).unwrap_or_else(|| panic!("{:?}", at("XY")));
         assert_eq!(after.col, wide.col + 2, "the text after a wide character starts right after its two cells");
     }
 

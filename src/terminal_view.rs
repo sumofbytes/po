@@ -28,6 +28,9 @@ pub struct TerminalView {
     error: Option<String>,
     /// The cells and the size of one, as last painted.
     grid: Rc<Cell<(u16, u16, f32, f32)>>,
+    /// The size of a cell in the font and size it was measured for: shaping text to measure it is
+    /// not done again on every frame.
+    measured: Rc<Cell<Option<(gpui::SharedString, Pixels, (f32, f32))>>>,
     /// The colors the session was last told of.
     theme: Option<(Rgb, Rgb)>,
     /// The part of a line the wheel has turned and not yet scrolled: a touchpad sends fractions.
@@ -36,7 +39,7 @@ pub struct TerminalView {
 
 impl TerminalView {
     pub fn new(root: PathBuf, cx: &mut Context<Self>) -> Self {
-        let mut view = Self { root, focus: cx.focus_handle(), session: None, error: None, grid: Rc::new(Cell::new((80, 24, 8.0, 16.0))), theme: None, wheel_rest: 0.0 };
+        let mut view = Self { root, focus: cx.focus_handle(), session: None, error: None, grid: Rc::new(Cell::new((80, 24, 8.0, 16.0))), measured: Rc::new(Cell::new(None)), theme: None, wheel_rest: 0.0 };
         view.start(cx);
         view
     }
@@ -59,11 +62,14 @@ impl TerminalView {
                         while woken.try_recv().is_ok() {}
                         let gone = this.update(cx, |this, cx| {
                             cx.notify();
-                            if this.session.as_ref().is_some_and(|s| s.frame().exited.is_some()) {
+                            let exited = this.session.as_ref().is_some_and(|s| s.frame().exited.is_some());
+                            if exited {
                                 cx.emit(Exited);
                             }
+                            exited
                         });
-                        if gone.is_err() {
+                        // Once the shell has ended, the one `Exited` was all there was to say.
+                        if gone.unwrap_or(true) {
                             break;
                         }
                     }
@@ -105,6 +111,10 @@ impl TerminalView {
         }
         let Some(key) = key_of(&stroke.key) else { return };
         let text = stroke.key_char.clone().filter(|t| !t.chars().all(char::is_control));
+        // A key the encoder has no name for is only worth sending if it types something.
+        if key == Key::Unidentified && text.is_none() {
+            return;
+        }
         if let Some(session) = &self.session {
             session.key(KeyInput { key, text, shift, alt, ctrl, meta });
         }
@@ -154,7 +164,7 @@ impl Render for TerminalView {
                 .child(self.error.clone().unwrap_or_default())
                 .into_any_element();
         };
-        let (grid, focus) = (self.grid.clone(), self.focus.clone());
+        let (grid, focus, measured) = (self.grid.clone(), self.focus.clone(), self.measured.clone());
         let caret = palette.caret;
         area.id("terminal")
             .key_context("Terminal")
@@ -168,10 +178,20 @@ impl Render for TerminalView {
             .child(
                 canvas(
                     {
-                        let (session, grid) = (session.clone(), grid.clone());
+                        let (session, grid, measured) = (session.clone(), grid.clone(), measured.clone());
                         let family = family.clone();
                         move |bounds, window, _| {
-                            let (cell_w, cell_h) = cell_size(window, &family, font_size);
+                            let (cell_w, cell_h) = match measured.take() {
+                                Some((name, size, cell)) if name == family && size == font_size => {
+                                    measured.set(Some((name, size, cell)));
+                                    cell
+                                }
+                                _ => {
+                                    let cell = cell_size(window, &family, font_size);
+                                    measured.set(Some((family.clone(), font_size, cell)));
+                                    cell
+                                }
+                            };
                             let cols = (f32::from(bounds.size.width) / cell_w).floor().max(1.0) as u16;
                             let rows = (f32::from(bounds.size.height) / cell_h).floor().max(1.0) as u16;
                             if grid.get() != (cols, rows, cell_w, cell_h) {
@@ -241,12 +261,12 @@ fn paint(frame: &Frame, bounds: Bounds<Pixels>, (cell_w, cell_h): (f32, f32), (f
     };
     for (row, line) in frame.lines.iter().enumerate() {
         let row = row as u16;
-        for run in line {
+        for run in line.iter() {
             if let Some(bg) = run.bg {
                 window.paint_quad(fill(Bounds::new(at(run.col, row), size(px(f32::from(run.cells) * cell_w), line_height)), from_rgb(bg)));
             }
         }
-        for run in line {
+        for run in line.iter() {
             text(run, from_rgb(run.fg), window, cx, row);
         }
     }
