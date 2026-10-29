@@ -1,6 +1,6 @@
 [package]
 name = "po"
-version = "0.11.0"
+version = "0.13.0"
 edition = "2024"
 description = "A native desktop GUI for ACP coding agents: chat, file browser, code viewer and diffs."
 license = "MIT OR Apache-2.0"
@@ -25,7 +25,7 @@ ignore = "0.4"
 # TLS is only for `po update`: the daemon is plain HTTP to localhost.
 ureq = { version = "3", default-features = false, features = ["json", "rustls"] }
 base64 = "0.22"
-# The todos store the window's NSH screen and the sidebar share.
+# The issues store the window's NSH screen and the sidebar share.
 tokio = { version = "1", default-features = false, features = ["sync"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif"] }
 # The terminal: libghostty-vt's emulator, built from source with Zig 0.15.2 (see mise.toml).
