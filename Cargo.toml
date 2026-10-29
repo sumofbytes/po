@@ -49,3 +49,6 @@ debug = "line-tables-only"
 gpui-fast-wgpu = { path = "vendor/gpui-fast-wgpu" }
 gpui-fast-apple = { path = "vendor/gpui-fast-apple" }
 gpui-fast-windows = { path = "vendor/gpui-fast-windows" }
+# The green macOS traffic light zooms instead of entering native full screen
+# (see `vendor/gpui-fast-macos/src/window.rs`, `MacWindow::open`).
+gpui-fast-macos = { path = "vendor/gpui-fast-macos" }

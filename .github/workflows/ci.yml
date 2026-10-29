@@ -49,3 +49,24 @@ jobs:
         with:
           key: windows-check
       - run: cargo build --all-targets --locked
+
+  # Po's macOS window code is patched by hand in vendor/gpui-fast-macos. Compile the
+  # Apple target with real Metal/Apple tooling so a bad patch cannot pass CI on Linux.
+  # (macos-15: pinned like release.yml because macOS 26's SDK can't link Zig 0.15.2.)
+  macos-check:
+    runs-on: macos-15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+      # libghostty-vt builds Ghostty, which pins this Zig (see mise.toml).
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: macos-check
+      - run: cargo check --target aarch64-apple-darwin --locked

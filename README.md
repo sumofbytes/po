@@ -320,7 +320,7 @@ theme's colours. Code is coloured by NSH's own fixed palette.
 
 Dual-licensed under [MIT](LICENSE) or [Apache-2.0](LICENSE-APACHE), at your
 option. Bundled third-party material keeps its own license: `vendor/gpui-fast-wgpu`,
-`vendor/gpui-fast-apple`, and `vendor/gpui-fast-windows` (Apache-2.0),
-and the Lucide icons in `assets/icons` (ISC).
+`vendor/gpui-fast-apple`, `vendor/gpui-fast-macos`, and `vendor/gpui-fast-windows`
+(Apache-2.0), and the Lucide icons in `assets/icons` (ISC).
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md).
