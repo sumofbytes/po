@@ -1395,10 +1395,12 @@ fn bar(snap: Snapshot, draft: Signal<String>, field_ref: ElementRef) -> AnyEleme
         .p(scale::s2())
         .rounded(super::surface_radius())
         .border_1()
-        .border_color(super::hairline())
+        // The input's own border, firmer than the hairlines of the page, so the card reads as
+        // the place to type.
+        .border_color(Colors::input_border())
         .bg(Colors::input_background())
-        // The faintest lift, so the card stands off the page without floating over it.
-        .shadow_xs()
+        // A soft lift, so the card stands off the page without floating over it.
+        .shadow_sm()
         .on_file_drop(move |drop: &FileDropEvent| tell(Cmd::Drop(drop.uris.clone())))
         .children(snap.note.as_deref().map(note_row))
         .children((!snap.pictures.is_empty()).then(|| pictures_row(&snap.pictures)))
