@@ -303,7 +303,7 @@ fn phase_tint(phase: Phase) -> AdaptiveColor {
 
 /// The font the code the tools take is set in.
 fn mono_family() -> SharedString {
-    nsh_base::theme().font_mono.clone().unwrap_or_else(|| SharedString::from("monospace"))
+    nsh_base::theme().font_mono.clone().unwrap_or_else(|| SharedString::from("Geist Mono"))
 }
 
 /// A line between the groups of a menu's items.
