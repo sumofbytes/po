@@ -33,12 +33,12 @@ impl Control {
 
 /// A ghost icon button that can be selected, as the header's controls are.
 pub fn toggle_button(name: IconName, tip: &'static str, selected: bool, on_press: impl Fn() + 'static) -> View {
-    let b = view()
+    let b = super::smooth(view())
         .role(AccessibilityRole::Button)
         .label(tip)
         .flex_none()
         .p(scale::s1_5())
-        .rounded(Colors::radius())
+        .rounded(super::pill())
         .cursor_pointer()
         .tooltip(tooltip(tip))
         .on_press(on_press)
@@ -74,7 +74,7 @@ pub fn pane_header(title: impl IntoReactive<SharedString>, right: impl IntoEleme
                 .child(body(title).number_of_lines(1).flex_shrink(1.).font_weight(FontWeight::MEDIUM)),
         )
         .child(view().flex_row().items_center().gap(scale::s2()).child(right).child(controls(trail).collect::<Vec<_>>()));
-    if glass { bar } else { bar.border_b_1().border_color(Colors::border()) }
+    if glass { bar } else { bar.border_b_1().border_color(super::hairline()) }
 }
 
 /// A quiet note in a header, such as the language of the file.
@@ -84,13 +84,13 @@ pub fn status(text_: impl IntoReactive<SharedString>) -> Text {
 
 /// A small text button in a header.
 pub fn header_button(label: &'static str, tip: &'static str, on_press: impl Fn() + 'static) -> View {
-    view()
+    super::smooth(view())
         .role(AccessibilityRole::Button)
         .label(tip)
         .flex_none()
-        .px(scale::s2())
+        .px(scale::s3())
         .py(scale::s1())
-        .rounded(Colors::radius())
+        .rounded(super::pill())
         .cursor_pointer()
         .tooltip(tooltip(tip))
         .hover(|s| s.bg(Colors::hover()))

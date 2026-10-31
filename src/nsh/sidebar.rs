@@ -7,7 +7,7 @@ use nsh_core::prelude::*;
 use tokio::sync::watch;
 
 use super::bus::{Cmd, send};
-use super::{Colors, body, caption, header_height, icon, icon_button, note, on_hover, scale, small, text_base, text_sm, text_xs};
+use super::{Colors, header_height, icon, leading, icon_button, on_hover, scale, small, text_base};
 use crate::ui::icon::IconName;
 
 /// What a thread is up to, for its mark.
@@ -102,20 +102,25 @@ pub fn publish(snapshot: Snapshot) {
 /// The sidebar's spacing, on a 4px grid, as the GPUI one it replaces had it.
 mod space {
     use super::{Points, scale};
-    pub fn gutter() -> Points { scale::s2() }
-    pub fn inset() -> Points { scale::s2_5() }
+    pub fn gutter() -> Points { scale::s3() }
+    pub fn inset() -> Points { scale::s3() }
     pub fn lead() -> Points { scale::s4() }
-    pub fn row() -> Points { scale::s8() }
-    pub fn tree() -> Points { scale::s7() }
-    pub fn more() -> Points { scale::s6() }
-    pub fn item_gap() -> Points { scale::s0_5() }
+    pub fn row() -> Points { scale::s8() + scale::s0_5() }
+    pub fn tree() -> Points { scale::s7() + scale::s0_5() }
+    pub fn more() -> Points { scale::s7() }
+    pub fn item_gap() -> Points { Points(0.) }
     pub fn group_gap() -> Points { scale::s4() }
     pub fn list_top() -> Points { scale::s1() }
     pub fn list_bottom() -> Points { scale::s3() }
     pub fn action_gap() -> Points { scale::s1() }
-    pub fn actions_top() -> Points { scale::s3() }
+    pub fn actions_top() -> Points { scale::s4() }
     pub fn section_gap() -> Points { scale::s2() }
     pub fn section() -> Points { scale::s8() }
+}
+
+/// Muted text at the size of every other line of the sidebar.
+fn quiet(content: impl IntoReactive<SharedString>) -> Text {
+    text(content).text_size(text_base()).line_height(leading(text_base())).text_color(Colors::muted())
 }
 
 /// The most rows Needs you shows before it scrolls.
@@ -127,10 +132,13 @@ fn side_row(lead: Option<View>) -> View {
         .group()
         .flex_row()
         .items_center()
-        .gap(scale::s2())
+        .gap(scale::s2_5())
         .px(space::inset())
-        .rounded(Colors::radius())
+        .rounded(super::card_radius())
         .cursor_pointer()
+        .transition_colors()
+        .duration(220.)
+        .ease_out()
         .child(lead)
 }
 
@@ -147,11 +155,11 @@ fn lead(content: impl IntoElement) -> View {
 /// A thread's state, in the lead column under its project's chevron: a dot while it runs or has
 /// news, a ! when it asks, nothing when idle.
 fn mark(mark: Mark) -> View {
-    let size = scale::s2();
+    let size = scale::s1_5() + scale::s0_5();
     let dot = |color: fn() -> AdaptiveColor| view().w(size).h(size).rounded(super::pill()).bg(color);
     centered(match mark {
         Mark::Idle => view().into_element(),
-        Mark::Asking => text("!").text_size(text_sm()).font_weight(FontWeight::BOLD).text_color(Colors::warning()).into_element(),
+        Mark::Asking => text("!").text_size(text_base()).font_weight(FontWeight::BOLD).text_color(Colors::warning()).into_element(),
         Mark::Running => dot(|| Colors::primary()()).into_element(),
         Mark::Unread => dot(|| Colors::added()()).into_element(),
     })
@@ -167,7 +175,7 @@ fn section(title: impl IntoReactive<SharedString>, action: Option<View>) -> View
         .items_center()
         .justify_between()
         .px(space::gutter() + space::inset())
-        .child(note(title).font_weight(FontWeight::MEDIUM))
+        .child(text(title).text_size(super::text_sm()).line_height(leading(super::text_sm())).font_weight(FontWeight::MEDIUM).text_color(Colors::muted()))
         .child(action)
 }
 
@@ -187,8 +195,9 @@ fn thread_row(thread: &Thread, project: Option<&str>, close_tip: &'static str) -
     let label = text(thread.label.clone())
         .number_of_lines(1)
         .flex_shrink(1.)
-        .text_size(text_sm())
-        .text_color(move || if selected { Colors::foreground()() } else { Colors::foreground()().opacity(crate::theme::tokens::HOVER) })
+        .text_size(text_base())
+        .line_height(leading(text_base()))
+        .text_color(move || if selected { Colors::foreground()() } else { Colors::muted()() })
         .style_when(selected, |s| s.font_weight(FontWeight::MEDIUM));
     let title = match project {
         // The title, then the project it is in, which the row no longer sits under.
@@ -198,7 +207,7 @@ fn thread_row(thread: &Thread, project: Option<&str>, close_tip: &'static str) -
             .items_baseline()
             .gap(scale::s2())
             .child(label)
-            .child(caption(project.to_string()).number_of_lines(1).flex_shrink(1.)),
+            .child(quiet(project.to_string()).number_of_lines(1).flex_shrink(1.)),
         None => view().flex_1().flex_row().child(label.flex_1()),
     };
     let row = side_row(Some(mark(thread.mark)))
@@ -211,53 +220,36 @@ fn thread_row(thread: &Thread, project: Option<&str>, close_tip: &'static str) -
     if selected { row.bg(Colors::selected()) } else { row.hover(|s| s.bg(Colors::hover())) }
 }
 
-/// A wavy line with the day centred in it, over the threads of that day.
+/// The day, quietly, over the threads of that day.
 fn day_separator(day: &'static str) -> View {
-    let wave = || {
-        view().flex_1().min_w(scale::s0()).w(scale::s0()).overflow_hidden().child(text("~".repeat(80)).number_of_lines(1).ellipsize_mode(nsh_core::EllipsizeMode::Clip).text_size(text_xs()).text_color(|| Colors::primary()().opacity(crate::theme::tokens::DIM)))
-    };
     view()
         .w_full()
-        .overflow_hidden()
-        .h(space::more() + space::group_gap())
+        .h(space::more() + space::section_gap())
         .flex_none()
         .flex_row()
-        .items_center()
-        .gap(scale::s2())
-        .pl(space::inset() + space::lead() + scale::s2())
-        .pr(space::inset() + scale::s4())
-        .pt(space::section_gap())
+        .items_end()
+        .pl(space::inset() + space::lead() + scale::s2_5())
+        .pr(space::inset())
         .pb(space::section_gap())
-        .child(wave())
-        .child(text(day).flex_none().text_size(text_xs()).text_color(|| Colors::primary()().opacity(crate::theme::tokens::DIM)))
-        .child(wave())
+        .child(text(day).flex_none().text_size(super::text_xs()).line_height(leading(super::text_xs())).font_weight(FontWeight::MEDIUM).text_color(Colors::dim(Colors::muted())))
 }
 
 fn project_group(project: &Project) -> View {
     let pid = project.id;
     let active = project.active;
-    let label = move || if active { Colors::foreground()() } else { Colors::foreground()().opacity(crate::theme::tokens::HOVER) };
+    let label = move || if active { Colors::foreground()() } else { Colors::muted()() };
     let chevron = if project.collapsed { IconName::ChevronRight } else { IconName::ChevronDown };
-    let name = view()
+    let name = text(project.name.clone())
+        .number_of_lines(1)
         .flex_1()
-        .flex_row()
-        .items_baseline()
-        .gap(scale::s2())
-        .child(text(project.name.clone()).number_of_lines(1).flex_shrink(1.).min_w(scale::project_name_min_width()).text_size(text_sm()).font_weight(FontWeight::SEMIBOLD).text_color(label))
-        .child(project.branch.as_ref().map(|branch| {
-            view()
-                .flex_row()
-                .items_baseline()
-                .gap(scale::s1())
-                .min_w(scale::branch_name_min_width())
-                .flex_shrink(10.)
-                .overflow_hidden()
-                .child(caption(branch.name.clone()).number_of_lines(1).flex_shrink(1.).min_w_0())
-                .child(branch.dirty.then(|| text("*").text_color(Colors::warning())))
-        }));
+        .min_w_0()
+        .text_size(text_base())
+        .line_height(leading(text_base()))
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(label);
     // Pressing the row opens the project and folds or unfolds its threads; the buttons on it are
     // their own targets.
-    let head = side_row(Some(centered(icon(chevron, scale::s3_5(), Colors::muted()))))
+    let head = side_row(Some(centered(icon(chevron, scale::s4(), Colors::muted()))))
         .h(space::tree())
         .test_id(&format!("agent-project-{pid}"))
         .hover(|s| s.bg(Colors::hover()))
@@ -271,7 +263,7 @@ fn project_group(project: &Project) -> View {
             .h(space::more())
             .hover(|s| s.bg(Colors::hover()))
             .on_press(move || send(Cmd::ToggleMore(pid)))
-            .child(caption(label))
+            .child(text(label).text_size(super::text_sm()).line_height(leading(super::text_sm())).text_color(Colors::dim(Colors::muted())))
     });
     view()
         .gap(space::item_gap())
@@ -294,21 +286,28 @@ fn suggestion(item: &Suggestion) -> View {
         let b = view()
             .role(AccessibilityRole::Button)
             .label(label)
-            .px(scale::s2())
+            .px(scale::s3())
             .py(scale::s0_5())
-            .rounded(Colors::radius())
+            .rounded(super::pill())
             .cursor_pointer()
+            .transition_colors()
+            .duration(220.)
+            .ease_out()
             .on_press(on_press)
-            .child(text(label).text_size(text_xs()).text_color(move || if primary { Colors::primary_foreground()() } else { Colors::foreground()() }));
+            .child(text(label).text_size(text_base()).text_color(move || if primary { Colors::primary_foreground()() } else { Colors::foreground()() }));
         if primary { b.bg(Colors::primary()) } else { b.hover(|s| s.bg(Colors::hover())) }
     };
     view()
+        .mx(space::gutter())
+        .my(scale::s1())
         .px(scale::s3())
-        .py(scale::s1())
-        .gap(scale::s1())
-        .border_b_1()
+        .py(scale::s2())
+        .gap(scale::s2())
+        .rounded(super::card_radius())
+        .border_1()
         .border_color(Colors::border())
-        .child(caption(item.text.clone()))
+        .bg(Colors::hover())
+        .child(quiet(item.text.clone()))
         .child(
             view()
                 .flex_row()
@@ -324,7 +323,7 @@ fn action(icon_name: IconName, label: &'static str, tip: &'static str, selected:
         .h(space::row())
         .tooltip(super::tooltip(tip))
         .on_press(on_press)
-        .child(text(label).flex_1().text_size(text_base()).text_color(move || if selected == Some(true) { Colors::foreground()() } else { Colors::foreground()().opacity(crate::theme::tokens::HOVER) }));
+        .child(text(label).flex_1().text_size(text_base()).line_height(leading(text_base())).text_color(move || if selected == Some(true) { Colors::foreground()() } else { Colors::foreground()().opacity(crate::theme::tokens::HOVER) }).style_when(selected == Some(true), |s| s.font_weight(FontWeight::MEDIUM)));
     if selected == Some(true) { row.bg(Colors::selected()) } else { row.hover(|s| s.bg(Colors::hover())) }
 }
 
@@ -355,7 +354,14 @@ pub fn Sidebar() -> impl IntoElement {
             .px(space::inset())
             .rounded(Colors::radius())
             .on_press(move || field.focus())
-            .style_when(in_use, |s| s.bg(Colors::input_background()))
+            .transition_colors()
+            .duration(220.)
+            .ease_out()
+            .transition_colors()
+            .duration(220.)
+            .ease_out()
+            .hover(|s| s.bg(Colors::hover()))
+            .style_when(in_use, |s| s.bg(Colors::hover()))
             .child(lead(icon(IconName::Search, scale::s4(), Colors::muted())))
             .child(
                 nsh_core::element::input()
@@ -365,6 +371,7 @@ pub fn Sidebar() -> impl IntoElement {
                     .placeholder("Search")
                     .placeholder_color(Colors::one(Colors::muted()))
                     .selection_color(Colors::one(Colors::caret()))
+                    .text_size(text_base())
                     .text_color(Colors::muted())
                     .auto_correct(false)
                     .on_focus(move || focused.set(true))
@@ -396,7 +403,7 @@ pub fn Sidebar() -> impl IntoElement {
                 .items_center()
                 .justify_center()
                 .tooltip(super::tooltip(if late > 0 { "Some are late" } else { "Open issues" }))
-                .child(text(left.to_string()).text_size(text_sm()).text_color(if late > 0 { Colors::danger()() } else { Colors::muted()() }))
+                .child(text(left.to_string()).text_size(text_base()).text_color(if late > 0 { Colors::danger()() } else { Colors::muted()() }))
         });
         action(IconName::CircleDot, "Issues", "Issues", Some(open), || send(Cmd::ToggleIssues)).child(count)
     };
@@ -431,7 +438,7 @@ pub fn Sidebar() -> impl IntoElement {
                 .pt(space::list_top())
                 .pb(space::list_bottom())
                 .child(projects.iter().map(project_group).collect::<Vec<_>>())
-                .child(empty.then(|| side_row(None).h(space::more()).child(note("No matches")))),
+                .child(empty.then(|| side_row(None).h(space::more()).child(quiet("No matches")))),
         )
     };
 
@@ -444,8 +451,8 @@ pub fn Sidebar() -> impl IntoElement {
                 .flex_none()
                 .justify_center()
                 .px(space::gutter() + space::inset())
-                .style_when(move || !glass(), |s| s.border_b_1().border_color(Colors::border()))
-                .child(body("Po").font_weight(FontWeight::MEDIUM)),
+                .style_when(move || !glass(), |s| s.border_b_1().border_color(super::hairline()))
+                .child(text("Po").text_size(scale::s4() + scale::s0_5()).line_height(leading(text_base())).font_weight(FontWeight::SEMIBOLD).text_color(Colors::foreground())),
         )
         .child(
             view()
@@ -467,7 +474,7 @@ pub fn Sidebar() -> impl IntoElement {
                 ))
                 .child(dynamic(move || {
                     state.with(|s| s.status.clone()).map(|status| {
-                        view().px(space::gutter() + space::inset()).py(scale::s1()).max_h(scale::lines(4.)).child(note(status))
+                        view().px(space::gutter() + space::inset()).py(scale::s1()).max_h(scale::lines(4.)).child(quiet(status))
                     })
                 }))
                 .child(dynamic(move || state.with(|s| s.suggestions.clone()).iter().map(suggestion).collect::<Vec<_>>()))
@@ -477,7 +484,9 @@ pub fn Sidebar() -> impl IntoElement {
             view()
                 .flex_none()
                 .px(space::gutter())
-                .pb(scale::s3())
+                .py(scale::s3())
+                .border_t_1()
+                .border_color(super::hairline())
                 .child(action(IconName::Settings, "Settings", "Settings (Ctrl+,)", None, || send(Cmd::OpenSettings))),
         )
 }
@@ -529,9 +538,10 @@ mod tests {
             ..Snapshot::default()
         });
         let mut app = start();
-        for shown in ["Needs you · 1", "Fix the build", "Port the sidebar", "Old idea", "3 more", "po", "nsh", "Projects", "Open", "Not now", "Issues", "2"] {
+        for shown in ["Needs you · 1", "Fix the build", "Port the sidebar", "Old idea", "3 more", "po", "Projects", "Open", "Not now", "Issues", "2"] {
             assert!(app.shows(shown), "{shown} is on screen: {:?}", app.screen().texts());
         }
+        assert!(!app.shows("nsh"), "a project's branch is not in the sidebar: {:?}", app.screen().texts());
         let mut next = |app: &mut Headless| {
             app.settle();
             std::iter::from_fn(|| commands.try_recv().ok()).collect::<Vec<_>>()

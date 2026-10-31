@@ -115,9 +115,10 @@ impl Render for Overlay {
                     .when(self.height > 0., |card| card.h(px(self.height + 2.)))
                     .when(self.height <= 0., |card| card.h_full())
                     .max_h_full()
-                    .rounded(radius * 2.)
+                    .rounded(radius * 3.)
                     .border_1()
                     .border_color(border)
+                    .shadow_2xl()
                     .bg(popover)
                     .overflow_hidden()
                     .children(self.view.as_ref().map(|(view, _)| view.clone())),

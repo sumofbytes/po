@@ -145,7 +145,7 @@ pub fn Finder() -> impl IntoElement {
                 .h(list_height())
                 .flex_none()
                 .border_t_1()
-                .border_color(Colors::border())
+                .border_color(super::hairline())
                 .on_layout(measure(1))
                 .child(
                     virtual_list(count, row)
@@ -169,7 +169,7 @@ pub fn Finder() -> impl IntoElement {
                 .px(scale::s3())
                 .py(scale::s1())
                 .border_t_1()
-                .border_color(Colors::border())
+                .border_color(super::hairline())
                 .on_layout(measure(2))
                 .child(text(move || match matches.with(|m| m.capped) {
                     Some(files) => format!("first {files} files only"),
