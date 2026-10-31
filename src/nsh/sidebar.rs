@@ -344,7 +344,7 @@ fn suggestion(item: &Suggestion) -> View {
 
 /// A plain text action below the title bar: it lights up under the pointer.
 fn action(icon_name: IconName, label: &'static str, tip: &'static str, selected: Option<bool>, on_press: impl Fn() + 'static) -> View {
-    let row = side_row(Some(lead(icon(icon_name, scale::s4(), Colors::muted()))))
+    let row = side_row(Some(lead(icon(icon_name, scale::s4(), Colors::foreground()))))
         .h(space::row())
         .tooltip(super::tooltip(tip))
         .on_press(on_press)
@@ -372,7 +372,7 @@ pub fn Sidebar() -> impl IntoElement {
         let filled = !query.get().is_empty();
         let in_use = filled || focused.get();
         // The row of the other actions, so its icon, gap and text line up with theirs.
-        side_row(Some(lead(icon(IconName::Search, scale::s4(), Colors::muted()))))
+        side_row(Some(lead(icon(IconName::Search, scale::s4(), Colors::foreground()))))
             .h(space::row())
             .on_press(move || field.focus())
             .hover(|s| s.bg(Colors::hover()))
@@ -383,8 +383,8 @@ pub fn Sidebar() -> impl IntoElement {
                     .element_ref(&field)
                     .value(move || query.get())
                     .placeholder("Search")
-                    // As quiet as the labels of the actions around it, and the typed text as full.
-                    .placeholder_color(Colors::one(|| Colors::foreground()().opacity(crate::theme::tokens::HOVER)))
+                    // The same as the labels of the actions around it, and the typed text.
+                    .placeholder_color(Colors::one(|| Colors::foreground()()))
                     .selection_color(Colors::one(Colors::caret()))
                     .sized(text_base())
                     .text_color(Colors::foreground())
