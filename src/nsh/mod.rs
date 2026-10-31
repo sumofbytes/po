@@ -345,6 +345,12 @@ pub fn pill() -> Points {
     Points(999.)
 }
 
+/// The corner of a soft, flat surface: a sidebar row, a step of the agent's work, a message bubble.
+/// One size for them all keeps them of a family; 1.5 times the base radius.
+pub fn soft_radius() -> Points {
+    Colors::radius() * 1.5
+}
+
 /// The corner of a card or panel, which holds controls of the base radius: twice that radius.
 pub fn card_radius() -> Points {
     Colors::radius() * 2.

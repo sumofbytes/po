@@ -469,7 +469,7 @@ fn user_row(text_: &str, pictures: &[Picture]) -> AnyElement {
         .max_w(px(700.))
         .px(scale::s4())
         .py(scale::s2_5())
-        .rounded(super::card_radius())
+        .rounded(super::soft_radius())
         .bg(Colors::hover())
         .children(
             pictures
@@ -516,7 +516,7 @@ fn thought_row(message: usize, at: usize, text_: &str, open: bool) -> AnyElement
             .px(scale::s3())
             .mx(-scale::s3())
             .cursor_pointer()
-            .rounded(STEP_RADIUS)
+            .rounded(super::soft_radius())
             .smooth()
             .hover(|s| s.bg(Colors::hover()))
             .on_press(move || tell(Cmd::ToggleThought { message, block: at }))
@@ -551,9 +551,6 @@ fn thought_row(message: usize, at: usize, text_: &str, open: bool) -> AnyElement
 
 /// One call of the agent's tools: its glyph and title, what it sent and what came back once it
 /// is open, and a way to the file it touched.
-/// The corner of a step of the agent's work: a tool call, or the run that folds several.
-const STEP_RADIUS: Points = Points(8.);
-
 /// Whether `block` is a step of the agent's work, which sits close to the steps beside it.
 fn is_step(block: &Block) -> bool {
     matches!(block, Block::Tool(_) | Block::Run { .. } | Block::Thought { .. })
@@ -568,7 +565,7 @@ fn tool_row(message: usize, at: usize, tool: &Tool) -> AnyElement {
         .py(scale::s1())
         .px(scale::s3())
         .mx(-scale::s3())
-        .rounded(STEP_RADIUS)
+        .rounded(super::soft_radius())
         .smooth()
         .hover(|s| s.bg(Colors::hover()))
         .child(
@@ -648,7 +645,7 @@ fn run_row(message: usize, at: usize, count: usize, phase: Phase, folded: bool) 
         .py(scale::s1())
         .px(scale::s3())
         .mx(-scale::s3())
-        .rounded(STEP_RADIUS)
+        .rounded(super::soft_radius())
         .cursor_pointer()
         .smooth()
         .hover(|s| s.bg(Colors::hover()))
