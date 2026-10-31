@@ -884,7 +884,7 @@ impl Thread {
         match first {
             Some(line) => {
                 let line = line.trim();
-                let short: String = line.chars().take(28).collect();
+                let short: String = line.chars().take(72).collect();
                 if short.len() < line.len() { format!("{short}…") } else { short }
             }
             None => self.saved_title.clone().unwrap_or_else(|| "New thread".into()),

@@ -224,11 +224,14 @@ fn day_separator(day: &'static str) -> View {
         .h(space::more() + space::section_gap())
         .flex_none()
         .flex_row()
-        .items_end()
+        .items_center()
+        .gap(scale::s2())
         .pl(space::inset() + space::lead() + scale::s2_5())
         .pr(space::inset())
-        .pb(space::section_gap())
+        .pt(space::section_gap())
+        // The day, then a hairline that carries the eye to the edge.
         .child(text(day).flex_none().sized(super::text_xs()).font_weight(FontWeight::MEDIUM).text_color(Colors::dim(Colors::muted())))
+        .child(view().flex_1().h(Points(1.)).bg(super::hairline()))
 }
 
 fn project_group(project: &Project) -> View {
@@ -261,7 +264,8 @@ fn project_group(project: &Project) -> View {
         .child(project.closable.then(|| on_hover(icon_button(IconName::Close, scale::s3(), "Close project", move || send(Cmd::CloseProject(pid))))));
     let fold = project.fold.map(|(expanded, hidden)| {
         let label = if expanded { "Show less".to_string() } else { format!("{hidden} more") };
-        side_row(Some(lead(view())))
+        let chevron = if expanded { IconName::ChevronUp } else { IconName::ChevronDown };
+        side_row(Some(centered(icon(chevron, scale::s3(), Colors::dim(Colors::muted())))))
             .h(space::more())
             .hover(|s| s.bg(Colors::hover()))
             .on_press(move || send(Cmd::ToggleMore(pid)))
