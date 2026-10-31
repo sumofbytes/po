@@ -391,7 +391,7 @@ fn item(what: String, on_press: impl Fn() + 'static) -> AnyElement {
 
 /// A line in a header, like `3 threads · 1 asking`.
 fn status_line(line: String) -> View {
-    // The size and padding of the History button beside it, so the two sit on one rhythm.
+    // The height of the History chip beside it, so the two sit on one rhythm.
     view().flex_none().px(scale::s2()).py(scale::s1()).child(text(super::sentence(&line)).sized(text_sm()).text_color(Colors::muted()).number_of_lines(1))
 }
 
@@ -406,14 +406,21 @@ fn pane(title: String, snap: &Snapshot) -> View {
         right = right.child(
             view()
                 .role(AccessibilityRole::Button)
+                .label("History")
                 .flex_none()
-                .px(scale::s2())
+                .flex_row()
+                .items_center()
+                .gap(scale::s1_5())
+                .px(scale::s3())
                 .py(scale::s1())
-                .rounded(Colors::radius())
+                .rounded(super::pill())
+                .bg(Colors::hover())
                 .cursor_pointer()
-                .hover(|s| s.bg(Colors::hover()))
+                .smooth()
+                .hover(|s| s.bg(Colors::selected()))
                 .on_press(|| tell(Cmd::History))
                 .tooltip(tooltip("Resume an earlier session (Ctrl+Shift+H)"))
+                .child(icon(IconName::History, scale::s3(), Colors::muted()))
                 .child(body("History").text_color(Colors::muted())),
         );
     }
