@@ -4457,6 +4457,8 @@ impl Reader {
 
     /// Brings up thread `tid` of project `pid`, whichever is on screen.
     fn open_thread(&mut self, pid: u64, tid: u64, window: &mut Window, cx: &mut Context<Self>) {
+        // The issues page stands in for the conversation, so a thread picked from the sidebar closes it.
+        self.hide_issues(window, cx);
         if pid == self.project_id {
             self.show_thread(tid, window, cx);
         } else {
@@ -5215,6 +5217,8 @@ impl Reader {
         self.thread.relist(0);
         // What was waiting goes back to the draft rather than being sent into a stopped turn.
         self.restore_queue(cx);
+        // Pressing stop is a move in the composer, so the keyboard goes back to its field.
+        self.chat_focus.set(self.chat_focus.get() + 1);
         cx.notify();
     }
 
@@ -5497,7 +5501,18 @@ impl Reader {
     /// of the pane, as the viewer's panes are.
     fn chat_pane(&self, lead: Vec<nsh::header::Control>, trail: Vec<nsh::header::Control>, cx: &mut Context<Self>) -> gpui::Div {
         nsh::chat::publish(self.chat_snapshot(lead, trail, cx));
-        div().size_full().flex().flex_col().child(self.chat.clone())
+        let tint = cx.global::<Palette>().primary.opacity(0.08);
+        // Files dropped anywhere on the conversation join the draft: the platform under NSH does
+        // not hand drops to its elements, so the window's own drop target takes them.
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .drag_over::<gpui::ExternalPaths>(move |style, _, _, _| style.bg(tint))
+            .on_drop(cx.listener(|reader, dropped: &gpui::ExternalPaths, _, cx| {
+                reader.attach(dropped.paths().iter().cloned().map(Source::Path).collect(), cx);
+            }))
+            .child(self.chat.clone())
     }
 
     /// What the conversation shows: the header, the transcript, and the composer.

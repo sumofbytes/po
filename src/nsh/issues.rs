@@ -617,7 +617,7 @@ fn list_page(state: State) -> View {
                 .child(
                     view().px(scale::s6()).pt(scale::s4()).pb(scale::s3()).child(boxed(
                         IconName::Plus,
-                        line_input("issue-new-title", state.new_title, "New issue — try: Fix login !high #bug @epic", move || state.add(None)).auto_focus(true).element_ref(&state.add_field),
+                        line_input("issue-new-title", state.new_title, "New issue — try: Fix login !high #bug @epic", move || state.add(None)).multiline(true).max_h(px(160.)).auto_focus(true).element_ref(&state.add_field),
                         Some(
                             view()
                                 .flex_none()
