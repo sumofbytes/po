@@ -21,6 +21,8 @@ pub mod tokens {
     pub const HOVER: f32 = 0.85;
     /// Alpha of the wash over selected text, which must stay readable beneath it.
     pub const SELECTION: f32 = 0.35;
+    /// Alpha of the wash over a drop target while files are dragged onto it.
+    pub const DROP_TINT: f32 = 0.08;
 }
 
 /// Where themes are picked from: `<config>/themes/`.
