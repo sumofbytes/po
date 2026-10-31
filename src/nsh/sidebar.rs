@@ -107,9 +107,9 @@ mod space {
     pub fn gutter() -> Points { scale::s3() }
     pub fn inset() -> Points { scale::s3() }
     pub fn lead() -> Points { scale::s4() }
-    pub fn row() -> Points { scale::s8() + scale::s0_5() }
-    pub fn tree() -> Points { scale::s7() + scale::s0_5() }
-    pub fn more() -> Points { scale::s7() }
+    pub fn row() -> Points { scale::s8() + scale::s1() }
+    pub fn tree() -> Points { scale::s8() + scale::s1() }
+    pub fn more() -> Points { scale::s8() }
     pub fn item_gap() -> Points { Points(0.) }
     pub fn group_gap() -> Points { scale::s6() }
     pub fn list_top() -> Points { scale::s1() }
@@ -157,7 +157,7 @@ fn lead(content: impl IntoElement) -> View {
 fn mark(mark: Mark) -> View {
     let size = scale::s1_5() + scale::s0_5();
     let dot = |color: fn() -> AdaptiveColor| view().w(size).h(size).rounded(super::pill()).bg(color);
-    centered(match mark {
+    view().flex_none().items_center().justify_center().child(match mark {
         Mark::Idle => view().into_element(),
         Mark::Asking => text("!").text_size(text_base()).font_weight(FontWeight::BOLD).text_color(Colors::warning()).into_element(),
         Mark::Running => dot(|| Colors::primary()()).into_element(),
@@ -189,15 +189,16 @@ fn grant_badge() -> View {
         .child(small("⌁"))
 }
 
-fn thread_row(thread: &Thread, project: Option<&str>, close_tip: &'static str) -> View {
+/// The row of a thread. In a project's tree it starts to the right of the guide line, so its
+/// highlight never touches the line; in Needs you it starts at the edge. Its mark is at the end.
+fn thread_row(thread: &Thread, project: Option<&str>, close_tip: &'static str, in_tree: bool) -> View {
     let (pid, tid) = (thread.project, thread.id);
     let selected = thread.selected;
     let label = text(thread.label.clone())
         .number_of_lines(1)
         .flex_shrink(1.)
         .sized(text_base())
-        .text_color(move || if selected { Colors::foreground()() } else { Colors::muted()() })
-        .style_when(selected, |s| s.font_weight(FontWeight::MEDIUM));
+        .text_color(move || if selected { Colors::foreground()() } else { Colors::foreground()().opacity(crate::theme::tokens::HOVER) });
     let title = match project {
         // The title, then the project it is in, which the row no longer sits under.
         Some(project) => view()
@@ -209,14 +210,25 @@ fn thread_row(thread: &Thread, project: Option<&str>, close_tip: &'static str) -
             .child(quiet(project.to_string()).number_of_lines(1).flex_shrink(1.)),
         None => view().flex_1().flex_row().child(label.flex_1()),
     };
-    let row = side_row(Some(mark(thread.mark)))
+    // The highlight starts a step right of the guide line, and the text still lines up with the
+    // name of the project above.
+    let (left, pad) = if in_tree {
+        let left = space::inset() + space::lead() / 2. + scale::s2();
+        (left, space::inset() + space::lead() + scale::s2_5() - left)
+    } else {
+        (Points(0.), space::inset())
+    };
+    let row = side_row(None)
+        .ml(left)
+        .px(pad)
         .h(space::tree())
         .test_id(&format!("agent-thread-{tid}"))
         .on_press(move || send(Cmd::OpenThread(pid, tid)))
         .child(title)
         .child(thread.controlled.then(grant_badge))
         .child(on_hover(icon_button(IconName::Close, scale::s3(), close_tip, move || send(Cmd::CloseThread(pid, tid)))))
-        .child(thread.ago.clone().map(|ago| text(ago).flex_none().sized(super::text_xs()).text_color(Colors::dim(Colors::muted()))));
+        .child(thread.ago.clone().map(|ago| text(ago).flex_none().sized(super::text_xs()).text_color(Colors::dim(Colors::muted()))))
+        .child((thread.mark != Mark::Idle).then(|| mark(thread.mark)));
     if selected { row.bg(Colors::selected()) } else { row.hover(|s| s.bg(Colors::hover())) }
 }
 
@@ -239,14 +251,8 @@ fn day_separator(day: &'static str) -> View {
 
 fn project_group(project: &Project) -> View {
     let pid = project.id;
-    let active = project.active;
     // With one of its threads selected, the highlight says where we are; the name steps back.
-    let holds_selected = project.threads.iter().any(|thread| thread.selected);
-    let label = move || match (active, holds_selected) {
-        (true, false) => Colors::foreground()(),
-        (true, true) => Colors::foreground()().opacity(crate::theme::tokens::HOVER),
-        _ => Colors::muted()(),
-    };
+    let label = Colors::foreground();
     let chevron = if project.collapsed { IconName::ChevronRight } else { IconName::ChevronDown };
     let name = text(project.name.clone())
         .number_of_lines(1)
@@ -295,7 +301,7 @@ fn project_group(project: &Project) -> View {
                     project
                         .threads
                         .iter()
-                        .flat_map(|thread| [thread.day.map(day_separator), Some(thread_row(thread, None, "Close thread"))])
+                        .flat_map(|thread| [thread.day.map(day_separator), Some(thread_row(thread, None, "Close thread", true))])
                         .flatten()
                         .collect::<Vec<_>>(),
                 ),
@@ -439,7 +445,7 @@ pub fn Sidebar() -> impl IntoElement {
                             .px(space::gutter())
                             .pt(space::list_top())
                             .pb(space::list_bottom())
-                            .child(waiting.iter().map(|item| thread_row(&item.thread, Some(&item.project), "Close thread")).collect::<Vec<_>>()),
+                            .child(waiting.iter().map(|item| thread_row(&item.thread, Some(&item.project), "Close thread", false)).collect::<Vec<_>>()),
                     ),
                 )
         })
