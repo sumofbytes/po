@@ -55,6 +55,8 @@ impl Reader {
                 if from_user {
                     self.clear_draft();
                 }
+                // `route` only takes a message mid-turn when the agent's client takes them.
+                debug_assert!(self.thread.client.is_some(), "a message routed to `Take` needs a client");
                 if let Some(client) = self.thread.client.as_ref() {
                     client.enqueue(&out.queued_text(), kind);
                 }

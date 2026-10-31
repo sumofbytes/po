@@ -137,7 +137,7 @@ impl Reader {
     }
 
     /// The read families: snapshots of this window's threads, agents and projects. They look
-    /// and never swap a thread in to change it — every write is a phase-2 command, and the
+    /// and never swap a thread in to change it — every write is its own command, and the
     /// reads answer from the state as it is.
     pub(crate) fn run_read(&self, caller: command::Caller, id: u64, command: command::Command) -> command::Reply {
         use command::{Command, Scope};
