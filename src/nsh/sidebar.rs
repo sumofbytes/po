@@ -106,7 +106,7 @@ mod space {
     pub fn tree() -> Points { scale::s8() + scale::s1() }
     pub fn more() -> Points { scale::s8() }
     pub fn item_gap() -> Points { Points(0.) }
-    pub fn group_gap() -> Points { scale::s6() }
+    pub fn group_gap() -> Points { scale::s6() * 0.8 }
     pub fn list_top() -> Points { scale::s1() }
     pub fn list_bottom() -> Points { scale::s3() }
     pub fn action_gap() -> Points { scale::s1() }
@@ -247,8 +247,16 @@ fn day_separator(day: &'static str) -> View {
         .child(view().flex_1().h(Points(1.)).bg(super::hairline()))
 }
 
+/// A color of the project's own, the same each time it is open: its name picks the hue.
+fn accent(name: &str) -> AdaptiveColor {
+    let hash = name.bytes().fold(2166136261u32, |h, b| (h ^ b as u32).wrapping_mul(16777619));
+    let hue = (hash % 360) as f32 / 360.;
+    AdaptiveColor { light: hsla(hue, 0.6, 0.42, 1.), dark: hsla(hue, 0.6, 0.68, 1.) }
+}
+
 fn project_group(project: &Project) -> View {
     let pid = project.id;
+    let accent = accent(&project.name);
     // With one of its threads selected, the highlight says where we are; the name steps back.
     let label = Colors::foreground();
     let chevron = if project.collapsed { IconName::ChevronRight } else { IconName::ChevronDown };
@@ -261,7 +269,7 @@ fn project_group(project: &Project) -> View {
         .text_color(label);
     // Pressing the row opens the project and folds or unfolds its threads; the buttons on it are
     // their own targets.
-    let head = side_row(Some(centered(icon(chevron, scale::s4(), Colors::muted()))))
+    let head = side_row(Some(centered(icon(chevron, scale::s4(), move || accent))))
         .h(space::tree())
         .test_id(&format!("agent-project-{pid}"))
         .hover(|s| s.bg(Colors::hover()))
