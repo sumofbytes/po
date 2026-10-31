@@ -438,8 +438,6 @@ pub fn Sidebar() -> impl IntoElement {
                 .px(scale::s1_5())
                 .rounded(super::pill())
                 .bg(Colors::selected())
-                // Out to the edge of the row's highlight, where the rows of the tree end.
-                .mr(-space::inset())
                 .tooltip(super::tooltip(if late > 0 { "Some are late" } else { "Open issues" }))
                 .child(text(left.to_string()).text_size(text_base()).text_color(if late > 0 { Colors::danger()() } else { Colors::muted()() }))
         });
@@ -509,12 +507,11 @@ pub fn Sidebar() -> impl IntoElement {
                 .child(section(
                     "Projects",
                     Some(icon_button(IconName::Plus, scale::s3(), "Add a project: open a folder (Ctrl+Shift+O)", || send(Cmd::AddProject))
-                        // A box of its own, so it reads as a button; its edge ends at the edge of the highlight of the rows below.
+                        // A box of its own, so it reads as a button; its edge ends where the time of a thread does.
                         .border_1()
                         .border_color(super::hairline())
                         // The border is drawn inside the button; hung out, it leaves the header as tall as before.
-                        .my(px(-1.))
-                        .mr(-space::inset())),
+                        .my(px(-1.))),
                 ))
                 .child(dynamic(move || {
                     state.with(|s| s.status.clone()).map(|status| {
