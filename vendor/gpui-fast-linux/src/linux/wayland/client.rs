@@ -2921,7 +2921,12 @@ impl Dispatch<wl_data_device::WlDataDevice, ()> for WaylandClientStatePtr {
                     // Accepted here, with the serial of this Enter: an offer is announced before
                     // the drag enters the window, and a compositor ignores an accept carrying the
                     // serial of an earlier one (the drag shows a "not allowed" cursor).
-                    data_offer.accept(serial, Some(FILE_LIST_MIME_TYPE.to_string()));
+                    // Only what is offered as files: text dragged in from another program is
+                    // refused, as before.
+                    let files = state.data_offers.iter().any(|offer| offer.inner.id() == data_offer.id() && offer.has_mime_type(FILE_LIST_MIME_TYPE));
+                    if files {
+                        data_offer.accept(serial, Some(FILE_LIST_MIME_TYPE.to_string()));
+                    }
 
                     let pipe = Pipe::new().unwrap();
                     data_offer.receive(FILE_LIST_MIME_TYPE.to_string(), unsafe {

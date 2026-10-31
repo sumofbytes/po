@@ -41,7 +41,7 @@ pub struct Attachment {
 impl Attachment {
     fn new(format: ImageFormat, bytes: Vec<u8>) -> Self {
         let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-        let size = ImageReader::new(Cursor::new(&bytes)).with_guessed_format().ok().and_then(|reader| reader.into_dimensions().ok()).unwrap_or((1, 1));
+        let size = ImageReader::new(Cursor::new(&bytes)).with_guessed_format().ok().and_then(|reader| reader.into_dimensions().ok()).unwrap_or((MAX_SIDE, MAX_SIDE));
         Self { image: Arc::new(gpui::Image { format, bytes, id }), size, saved: OnceLock::new() }
     }
 
