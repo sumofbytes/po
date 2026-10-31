@@ -467,12 +467,10 @@ fn user_row(text_: &str, pictures: &[Picture]) -> AnyElement {
         .min_w_0()
         .flex_shrink(1.)
         .max_w(px(700.))
-        .px(scale::s5())
-        .py(scale::s3_5())
-        .rounded(super::surface_radius())
-        .border_1()
-        .border_color(super::hairline())
-        .bg(Colors::selected())
+        .px(scale::s4())
+        .py(scale::s2_5())
+        .rounded(super::card_radius())
+        .bg(Colors::hover())
         .children(
             pictures
                 .iter()
