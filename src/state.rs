@@ -351,7 +351,7 @@ mod tests {
         assert_eq!(state(&Facts { busy: true, ..idle }), ThreadState::Running);
         assert_eq!(state(&Facts { ready: false, ..idle }), ThreadState::Starting);
         // Nothing is running at all (never started): it reads ready, which a caller can tell
-        // from a live one by `started`'s facts; only a child of phase 2 is ever blank, and it
+        // from a live one by `started`'s facts; only a thread an agent started is ever blank, and it
         // has a client while it waits.
         assert_eq!(state(&facts(false, false, false, false, false, false, false)), ThreadState::Ready);
         // A question outranks the failure that may sit behind it in the transcript.
