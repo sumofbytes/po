@@ -391,7 +391,7 @@ fn item(what: String, on_press: impl Fn() + 'static) -> AnyElement {
 /// A line in a header, like `3 threads · 1 asking`.
 fn status_line(line: String) -> View {
     // The size and padding of the History button beside it, so the two sit on one rhythm.
-    view().flex_none().px(scale::s2()).py(scale::s1()).child(text(line).sized(text_sm()).text_color(Colors::muted()).number_of_lines(1))
+    view().flex_none().px(scale::s2()).py(scale::s1()).child(text(super::sentence(&line)).sized(text_sm()).text_color(Colors::muted()).number_of_lines(1))
 }
 
 /// The pane header of the conversation: the title, the statuses, the history button, the Control
@@ -1023,10 +1023,7 @@ fn note_row(note: &str) -> AnyElement {
 /// What the picker has to say while it has no sessions to list, such as that the agent is waking
 /// or the session loading: one quiet line with a dot, not a card with an empty body.
 fn picker_note(note: &str) -> AnyElement {
-    let mut shown = note.to_string();
-    if let Some(first) = shown.get(..1) {
-        shown = first.to_uppercase() + &shown[1..];
-    }
+    let shown = super::sentence(note);
     view()
         .flex_row()
         .items_center()
@@ -1258,7 +1255,12 @@ fn send_button(snap: Snapshot, draft: Signal<String>) -> AnyElement {
         (IconName::ArrowUp, "Send now")
     };
     let busy = snap.busy;
-    let draft2 = draft.clone();
+    // Nothing to send while the agent is idle and the draft is blank.
+    let empty = {
+        let draft = draft.clone();
+        move || !busy && draft.get().trim().is_empty()
+    };
+    let empty2 = empty.clone();
     view()
         .role(AccessibilityRole::Button)
         .label(tip)
@@ -1273,7 +1275,7 @@ fn send_button(snap: Snapshot, draft: Signal<String>) -> AnyElement {
         .smooth()
         .hover(|s| s.opacity(crate::theme::tokens::HOVER))
         // Nothing to send: a neutral disc. Something to send: the accent.
-        .bg(move || if !busy && draft.get().trim().is_empty() { Colors::selected()() } else { Colors::primary()() })
+        .bg(move || if empty() { Colors::selected()() } else { Colors::primary()() })
         .tooltip(tooltip(tip))
         .on_press(move || {
             if busy {
@@ -1282,7 +1284,7 @@ fn send_button(snap: Snapshot, draft: Signal<String>) -> AnyElement {
                 pressed_send(&draft);
             }
         })
-        .child(icon(name, scale::s3_5(), move || if !busy && draft2.get().trim().is_empty() { Colors::muted()() } else { Colors::primary_foreground()() }))
+        .child(icon(name, scale::s3_5(), move || if empty2() { Colors::muted()() } else { Colors::primary_foreground()() }))
         .into_element()
 }
 

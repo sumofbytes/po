@@ -100,6 +100,8 @@ mod space {
     pub fn gutter() -> Points { scale::s3() }
     pub fn inset() -> Points { scale::s3() }
     pub fn lead() -> Points { scale::s4() }
+    /// Where a thread's title starts, in line with the name of its project above.
+    pub fn title() -> Points { inset() + lead() + scale::s2_5() }
     pub fn row() -> Points { scale::s8() + scale::s1() }
     pub fn tree() -> Points { scale::s8() + scale::s1() }
     pub fn more() -> Points { scale::s8() }
@@ -208,7 +210,7 @@ fn thread_row(thread: &Thread, project: Option<&str>, close_tip: &'static str, i
     // name of the project above.
     let (left, pad) = if in_tree {
         let left = space::inset() + space::lead() / 2. + scale::s2();
-        (left, space::inset() + space::lead() + scale::s2_5() - left)
+        (left, space::title() - left)
     } else {
         (Points(0.), space::inset())
     };
@@ -236,7 +238,7 @@ fn day_separator(day: &'static str) -> View {
         .flex_row()
         .items_center()
         .gap(scale::s2())
-        .pl(space::inset() + space::lead() + scale::s2_5())
+        .pl(space::title())
         .pr(space::inset())
         .pt(space::section_gap())
         // The day, then a hairline that carries the eye to the edge.

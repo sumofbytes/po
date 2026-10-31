@@ -216,6 +216,12 @@ pub fn snap(px: f32) -> f32 {
     ((px / 2.).round() * 2.).max(2.)
 }
 
+/// `text` with its first letter in capitals, as a sentence starts.
+pub fn sentence(text: &str) -> String {
+    let mut chars = text.chars();
+    chars.next().map_or_else(String::new, |first| first.to_uppercase().chain(chars).collect())
+}
+
 /// The lengths of the screens: spacing, padding, gaps and sizes in rems. Each step `sN` is N quarter
 /// rems (`s1_5` is one and a half), a 2px grid at the default font size; use these, not `rems`, so
 /// every screen spaces itself the same way. The named sizes below are one element's own measure.
@@ -506,5 +512,21 @@ mod snap_tests {
         assert_eq!(snap(3.5), 4.);
         assert_eq!(snap(10.5), 10.);
         assert_eq!(snap(29.75), 30.);
+    }
+
+    #[test]
+    fn steps_never_swap_order() {
+        let steps = [0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 0.875, 1., 1.25, 1.5, 1.75, 2., 2.5, 2.75];
+        for rem in [12., 13., 14., 15., 16., 18.] {
+            let px: Vec<f32> = steps.iter().map(|n| snap(n * rem)).collect();
+            assert!(px.windows(2).all(|pair| pair[0] <= pair[1]), "at {rem}: {px:?}");
+        }
+    }
+
+    #[test]
+    fn a_sentence_starts_in_capitals() {
+        assert_eq!(super::sentence("working"), "Working");
+        assert_eq!(super::sentence("élan"), "Élan");
+        assert_eq!(super::sentence(""), "");
     }
 }

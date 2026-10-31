@@ -856,11 +856,16 @@ fn ago(now: u64, then: u64) -> Option<String> {
 /// `snake_case`, `v2`) is left as typed.
 fn capitalized(title: String) -> String {
     let word = title.split_whitespace().next().unwrap_or("").trim_end_matches([',', ':', ';', '.', '?', '!']);
-    // `cargo test` is a command, though `cargo` is a plain word.
-    let plain = !word.is_empty() && word.chars().all(|c| c.is_lowercase()) && !title.starts_with(char::is_uppercase);
-    let command = ["cargo", "git", "npm", "pnpm", "yarn", "make", "cd", "ls", "sudo", "gh", "docker", "kubectl", "rustc", "python", "node"];
+    // A command (`cargo test`, `curl localhost`) opens with a plain word too, but is followed by
+    // arguments: a flag, a path, a URL or a number. Prose is words and punctuation only.
+    let prose = title.split_whitespace().skip(1).all(|w| w.chars().all(|c| c.is_alphabetic() || "'’,:;.?!-".contains(c)));
+    // Bare subcommands (`cargo test`, `git status`) read as prose, so the usual tools are named.
+    let tools = [
+        "cargo", "git", "npm", "npx", "pnpm", "yarn", "bun", "make", "cd", "ls", "cat", "rm", "grep", "sudo", "gh", "docker", "kubectl", "rustc", "python", "pip", "node", "go", "curl", "ssh",
+    ];
+    let plain = !word.is_empty() && word.chars().all(|c| c.is_lowercase()) && prose && !tools.contains(&word);
     match title.chars().next() {
-        Some(first) if plain && !command.contains(&word) => first.to_uppercase().chain(title.chars().skip(1)).collect(),
+        Some(_) if plain => crate::nsh::sentence(&title),
         _ => title,
     }
 }
@@ -4618,10 +4623,13 @@ impl Reader {
             }
             Event::Stopped(reason) => {
                 self.thread.busy = false;
+                if self.thread.status == "working" {
+                    self.thread.status = "ready".into();
+                }
                 self.thread.unread = !visible;
-                // Not while the user is typing somewhere else: a search, the settings, the finder
-                // or an issue.
-                if visible && self.side_query.is_empty() && !self.settings_open && !self.finder_open && !self.issues_open {
+                // Only when nothing else holds the keyboard: the reader's own focus is where it
+                // rests, so an input (a search, the finder, a rename, the editor) has it otherwise.
+                if visible && self.focus.is_focused(window) && !self.settings_open && !self.finder_open && !self.issues_open {
                     self.focus_draft(window, cx);
                 }
                 // A child's parent is told instead; the desktop hears of it only when nobody
@@ -5176,6 +5184,9 @@ impl Reader {
     fn begin_turn(&mut self, out: &Outgoing) {
         self.thread.blank = false;
         self.thread.busy = true;
+        if self.thread.status == "ready" {
+            self.thread.status = "working".into();
+        }
         self.thread.failed = false;
         self.thread.last_error = None;
         self.thread.touched = Instant::now();
@@ -5532,7 +5543,7 @@ impl Reader {
         }
         if !thread.status.is_empty() {
             // "ready" is set when the agent starts and nothing resets it, so a turn going on says so here.
-            statuses.push(if thread.busy && thread.status == "ready" { "working".to_string() } else { thread.status.clone() });
+            statuses.push(thread.status.clone());
         }
         let picking = thread.picking.then(|| match &thread.sessions {
             Some(sessions) if !thread.loading && !sessions.is_empty() => chat::Picking::Sessions(sessions.iter().map(|session| chat::Session {
