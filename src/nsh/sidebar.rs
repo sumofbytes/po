@@ -134,7 +134,7 @@ fn side_row(lead: Option<View>) -> View {
         .items_center()
         .gap(scale::s2_5())
         .px(space::inset())
-        .rounded(super::card_radius())
+        .rounded(Colors::radius() * 1.5)
         .cursor_pointer()
         .smooth()
         .child(lead)
@@ -234,7 +234,13 @@ fn day_separator(day: &'static str) -> View {
 fn project_group(project: &Project) -> View {
     let pid = project.id;
     let active = project.active;
-    let label = move || if active { Colors::foreground()() } else { Colors::muted()() };
+    // With one of its threads selected, the highlight says where we are; the name steps back.
+    let holds_selected = project.threads.iter().any(|thread| thread.selected);
+    let label = move || match (active, holds_selected) {
+        (true, false) => Colors::foreground()(),
+        (true, true) => Colors::foreground()().opacity(crate::theme::tokens::HOVER),
+        _ => Colors::muted()(),
+    };
     let chevron = if project.collapsed { IconName::ChevronRight } else { IconName::ChevronDown };
     let name = text(project.name.clone())
         .number_of_lines(1)
@@ -346,7 +352,7 @@ pub fn Sidebar() -> impl IntoElement {
             .items_center()
             .gap(scale::s2())
             .px(space::inset())
-            .rounded(super::card_radius())
+            .rounded(Colors::radius() * 1.5)
             .on_press(move || field.focus())
             .smooth()
             .hover(|s| s.bg(Colors::hover()))
