@@ -31,13 +31,13 @@ struct Agent {
 
 /// A group's eyebrow: small, upper-case and quiet, with room above it to set the groups apart.
 fn section(title: &'static str) -> View {
-    view().pt(scale::s8()).pb(scale::s2()).px(scale::s2()).child(caption(title.to_uppercase()).font_weight(FontWeight::MEDIUM))
+    view().pt(scale::s8()).pb(scale::s1()).child(caption(title.to_uppercase()).font_weight(FontWeight::MEDIUM))
 }
 
 /// The rows of a group: bare, set apart by hairlines alone, so the page is one surface and not
 /// cards holding rows holding boxes.
 fn group() -> View {
-    view().flex_col().border_t_1().border_color(super::hairline())
+    view().flex_col()
 }
 
 /// The line between two rows of a group.
