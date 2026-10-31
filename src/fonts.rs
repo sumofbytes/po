@@ -12,7 +12,7 @@ const MONO_SIZE: f32 = 14.0;
 pub const SIZES: std::ops::RangeInclusive<f32> = 8.0..=48.0;
 
 /// The fonts in the binary, so po looks the same whatever is installed.
-const BUNDLED: [&[u8]; 9] = [
+const BUNDLED: [&[u8]; 10] = [
     include_bytes!("../assets/fonts/Geist-Regular.ttf"),
     include_bytes!("../assets/fonts/Geist-Italic.ttf"),
     include_bytes!("../assets/fonts/Geist-Medium.ttf"),
@@ -21,10 +21,11 @@ const BUNDLED: [&[u8]; 9] = [
     include_bytes!("../assets/fonts/GeistMono-Regular.ttf"),
     include_bytes!("../assets/fonts/GeistMono-Italic.ttf"),
     include_bytes!("../assets/fonts/GeistMono-Medium.ttf"),
+    include_bytes!("../assets/fonts/GeistMono-SemiBold.ttf"),
     include_bytes!("../assets/fonts/GeistMono-Bold.ttf"),
 ];
-const BUNDLED_UI_FAMILY: &str = "Geist";
-const BUNDLED_MONO_FAMILY: &str = "Geist Mono";
+pub const BUNDLED_UI_FAMILY: &str = "Geist";
+pub const BUNDLED_MONO_FAMILY: &str = "Geist Mono";
 
 /// The keys of the config's `font` block.
 const KEYS: [&str; 4] = ["family", "size", "mono_family", "mono_size"];
@@ -153,6 +154,15 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn bundled_fonts_are_truetype_files() {
+        // The text system only reports a bad font when it is added, which needs an app; the header is what a bad copy gets wrong.
+        for data in BUNDLED {
+            assert_eq!(data[..4], [0, 1, 0, 0], "not a TrueType file");
+            assert!(data.len() > 50_000);
+        }
+    }
 
     #[test]
     fn config_wins_over_the_theme() {
