@@ -4463,6 +4463,8 @@ impl Reader {
 
     /// Brings up thread `tid` of project `pid`, whichever is on screen.
     fn open_thread(&mut self, pid: u64, tid: u64, window: &mut Window, cx: &mut Context<Self>) {
+        // The issues page stands in for the conversation, so a thread picked from the sidebar closes it.
+        self.hide_issues(window, cx);
         if pid == self.project_id {
             self.show_thread(tid, window, cx);
         } else {
@@ -5503,7 +5505,18 @@ impl Reader {
     /// of the pane, as the viewer's panes are.
     fn chat_pane(&self, lead: Vec<nsh::header::Control>, trail: Vec<nsh::header::Control>, cx: &mut Context<Self>) -> gpui::Div {
         nsh::chat::publish(self.chat_snapshot(lead, trail, cx));
-        div().size_full().flex().flex_col().child(self.chat.clone())
+        let tint = cx.global::<Palette>().primary.opacity(0.08);
+        // Files dropped anywhere on the conversation join the draft: the platform under NSH does
+        // not hand drops to its elements, so the window's own drop target takes them.
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .drag_over::<gpui::ExternalPaths>(move |style, _, _, _| style.bg(tint))
+            .on_drop(cx.listener(|reader, dropped: &gpui::ExternalPaths, _, cx| {
+                reader.attach(dropped.paths().iter().cloned().map(Source::Path).collect(), cx);
+            }))
+            .child(self.chat.clone())
     }
 
     /// What the conversation shows: the header, the transcript, and the composer.
@@ -5616,7 +5629,12 @@ impl Reader {
         match cmd {
             Chat::Draft(text) => self.thread.draft = text,
             Chat::Send { later } => self.send(later, window, cx),
-            Chat::Stop => self.stop(cx),
+            Chat::Stop => {
+                self.stop(cx);
+                // Pressing stop is a move in the composer, so the keyboard goes back to its field
+                // (a cancel from elsewhere, through `stop`, leaves it where it is).
+                self.focus_draft(window, cx);
+            }
             Chat::Drop(uris) => self.attach(uris.iter().filter_map(|uri| file_of(uri)).map(|path| Source::Path(PathBuf::from(path))).collect(), cx),
             Chat::Paste(pictures) => self.attach(pictures.into_iter().map(Source::Bytes).collect(), cx),
             Chat::Detach(at) => {
