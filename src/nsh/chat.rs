@@ -977,31 +977,48 @@ fn pictures_row(pictures: &[Picture]) -> AnyElement {
         .into_element()
 }
 
+/// What a queued message shows on its one row: its text with the line breaks folded into
+/// spaces, then how many pictures go with it; the pictures alone when it has no text; nothing when
+/// it has neither.
+fn queue_preview(text: &str, pictures: usize) -> String {
+    let line = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let word = match pictures {
+        0 => String::new(),
+        1 => "1 picture".to_string(),
+        n => format!("{n} pictures"),
+    };
+    match (line.is_empty(), word.is_empty()) {
+        (_, true) => line,
+        (true, false) => word,
+        (false, false) => format!("{line} · +{word}"),
+    }
+}
+
 /// One message waiting to be sent when the turn is over: its kind, what it says, and the
 /// take-back button. The rows share the tray that sits on the composer (see [`bar`]).
 fn queue_row(queued: Queued) -> AnyElement {
-    let mut row = view()
+    let kind = if queued.kind.is_empty() { "Queued".to_string() } else { queued.kind.clone() };
+    let preview = queue_preview(&queued.text, queued.pictures);
+    // Said of the take-back button, so the buttons of several rows tell apart.
+    let spoken = format!("Take back into the draft: {}", preview.chars().take(40).collect::<String>());
+    // Text in the foreground; pictures alone, muted.
+    let message = text(preview).number_of_lines(1).flex_1().min_w_0().sized(text_sm());
+    let message = if queued.text.split_whitespace().next().is_some() { message.text_color(Colors::foreground()) } else { message.text_color(Colors::muted()) };
+    view()
         .flex_row()
         .items_center()
         .gap(scale::s2())
         .px(scale::s3())
-        .py(scale::s1_5());
-    // A fixed width, so the messages of every row start at the same place.
-    let kind = if queued.kind.is_empty() { "Queued".to_string() } else { queued.kind.clone() };
-    row = row.child(text(kind).w(px(56.)).flex_none().sized(text_xs()).font_weight(FontWeight::MEDIUM).text_color(Colors::muted()));
-    row = if queued.text.is_empty() {
-        let word = if queued.pictures == 1 { "1 picture".to_string() } else { format!("{} pictures", queued.pictures) };
-        row.child(text(word).flex_1().min_w_0().sized(text_sm()).text_color(Colors::muted()))
-    } else {
-        // One line, whatever the message: its line breaks fold into spaces and the end is cut.
-        let line = queued.text.split_whitespace().collect::<Vec<_>>().join(" ");
-        row.child(text(line).number_of_lines(1).flex_1().min_w_0().sized(text_sm()).text_color(Colors::foreground()))
-    };
-    row = row
+        .py(scale::s1_5())
+        // At least this wide, so the messages of the rows start at the same place; a longer kind
+        // widens it rather than wrapping.
+        .child(text(kind).min_w(px(56.)).flex_none().number_of_lines(1).sized(text_xs()).font_weight(FontWeight::MEDIUM).text_color(Colors::muted()))
+        // One line, whatever the message: the end is cut.
+        .child(message)
         .child(
             view()
                 .role(AccessibilityRole::Button)
-                .label("Take back into the draft")
+                .label(spoken)
                 .flex_none()
                 .p(scale::s0_5())
                 .rounded(super::pill())
@@ -1009,8 +1026,8 @@ fn queue_row(queued: Queued) -> AnyElement {
                 .hover(|s| s.bg(Colors::hover()))
                 .on_press(move || tell(Cmd::Recall(queued.at)))
                 .child(icon(IconName::Pencil, scale::s2_5(), Colors::muted())),
-        );
-    row.into_element()
+        )
+        .into_element()
 }
 
 /// Why some of what was pasted or dropped was left out, with a way to dismiss it.
@@ -1607,7 +1624,7 @@ mod tests {
             app.settle();
             std::iter::from_fn(|| commands.try_recv().ok()).collect::<Vec<_>>()
         };
-        app.press("label:Take back into the draft").unwrap();
+        app.press("label:Take back into the draft: then run the tests").unwrap();
         assert_eq!(drain(&mut app), [Bus::Chat(Cmd::Recall(0))]);
         app.press("label:Stop the agent").unwrap();
         assert_eq!(drain(&mut app), [Bus::Chat(Cmd::Stop)]);
@@ -1618,6 +1635,30 @@ mod tests {
         app.press("label:Steer: the agent reads it before its next step (Alt+Enter: after this turn)").unwrap();
         let sent = drain(&mut app);
         assert!(sent.contains(&Bus::Chat(Cmd::Send { later: false })), "{sent:?}");
+    }
+
+    #[test]
+    fn a_queued_message_previews_on_one_line_with_its_pictures() {
+        assert_eq!(queue_preview("first\n\n  second\tthird", 0), "first second third");
+        assert_eq!(queue_preview("", 2), "2 pictures");
+        assert_eq!(queue_preview(" \n ", 1), "1 picture");
+        assert_eq!(queue_preview("look at this", 3), "look at this · +3 pictures");
+        assert_eq!(queue_preview("  ", 0), "");
+    }
+
+    #[test]
+    fn each_queued_row_takes_back_its_own_message() {
+        let mut guard = crate::nsh::bus::lock();
+        let commands = guard.as_mut().expect("the channel");
+        let queue = vec![
+            Queued { at: 0, kind: "Steer".into(), text: "use the cache".into(), pictures: 0 },
+            Queued { at: 1, kind: String::new(), text: "and\nupdate the docs".into(), pictures: 0 },
+        ];
+        let mut app = start(Snapshot { title: "thread".into(), busy: true, queue, ..Snapshot::default() });
+        app.press("label:Take back into the draft: and update the docs").unwrap();
+        assert_eq!(drain(&mut app, commands), [Bus::Chat(Cmd::Recall(1))]);
+        app.press("label:Take back into the draft: use the cache").unwrap();
+        assert_eq!(drain(&mut app, commands), [Bus::Chat(Cmd::Recall(0))]);
     }
 
     fn start(snapshot: Snapshot) -> Headless {
