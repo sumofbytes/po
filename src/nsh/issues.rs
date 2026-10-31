@@ -115,7 +115,8 @@ impl State {
     /// Adds what the add field holds as an issue, with what is tagged onto it, and leaves the
     /// field empty and focused for the next one. `epic` puts it in an epic whatever the line says.
     pub fn add(self, epic: Option<String>) {
-        let line = self.new_title.get_untracked();
+        // A pasted block is one title: its lines run together.
+        let line = self.new_title.get_untracked().split_whitespace().collect::<Vec<_>>().join(" ");
         let Some(due) = parse_due(&self.new_due.get_untracked(), today()) else { return };
         let quick = self.read(|data| parse_quick(&line, &data.tracker));
         if quick.title.is_empty() {

@@ -5217,8 +5217,6 @@ impl Reader {
         self.thread.relist(0);
         // What was waiting goes back to the draft rather than being sent into a stopped turn.
         self.restore_queue(cx);
-        // Pressing stop is a move in the composer, so the keyboard goes back to its field.
-        self.chat_focus.set(self.chat_focus.get() + 1);
         cx.notify();
     }
 
@@ -5625,7 +5623,12 @@ impl Reader {
         match cmd {
             Chat::Draft(text) => self.thread.draft = text,
             Chat::Send { later } => self.send(later, window, cx),
-            Chat::Stop => self.stop(cx),
+            Chat::Stop => {
+                self.stop(cx);
+                // Pressing stop is a move in the composer, so the keyboard goes back to its field
+                // (a cancel from elsewhere, through `stop`, leaves it where it is).
+                self.focus_draft(window, cx);
+            }
             Chat::Drop(uris) => self.attach(uris.iter().filter_map(|uri| file_of(uri)).map(|path| Source::Path(PathBuf::from(path))).collect(), cx),
             Chat::Paste(pictures) => self.attach(pictures.into_iter().map(Source::Bytes).collect(), cx),
             Chat::Detach(at) => {
