@@ -1399,8 +1399,12 @@ fn bar(snap: Snapshot, draft: Signal<String>, field_ref: ElementRef) -> AnyEleme
         // the place to type.
         .border_color(Colors::input_border())
         .bg(Colors::input_background())
-        // A soft lift, so the card stands off the page without floating over it.
-        .shadow_sm()
+        // A tight, crisp lift: a wide blur reads as a wash, not an edge, so the shadow is a
+        // one-point drop with next to no blur, in a color that adapts to the theme.
+        .shadow_color(Colors::shadow())
+        .shadow_opacity(1.)
+        .shadow_radius(px(0.))
+        .shadow_offset(point(px(0.), px(1.)))
         .on_file_drop(move |drop: &FileDropEvent| tell(Cmd::Drop(drop.uris.clone())))
         .children(snap.note.as_deref().map(note_row))
         .children((!snap.pictures.is_empty()).then(|| pictures_row(&snap.pictures)))

@@ -120,6 +120,13 @@ impl Colors {
         || nsh_base::theme().border
     }
 
+    /// The color a card's shadow is cast in: black either way, but firmer in dark appearance,
+    /// where the same alpha vanishes against the page. Tight shadows need the alpha to stay crisp.
+    pub fn shadow() -> AdaptiveColor {
+        let black = AdaptiveColor::rgb(0x000000, 0x000000);
+        AdaptiveColor { light: black.light.opacity(0.22), dark: black.dark.opacity(0.8) }
+    }
+
     pub fn danger() -> impl Fn() -> AdaptiveColor + Copy {
         || nsh_base::theme().destructive
     }
