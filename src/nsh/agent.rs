@@ -233,7 +233,7 @@ pub fn Agent() -> impl IntoElement {
                         .justify_end()
                         .pt(scale::s2())
                         .border_t_1()
-                        .border_color(Colors::border())
+                        .border_color(super::hairline())
                         .child(if answered {
                             // The agent has the answers; the button could be pressed again, but
                             // answers nothing.

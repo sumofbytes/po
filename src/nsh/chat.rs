@@ -11,7 +11,7 @@ use tokio::sync::watch;
 
 use super::header::{Control, pane_header};
 use super::source::Shared;
-use super::{Colors, body, caption, icon, mono_size, note, scale, text_base, text_sm, tooltip};
+use super::{Colors, body, caption, icon, mono_size, note, scale, text_base, text_sm, text_xs, tooltip, Sizing, Smooth};
 use crate::ui::icon::IconName;
 
 /// Whether a step of the agent's is waiting, going, done or failed: a tool call, the plan's
@@ -327,7 +327,7 @@ fn step_glyph(phase: Phase) -> View {
 }
 
 /// The popovers of the menus: the theme's own surface, with a shadow.
-const MENU: &str = "bg-popover border border-border rounded-lg shadow-lg py-1 min-w-44";
+const MENU: &str = "bg-popover border border-border rounded-xl shadow-2xl p-1 min-w-44";
 
 /// A menu item's row: the check when it is the one on, else the label alone.
 fn choice(label: String, on: bool) -> String {
@@ -458,9 +458,11 @@ fn user_row(text_: &str, pictures: &[Picture]) -> AnyElement {
         .min_w_0()
         .flex_shrink(1.)
         .max_w(px(700.))
-        .px(scale::s4())
-        .py(scale::s3())
+        .px(scale::s5())
+        .py(scale::s3_5())
         .rounded(super::surface_radius())
+        .border_1()
+        .border_color(super::hairline())
         .bg(Colors::selected())
         .children(
             pictures
@@ -471,7 +473,7 @@ fn user_row(text_: &str, pictures: &[Picture]) -> AnyElement {
                         .max_h(px(280.))
                         .rounded(Colors::radius())
                         .border_1()
-                        .border_color(Colors::border())
+                        .border_color(super::hairline())
                         .overflow_hidden()
                         .flex_none()
                 })
@@ -479,45 +481,53 @@ fn user_row(text_: &str, pictures: &[Picture]) -> AnyElement {
         );
     if !text_.is_empty() {
         // Typed text is shown as typed: its `*` and `#` are not markup.
-        bubble = bubble.child(text(text_.to_string()).selectable(true).text_base().text_color(Colors::foreground()));
+        bubble = bubble.child(text(text_.to_string()).selectable(true).sized(text_base()).text_color(Colors::foreground()));
     }
     view().flex_row().w_full().min_w_0().justify_end().child(bubble).into_element()
 }
 
-/// The agent's reasoning: a quiet row that opens to it in italics.
+/// The first line of a thought, without its markup, for the row it folds to.
+fn thought_gist(text_: &str) -> String {
+    // A fence line only names a language, so the gist is the first line of prose after it.
+    let line = text_.lines().map(str::trim).find(|line| !line.is_empty() && !line.starts_with("```")).unwrap_or("");
+    let line = line.trim_start_matches(['#', '*', '_', '-', '>', ' ']);
+    // A numbered item reads without its number.
+    let line = line.split_once(". ").filter(|(n, _)| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit())).map_or(line, |(_, rest)| rest);
+    line.replace(['*', '_', '`'], "")
+}
+
+/// The agent's reasoning: a quiet one-line row that opens to all of it in italics.
 fn thought_row(message: usize, at: usize, text_: &str, open: bool) -> AnyElement {
-    let mut column = view()
-        .flex_col()
-        .gap(scale::s1())
-        .child(
-            view()
-                .flex_row()
-                .items_start()
-                .gap(scale::s2())
-                .py(scale::s0_5())
-                .cursor_pointer()
-                .rounded(Colors::radius())
-                .on_press(move || tell(Cmd::ToggleThought { message, block: at }))
-                .child(
-                    view()
-                        .flex_1()
-                        .min_w_0()
-                        .child(text_view().markdown(text_.to_string()).on_link_press(open_link).italic().text_sm().text_color(Colors::muted()).opacity(crate::theme::tokens::DIM)),
-                )
-                .child(
-                    view()
-                        .flex_none()
-                        .pt(scale::s0_5())
-                        .child(icon(if open { IconName::ChevronDown } else { IconName::ChevronRight }, scale::s3(), Colors::muted())),
-                ),
-        );
+    let mut column = view().flex_col().gap(scale::s1()).child(
+        view()
+            .role(AccessibilityRole::Button)
+            .label(format!("Thinking: {}", thought_gist(text_)))
+            .flex_row()
+            .items_center()
+            .gap(scale::s2())
+            .py(scale::s0_5())
+            .cursor_pointer()
+            .rounded(Colors::radius())
+            .on_press(move || tell(Cmd::ToggleThought { message, block: at }))
+            .child(icon(if open { IconName::ChevronDown } else { IconName::ChevronRight }, scale::s3(), Colors::muted()))
+            .child(text("Thinking").flex_none().sized(text_sm()).font_weight(FontWeight::MEDIUM).text_color(Colors::muted()))
+            .children((!open).then(|| {
+                text(thought_gist(text_))
+                    .number_of_lines(1)
+                    .flex_1()
+                    .min_w_0()
+                    .sized(text_sm())
+                    .text_color(Colors::muted())
+                    .opacity(crate::theme::tokens::DIM)
+            })),
+    );
     if open {
         column = column.child(
             text_view()
                 .markdown(text_.to_string())
                 .on_link_press(open_link)
                 .italic()
-                .text_sm()
+                .sized(text_sm())
                 .px(scale::s3())
                 .py(scale::s1())
                 .pl(scale::s5())
@@ -538,7 +548,10 @@ fn tool_row(message: usize, at: usize, tool: &Tool) -> AnyElement {
         .gap(scale::s1())
         .py(scale::s1())
         .px(scale::s3())
-        .rounded(Colors::radius())
+        .rounded(Colors::radius() * 1.5)
+        .border_1()
+        .border_color(super::hairline())
+        .smooth()
         .hover(|s| s.bg(Colors::hover()))
         .child(
             view()
@@ -560,7 +573,7 @@ fn tool_row(message: usize, at: usize, tool: &Tool) -> AnyElement {
                                 .number_of_lines(1)
                                 .flex_1()
                                 .min_w_0()
-                                .text_sm()
+                                .sized(text_sm())
                                 .text_color(move || if settled { Colors::muted()() } else { Colors::foreground()() }),
                         ),
                 )
@@ -587,7 +600,7 @@ fn tool_row(message: usize, at: usize, tool: &Tool) -> AnyElement {
                 view()
                     .max_h(px(448.))
                     .border_l_1()
-                    .border_color(Colors::border())
+                    .border_color(super::hairline())
                     .pl(scale::s3())
                     .child(scroll().max_h(px(448.)).child(
                         text(piece.clone())
@@ -619,7 +632,7 @@ fn run_row(message: usize, at: usize, count: usize, phase: Phase, folded: bool) 
         .hover(|s| s.bg(Colors::hover()))
         .on_press(move || tell(Cmd::Fold { message, block: at, folded: !folded }))
         .child(step_glyph(phase))
-        .child(text(label).flex_1().text_sm().text_color(Colors::muted()))
+        .child(text(label).flex_1().sized(text_sm()).text_color(Colors::muted()))
         .child(icon(if folded { IconName::ChevronRight } else { IconName::ChevronDown }, scale::s3(), Colors::muted()))
         .into_element()
 }
@@ -642,7 +655,7 @@ fn plan_rows(entries: &[Entry]) -> AnyElement {
                         .on_link_press(open_link)
                         .flex_1()
                         .min_w_0()
-                        .text_sm()
+                        .sized(text_sm())
                         .text_color(move || if entry_phase == Phase::Done { Colors::muted()() } else { Colors::foreground()() }),
                 )
         }))
@@ -661,19 +674,19 @@ fn ask_row(message: usize, at: usize, title: &str, options: &[AskOption], answer
         .px(scale::s3())
         .rounded(super::card_radius())
         .border_1()
-        .border_color(move || if waiting { Colors::warning()().opacity(crate::theme::tokens::ALERT_BORDER) } else { Colors::border()() })
+        .border_color(move || if waiting { Colors::warning()().opacity(crate::theme::tokens::ALERT_BORDER) } else { super::hairline()() })
         .child(
             view()
                 .flex_row()
                 .items_start()
                 .gap(scale::s2())
-                .child(text("Permission").flex_none().text_xs().font_weight(FontWeight::MEDIUM).text_color(Colors::muted()))
-                .child(view().flex_1().min_w_0().child(text_view().markdown(title).text_sm().text_color(Colors::foreground()))),
+                .child(text("Permission").flex_none().sized(text_xs()).font_weight(FontWeight::MEDIUM).text_color(Colors::muted()))
+                .child(view().flex_1().min_w_0().child(text_view().markdown(title).sized(text_sm()).text_color(Colors::foreground()))),
         );
     match answered {
         Some(given) => {
             let said = format!("→ {given}");
-            card = card.child(text(said).text_sm().text_color(Colors::muted()));
+            card = card.child(text(said).sized(text_sm()).text_color(Colors::muted()));
         }
         None => {
             let mut row = view().flex_row().flex_wrap().gap(scale::s1_5());
@@ -682,10 +695,11 @@ fn ask_row(message: usize, at: usize, title: &str, options: &[AskOption], answer
                 let mut reply = view()
                     .role(AccessibilityRole::Button)
                     .label(label.clone())
-                    .px(scale::s3())
+                    .px(scale::s4())
                     .py(scale::s1())
-                    .rounded(Colors::radius())
+                    .rounded(super::pill())
                     .cursor_pointer()
+                    .smooth()
                     .on_press(move || tell(Cmd::Answer { message, block: at, at: way }));
                 reply = if primary {
                     reply.bg(Colors::primary())
@@ -693,7 +707,7 @@ fn ask_row(message: usize, at: usize, title: &str, options: &[AskOption], answer
                     reply.border_1().border_color(Colors::input_border()).hover(|s| s.bg(Colors::hover()))
                 };
                 row = row.child(
-                    reply.child(text(label).text_sm().text_color(move || if primary { Colors::primary_foreground()() } else { Colors::foreground()() })),
+                    reply.child(text(label).sized(text_sm()).text_color(move || if primary { Colors::primary_foreground()() } else { Colors::foreground()() })),
                 );
             }
             card = card.child(row);
@@ -714,14 +728,14 @@ fn approve_row(message: usize, at: usize, question: &str, lines: &[String], answ
         .px(scale::s3())
         .rounded(super::card_radius())
         .border_1()
-        .border_color(move || if waiting { Colors::warning()().opacity(crate::theme::tokens::ALERT_BORDER) } else { Colors::border()() })
+        .border_color(move || if waiting { Colors::warning()().opacity(crate::theme::tokens::ALERT_BORDER) } else { super::hairline()() })
         .child(
             view()
                 .flex_row()
                 .items_start()
                 .gap(scale::s2())
-                .child(text("Approve").flex_none().text_xs().font_weight(FontWeight::MEDIUM).text_color(Colors::muted()))
-                .child(view().flex_1().min_w_0().child(text_view().markdown(title).text_sm().text_color(Colors::foreground()))),
+                .child(text("Approve").flex_none().sized(text_xs()).font_weight(FontWeight::MEDIUM).text_color(Colors::muted()))
+                .child(view().flex_1().min_w_0().child(text_view().markdown(title).sized(text_sm()).text_color(Colors::foreground()))),
         )
         .children((!lines.is_empty()).then(|| {
             view()
@@ -729,7 +743,7 @@ fn approve_row(message: usize, at: usize, question: &str, lines: &[String], answ
                 .max_h(px(224.))
                 .overflow_hidden()
                 .border_l_1()
-                .border_color(Colors::border())
+                .border_color(super::hairline())
                 .pl(scale::s3())
                 .children(
                     lines
@@ -747,7 +761,7 @@ fn approve_row(message: usize, at: usize, question: &str, lines: &[String], answ
     match answered {
         Some(said) => {
             let said = format!("→ {said}");
-            card = card.child(text(said).text_sm().text_color(Colors::muted()));
+            card = card.child(text(said).sized(text_sm()).text_color(Colors::muted()));
         }
         None => {
             card = card.child(
@@ -765,7 +779,7 @@ fn approve_row(message: usize, at: usize, question: &str, lines: &[String], answ
                             .cursor_pointer()
                             .bg(Colors::primary())
                             .on_press(move || tell(Cmd::Approve { message, block: at, yes: true }))
-                            .child(text("Run it").text_sm().text_color(Colors::primary_foreground())),
+                            .child(text("Run it").sized(text_sm()).text_color(Colors::primary_foreground())),
                     )
                     .child(
                         view()
@@ -779,7 +793,7 @@ fn approve_row(message: usize, at: usize, question: &str, lines: &[String], answ
                             .border_color(Colors::input_border())
                             .hover(|s| s.bg(Colors::hover()))
                             .on_press(move || tell(Cmd::Approve { message, block: at, yes: false }))
-                            .child(text("Leave out").text_sm().text_color(Colors::foreground())),
+                            .child(text("Leave out").sized(text_sm()).text_color(Colors::foreground())),
                     ),
             );
         }
@@ -795,7 +809,7 @@ fn block_row(message: usize, block: &Block) -> AnyElement {
             .markdown(markdown.0.to_string())
             .on_link_press(open_link)
             .selectable(true)
-            .text_base()
+            .sized(text_base())
             .text_color(Colors::foreground())
             .into_element(),
         Block::Thought { index, text: thought, open } => thought_row(message, *index, thought, *open),
@@ -812,7 +826,7 @@ fn agent_row(message: usize, blocks: &[Block]) -> AnyElement {
     let mut column = view().flex_col().min_w_0().gap(scale::s3());
     let mut skip = 0;
     if blocks.is_empty() {
-        column = column.child(text("Thinking…").text_sm().text_color(Colors::muted()));
+        column = column.child(text("Thinking…").sized(text_sm()).text_color(Colors::muted()));
     }
     for block in blocks {
         if skip > 0 {
@@ -832,7 +846,7 @@ fn agent_row(message: usize, blocks: &[Block]) -> AnyElement {
 fn transcript(items: &[Item], slot: ElementRef, at_end: Signal<bool>) -> AnyElement {
     // The transcript's column is the composer card's width, and its text starts where the
     // composer's does: the card's border, its padding and the field's padding in (see [`bar`]).
-    let mut rows = view().w_full().min_w_0().max_w(px(COLUMN)).flex_col().gap(scale::s6()).px(scale::composer_text_inset()).py(scale::s6());
+    let mut rows = view().w_full().min_w_0().max_w(px(COLUMN)).flex_col().gap(scale::s8()).px(scale::composer_text_inset()).py(scale::s8());
     for (message, item) in items.iter().enumerate() {
         let row = match item {
             Item::User { text, pictures } => user_row(text, pictures),
@@ -877,7 +891,7 @@ fn pictures_row(pictures: &[Picture]) -> AnyElement {
                             image(picture.uri.clone())
                                 .rounded(Colors::radius())
                                 .border_1()
-                                .border_color(Colors::border())
+                                .border_color(super::hairline())
                                 .max_h(px(72.))
                                 .max_w(px(120.))
                                 .overflow_hidden(),
@@ -893,7 +907,7 @@ fn pictures_row(pictures: &[Picture]) -> AnyElement {
                                 .rounded(super::pill())
                                 .bg(Colors::background())
                                 .border_1()
-                                .border_color(Colors::border())
+                                .border_color(super::hairline())
                                 .cursor_pointer()
                                 .hover(|s| s.bg(Colors::hover()))
                                 .on_press(move || tell(Cmd::Detach(at)))
@@ -915,17 +929,19 @@ fn queue_row(queued: Queued) -> AnyElement {
         .px(scale::s3())
         .py(scale::s1_5())
         .rounded(super::surface_radius())
+        .border_1()
+        .border_color(super::hairline())
         .bg(Colors::selected());
     row = if queued.kind.is_empty() {
-        row.child(text("Queued").flex_none().text_xs().font_weight(FontWeight::MEDIUM).text_color(Colors::muted()))
+        row.child(text("Queued").flex_none().sized(text_xs()).font_weight(FontWeight::MEDIUM).text_color(Colors::muted()))
     } else {
-        row.child(text(queued.kind.clone()).flex_none().text_xs().font_weight(FontWeight::MEDIUM).text_color(Colors::muted()))
+        row.child(text(queued.kind.clone()).flex_none().sized(text_xs()).font_weight(FontWeight::MEDIUM).text_color(Colors::muted()))
     };
     row = if queued.text.is_empty() {
         let word = if queued.pictures == 1 { "1 picture".to_string() } else { format!("{} pictures", queued.pictures) };
-        row.child(text(word).flex_1().min_w_0().text_sm().text_color(Colors::muted()))
+        row.child(text(word).flex_1().min_w_0().sized(text_sm()).text_color(Colors::muted()))
     } else {
-        row.child(text_view().markdown(queued.text.clone()).flex_1().min_w_0().text_sm().text_color(Colors::foreground()))
+        row.child(text_view().markdown(queued.text.clone()).flex_1().min_w_0().sized(text_sm()).text_color(Colors::foreground()))
     };
     row = row
         .child(
@@ -949,7 +965,7 @@ fn note_row(note: &str) -> AnyElement {
         .flex_row()
         .items_center()
         .gap(scale::s2())
-        .child(text(note.to_string()).flex_1().min_w_0().text_xs().text_color(Colors::muted()))
+        .child(text(note.to_string()).flex_1().min_w_0().sized(text_xs()).text_color(Colors::muted()))
         .child(
             view()
                 .role(AccessibilityRole::Button)
@@ -986,8 +1002,8 @@ fn picker(picking: &Picking) -> AnyElement {
                         .cursor_pointer()
                         .hover(|s| s.bg(Colors::hover()))
                         .on_press(move || tell(Cmd::Resume(id.clone())))
-                        .child(text(label).flex_1().min_w_0().number_of_lines(1).text_sm().text_color(Colors::foreground()))
-                        .child(text(when).flex_none().text_xs().text_color(Colors::muted())),
+                        .child(text(label).flex_1().min_w_0().number_of_lines(1).sized(text_sm()).text_color(Colors::foreground()))
+                        .child(text(when).flex_none().sized(text_xs()).text_color(Colors::muted())),
                 );
             }
             column.into_element()
@@ -1009,7 +1025,7 @@ fn picker(picking: &Picking) -> AnyElement {
                 .items_center()
                 .px(scale::s1_5())
                 .pb(scale::s1())
-                .child(text(title).flex_1().text_xs().font_weight(FontWeight::MEDIUM).text_color(Colors::muted()))
+                .child(text(title).flex_1().sized(text_xs()).font_weight(FontWeight::MEDIUM).text_color(Colors::muted()))
                 .child(
                     view()
                         .role(AccessibilityRole::Button)
@@ -1209,7 +1225,7 @@ fn draft_field(draft: &Signal<String>, field_ref: ElementRef) -> Input {
         .flex_1()
         .min_w_0()
         .max_h(px(160.))
-        .text_base()
+        .sized(text_base())
         .multiline(true)
         .value(move || held.get())
         .text_color(Colors::foreground())
@@ -1269,7 +1285,7 @@ fn bar(snap: Snapshot, draft: Signal<String>, field_ref: ElementRef) -> AnyEleme
             .as_ref()
             .map(|id| snap.agents.iter().find(|(_, key)| key == id).map_or(id.clone(), |(name, _)| name.clone()))
             .unwrap_or_else(|| "Agent".to_string());
-        chips = chips.child(text(name).px(scale::s2()).text_sm().text_color(Colors::muted()));
+        chips = chips.child(text(name).px(scale::s2()).sized(text_sm()).text_color(Colors::muted()));
     }
     if !snap.settings.is_empty() {
         chips = chips.child(settings_rows(&snap.settings, snap.busy));
@@ -1277,15 +1293,16 @@ fn bar(snap: Snapshot, draft: Signal<String>, field_ref: ElementRef) -> AnyEleme
     if !snap.blank {
         chips = chips.child(grant_menu(snap.grant.unwrap_or_default()));
     }
-    let card = view()
+    // Two enclosures, the inner concentric with the outer: a tray holding the card, so the composer
+    // reads as one machined piece. The inset of its text is `scale::composer_text_inset`.
+    let core = view()
         .flex_col()
         .gap(scale::s2())
         .w_full()
-        .max_w(px(COLUMN))
         .p(scale::s2())
-        .rounded(super::surface_radius())
+        .rounded(super::surface_radius() - scale::s1())
         .border_1()
-        .border_color(Colors::border())
+        .border_color(super::hairline())
         .bg(Colors::sidebar())
         .on_file_drop(move |drop: &FileDropEvent| tell(Cmd::Drop(drop.uris.clone())))
         .children(snap.note.as_deref().map(note_row))
@@ -1307,7 +1324,17 @@ fn bar(snap: Snapshot, draft: Signal<String>, field_ref: ElementRef) -> AnyEleme
     if !snap.queue.is_empty() {
         column = column.child(view().w_full().max_w(px(COLUMN)).flex_col().gap(scale::s1()).child(snap.queue.iter().cloned().map(queue_row).collect::<Vec<_>>()));
     }
-    column = column.child(card);
+    let shell = view()
+        .w_full()
+        .max_w(px(COLUMN))
+        .p(scale::s1())
+        .rounded(super::surface_radius())
+        .border_1()
+        .border_color(Colors::input_border())
+        .bg(Colors::selected())
+        .shadow_lg()
+        .child(core);
+    column = column.child(shell);
     column.into_element()
 }
 
@@ -1412,7 +1439,7 @@ pub fn Chat() -> impl IntoElement {
                 .justify_center()
                 .gap(scale::s3())
                 .px(scale::s4())
-                .children([text("What is this thread about?").text_base().text_color(Colors::muted()), text("Message an agent to begin.").text_sm().text_color(Colors::muted())])
+                .children([text("What is this thread about?").sized(text_base()).text_color(Colors::muted()), text("Message an agent to begin.").sized(text_sm()).text_color(Colors::muted())])
                 .into_element()
         } else {
             transcript(&snap.items, scrolled.clone(), at_end)
@@ -1440,6 +1467,14 @@ mod tests {
     use nsh_testing::Headless;
 
     use super::*;
+
+    #[test]
+    fn a_thought_folds_to_its_first_line_of_prose() {
+        assert_eq!(thought_gist("**Plan** the work\nthen do it"), "Plan the work");
+        assert_eq!(thought_gist("```rust\nlet x = 1;\n```"), "let x = 1;");
+        assert_eq!(thought_gist("1. Read the file"), "Read the file");
+        assert_eq!(thought_gist("\n\n"), "");
+    }
     use crate::nsh::bus::Cmd as Bus;
 
     #[test]

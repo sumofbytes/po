@@ -203,7 +203,6 @@ fn rems(n: f32) -> Points {
 pub mod scale {
     use super::{Points, rems};
 
-    pub fn s0() -> Points { rems(0.0) }
     pub fn s0_5() -> Points { rems(0.125) }
     pub fn s1() -> Points { rems(0.25) }
     pub fn s1_5() -> Points { rems(0.375) }
@@ -232,18 +231,59 @@ pub mod scale {
     pub fn due_entry_width() -> Points { rems(13.0) }
     /// From the composer card's edge to its text: the card's padding and the field's, and the
     /// border, which is a point wide whatever the font size.
-    pub fn composer_text_inset() -> Points { s2() + s2() + Points(1.) }
+    pub fn composer_text_inset() -> Points { s2() + s2() + s1() + Points(2.) }
     /// `n` lines of small text, whose line is 1.25rem tall: a text area's minimum, a note's maximum.
     pub fn lines(n: f32) -> Points { rems(1.25 * n) }
-    /// The least width of a project's name in the sidebar.
-    pub fn project_name_min_width() -> Points { rems(6.0) }
-    /// The least width of a project's branch in the sidebar.
-    pub fn branch_name_min_width() -> Points { rems(4.0) }
 }
 
 /// The monospace font's size, in points.
 pub fn mono_size() -> f32 {
     nsh_base::theme().number("mono-size").unwrap_or(13.)
+}
+
+/// Changes of colour on `v` ease out over 220ms: the one motion curve of the screens, a quick start
+/// that settles softly, so nothing snaps from one state to the next.
+pub fn smooth(v: View) -> View {
+    v.smooth()
+}
+
+/// [`smooth`], as a step of a builder chain.
+pub trait Smooth {
+    fn smooth(self) -> Self;
+}
+
+impl Smooth for View {
+    fn smooth(self) -> Self {
+        self.transition_colors().duration(220.).ease_out()
+    }
+}
+
+/// Text of one of the fixed sizes, with the line height that goes with it.
+pub trait Sizing {
+    fn sized(self, size: Points) -> Self;
+}
+
+impl Sizing for Text {
+    fn sized(self, size: Points) -> Self {
+        self.text_size(size).line_height(leading(size))
+    }
+}
+
+impl Sizing for nsh_base::Input {
+    fn sized(self, size: Points) -> Self {
+        self.text_size(size).line_height(leading(size))
+    }
+}
+
+impl Sizing for nsh_base::TextViewElement {
+    fn sized(self, size: Points) -> Self {
+        self.text_size(size).line_height(leading(size))
+    }
+}
+
+/// A faint hairline: the border of the outer shell of a nested surface.
+pub fn hairline() -> impl Fn() -> AdaptiveColor + Copy {
+    || Colors::border()().opacity(0.6)
 }
 
 /// The text of a row's label, GPUI's `text_base`.
@@ -271,24 +311,33 @@ pub fn text_sm() -> Points {
     scale::s3_5()
 }
 
+/// The line height of text of `size`: the leading the fixed text sizes of GPUI have, which follows
+/// the font size now that the text sizes do.
+pub fn leading(size: Points) -> Points {
+    // GPUI's own steps: 4/3 for text_xs, 10/7 for text_sm, 3/2 from text_base up.
+    let rem = nsh_base::theme().number("rem").unwrap_or(14.);
+    let ratio = size.0 / rem;
+    Points(size.0 * if ratio <= 0.76 { 4. / 3. } else if ratio <= 0.88 { 10. / 7. } else { 1.5 })
+}
+
 /// Quiet small text: dates, counts, secondary labels.
 pub fn caption(content: impl IntoReactive<SharedString>) -> Text {
-    text(content).text_size(text_xs()).text_color(Colors::muted())
+    text(content).sized(text_xs()).text_color(Colors::muted())
 }
 
 /// Small text in the foreground color: short labels and marks.
 pub fn small(content: impl IntoReactive<SharedString>) -> Text {
-    text(content).text_size(text_xs()).text_color(Colors::foreground())
+    text(content).sized(text_xs()).text_color(Colors::foreground())
 }
 
 /// Quiet text: notes, empty states, hints.
 pub fn note(content: impl IntoReactive<SharedString>) -> Text {
-    text(content).text_size(text_sm()).text_color(Colors::muted())
+    text(content).sized(text_sm()).text_color(Colors::muted())
 }
 
 /// Text of a row or control, in the foreground color.
 pub fn body(content: impl IntoReactive<SharedString>) -> Text {
-    text(content).text_size(text_sm()).text_color(Colors::foreground())
+    text(content).sized(text_sm()).text_color(Colors::foreground())
 }
 
 /// A radius that makes a pill or dot of anything square.
@@ -323,7 +372,7 @@ pub fn tooltip(label: &'static str) -> Text {
     small(label)
         .bg(Colors::popover())
         .border_1()
-        .border_color(Colors::border())
+        .border_color(hairline())
         .rounded(Colors::radius())
         .px(Points(8.))
         .py(Points(4.))
@@ -343,6 +392,9 @@ pub fn icon_button(name: IconName, size: Points, label: &'static str, on_press: 
         .p(scale::s1())
         .rounded(Colors::radius())
         .cursor_pointer()
+        .transition_colors()
+        .duration(220.)
+        .ease_out()
         .hover(|s| s.bg(Colors::hover()))
         .tooltip(tooltip(label))
         .on_press(on_press)
@@ -355,10 +407,13 @@ pub fn button(label: &'static str, primary: bool, on_press: impl Fn() + 'static)
         .role(AccessibilityRole::Button)
         .label(label)
         .flex_none()
-        .px(scale::s3())
+        .px(scale::s4())
         .py(scale::s1_5())
-        .rounded(Colors::radius())
+        .rounded(pill())
         .cursor_pointer()
+        .transition_colors()
+        .duration(220.)
+        .ease_out()
         .on_press(on_press)
         .child(text(label).text_size(text_sm()).text_color(move || if primary { Colors::primary_foreground()() } else { Colors::foreground()() }));
     if primary { b.bg(Colors::primary()) } else { b.border_1().border_color(Colors::input_border()).hover(|s| s.bg(Colors::hover())) }
@@ -392,10 +447,13 @@ pub fn field_with(id: &str, value: Signal<String>, placeholder: &'static str, on
         .h(field_height())
         .flex_row()
         .items_center()
-        .px(scale::s2_5())
-        .rounded(Colors::radius())
+        .px(scale::s3())
+        .rounded(card_radius())
         .border_1()
         .border_color(Colors::input_border())
         .bg(Colors::input_background())
+        .transition_colors()
+        .duration(220.)
+        .ease_out()
         .child(input)
 }

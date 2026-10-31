@@ -41,13 +41,13 @@ pub fn publish(snapshot: Snapshot) {
 }
 
 fn tab_button(label: String, selected: bool, on_press: impl Fn() + 'static) -> View {
-    let b = view()
+    let b = super::smooth(view())
         .role(AccessibilityRole::Button)
         .label(label.clone())
         .flex_none()
-        .px(scale::s2())
+        .px(scale::s3())
         .py(scale::s1())
-        .rounded(Colors::radius())
+        .rounded(super::pill())
         .cursor_pointer()
         .on_press(on_press)
         .child(body(label).number_of_lines(1));
@@ -71,10 +71,10 @@ pub fn Tabs() -> impl IntoElement {
         .flex_row()
         .items_center()
         .gap(scale::s1())
-        .px(scale::s2())
-        .py(scale::s1())
+        .px(scale::s3())
+        .py(scale::s1_5())
         .border_b_1()
-        .border_color(Colors::border())
+        .border_color(super::hairline())
         .child(dynamic(move || {
             let (home, shown) = state.with(|s| (s.home.clone(), s.shown.is_none()));
             tab_button(home, shown, || send(Cmd::ShowHome))
@@ -98,13 +98,13 @@ pub fn Tabs() -> impl IntoElement {
             state.with(|s| s.offer.clone()).map(|offer| {
                 let id = offer.id.clone();
                 let label = format!("The agent wants to show “{}”", offer.title);
-                view()
+                super::smooth(view())
                     .role(AccessibilityRole::Button)
                     .label(label.clone())
                     .flex_none()
-                    .px(scale::s2())
+                    .px(scale::s3())
                     .py(scale::s1())
-                    .rounded(Colors::radius())
+                    .rounded(super::pill())
                     .cursor_pointer()
                     .bg(Colors::primary())
                     .on_press(move || send(Cmd::ShowView(id.clone())))
