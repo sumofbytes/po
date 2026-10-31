@@ -5,7 +5,7 @@ use nsh_core::prelude::*;
 
 use super::bus::{Cmd, send};
 use super::overlay::{self, Height};
-use super::{Colors, body, caption, icon, icon_button, note, on_hover, scale, text_sm, text_xs};
+use super::{Colors, body, caption, icon, icon_button, note, on_hover, scale, text_sm, text_xs, Smooth};
 use crate::issues::query::{self, Filter, Group, parse_quick};
 use crate::issues::shared::{self, View as Data};
 use crate::issues::{Issue, Link, Priority, Status};
@@ -552,9 +552,7 @@ fn header(state: State) -> View {
             .py(scale::s1())
             .rounded(super::pill())
             .cursor_pointer()
-            .transition_colors()
-            .duration(220.)
-            .ease_out()
+            .smooth()
             .hover(|s| s.bg(Colors::hover()))
             .style_when(move || state.page.with(|now| on(now)), |s| s.bg(Colors::selected()))
             .on_press(move || state.go(target.clone()))
@@ -780,9 +778,7 @@ pub fn issue_row(state: State, number: u64) -> View {
         .gap(scale::s3())
         .px(scale::s4())
         .cursor_pointer()
-        .transition_colors()
-        .duration(220.)
-        .ease_out()
+        .smooth()
         .hover(|s| s.bg(Colors::hover()))
         .on_press(move || state.open_issue(number))
         .child(view().role(AccessibilityRole::Button).label(format!("Status: {}", status.name())).flex_none().on_press(move || state.advance(number)).child(icon(status_icon(status), scale::s3_5(), move || status_tint(status))))
@@ -881,9 +877,7 @@ fn card(state: State, issue: &Issue, key: String) -> View {
         .bg(Colors::popover())
         .shadow_sm()
         .cursor_pointer()
-        .transition_colors()
-        .duration(220.)
-        .ease_out()
+        .smooth()
         .hover(|s| s.bg(Colors::hover()))
         .on_press(move || state.open_issue(number))
         // Dragging a card across the columns moves it to the one it ends over.

@@ -7,7 +7,7 @@ use nsh_core::prelude::*;
 use tokio::sync::watch;
 
 use super::bus::{Cmd, send};
-use super::{Colors, header_height, icon, leading, icon_button, on_hover, scale, small, text_base};
+use super::{Colors, header_height, icon, leading, icon_button, on_hover, scale, small, text_base, Sizing, Smooth};
 use crate::ui::icon::IconName;
 
 /// What a thread is up to, for its mark.
@@ -120,7 +120,7 @@ mod space {
 
 /// Muted text at the size of every other line of the sidebar.
 fn quiet(content: impl IntoReactive<SharedString>) -> Text {
-    text(content).text_size(text_base()).line_height(leading(text_base())).text_color(Colors::muted())
+    text(content).sized(text_base()).text_color(Colors::muted())
 }
 
 /// The most rows Needs you shows before it scrolls.
@@ -136,9 +136,7 @@ fn side_row(lead: Option<View>) -> View {
         .px(space::inset())
         .rounded(super::card_radius())
         .cursor_pointer()
-        .transition_colors()
-        .duration(220.)
-        .ease_out()
+        .smooth()
         .child(lead)
 }
 
@@ -175,7 +173,7 @@ fn section(title: impl IntoReactive<SharedString>, action: Option<View>) -> View
         .items_center()
         .justify_between()
         .px(space::gutter() + space::inset())
-        .child(text(title).text_size(super::text_sm()).line_height(leading(super::text_sm())).font_weight(FontWeight::MEDIUM).text_color(Colors::muted()))
+        .child(text(title).sized(super::text_sm()).font_weight(FontWeight::MEDIUM).text_color(Colors::muted()))
         .child(action)
 }
 
@@ -195,8 +193,7 @@ fn thread_row(thread: &Thread, project: Option<&str>, close_tip: &'static str) -
     let label = text(thread.label.clone())
         .number_of_lines(1)
         .flex_shrink(1.)
-        .text_size(text_base())
-        .line_height(leading(text_base()))
+        .sized(text_base())
         .text_color(move || if selected { Colors::foreground()() } else { Colors::muted()() })
         .style_when(selected, |s| s.font_weight(FontWeight::MEDIUM));
     let title = match project {
@@ -231,7 +228,7 @@ fn day_separator(day: &'static str) -> View {
         .pl(space::inset() + space::lead() + scale::s2_5())
         .pr(space::inset())
         .pb(space::section_gap())
-        .child(text(day).flex_none().text_size(super::text_xs()).line_height(leading(super::text_xs())).font_weight(FontWeight::MEDIUM).text_color(Colors::dim(Colors::muted())))
+        .child(text(day).flex_none().sized(super::text_xs()).font_weight(FontWeight::MEDIUM).text_color(Colors::dim(Colors::muted())))
 }
 
 fn project_group(project: &Project) -> View {
@@ -243,8 +240,7 @@ fn project_group(project: &Project) -> View {
         .number_of_lines(1)
         .flex_1()
         .min_w_0()
-        .text_size(text_base())
-        .line_height(leading(text_base()))
+        .sized(text_base())
         .font_weight(FontWeight::SEMIBOLD)
         .text_color(label);
     // Pressing the row opens the project and folds or unfolds its threads; the buttons on it are
@@ -263,7 +259,7 @@ fn project_group(project: &Project) -> View {
             .h(space::more())
             .hover(|s| s.bg(Colors::hover()))
             .on_press(move || send(Cmd::ToggleMore(pid)))
-            .child(text(label).text_size(super::text_sm()).line_height(leading(super::text_sm())).text_color(Colors::dim(Colors::muted())))
+            .child(text(label).sized(super::text_sm()).text_color(Colors::dim(Colors::muted())))
     });
     view()
         .gap(space::item_gap())
@@ -290,9 +286,7 @@ fn suggestion(item: &Suggestion) -> View {
             .py(scale::s0_5())
             .rounded(super::pill())
             .cursor_pointer()
-            .transition_colors()
-            .duration(220.)
-            .ease_out()
+            .smooth()
             .on_press(on_press)
             .child(text(label).text_size(text_base()).text_color(move || if primary { Colors::primary_foreground()() } else { Colors::foreground()() }));
         if primary { b.bg(Colors::primary()) } else { b.hover(|s| s.bg(Colors::hover())) }
@@ -305,7 +299,7 @@ fn suggestion(item: &Suggestion) -> View {
         .gap(scale::s2())
         .rounded(super::card_radius())
         .border_1()
-        .border_color(Colors::border())
+        .border_color(super::hairline())
         .bg(Colors::hover())
         .child(quiet(item.text.clone()))
         .child(
@@ -323,7 +317,7 @@ fn action(icon_name: IconName, label: &'static str, tip: &'static str, selected:
         .h(space::row())
         .tooltip(super::tooltip(tip))
         .on_press(on_press)
-        .child(text(label).flex_1().text_size(text_base()).line_height(leading(text_base())).text_color(move || if selected == Some(true) { Colors::foreground()() } else { Colors::foreground()().opacity(crate::theme::tokens::HOVER) }).style_when(selected == Some(true), |s| s.font_weight(FontWeight::MEDIUM)));
+        .child(text(label).flex_1().sized(text_base()).text_color(move || if selected == Some(true) { Colors::foreground()() } else { Colors::foreground()().opacity(crate::theme::tokens::HOVER) }).style_when(selected == Some(true), |s| s.font_weight(FontWeight::MEDIUM)));
     if selected == Some(true) { row.bg(Colors::selected()) } else { row.hover(|s| s.bg(Colors::hover())) }
 }
 
@@ -352,14 +346,9 @@ pub fn Sidebar() -> impl IntoElement {
             .items_center()
             .gap(scale::s2())
             .px(space::inset())
-            .rounded(Colors::radius())
+            .rounded(super::card_radius())
             .on_press(move || field.focus())
-            .transition_colors()
-            .duration(220.)
-            .ease_out()
-            .transition_colors()
-            .duration(220.)
-            .ease_out()
+            .smooth()
             .hover(|s| s.bg(Colors::hover()))
             .style_when(in_use, |s| s.bg(Colors::hover()))
             .child(lead(icon(IconName::Search, scale::s4(), Colors::muted())))
@@ -474,7 +463,7 @@ pub fn Sidebar() -> impl IntoElement {
                 ))
                 .child(dynamic(move || {
                     state.with(|s| s.status.clone()).map(|status| {
-                        view().px(space::gutter() + space::inset()).py(scale::s1()).max_h(scale::lines(4.)).child(quiet(status))
+                        view().px(space::gutter() + space::inset()).py(scale::s1()).max_h(leading(text_base()) * 4.).child(quiet(status))
                     })
                 }))
                 .child(dynamic(move || state.with(|s| s.suggestions.clone()).iter().map(suggestion).collect::<Vec<_>>()))

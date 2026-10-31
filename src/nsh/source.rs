@@ -122,7 +122,7 @@ pub fn Source() -> impl IntoElement {
                 .px(scale::s3())
                 .py(scale::s1_5())
                 .border_b_1()
-                .border_color(Colors::border())
+                .border_color(super::hairline())
                 .child(super::field_with("source-find", query, "Find", move || run(nsh_base::EditorCommand::FindNext), move |input| input.element_ref(&find_field).auto_focus(true)).flex_1())
                 .child(toggle_button(IconName::CaseSensitive, "Match case", case.get(), move || case.update(|on| *on = !*on)))
                 .child(

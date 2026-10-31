@@ -115,6 +115,7 @@ impl Render for Overlay {
                     .when(self.height > 0., |card| card.h(px(self.height + 2.)))
                     .when(self.height <= 0., |card| card.h_full())
                     .max_h_full()
+                    .max_w_full()
                     .rounded(radius * 3.)
                     .border_1()
                     .border_color(border)

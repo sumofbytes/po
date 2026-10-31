@@ -244,7 +244,41 @@ pub fn mono_size() -> f32 {
 /// Changes of colour on `v` ease out over 220ms: the one motion curve of the screens, a quick start
 /// that settles softly, so nothing snaps from one state to the next.
 pub fn smooth(v: View) -> View {
-    v.transition_colors().duration(220.).ease_out()
+    v.smooth()
+}
+
+/// [`smooth`], as a step of a builder chain.
+pub trait Smooth {
+    fn smooth(self) -> Self;
+}
+
+impl Smooth for View {
+    fn smooth(self) -> Self {
+        self.transition_colors().duration(220.).ease_out()
+    }
+}
+
+/// Text of one of the fixed sizes, with the line height that goes with it.
+pub trait Sizing {
+    fn sized(self, size: Points) -> Self;
+}
+
+impl Sizing for Text {
+    fn sized(self, size: Points) -> Self {
+        self.text_size(size).line_height(leading(size))
+    }
+}
+
+impl Sizing for nsh_base::Input {
+    fn sized(self, size: Points) -> Self {
+        self.text_size(size).line_height(leading(size))
+    }
+}
+
+impl Sizing for nsh_base::TextViewElement {
+    fn sized(self, size: Points) -> Self {
+        self.text_size(size).line_height(leading(size))
+    }
 }
 
 /// A faint hairline: the border of the outer shell of a nested surface.
@@ -280,27 +314,30 @@ pub fn text_sm() -> Points {
 /// The line height of text of `size`: the leading the fixed text sizes of GPUI have, which follows
 /// the font size now that the text sizes do.
 pub fn leading(size: Points) -> Points {
-    Points(size.0 * 1.5)
+    // GPUI's own steps: 4/3 for text_xs, 10/7 for text_sm, 3/2 from text_base up.
+    let rem = nsh_base::theme().number("rem").unwrap_or(14.);
+    let ratio = size.0 / rem;
+    Points(size.0 * if ratio <= 0.76 { 4. / 3. } else if ratio <= 0.88 { 10. / 7. } else { 1.5 })
 }
 
 /// Quiet small text: dates, counts, secondary labels.
 pub fn caption(content: impl IntoReactive<SharedString>) -> Text {
-    text(content).text_size(text_xs()).text_color(Colors::muted())
+    text(content).sized(text_xs()).text_color(Colors::muted())
 }
 
 /// Small text in the foreground color: short labels and marks.
 pub fn small(content: impl IntoReactive<SharedString>) -> Text {
-    text(content).text_size(text_xs()).text_color(Colors::foreground())
+    text(content).sized(text_xs()).text_color(Colors::foreground())
 }
 
 /// Quiet text: notes, empty states, hints.
 pub fn note(content: impl IntoReactive<SharedString>) -> Text {
-    text(content).text_size(text_sm()).text_color(Colors::muted())
+    text(content).sized(text_sm()).text_color(Colors::muted())
 }
 
 /// Text of a row or control, in the foreground color.
 pub fn body(content: impl IntoReactive<SharedString>) -> Text {
-    text(content).text_size(text_sm()).text_color(Colors::foreground())
+    text(content).sized(text_sm()).text_color(Colors::foreground())
 }
 
 /// A radius that makes a pill or dot of anything square.
@@ -335,7 +372,7 @@ pub fn tooltip(label: &'static str) -> Text {
     small(label)
         .bg(Colors::popover())
         .border_1()
-        .border_color(Colors::border())
+        .border_color(hairline())
         .rounded(Colors::radius())
         .px(Points(8.))
         .py(Points(4.))
