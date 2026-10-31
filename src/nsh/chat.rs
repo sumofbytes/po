@@ -356,10 +356,11 @@ fn menu_trigger(label: String, tip: &'static str) -> View {
         .flex_row()
         .items_center()
         .gap(scale::s1())
-        .px(scale::s2())
+        .px(scale::s3())
         .py(scale::s1())
-        .rounded(Colors::radius())
+        .rounded(super::pill())
         .cursor_pointer()
+        .smooth()
         .hover(|s| s.bg(Colors::hover()))
         .tooltip(tooltip(tip))
         .child(
@@ -367,8 +368,9 @@ fn menu_trigger(label: String, tip: &'static str) -> View {
                 .flex_row()
                 .items_center()
                 .gap(scale::s1())
-                .child(body(label).font_weight(FontWeight::MEDIUM))
-                .child(icon(IconName::ChevronDown, scale::s3(), Colors::muted())),
+                // What is set reads quieter than what is typed; the pill is what says "press".
+                .child(body(label).text_color(|| Colors::foreground()().opacity(crate::theme::tokens::HOVER)))
+                .child(icon(IconName::ChevronDown, scale::s3(), Colors::dim(Colors::muted()))),
         )
 }
 
@@ -1245,6 +1247,7 @@ fn send_button(snap: Snapshot, draft: Signal<String>) -> AnyElement {
         (IconName::ArrowUp, "Send now")
     };
     let busy = snap.busy;
+    let draft2 = draft.clone();
     view()
         .role(AccessibilityRole::Button)
         .label(tip)
@@ -1252,16 +1255,14 @@ fn send_button(snap: Snapshot, draft: Signal<String>) -> AnyElement {
         .flex_row()
         .items_center()
         .justify_center()
-        .w(scale::s7())
-        .h(scale::s7())
+        .w(scale::s8())
+        .h(scale::s8())
         .rounded(super::pill())
         .cursor_pointer()
-        .style_when(
-            move || !busy && draft.get_untracked().trim().is_empty(),
-            |s| s.opacity(crate::theme::tokens::DISABLED),
-        )
+        .smooth()
         .hover(|s| s.opacity(crate::theme::tokens::HOVER))
-        .bg(Colors::primary())
+        // Nothing to send: a neutral disc. Something to send: the accent.
+        .bg(move || if !busy && draft.get().trim().is_empty() { Colors::selected()() } else { Colors::primary()() })
         .tooltip(tooltip(tip))
         .on_press(move || {
             if busy {
@@ -1270,7 +1271,7 @@ fn send_button(snap: Snapshot, draft: Signal<String>) -> AnyElement {
                 pressed_send(&draft);
             }
         })
-        .child(icon(name, scale::s3_5(), Colors::primary_foreground()))
+        .child(icon(name, scale::s3_5(), move || if !busy && draft2.get().trim().is_empty() { Colors::muted()() } else { Colors::primary_foreground()() }))
         .into_element()
 }
 
@@ -1335,7 +1336,7 @@ fn bar(snap: Snapshot, draft: Signal<String>, field_ref: ElementRef) -> AnyEleme
     let has_pictures = !snap.pictures.is_empty();
     // The chips under the field: before the thread starts its agent is chosen here, after it the
     // agent is named; the settings and the Control menu follow, and the action ends the row.
-    let mut chips = view().flex_row().flex_wrap().items_center().gap(scale::s2()).flex_1().min_w_0();
+    let mut chips = view().flex_row().flex_wrap().items_center().gap(scale::s1()).flex_1().min_w_0();
     if snap.blank {
         chips = chips.child(setup(&snap));
     } else {
@@ -1344,7 +1345,7 @@ fn bar(snap: Snapshot, draft: Signal<String>, field_ref: ElementRef) -> AnyEleme
             .as_ref()
             .map(|id| snap.agents.iter().find(|(_, key)| key == id).map_or(id.clone(), |(name, _)| name.clone()))
             .unwrap_or_else(|| "Agent".to_string());
-        chips = chips.child(text(name).px(scale::s2()).sized(text_sm()).text_color(Colors::muted()));
+        chips = chips.child(text(name).px(scale::s3()).sized(text_sm()).text_color(Colors::dim(Colors::muted())));
     }
     if !snap.settings.is_empty() {
         chips = chips.children(setting_chips(&snap.settings, snap.busy));
@@ -1370,7 +1371,7 @@ fn bar(snap: Snapshot, draft: Signal<String>, field_ref: ElementRef) -> AnyEleme
         .child(
             view()
                 .flex_row()
-                .items_center()
+                .items_end()
                 .justify_between()
                 .gap(scale::s2())
                 .child(chips)
@@ -1389,8 +1390,8 @@ fn bar(snap: Snapshot, draft: Signal<String>, field_ref: ElementRef) -> AnyEleme
         .p(scale::s1())
         .rounded(super::surface_radius())
         .border_1()
-        .border_color(Colors::input_border())
-        .bg(Colors::selected())
+        .border_color(super::hairline())
+        .bg(Colors::hover())
         .shadow_lg()
         .child(core);
     column = column.child(shell);
