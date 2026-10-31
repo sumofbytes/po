@@ -38,16 +38,9 @@ pub struct Thread {
 }
 
 #[derive(Clone, PartialEq, Debug)]
-pub struct Branch {
-    pub name: String,
-    pub dirty: bool,
-}
-
-#[derive(Clone, PartialEq, Debug)]
 pub struct Project {
     pub id: u64,
     pub name: String,
-    pub branch: Option<Branch>,
     /// The one on screen has its name at full strength.
     pub active: bool,
     pub collapsed: bool,
@@ -229,7 +222,8 @@ fn thread_row(thread: &Thread, project: Option<&str>, close_tip: &'static str, i
         .child(on_hover(icon_button(IconName::Close, scale::s3(), close_tip, move || send(Cmd::CloseThread(pid, tid)))))
         .child(thread.ago.clone().map(|ago| text(ago).flex_none().sized(super::text_xs()).text_color(Colors::dim(Colors::muted()))))
         .child((thread.mark != Mark::Idle).then(|| mark(thread.mark)));
-    if selected { row.bg(Colors::selected()) } else { row.hover(|s| s.bg(Colors::hover())) }
+    // The selection takes the colour of the message bubbles; a hovered row only hints at it.
+    if selected { row.bg(Colors::hover()) } else { row.hover(|s| s.bg(|| Colors::hover()().opacity(0.6))) }
 }
 
 /// The day, quietly, over the threads of that day.
@@ -541,14 +535,13 @@ mod tests {
                 Project {
                     id: 1,
                     name: "po".into(),
-                    branch: Some(Branch { name: "nsh".into(), dirty: true }),
                     active: true,
                     collapsed: false,
                     closable: true,
                     threads: vec![thread(1, 10, "Port the sidebar", Mark::Running, true), thread(1, 11, "Old idea", Mark::Idle, false)],
                     fold: Some((false, 3)),
                 },
-                Project { id: 2, name: "other".into(), branch: None, active: false, collapsed: true, closable: true, threads: vec![], fold: None },
+                Project { id: 2, name: "other".into(), active: false, collapsed: true, closable: true, threads: vec![], fold: None },
             ],
             suggestions: vec![Suggestion { id: 7, text: "“Fix the build” wants to open /tmp/x".into(), yes: "Open" }],
             issues_open: false,

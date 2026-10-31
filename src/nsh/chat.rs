@@ -502,7 +502,10 @@ fn thought_gist(text_: &str) -> String {
     let line = line.trim_start_matches(['#', '*', '_', '-', '>', ' ']);
     // A numbered item reads without its number.
     let line = line.split_once(". ").filter(|(n, _)| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit())).map_or(line, |(_, rest)| rest);
-    line.replace(['*', '_', '`'], "")
+    // Emphasis marks go; an underscore inside a word is part of its name.
+    let gist = line.replace(['*', '`'], "");
+    let gist = gist.trim_matches('_');
+    gist.to_string()
 }
 
 /// The agent's reasoning: a quiet one-line row that opens to all of it in italics.
@@ -510,7 +513,10 @@ fn thought_row(message: usize, at: usize, text_: &str, open: bool) -> AnyElement
     let mut column = view().flex_col().gap(scale::s1()).child(
         view()
             .role(AccessibilityRole::Button)
-            .label(format!("Thinking: {}", thought_gist(text_)))
+            .label(match thought_gist(text_) {
+                gist if gist.is_empty() => "Thinking".to_string(),
+                gist => format!("Thinking: {gist}"),
+            })
             .flex_row()
             .items_center()
             .gap(scale::s2())
@@ -551,13 +557,13 @@ fn thought_row(message: usize, at: usize, text_: &str, open: bool) -> AnyElement
     column.into_element()
 }
 
-/// One call of the agent's tools: its glyph and title, what it sent and what came back once it
-/// is open, and a way to the file it touched.
 /// Whether `block` is a step of the agent's work, which sits close to the steps beside it.
 fn is_step(block: &Block) -> bool {
     matches!(block, Block::Tool(_) | Block::Run { .. } | Block::Thought { .. })
 }
 
+/// One call of the agent's tools: its glyph and title, what it sent and what came back once it
+/// is open, and a way to the file it touched.
 fn tool_row(message: usize, at: usize, tool: &Tool) -> AnyElement {
     let settled = tool.phase == Phase::Done;
     let title = tool.title.clone();

@@ -833,7 +833,6 @@ impl Activity {
     }
 }
 
-/// The time now in milliseconds since the Unix epoch.
 /// How long ago `then` (ms since the epoch) was, as the sidebar says it: `5m`, `3h`, `2d`, `6w`,
 /// `4mo`. Nothing for the last minute, and for a time that was never recorded.
 fn ago(now: u64, then: u64) -> Option<String> {
@@ -852,6 +851,7 @@ fn ago(now: u64, then: u64) -> Option<String> {
     })
 }
 
+/// The time now in milliseconds since the Unix epoch.
 fn now_ms() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
 }
@@ -4605,7 +4605,9 @@ impl Reader {
             Event::Stopped(reason) => {
                 self.thread.busy = false;
                 self.thread.unread = !visible;
-                if visible {
+                // Not while the user is typing somewhere else: a search, the settings, the finder
+                // or an issue.
+                if visible && self.side_query.is_empty() && !self.settings_open && !self.finder_open && !self.issues_open {
                     self.focus_draft(window, cx);
                 }
                 // A child's parent is told instead; the desktop hears of it only when nobody
@@ -5402,11 +5404,9 @@ impl Reader {
                 if collapsed {
                     recent.clear();
                 }
-                let head = self.heads.get(&view.project.root).filter(|_| view.project.shows_branch());
                 side::Project {
                     id: pid,
                     name: view.project.name(),
-                    branch: head.map(|head| side::Branch { name: head.name.to_string(), dirty: head.dirty }),
                     active: pid == active_project,
                     collapsed,
                     closable: many,

@@ -297,7 +297,7 @@ pub fn hairline() -> impl Fn() -> AdaptiveColor + Copy {
 
 /// The text of a row's label, GPUI's `text_base`.
 pub fn text_base() -> Points {
-    scale::s4()
+    font(1.)
 }
 
 /// A field's height.
@@ -312,12 +312,19 @@ pub fn header_height() -> Points {
 
 /// Small text, GPUI's `text_xs`: dates and counts.
 pub fn text_xs() -> Points {
-    scale::s3()
+    font(0.75)
 }
 
 /// GPUI's `text_sm`: the footer and quiet notes.
 pub fn text_sm() -> Points {
-    scale::s3_5()
+    font(0.875)
+}
+
+/// A font size of `n` rems, in whole points: spacing sits on an even grid, but text is free to
+/// take an odd size, so an odd UI font size or rem is followed as it is.
+fn font(n: f32) -> Points {
+    // Halves round down, as the even grid did for 10.5.
+    Points((n * nsh_base::theme().number("rem").unwrap_or(14.) - 0.5).ceil().max(1.))
 }
 
 /// The line height of text of `size`: the leading the fixed text sizes of GPUI have, which follows
