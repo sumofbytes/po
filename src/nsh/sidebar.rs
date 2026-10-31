@@ -216,7 +216,8 @@ fn thread_row(thread: &Thread, project: Option<&str>, close_tip: &'static str, i
     };
     let row = side_row(None)
         .ml(left)
-        .px(pad)
+        .pl(pad)
+        .pr(space::inset())
         .h(space::tree())
         .test_id(&format!("agent-thread-{tid}"))
         .on_press(move || send(Cmd::OpenThread(pid, tid)))
@@ -266,8 +267,9 @@ fn project_group(project: &Project) -> View {
         .hover(|s| s.bg(Colors::hover()))
         .on_press(move || send(Cmd::ToggleProject(pid)))
         .child(name)
-        .child(on_hover(icon_button(IconName::Plus, scale::s3(), "New thread in this project", move || send(Cmd::StartThread(pid)))))
-        .child(project.closable.then(|| on_hover(icon_button(IconName::Close, scale::s3(), "Close project", move || send(Cmd::CloseProject(pid))))));
+        // The last button's padding hangs out, so its icon ends where the text of the rows below does.
+        .child(on_hover(icon_button(IconName::Plus, scale::s3(), "New thread in this project", move || send(Cmd::StartThread(pid)))).mr(if project.closable { Points(0.) } else { -scale::s1() }))
+        .child(project.closable.then(|| on_hover(icon_button(IconName::Close, scale::s3(), "Close project", move || send(Cmd::CloseProject(pid)))).mr(-scale::s1())));
     let fold = project.fold.map(|(expanded, hidden)| {
         let label = if expanded { "Show less".to_string() } else { format!("{hidden} more") };
         let chevron = if expanded { IconName::ChevronUp } else { IconName::ChevronDown };
@@ -485,7 +487,8 @@ pub fn Sidebar() -> impl IntoElement {
                 .flex_1()
                 .child(section(
                     "Projects",
-                    Some(icon_button(IconName::Plus, scale::s3(), "Add a project: open a folder (Ctrl+Shift+O)", || send(Cmd::AddProject))),
+                    // The button's padding hangs out, so its icon ends where the text of the rows below does.
+                    Some(icon_button(IconName::Plus, scale::s3(), "Add a project: open a folder (Ctrl+Shift+O)", || send(Cmd::AddProject)).mr(-scale::s1())),
                 ))
                 .child(dynamic(move || {
                     state.with(|s| s.status.clone()).map(|status| {
