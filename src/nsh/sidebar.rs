@@ -223,7 +223,7 @@ fn thread_row(thread: &Thread, project: Option<&str>, close_tip: &'static str, i
         .child(thread.ago.clone().map(|ago| text(ago).flex_none().sized(super::text_xs()).text_color(Colors::dim(Colors::muted()))))
         .child((thread.mark != Mark::Idle).then(|| mark(thread.mark)));
     // The selection takes the colour of the message bubbles; a hovered row only hints at it.
-    if selected { row.bg(Colors::hover()) } else { row.hover(|s| s.bg(|| Colors::hover()().opacity(0.6))) }
+    if selected { row.bg(Colors::hover()) } else { row.hover(|s| s.bg(Colors::hint())) }
 }
 
 /// The day, quietly, over the threads of that day.
@@ -287,9 +287,9 @@ fn project_group(project: &Project) -> View {
                         .top(scale::s1())
                         .bottom(scale::s1())
                         .left(space::inset() + space::lead() / 2. - Points(1.))
-                        .w(Points(2.))
+                        .w(scale::s0_5())
                         .rounded(super::pill())
-                        .bg(|| Colors::border()().opacity(0.4)),
+                        .bg(Colors::guide()),
                 )
                 .child(
                     project

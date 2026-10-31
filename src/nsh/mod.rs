@@ -169,6 +169,16 @@ impl Colors {
         Self::token("list-hover")
     }
 
+    /// A row's hover when the selected row already wears [`Colors::hover`]: a hint of it.
+    pub fn hint() -> impl Fn() -> AdaptiveColor + Copy {
+        move || Self::hover()().opacity(0.6)
+    }
+
+    /// The guide line down a project's threads.
+    pub fn guide() -> impl Fn() -> AdaptiveColor + Copy {
+        move || Self::border()().opacity(0.4)
+    }
+
     pub fn input_background() -> impl Fn() -> AdaptiveColor + Copy {
         Self::token("input-background")
     }
