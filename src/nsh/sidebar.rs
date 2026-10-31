@@ -374,28 +374,23 @@ pub fn Sidebar() -> impl IntoElement {
     let search = move || {
         let filled = !query.get().is_empty();
         let in_use = filled || focused.get();
-        view()
+        // The row of the other actions, so its icon, gap and text line up with theirs.
+        side_row(Some(lead(icon(IconName::Search, scale::s4(), Colors::muted()))))
             .h(space::row())
-            .flex_row()
-            .items_center()
-            .gap(scale::s2())
-            .px(space::inset())
-            .rounded(super::soft_radius())
             .on_press(move || field.focus())
-            .smooth()
             .hover(|s| s.bg(Colors::hover()))
             .style_when(in_use, |s| s.bg(Colors::hover()))
-            .child(lead(icon(IconName::Search, scale::s4(), Colors::muted())))
             .child(
                 nsh_core::element::input()
                     .test_id("sidebar-search")
                     .element_ref(&field)
                     .value(move || query.get())
                     .placeholder("Search")
-                    .placeholder_color(Colors::one(Colors::muted()))
+                    // As quiet as the labels of the actions around it, and the typed text as full.
+                    .placeholder_color(Colors::one(|| Colors::foreground()().opacity(crate::theme::tokens::HOVER)))
                     .selection_color(Colors::one(Colors::caret()))
-                    .text_size(text_base())
-                    .text_color(Colors::muted())
+                    .sized(text_base())
+                    .text_color(Colors::foreground())
                     .auto_correct(false)
                     .on_focus(move || focused.set(true))
                     .on_blur(move || focused.set(false))
