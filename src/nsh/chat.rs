@@ -24,18 +24,6 @@ pub enum Phase {
     Failed,
 }
 
-impl Phase {
-    /// The glyph that stands for it.
-    pub fn glyph(self) -> &'static str {
-        match self {
-            Self::Waiting => "○",
-            Self::Working => "◐",
-            Self::Done => "✓",
-            Self::Failed => "✕",
-        }
-    }
-}
-
 /// How far a thread's agent may reach through Po's API.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Scope {
@@ -322,9 +310,18 @@ fn separator() -> AnyElement {
 
 /// The glyph that walks with it, in its tone.
 fn step_glyph(phase: Phase) -> View {
-    // A fixed width, so the text beside it stays put as the glyph changes from one phase to the next.
-    view().flex_none().w(scale::s4()).flex_row().justify_center().child(text(phase.glyph().to_string()).text_color(phase_tint(phase)))
+    let name = match phase {
+        Phase::Waiting => IconName::Circle,
+        Phase::Working => IconName::CircleHalf,
+        Phase::Done => IconName::CircleCheck,
+        Phase::Failed => IconName::CircleX,
+    };
+    // A fixed slot, so the text beside it stays put as the glyph changes from one phase to the next.
+    lead_slot(icon(name, STEP_ICON, move || phase_tint(phase)))
 }
+
+/// The size of every icon of a step: its status, its chevron and its file.
+const STEP_ICON: Points = Points(14.);
 
 /// A fixed slot for the small icon at the start of a step, as wide as [`step_glyph`], so the text
 /// of every step starts on one line.
@@ -335,7 +332,7 @@ fn lead_slot(content: impl IntoElement) -> View {
 /// A fixed slot for what ends a step, as wide as the button that opens the file of a tool call
 /// (its icon and the padding of that button), so the ends of the steps line up too.
 fn trail_slot(content: impl IntoElement) -> View {
-    view().flex_none().w(scale::s7()).flex_row().justify_center().child(content)
+    view().flex_none().w(scale::s2() + scale::s2() + STEP_ICON).flex_row().justify_center().child(content)
 }
 
 /// The popovers of the menus: the theme's own surface, with a shadow.
@@ -525,7 +522,7 @@ fn thought_row(message: usize, at: usize, text_: &str, open: bool) -> AnyElement
             .smooth()
             .hover(|s| s.bg(Colors::hover()))
             .on_press(move || tell(Cmd::ToggleThought { message, block: at }))
-            .child(lead_slot(icon(if open { IconName::ChevronDown } else { IconName::ChevronRight }, scale::s3(), Colors::muted())))
+            .child(lead_slot(icon(if open { IconName::ChevronDown } else { IconName::ChevronRight }, STEP_ICON, Colors::muted())))
             .child(text("Thinking").flex_none().sized(text_sm()).font_weight(FontWeight::MEDIUM).text_color(Colors::muted()))
             .children((!open).then(|| {
                 text(thought_gist(text_))
@@ -611,7 +608,7 @@ fn tool_row(message: usize, at: usize, tool: &Tool) -> AnyElement {
                         .cursor_pointer()
                         .hover(|s| s.bg(Colors::hover()))
                         .on_press(move || tell(Cmd::Open(path.clone())))
-                        .child(icon(IconName::FileText, scale::s3(), Colors::muted()))
+                        .child(icon(IconName::FileText, STEP_ICON, Colors::muted()))
                 })),
         );
     if tool.open {
@@ -660,7 +657,7 @@ fn run_row(message: usize, at: usize, count: usize, phase: Phase, folded: bool) 
         .on_press(move || tell(Cmd::Fold { message, block: at, folded: !folded }))
         .child(step_glyph(phase))
         .child(text(label).flex_1().sized(text_sm()).text_color(Colors::muted()))
-        .child(trail_slot(icon(if folded { IconName::ChevronRight } else { IconName::ChevronDown }, scale::s3(), Colors::muted())))
+        .child(trail_slot(icon(if folded { IconName::ChevronRight } else { IconName::ChevronDown }, STEP_ICON, Colors::muted())))
         .into_element()
 }
 
