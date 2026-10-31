@@ -766,21 +766,18 @@ impl Thread {
                 }
             }
             Some("tool_call") => {
-                let task = self.blocks().iter().find_map(|b| match b {
-                    Block::Plan(entries) => entries.iter().find(|(_, step)| *step == Step::Working).map(|(text, _)| text.clone()),
-                    _ => None,
-                });
+                let task = task_in_progress(&self.messages);
                 self.blocks().push(Block::Tool(ToolBlock {
-                id: update["toolCallId"].as_str().unwrap_or_default().to_string(),
-                title: update["title"].as_str().unwrap_or("Tool").to_string(),
-                status: step(update["status"].as_str().unwrap_or("pending")),
-                open: false,
-                fold: None,
-                task,
-                arguments: pretty(&update["rawInput"]),
-                result: tool_result(update),
-                path: touched(update),
-            }))
+                    id: update["toolCallId"].as_str().unwrap_or_default().to_string(),
+                    title: update["title"].as_str().unwrap_or("Tool").to_string(),
+                    status: step(update["status"].as_str().unwrap_or("pending")),
+                    open: false,
+                    fold: None,
+                    task,
+                    arguments: pretty(&update["rawInput"]),
+                    result: tool_result(update),
+                    path: touched(update),
+                }))
             }
             Some("tool_call_update") => {
                 let id = update["toolCallId"].as_str().unwrap_or_default();
@@ -6206,6 +6203,23 @@ fn chat_phase(step: Step) -> nsh::chat::Phase {
     }
 }
 
+/// The plan entry in progress in the latest plan, which a call that begins now works towards.
+fn task_in_progress(messages: &[Msg]) -> Option<String> {
+    let entries = messages.iter().rev().find_map(|msg| match msg {
+        Msg::Agent(blocks) => blocks.iter().find_map(|b| if let Block::Plan(entries) = b { Some(entries) } else { None }),
+        _ => None,
+    })?;
+    entries.iter().find(|(_, step)| *step == Step::Working).map(|(text, _)| text.clone())
+}
+
+/// The plan task a run of calls worked towards: the one task its calls name, none when they name
+/// no task or span several.
+fn run_task(run: &[Block]) -> Option<String> {
+    let mut tasks = run.iter().filter_map(|b| if let Block::Tool(tool) = b { tool.task.as_deref() } else { None });
+    let first = tasks.next()?;
+    tasks.all(|task| task == first).then(|| first.to_string())
+}
+
 /// One agent message's blocks for the conversation drawn by NSH. Runs of three or more tool calls
 /// also carry the row that folds them; the calls stay in place either way, so the indexes their
 /// answers are told by hold.
@@ -6218,7 +6232,7 @@ fn chat_blocks(blocks: &[Block]) -> Vec<nsh::chat::Block> {
         if len >= 3 {
             let run = &blocks[n..n + len];
             let (phase, failed) = run_outcome(run);
-            let task = if let Some(Block::Tool(first)) = run.first() { first.task.clone() } else { None };
+            let task = run_task(run);
             out.push(nsh::chat::Block::Run { index: n, count: len, failed, phase: chat_phase(phase), folded: run_folded(run), task });
             for (k, block) in run.iter().enumerate() {
                 if let Block::Tool(tool) = block {
@@ -6694,7 +6708,7 @@ mod tests {
         }
     }
 
-    use super::{Queue, Where, ago, route};
+    use super::{Queue, Where, ago, route, run_task, task_in_progress};
 
     #[test]
     fn the_sidebar_says_how_long_ago_in_a_word() {
@@ -6866,6 +6880,27 @@ mod tests {
     fn names_only_fall_back_to_the_first_allow() {
         let options = vec![option("Allow once", ""), option("Allow for session", ""), option("Deny", "")];
         assert_eq!(primary_option(&options), Some(0));
+    }
+
+    fn tool_for(task: Option<&str>) -> Block {
+        Block::Tool(ToolBlock { id: String::new(), title: "call".into(), status: Step::Done, open: false, fold: None, task: task.map(str::to_string), arguments: String::new(), result: String::new(), path: None })
+    }
+
+    #[test]
+    fn a_run_is_named_by_the_one_task_its_calls_work_towards() {
+        assert_eq!(run_task(&[tool_for(None), tool_for(Some("Fix it")), tool_for(Some("Fix it"))]), Some("Fix it".to_string()));
+        assert_eq!(run_task(&[tool_for(None), tool_for(None)]), None);
+        assert_eq!(run_task(&[tool_for(Some("A")), tool_for(Some("B")), tool_for(Some("B"))]), None);
+    }
+
+    #[test]
+    fn a_call_takes_the_task_in_progress_in_the_latest_plan() {
+        let mut messages = vec![Msg::Agent(vec![Block::Plan(vec![("Read".into(), Step::Done), ("Fix it".into(), Step::Working)])])];
+        assert_eq!(task_in_progress(&messages), Some("Fix it".to_string()));
+        messages.push(Msg::User("go on".into(), vec![]));
+        messages.push(Msg::Agent(vec![Block::Plan(vec![("Fix it".into(), Step::Done)])]));
+        assert_eq!(task_in_progress(&messages), None);
+        assert_eq!(task_in_progress(&[]), None);
     }
 
     fn tool(title: &str, status: Step) -> Block {

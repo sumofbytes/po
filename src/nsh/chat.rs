@@ -651,17 +651,19 @@ fn run_row(message: usize, at: usize, count: usize, failed: usize, phase: Phase,
     // The task the calls work towards, when the plan names one; the count then follows it.
     let label = task.map_or_else(|| calls.clone(), str::to_string);
     // A failure the run got past is a quiet count after the label, not a failed run.
-    let mut aside = String::new();
+    let mut aside: Vec<String> = Vec::new();
     if task.is_some() {
-        aside = format!("· {calls}");
+        aside.push(calls);
     }
     if failed > 0 && phase != Phase::Failed {
-        aside = if aside.is_empty() { format!("· {failed} failed") } else { format!("{aside} · {failed} failed") };
+        aside.push(format!("{failed} failed"));
     }
-    let aside = (!aside.is_empty()).then_some(aside);
+    let aside = (!aside.is_empty()).then(|| format!("· {}", aside.join(" · ")));
+    // What is read out is all the row says.
+    let spoken = aside.as_ref().map_or_else(|| label.clone(), |aside| format!("{label} {aside}"));
     view()
         .role(AccessibilityRole::Button)
-        .label(label.clone())
+        .label(spoken)
         .flex_row()
         .items_center()
         .gap(scale::s2())
@@ -674,7 +676,7 @@ fn run_row(message: usize, at: usize, count: usize, failed: usize, phase: Phase,
         .hover(|s| s.bg(Colors::hover()))
         .on_press(move || tell(Cmd::Fold { message, block: at, folded: !folded }))
         .child(step_glyph(phase))
-        .child(text(label).sized(text_sm()).text_color(Colors::muted()))
+        .child(text(label).min_w_0().sized(text_sm()).text_color(Colors::muted()))
         .children(aside.map(|aside| text(aside).sized(text_sm()).text_color(Colors::muted())))
         .child(view().flex_1())
         .child(trail_slot(icon(if folded { IconName::ChevronRight } else { IconName::ChevronDown }, STEP_ICON, Colors::muted())))
@@ -1630,6 +1632,23 @@ mod tests {
 
     fn tool(index: usize) -> Block {
         Block::Tool(Tool { index, title: format!("call {index}"), phase: Phase::Done, open: false, arguments: String::new(), result: String::new(), path: None })
+    }
+
+    #[test]
+    fn a_run_with_a_task_is_named_by_it_and_says_its_calls_and_failures() {
+        let mut guard = crate::nsh::bus::lock();
+        let commands = guard.as_mut().expect("the channel");
+        let run = |task: Option<&str>, failed| {
+            let blocks = vec![Block::Run { index: 0, count: 4, failed, phase: Phase::Done, folded: true, task: task.map(str::to_string) }];
+            start(Snapshot { items: vec![Item::Agent { index: 0, blocks }], ..Snapshot::default() })
+        };
+        // The row's spoken name is all it says: the task, then the calls and the failures.
+        let mut app = run(Some("Fix the parser"), 1);
+        app.press("label:Fix the parser · 4 tool calls · 1 failed").unwrap();
+        assert_eq!(drain(&mut app, commands), [Bus::Chat(Cmd::Fold { message: 0, block: 0, folded: false })]);
+        let mut app = run(None, 0);
+        app.press("label:4 tool calls").unwrap();
+        assert_eq!(drain(&mut app, commands), [Bus::Chat(Cmd::Fold { message: 0, block: 0, folded: false })]);
     }
 
     fn drain(app: &mut Headless, commands: &mut tokio::sync::mpsc::UnboundedReceiver<Bus>) -> Vec<Bus> {
