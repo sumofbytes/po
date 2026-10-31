@@ -4587,6 +4587,9 @@ impl Reader {
             Event::Stopped(reason) => {
                 self.thread.busy = false;
                 self.thread.unread = !visible;
+                if visible {
+                    self.focus_draft(window, cx);
+                }
                 // A child's parent is told instead; the desktop hears of it only when nobody
                 // is waiting on the child.
                 let parent_hears = self.thread.parent.is_some() && self.thread.notify != Notify::Never;
