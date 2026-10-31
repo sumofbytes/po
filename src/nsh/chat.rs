@@ -448,7 +448,7 @@ fn grant_menu(grant: Grant) -> AnyElement {
 /// the same lines: the column's, the space outside it, and from the composer card's edge to its
 /// text (the card's 1px border, its 0.5rem padding and the field's 0.5rem): `scale::s3` outside the
 /// column and `scale::composer_text_inset` inside.
-const COLUMN: f32 = 860.;
+const COLUMN: f32 = 760.;
 
 /// A message the user sent, in a rounded column at the right: its pictures, then its text.
 fn user_row(text_: &str, pictures: &[Picture]) -> AnyElement {
@@ -507,6 +507,7 @@ fn thought_row(message: usize, at: usize, text_: &str, open: bool) -> AnyElement
             .gap(scale::s2())
             .py(scale::s1())
             .px(scale::s3())
+            .mx(-scale::s3())
             .cursor_pointer()
             .rounded(STEP_RADIUS)
             .smooth()
@@ -559,6 +560,7 @@ fn tool_row(message: usize, at: usize, tool: &Tool) -> AnyElement {
         .gap(scale::s1())
         .py(scale::s1())
         .px(scale::s3())
+        .mx(-scale::s3())
         .rounded(STEP_RADIUS)
         .smooth()
         .hover(|s| s.bg(Colors::hover()))
@@ -636,6 +638,7 @@ fn run_row(message: usize, at: usize, count: usize, phase: Phase, folded: bool) 
         .gap(scale::s2())
         .py(scale::s1())
         .px(scale::s3())
+        .mx(-scale::s3())
         .rounded(STEP_RADIUS)
         .cursor_pointer()
         .smooth()
