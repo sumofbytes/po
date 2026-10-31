@@ -30,7 +30,7 @@ impl Reader {
                 Activity::Asking => side::Mark::Asking,
             },
             selected: (pid, thread.id) == (active_project, active_thread),
-            controlled: self.grants.get(&thread.id).is_some_and(|grant| *grant != command::Grant::default()),
+            controlled: self.grants.get(&thread.id).is_some_and(|grant| grant.read_project || grant.approvals),
             day: None,
             ago: ago(now_ms(), thread.active_at),
         };
@@ -209,10 +209,18 @@ impl Reader {
         if let Some(line) = self.children_status(thread.id) {
             statuses.push(line);
         }
-        if !thread.status.is_empty() {
+        let state = (!thread.status.is_empty()).then(|| {
+            use crate::state::ThreadState as S;
+            let tone = match crate::state::state(&thread.facts()) {
+                S::Ready | S::Asleep | S::Closed => chat::Tone::Idle,
+                S::Starting | S::Running => chat::Tone::Working,
+                S::Approval | S::Asking => chat::Tone::Attention,
+                S::Failed => chat::Tone::Failed,
+            };
             // "ready" is set when the agent starts and nothing resets it, so a turn going on says so here.
-            statuses.push(thread.status.clone());
-        }
+            let text = if tone == chat::Tone::Working && thread.status == "ready" { "working" } else { thread.status.as_str() };
+            (tone, text.to_string())
+        });
         let picking = thread.picking.then(|| match &thread.sessions {
             Some(sessions) if !thread.loading && !sessions.is_empty() => chat::Picking::Sessions(sessions.iter().map(|session| chat::Session {
                 id: session.id.clone(),
@@ -222,13 +230,14 @@ impl Reader {
             Some(_) if !thread.loading => chat::Picking::Note(format!("No sessions to resume in {}", self.project.root.display())),
             _ => chat::Picking::Loading,
         });
-        let grant = self.grants.get(&thread.id).copied().unwrap_or_default();
+        let grant = self.grants.get(&thread.id).copied().unwrap_or_else(command::Grant::initial);
         chat::Snapshot {
             glass: cx.global::<Palette>().glass.is_some(),
             title: capitalized(thread.title()),
             lead,
             trail,
             statuses,
+            state,
             blank: thread.blank,
             busy,
             steer: thread.client.as_ref().is_some_and(|client| client.queues()),
@@ -317,7 +326,7 @@ impl Reader {
             }
             Chat::Grant(change) => {
                 let id = self.thread.id;
-                let grant = self.grants.get(&id).copied().unwrap_or_default();
+                let grant = self.grants.get(&id).copied().unwrap_or_else(command::Grant::initial);
                 match change {
                     GrantChange::Set(set) => {
                         let scope = match set.scope {
@@ -335,7 +344,7 @@ impl Reader {
                 // started: it starts again so that the first message goes out under this grant.
                 if self.thread.blank
                     && self.thread.client.is_some()
-                    && self.grants.get(&id).copied().unwrap_or_default() != grant
+                    && self.grants.get(&id).copied().unwrap_or_else(command::Grant::initial) != grant
                     && let Some(key) = self.thread.agent.clone().or_else(|| self.chosen().map(|agent| agent.id.clone()))
                 {
                     log::info!("agent: blank thread restarts {key} under its new grant");

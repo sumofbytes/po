@@ -176,6 +176,18 @@ pub enum Picking {
     Loading,
 }
 
+/// What the header's status icon says.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Tone {
+    /// Ready, or asleep.
+    Idle,
+    /// Starting, or a turn going on.
+    Working,
+    /// Waiting on the user.
+    Attention,
+    Failed,
+}
+
 #[derive(Clone, PartialEq, Debug, Default)]
 pub struct Snapshot {
     pub glass: bool,
@@ -184,6 +196,8 @@ pub struct Snapshot {
     pub trail: Vec<Control>,
     /// The status lines of the header's right, like `3 threads · 1 asking`.
     pub statuses: Vec<String>,
+    /// How the thread itself is doing, drawn as an icon; `None` before it has anything to say.
+    pub state: Option<(Tone, String)>,
     /// Nothing on screen yet: the agent is picked below, and the thread starts when something
     /// is sent.
     pub blank: bool,
@@ -402,8 +416,28 @@ fn item(what: String, on_press: impl Fn() + 'static) -> AnyElement {
 
 /// A line in a header, like `3 threads · 1 asking`.
 fn status_line(line: String) -> View {
-    // The height of the History chip beside it, so the two sit on one rhythm.
+    // The height of the History button beside it, so the two sit on one rhythm.
     view().flex_none().px(scale::s2()).py(scale::s1()).child(text(super::sentence(&line)).sized(text_sm()).text_color(Colors::muted()).number_of_lines(1))
+}
+
+/// The thread's state as an icon in the header's right, its words in the tooltip. Idle shows
+/// nothing, and the shapes differ so the state doesn't rest on color alone.
+fn status_icon(tone: Tone, text: &str) -> Option<View> {
+    let (name, color): (IconName, fn() -> AdaptiveColor) = match tone {
+        Tone::Idle => return None,
+        Tone::Working => (IconName::CircleHalf, || Colors::warning()()),
+        Tone::Attention => (IconName::CircleDot, || Colors::info()()),
+        Tone::Failed => (IconName::CircleX, || Colors::danger()()),
+    };
+    Some(
+        view()
+            .role(AccessibilityRole::Image)
+            .label(text.to_string())
+            .flex_none()
+            .p(scale::s1_5())
+            .tooltip(tooltip(text.to_string()))
+            .child(icon(name, scale::s3_5(), color)),
+    )
 }
 
 /// The pane header of the conversation: the title, the statuses, the history button, the Control
@@ -413,27 +447,11 @@ fn pane(title: String, snap: &Snapshot) -> View {
     for line in &snap.statuses {
         right = right.child(status_line(line.clone()));
     }
+    if let Some((tone, text)) = &snap.state {
+        right = right.child(status_icon(*tone, text));
+    }
     if snap.picking.is_none() {
-        right = right.child(
-            view()
-                .role(AccessibilityRole::Button)
-                .label("History")
-                .flex_none()
-                .flex_row()
-                .items_center()
-                .gap(scale::s1_5())
-                .px(scale::s3())
-                .py(scale::s1())
-                .rounded(super::pill())
-                .bg(Colors::hover())
-                .cursor_pointer()
-                .smooth()
-                .hover(|s| s.bg(Colors::selected()))
-                .on_press(|| tell(Cmd::History))
-                .tooltip(tooltip("Resume an earlier session (Ctrl+Shift+H)"))
-                .child(icon(IconName::History, scale::s3(), Colors::muted()))
-                .child(body("History").text_color(Colors::muted())),
-        );
+        right = right.child(super::header::toggle_button(IconName::History, "Resume an earlier session (Ctrl+Shift+H)", false, || tell(Cmd::History)));
     }
     // The Control menu, once the thread's agent may do more than talk.
     if let Some(grant) = snap.grant.filter(|grant| *grant != Grant::default()) {
