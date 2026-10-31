@@ -188,6 +188,8 @@ struct ToolBlock {
     /// On the first call of a run of three or more: whether the run is folded to one line. `None`
     /// leaves it to `run_folded`'s default, until the user clicks the run's header.
     fold: Option<bool>,
+    /// The plan entry that was in progress when the call began: what the call is working towards.
+    task: Option<String>,
     arguments: String,
     result: String,
     path: Option<String>,
@@ -763,16 +765,23 @@ impl Thread {
                     None => blocks.push(Block::Plan(entries)),
                 }
             }
-            Some("tool_call") => self.blocks().push(Block::Tool(ToolBlock {
+            Some("tool_call") => {
+                let task = self.blocks().iter().find_map(|b| match b {
+                    Block::Plan(entries) => entries.iter().find(|(_, step)| *step == Step::Working).map(|(text, _)| text.clone()),
+                    _ => None,
+                });
+                self.blocks().push(Block::Tool(ToolBlock {
                 id: update["toolCallId"].as_str().unwrap_or_default().to_string(),
                 title: update["title"].as_str().unwrap_or("Tool").to_string(),
                 status: step(update["status"].as_str().unwrap_or("pending")),
                 open: false,
                 fold: None,
+                task,
                 arguments: pretty(&update["rawInput"]),
                 result: tool_result(update),
                 path: touched(update),
-            })),
+            }))
+            }
             Some("tool_call_update") => {
                 let id = update["toolCallId"].as_str().unwrap_or_default();
                 for msg in self.messages.iter_mut().rev() {
@@ -6209,7 +6218,8 @@ fn chat_blocks(blocks: &[Block]) -> Vec<nsh::chat::Block> {
         if len >= 3 {
             let run = &blocks[n..n + len];
             let (phase, failed) = run_outcome(run);
-            out.push(nsh::chat::Block::Run { index: n, count: len, failed, phase: chat_phase(phase), folded: run_folded(run) });
+            let task = if let Some(Block::Tool(first)) = run.first() { first.task.clone() } else { None };
+            out.push(nsh::chat::Block::Run { index: n, count: len, failed, phase: chat_phase(phase), folded: run_folded(run), task });
             for (k, block) in run.iter().enumerate() {
                 if let Block::Tool(tool) = block {
                     out.push(nsh::chat::Block::Tool(chat_tool(n + k, tool)));
@@ -6859,7 +6869,7 @@ mod tests {
     }
 
     fn tool(title: &str, status: Step) -> Block {
-        Block::Tool(ToolBlock { id: String::new(), title: title.into(), status, open: false, fold: None, arguments: String::new(), result: String::new(), path: None })
+        Block::Tool(ToolBlock { id: String::new(), title: title.into(), status, open: false, fold: None, task: None, arguments: String::new(), result: String::new(), path: None })
     }
 
     #[test]
