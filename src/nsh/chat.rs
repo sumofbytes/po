@@ -978,28 +978,24 @@ fn pictures_row(pictures: &[Picture]) -> AnyElement {
 }
 
 /// One message waiting to be sent when the turn is over: its kind, what it says, and the
-/// take-back and drop buttons.
+/// take-back button. The rows share the tray that sits on the composer (see [`bar`]).
 fn queue_row(queued: Queued) -> AnyElement {
     let mut row = view()
         .flex_row()
         .items_center()
         .gap(scale::s2())
         .px(scale::s3())
-        .py(scale::s1_5())
-        .rounded(super::surface_radius())
-        .border_1()
-        .border_color(super::hairline())
-        .bg(Colors::selected());
-    row = if queued.kind.is_empty() {
-        row.child(text("Queued").flex_none().sized(text_xs()).font_weight(FontWeight::MEDIUM).text_color(Colors::muted()))
-    } else {
-        row.child(text(queued.kind.clone()).flex_none().sized(text_xs()).font_weight(FontWeight::MEDIUM).text_color(Colors::muted()))
-    };
+        .py(scale::s1_5());
+    // A fixed width, so the messages of every row start at the same place.
+    let kind = if queued.kind.is_empty() { "Queued".to_string() } else { queued.kind.clone() };
+    row = row.child(text(kind).w(px(56.)).flex_none().sized(text_xs()).font_weight(FontWeight::MEDIUM).text_color(Colors::muted()));
     row = if queued.text.is_empty() {
         let word = if queued.pictures == 1 { "1 picture".to_string() } else { format!("{} pictures", queued.pictures) };
         row.child(text(word).flex_1().min_w_0().sized(text_sm()).text_color(Colors::muted()))
     } else {
-        row.child(text_view().markdown(queued.text.clone()).flex_1().min_w_0().sized(text_sm()).text_color(Colors::foreground()))
+        // One line, whatever the message: its line breaks fold into spaces and the end is cut.
+        let line = queued.text.split_whitespace().collect::<Vec<_>>().join(" ");
+        row.child(text(line).number_of_lines(1).flex_1().min_w_0().sized(text_sm()).text_color(Colors::foreground()))
     };
     row = row
         .child(
@@ -1387,13 +1383,16 @@ fn bar(snap: Snapshot, draft: Signal<String>, field_ref: ElementRef) -> AnyEleme
     }
     // One card: the field, the chips and the send. The inset of its text is
     // `scale::composer_text_inset`.
+    let queued = !snap.queue.is_empty();
     let core = view()
         .flex_col()
         .gap(scale::s2())
         .w_full()
         .max_w(px(COLUMN))
         .p(scale::s2())
-        .rounded(super::surface_radius())
+        .rounded_b(super::surface_radius())
+        // Under a queue tray the top edge is flat, so the two read as one piece.
+        .rounded_t(if queued { Points(0.) } else { super::surface_radius() })
         .border_1()
         // The input's own border, firmer than the hairlines of the page, so the card reads as
         // the place to type.
@@ -1422,10 +1421,26 @@ fn bar(snap: Snapshot, draft: Signal<String>, field_ref: ElementRef) -> AnyEleme
     if let Some(picking) = snap.picking.as_ref().filter(|picking| **picking != Picking::Loading) {
         column = column.child(view().w_full().max_w(px(COLUMN)).child(picker(picking)));
     }
-    if !snap.queue.is_empty() {
-        column = column.child(view().w_full().max_w(px(COLUMN)).flex_col().gap(scale::s1()).child(snap.queue.iter().cloned().map(queue_row).collect::<Vec<_>>()));
+    if queued {
+        // The waiting messages sit on the composer as a tray: its sides and top carry the
+        // composer's border, its bottom is the composer's top edge.
+        let tray = view()
+            .w_full()
+            .max_w(px(COLUMN))
+            .flex_col()
+            .gap(scale::s0_5())
+            .py(scale::s1())
+            .rounded_t(super::surface_radius())
+            .border_t_1()
+            .border_l_1()
+            .border_r_1()
+            .border_color(Colors::input_border())
+            .bg(Colors::selected())
+            .child(snap.queue.iter().cloned().map(queue_row).collect::<Vec<_>>());
+        column = column.child(view().w_full().max_w(px(COLUMN)).flex_col().child(tray).child(core));
+    } else {
+        column = column.child(core);
     }
-    column = column.child(core);
     column.into_element()
 }
 
