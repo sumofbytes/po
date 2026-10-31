@@ -851,6 +851,20 @@ fn ago(now: u64, then: u64) -> Option<String> {
     })
 }
 
+/// `title` with its first letter in capitals when it opens with a plain word, as "fix the build"
+/// does. One that opens with a path, a command or an identifier (`src/main.rs`, `cargo test`,
+/// `snake_case`, `v2`) is left as typed.
+fn capitalized(title: String) -> String {
+    let word = title.split_whitespace().next().unwrap_or("").trim_end_matches([',', ':', ';', '.', '?', '!']);
+    // `cargo test` is a command, though `cargo` is a plain word.
+    let plain = !word.is_empty() && word.chars().all(|c| c.is_lowercase()) && !title.starts_with(char::is_uppercase);
+    let command = ["cargo", "git", "npm", "pnpm", "yarn", "make", "cd", "ls", "sudo", "gh", "docker", "kubectl", "rustc", "python", "node"];
+    match title.chars().next() {
+        Some(first) if plain && !command.contains(&word) => first.to_uppercase().chain(title.chars().skip(1)).collect(),
+        _ => title,
+    }
+}
+
 /// The time now in milliseconds since the Unix epoch.
 fn now_ms() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
@@ -6000,7 +6014,7 @@ impl Reader {
     fn thread_label(&self, thread: &Thread) -> String {
         match thread.parent.and_then(|parent| self.title_of(parent)) {
             Some(parent) => format!("↳ {parent}"),
-            None => thread.title(),
+            None => capitalized(thread.title()),
         }
     }
 
@@ -6638,6 +6652,17 @@ fn preview_of(messages: &[Msg], busy: bool) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_thread_title_opens_with_a_capital_unless_it_is_code() {
+        let cap = |t: &str| super::capitalized(t.to_string());
+        assert_eq!(cap("fix the build"), "Fix the build");
+        assert_eq!(cap("why, though?"), "Why, though?");
+        assert_eq!(cap("Already fine"), "Already fine");
+        for as_typed in ["src/main.rs is slow", "cargo test fails", "snake_case rename", "v2 plan", "#115 review", "…", ""] {
+            assert_eq!(cap(as_typed), as_typed);
+        }
+    }
+
     use super::{Queue, Where, ago, route};
 
     #[test]
