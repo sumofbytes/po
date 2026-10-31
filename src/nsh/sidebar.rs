@@ -437,7 +437,7 @@ pub fn Sidebar() -> impl IntoElement {
                 .justify_center()
                 .px(scale::s1_5())
                 .rounded(super::pill())
-                .bg(Colors::hover())
+                .bg(Colors::selected())
                 // Out to the edge of the row's highlight, where the rows of the tree end.
                 .mr(-space::inset())
                 .tooltip(super::tooltip(if late > 0 { "Some are late" } else { "Open issues" }))
@@ -512,6 +512,8 @@ pub fn Sidebar() -> impl IntoElement {
                         // A box of its own, so it reads as a button; its edge ends at the edge of the highlight of the rows below.
                         .border_1()
                         .border_color(super::hairline())
+                        // The border is drawn inside the button; hung out, it leaves the header as tall as before.
+                        .my(px(-1.))
                         .mr(-space::inset())),
                 ))
                 .child(dynamic(move || {
