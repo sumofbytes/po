@@ -194,7 +194,16 @@ impl Colors {
 /// `n` rems, a rem being Po's UI font size, as GPUI's `rems` are in the rest of the window. Only
 /// [`scale`] calls it: a screen takes its lengths from there, so spacing stays on one scale.
 fn rems(n: f32) -> Points {
-    Points(n * nsh_base::theme().number("rem").unwrap_or(14.))
+    Points(snap(n * nsh_base::theme().number("rem").unwrap_or(14.)))
+}
+
+/// `px` as a whole, even number of points, so no edge falls between pixels: at a UI font size of
+/// 14, a quarter rem is 3.5, and every step off it would otherwise be a fraction.
+pub fn snap(px: f32) -> f32 {
+    if px <= 0. {
+        return 0.;
+    }
+    ((px / 2.).round() * 2.).max(2.)
 }
 
 /// The lengths of the screens: spacing, padding, gaps and sizes in rems. Each step `sN` is N quarter
@@ -317,7 +326,7 @@ pub fn leading(size: Points) -> Points {
     // GPUI's own steps: 4/3 for text_xs, 10/7 for text_sm, 3/2 from text_base up.
     let rem = nsh_base::theme().number("rem").unwrap_or(14.);
     let ratio = size.0 / rem;
-    Points(size.0 * if ratio <= 0.76 { 4. / 3. } else if ratio <= 0.88 { 10. / 7. } else { 1.5 })
+    Points(snap(size.0 * if ratio <= 0.76 { 4. / 3. } else if ratio <= 0.88 { 10. / 7. } else { 1.5 }))
 }
 
 /// Quiet small text: dates, counts, secondary labels.
@@ -462,4 +471,23 @@ pub fn field_with(id: &str, value: Signal<String>, placeholder: &'static str, on
         .duration(220.)
         .ease_out()
         .child(input)
+}
+
+#[cfg(test)]
+mod snap_tests {
+    use super::snap;
+
+    #[test]
+    fn lengths_are_whole_even_points() {
+        for rem in [12., 13., 14., 15., 16., 18.] {
+            for n in [0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 0.875, 1., 1.25, 1.5, 1.75, 2., 2.5, 2.75] {
+                let px = snap(n * rem);
+                assert!(px >= 2. && px % 2. == 0., "{n} rem at {rem} is {px}");
+            }
+        }
+        assert_eq!(snap(0.), 0.);
+        assert_eq!(snap(3.5), 4.);
+        assert_eq!(snap(10.5), 10.);
+        assert_eq!(snap(29.75), 30.);
+    }
 }

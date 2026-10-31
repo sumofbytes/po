@@ -109,13 +109,13 @@ mod space {
     pub fn tree() -> Points { scale::s7() + scale::s0_5() }
     pub fn more() -> Points { scale::s7() }
     pub fn item_gap() -> Points { Points(0.) }
-    pub fn group_gap() -> Points { scale::s4() }
+    pub fn group_gap() -> Points { scale::s6() }
     pub fn list_top() -> Points { scale::s1() }
     pub fn list_bottom() -> Points { scale::s3() }
     pub fn action_gap() -> Points { scale::s1() }
     pub fn actions_top() -> Points { scale::s4() }
     pub fn section_gap() -> Points { scale::s2() }
-    pub fn section() -> Points { scale::s8() }
+    pub fn section_top() -> Points { scale::s5() }
 }
 
 /// Muted text at the size of every other line of the sidebar.
@@ -166,8 +166,8 @@ fn mark(mark: Mark) -> View {
 /// A quiet section title with what can be done there.
 fn section(title: impl IntoReactive<SharedString>, action: Option<View>) -> View {
     view()
-        .h(space::section() + space::section_gap())
-        .pt(space::section_gap())
+        .pt(space::section_top())
+        .pb(space::section_gap() / 2.)
         .flex_none()
         .flex_row()
         .items_center()
