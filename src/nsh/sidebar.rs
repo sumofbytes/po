@@ -33,6 +33,8 @@ pub struct Thread {
     pub controlled: bool,
     /// The day this one starts in its project's list ("Today", "Yesterday"...), if it does.
     pub day: Option<&'static str>,
+    /// How long ago it was last active (`5m`, `3h`, `2d`), if that is known.
+    pub ago: Option<String>,
 }
 
 #[derive(Clone, PartialEq, Debug)]
@@ -213,7 +215,8 @@ fn thread_row(thread: &Thread, project: Option<&str>, close_tip: &'static str) -
         .on_press(move || send(Cmd::OpenThread(pid, tid)))
         .child(title)
         .child(thread.controlled.then(grant_badge))
-        .child(on_hover(icon_button(IconName::Close, scale::s3(), close_tip, move || send(Cmd::CloseThread(pid, tid)))));
+        .child(on_hover(icon_button(IconName::Close, scale::s3(), close_tip, move || send(Cmd::CloseThread(pid, tid)))))
+        .child(thread.ago.clone().map(|ago| text(ago).flex_none().sized(super::text_xs()).text_color(Colors::dim(Colors::muted()))));
     if selected { row.bg(Colors::selected()) } else { row.hover(|s| s.bg(Colors::hover())) }
 }
 
@@ -275,12 +278,27 @@ fn project_group(project: &Project) -> View {
         .gap(space::item_gap())
         .child(head)
         .child(
-            project
-                .threads
-                .iter()
-                .flat_map(|thread| [thread.day.map(day_separator), Some(thread_row(thread, None, "Close thread"))])
-                .flatten()
-                .collect::<Vec<_>>(),
+            view()
+                .relative()
+                // A guide down the lead column, through the marks of the threads, like a timeline.
+                .child(
+                    view()
+                        .absolute()
+                        .top(scale::s1())
+                        .bottom(scale::s1())
+                        .left(space::inset() + space::lead() / 2. - Points(1.))
+                        .w(Points(2.))
+                        .rounded(super::pill())
+                        .bg(|| Colors::border()().opacity(0.4)),
+                )
+                .child(
+                    project
+                        .threads
+                        .iter()
+                        .flat_map(|thread| [thread.day.map(day_separator), Some(thread_row(thread, None, "Close thread"))])
+                        .flatten()
+                        .collect::<Vec<_>>(),
+                ),
         )
         .child(fold)
 }
@@ -498,7 +516,7 @@ mod tests {
     use super::*;
 
     fn thread(project: u64, id: u64, label: &str, mark: Mark, selected: bool) -> Thread {
-        Thread { project, id, label: label.into(), mark, selected, controlled: false, day: None }
+        Thread { project, id, label: label.into(), mark, selected, controlled: false, day: None, ago: None }
     }
 
     fn start() -> Headless {

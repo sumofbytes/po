@@ -834,6 +834,24 @@ impl Activity {
 }
 
 /// The time now in milliseconds since the Unix epoch.
+/// How long ago `then` (ms since the epoch) was, as the sidebar says it: `5m`, `3h`, `2d`, `6w`,
+/// `4mo`. Nothing for the last minute, and for a time that was never recorded.
+fn ago(now: u64, then: u64) -> Option<String> {
+    // Threads from before the time was kept hold a counter, not a time.
+    if then < 1_000_000_000_000 || then > now {
+        return None;
+    }
+    let minutes = (now - then) / 60_000;
+    Some(match minutes {
+        0 => return None,
+        1..=59 => format!("{minutes}m"),
+        60..=1439 => format!("{}h", minutes / 60),
+        1440..=20159 => format!("{}d", minutes / 1440),
+        20160..=86399 => format!("{}w", minutes / 10080),
+        _ => format!("{}mo", minutes / 43200),
+    })
+}
+
 fn now_ms() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
 }
@@ -5339,6 +5357,7 @@ impl Reader {
             selected: (pid, thread.id) == (active_project, active_thread),
             controlled: self.grants.get(&thread.id).is_some_and(|grant| *grant != command::Grant::default()),
             day: None,
+            ago: ago(now_ms(), thread.active_at),
         };
         let today = date::today();
         // Filtering keeps a project whose name matches, with all its threads, and any project with a
@@ -6619,7 +6638,22 @@ fn preview_of(messages: &[Msg], busy: bool) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Queue, Where, route};
+    use super::{Queue, Where, ago, route};
+
+    #[test]
+    fn the_sidebar_says_how_long_ago_in_a_word() {
+        let now = 1_800_000_000_000;
+        let before = |ms: u64| ago(now, now - ms);
+        assert_eq!(before(30_000), None);
+        assert_eq!(before(5 * 60_000).as_deref(), Some("5m"));
+        assert_eq!(before(3 * 3_600_000).as_deref(), Some("3h"));
+        assert_eq!(before(2 * 86_400_000).as_deref(), Some("2d"));
+        assert_eq!(before(21 * 86_400_000).as_deref(), Some("3w"));
+        assert_eq!(before(120 * 86_400_000).as_deref(), Some("4mo"));
+        // A counter from before the time was kept, and a time in the future, say nothing.
+        assert_eq!(ago(now, 7), None);
+        assert_eq!(ago(now, now + 1), None);
+    }
 
     // submit's paths (§4.3 of the control plan): blank, unstarted, starting, asleep, ready,
     // busy for an agent that takes messages mid-turn (dex) and one that doesn't (ACP).
