@@ -505,9 +505,12 @@ fn thought_row(message: usize, at: usize, text_: &str, open: bool) -> AnyElement
             .flex_row()
             .items_center()
             .gap(scale::s2())
-            .py(scale::s0_5())
+            .py(scale::s1())
+            .px(scale::s3())
             .cursor_pointer()
-            .rounded(Colors::radius())
+            .rounded(STEP_RADIUS)
+            .smooth()
+            .hover(|s| s.bg(Colors::hover()))
             .on_press(move || tell(Cmd::ToggleThought { message, block: at }))
             .child(icon(if open { IconName::ChevronDown } else { IconName::ChevronRight }, scale::s3(), Colors::muted()))
             .child(text("Thinking").flex_none().sized(text_sm()).font_weight(FontWeight::MEDIUM).text_color(Colors::muted()))
@@ -540,6 +543,14 @@ fn thought_row(message: usize, at: usize, text_: &str, open: bool) -> AnyElement
 
 /// One call of the agent's tools: its glyph and title, what it sent and what came back once it
 /// is open, and a way to the file it touched.
+/// The corner of a step of the agent's work: a tool call, or the run that folds several.
+const STEP_RADIUS: Points = Points(8.);
+
+/// Whether `block` is a step of the agent's work, which sits close to the steps beside it.
+fn is_step(block: &Block) -> bool {
+    matches!(block, Block::Tool(_) | Block::Run { .. } | Block::Thought { .. })
+}
+
 fn tool_row(message: usize, at: usize, tool: &Tool) -> AnyElement {
     let settled = tool.phase == Phase::Done;
     let title = tool.title.clone();
@@ -548,9 +559,7 @@ fn tool_row(message: usize, at: usize, tool: &Tool) -> AnyElement {
         .gap(scale::s1())
         .py(scale::s1())
         .px(scale::s3())
-        .rounded(Colors::radius() * 1.5)
-        .border_1()
-        .border_color(super::hairline())
+        .rounded(STEP_RADIUS)
         .smooth()
         .hover(|s| s.bg(Colors::hover()))
         .child(
@@ -627,8 +636,9 @@ fn run_row(message: usize, at: usize, count: usize, phase: Phase, folded: bool) 
         .gap(scale::s2())
         .py(scale::s1())
         .px(scale::s3())
-        .rounded(Colors::radius())
+        .rounded(STEP_RADIUS)
         .cursor_pointer()
+        .smooth()
         .hover(|s| s.bg(Colors::hover()))
         .on_press(move || tell(Cmd::Fold { message, block: at, folded: !folded }))
         .child(step_glyph(phase))
@@ -823,8 +833,9 @@ fn block_row(message: usize, block: &Block) -> AnyElement {
 
 /// One message of the agent's: its blocks, a run's own row standing in for the tools it hides.
 fn agent_row(message: usize, blocks: &[Block]) -> AnyElement {
-    let mut column = view().flex_col().min_w_0().gap(scale::s3());
+    let mut column = view().flex_col().min_w_0();
     let mut skip = 0;
+    let mut before: Option<&Block> = None;
     if blocks.is_empty() {
         column = column.child(text("Thinking…").sized(text_sm()).text_color(Colors::muted()));
     }
@@ -837,7 +848,15 @@ fn agent_row(message: usize, blocks: &[Block]) -> AnyElement {
             // The tools the run hides; its own row takes their place.
             skip = *count;
         }
-        column = column.child(block_row(message, block));
+        // Steps sit close to each other; everything else, and the line between a step and text,
+        // has room.
+        let gap = match before {
+            None => Points::ZERO,
+            Some(before) if is_step(before) && is_step(block) => scale::s0_5(),
+            Some(_) => scale::s4(),
+        };
+        column = column.child(view().mt(gap).child(block_row(message, block)));
+        before = Some(block);
     }
     column.into_element()
 }
@@ -846,7 +865,7 @@ fn agent_row(message: usize, blocks: &[Block]) -> AnyElement {
 fn transcript(items: &[Item], slot: ElementRef, at_end: Signal<bool>) -> AnyElement {
     // The transcript's column is the composer card's width, and its text starts where the
     // composer's does: the card's border, its padding and the field's padding in (see [`bar`]).
-    let mut rows = view().w_full().min_w_0().max_w(px(COLUMN)).flex_col().gap(scale::s8()).px(scale::composer_text_inset()).py(scale::s8());
+    let mut rows = view().w_full().min_w_0().max_w(px(COLUMN)).flex_col().gap(scale::s6()).px(scale::composer_text_inset()).py(scale::s6());
     for (message, item) in items.iter().enumerate() {
         let row = match item {
             Item::User { text, pictures } => user_row(text, pictures),
