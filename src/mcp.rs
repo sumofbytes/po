@@ -23,8 +23,7 @@ list_projects and project_changes say what else Po has open. list_issues, get_is
 list_epics read the project's issues, which live in its .po folder. Reading the threads of others, \
 rather than your own, needs a grant the user gives in Po.";
 
-/// What an orchestrator may do, added when its grant says so. The tools of this scope arrive
-/// with phase 2 of the control plan.
+/// What an orchestrator may do, added when its grant says so.
 const ORCHESTRATE: &str = "You may start and steer other threads: each starts with the agent \
 and settings you choose, answers you when it finishes or asks, and is yours to read and close. \
 They start with the smallest grant, and nothing they do can reach further than yours does. \

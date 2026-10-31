@@ -290,13 +290,13 @@ fn open_link(press: &nsh_base::TextViewLinkPressEvent) {
     super::bus::send(super::bus::Cmd::OpenUrl(press.url.to_string()));
 }
 
-/// What a phase is drawn with: quiet while it waits, principal while it goes, and what it
-/// reached in the tone it had.
+/// What a phase is drawn with: quiet while it waits or once it went well, principal while it
+/// goes, and a failure in the danger tone, the one outcome worth a colour.
 fn phase_tint(phase: Phase) -> AdaptiveColor {
     match phase {
         Phase::Waiting => Colors::muted()(),
         Phase::Working => Colors::primary()(),
-        Phase::Done => Colors::added()(),
+        Phase::Done => Colors::muted()(),
         Phase::Failed => Colors::danger()(),
     }
 }
@@ -920,11 +920,10 @@ fn transcript(items: &[Item], slot: ElementRef, at_end: Signal<bool>) -> AnyElem
     // offset that stays put: a transcript that was at its end follows it to the new one.
     let size = stored((0., 0.));
     let resized = {
-        let slot = slot.clone();
         move |bounds: &Bounds<Points>| {
             let now = (bounds.size.width.0, bounds.size.height.0);
             if size.replace(now) != now && at_end.get_untracked() {
-                let slot = slot.clone();
+                let slot = slot;
                 spawn(async move {
                     slot.scroll_to_end(false);
                 });
@@ -1267,7 +1266,7 @@ fn steer_button(steer: bool, draft: Signal<String>, has_pictures: bool) -> AnyEl
     } else {
         (IconName::ListPlus, "Queue: sent when this turn is over")
     };
-    let typed = draft.clone();
+    let typed = draft;
     view()
         .role(AccessibilityRole::Button)
         .label(tip)
@@ -1308,10 +1307,9 @@ fn send_button(snap: Snapshot, draft: Signal<String>) -> AnyElement {
     let busy = snap.busy;
     // Nothing to send while the agent is idle and the draft is blank.
     let empty = {
-        let draft = draft.clone();
         move || !busy && draft.get().trim().is_empty()
     };
-    let empty2 = empty.clone();
+    let empty2 = empty;
     view()
         .role(AccessibilityRole::Button)
         .label(tip)
@@ -1342,7 +1340,7 @@ fn send_button(snap: Snapshot, draft: Signal<String>) -> AnyElement {
 /// The field the draft is typed in, reporting what the user pasted:
 /// the pictures and files it came with; the text it says is inserted by the field itself.
 fn draft_field(draft: &Signal<String>, field_ref: ElementRef) -> Input {
-    let held = draft.clone();
+    let held = *draft;
     input()
         .test_id("chat-draft")
         .element_ref(&field_ref)
@@ -1385,7 +1383,7 @@ fn draft_field(draft: &Signal<String>, field_ref: ElementRef) -> Input {
 /// view rather than the one the user typed in.
 fn fresh_field(reset: u64, field: Input) -> AnyElement {
     let row = view().px(scale::s2()).py(scale::s1()).flex_row().child(field);
-    if reset % 2 == 0 {
+    if reset.is_multiple_of(2) {
         row.into_element()
     } else {
         view().flex_col().child(row).into_element()
@@ -1395,8 +1393,8 @@ fn fresh_field(reset: u64, field: Input) -> AnyElement {
 /// The composer: the note, the strip of pictures, the setup of a thread that waits to start,
 /// the field, and the send.
 fn bar(snap: Snapshot, draft: Signal<String>, field_ref: ElementRef) -> AnyElement {
-    let field = draft.clone();
-    let low = draft.clone();
+    let field = draft;
+    let low = draft;
     let has_pictures = !snap.pictures.is_empty();
     // The chips under the field: before the thread starts its agent is chosen here, after it the
     // agent is named; the settings and the Control menu follow, and the action ends the row.
@@ -1449,7 +1447,7 @@ fn bar(snap: Snapshot, draft: Signal<String>, field_ref: ElementRef) -> AnyEleme
                 .justify_between()
                 .gap(scale::s2())
                 .child(chips)
-                .child(view().flex_row().flex_none().gap(scale::s2()).children(snap.busy.then(|| steer_button(snap.steer, low.clone(), has_pictures))).child(send_button(snap.clone(), low))),
+                .child(view().flex_row().flex_none().gap(scale::s2()).children(snap.busy.then(|| steer_button(snap.steer, low, has_pictures))).child(send_button(snap.clone(), low))),
         );
     let mut column = view().flex_none().flex_col().items_center().gap(scale::s1_5()).px(scale::s3()).pt(scale::s2()).pb(scale::s3());
     if let Some(picking) = snap.picking.as_ref().filter(|picking| **picking != Picking::Loading) {
@@ -1582,7 +1580,7 @@ pub fn Chat() -> impl IntoElement {
                 .children([text("What is this thread about?").sized(text_base()).text_color(Colors::muted()), text("Message an agent to begin.").sized(text_sm()).text_color(Colors::muted())])
                 .into_element()
         } else {
-            transcript(&snap.items, scrolled.clone(), at_end)
+            transcript(&snap.items, scrolled, at_end)
         };
         view()
             .flex_1()
@@ -1832,9 +1830,9 @@ mod tests {
         let mut app = start(Snapshot { items: vec![Item::Agent { index: 0, blocks: vec![] }], ..Snapshot::default() });
         app.type_text("id:chat-draft", "hello there").unwrap();
         drain(&mut app, commands);
-        assert_eq!(app.screen().input_text("id:chat-draft").unwrap().as_deref(), Some("hello there"));
+        assert_eq!(app.screen().input_text("id:chat-draft").unwrap(), Some("hello there"));
         publish(Snapshot { draft: String::new(), draft_reset: 1, items: vec![Item::Agent { index: 0, blocks: vec![] }], ..Snapshot::default() });
         app.wait(std::time::Duration::from_millis(100)).unwrap();
-        assert_eq!(app.screen().input_text("id:chat-draft").unwrap().as_deref().unwrap_or(""), "");
+        assert_eq!(app.screen().input_text("id:chat-draft").unwrap().unwrap_or(""), "");
     }
 }

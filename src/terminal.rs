@@ -450,7 +450,10 @@ mod pty {
             let (mut master, mut slave) = (0, 0);
             let mut ws = size(cols, rows);
             // SAFETY: both fds are out parameters, owned right after.
-            if unsafe { libc::openpty(&mut master, &mut slave, std::ptr::null_mut(), std::ptr::null_mut(), &mut ws) } != 0 {
+            // The BSDs and macOS declare the termios and winsize pointers `*mut`, Linux `*const`.
+            #[allow(clippy::unnecessary_mut_passed)]
+            let failed = unsafe { libc::openpty(&mut master, &mut slave, std::ptr::null_mut(), std::ptr::null_mut(), &mut ws) } != 0;
+            if failed {
                 return Err(io::Error::last_os_error());
             }
             // SAFETY: openpty just made these.

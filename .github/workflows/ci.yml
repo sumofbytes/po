@@ -30,7 +30,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --all-targets --locked
       - run: cargo test --locked
-      - run: cargo clippy --all-targets --locked
+      - run: cargo clippy --all-targets --locked -- -D warnings
       - run: scripts/check-design.sh
 
   # Portability gate, same as dex: windows-latest has MSVC preinstalled.

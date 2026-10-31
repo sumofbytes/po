@@ -79,7 +79,7 @@ impl Grant {
 }
 
 /// How a command's target stands to the caller, judged by the window, which knows the threads
-/// and their parents. `NoThread` joins in phase 4, with the window family.
+/// and their parents.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[allow(dead_code)]
 pub enum Relation {
@@ -95,8 +95,8 @@ pub enum Relation {
     NoThread,
 }
 
-/// The part of Po a command talks to; `run_command` splits by it. `Window` joins in phase 4
-/// (`window.info`, `po ctl`'s discovery).
+/// The part of Po a command talks to; `run_command` splits by it. `Window` is `window.info` and
+/// `po ctl`'s discovery.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[allow(dead_code)]
 pub enum Family {
