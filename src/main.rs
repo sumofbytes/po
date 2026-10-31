@@ -2031,6 +2031,10 @@ impl Reader {
         self.confirm_discard = false;
         self.open_project(project, Mode::Diff, Some(agent), window, cx);
         if let Some((out, (pid, tid))) = first {
+            // The new thread starts under the grant the blank one was given.
+            if let Some(grant) = self.grants.get(&tid).copied() {
+                self.grants.insert(self.thread.id, grant);
+            }
             self.begin_turn(&out);
             self.thread.pending = Some(out);
             // The thread it was typed in stays only if something has happened to it since.
@@ -5681,6 +5685,14 @@ impl Reader {
                     GrantChange::Read => self.set_grant(id, grant.scope, !grant.read_project, grant.approvals, cx),
                     GrantChange::Approvals => self.set_grant(id, grant.scope, grant.read_project, !grant.approvals, cx),
                     GrantChange::Stop => self.stop_agent_control(id, cx),
+                }
+                // A blank thread's agent is already running, and its tool list was fixed when it
+                // started: it starts again so that the first message goes out under this grant.
+                if self.thread.blank && self.thread.client.is_some() && self.grants.get(&id).copied().unwrap_or_default() != grant {
+                    if let Some(key) = self.thread.agent.clone().or_else(|| self.chosen().map(|agent| agent.id.clone())) {
+                        log::info!("agent: blank thread restarts {key} under its new grant");
+                        self.connect(&key, false, window, cx);
+                    }
                 }
             }
         }

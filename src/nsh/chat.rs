@@ -1801,8 +1801,8 @@ mod tests {
     #[test]
     fn a_new_thread_offers_control_before_it_starts() {
         let mut guard = crate::nsh::bus::lock();
-        let _commands = guard.as_mut().expect("the channel");
-        let app = start(Snapshot {
+        let commands = guard.as_mut().expect("the channel");
+        let mut app = start(Snapshot {
             blank: true,
             agents: vec![("Claude".into(), "claude".into())],
             chosen: Some("claude".into()),
@@ -1810,6 +1810,12 @@ mod tests {
             ..Snapshot::default()
         });
         assert!(app.shows("Control"), "{:?}", app.screen().texts());
+        app.press("label:What this thread's agent may do through Po").unwrap();
+        app.settle();
+        app.press("text:Orchestrate").unwrap();
+        let sent = drain(&mut app, commands);
+        let set = Grant { scope: Scope::Orchestrate, ..Grant::default() };
+        assert!(sent.contains(&Bus::Chat(Cmd::Grant(GrantChange::Set(set)))), "{sent:?}");
     }
 
     #[test]
