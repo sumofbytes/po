@@ -5541,7 +5541,7 @@ impl Reader {
                 when: session.updated.get(..16).unwrap_or_default().replace('T', " "),
             }).collect()),
             Some(_) if !thread.loading => chat::Picking::Note(format!("No sessions to resume in {}", self.project.root.display())),
-            _ => chat::Picking::Note(thread.status.clone()),
+            _ => chat::Picking::Loading,
         });
         let grant = self.grants.get(&thread.id).copied().unwrap_or_default();
         chat::Snapshot {

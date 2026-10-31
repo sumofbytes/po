@@ -11,7 +11,7 @@ use tokio::sync::watch;
 
 use super::header::{Control, pane_header};
 use super::source::Shared;
-use super::{Colors, body, caption, icon, mono_size, note, scale, text_base, text_sm, text_xs, tooltip, Sizing, Smooth};
+use super::{Colors, body, icon, mono_size, note, scale, text_base, text_sm, text_xs, tooltip, Sizing, Smooth};
 use crate::ui::icon::IconName;
 
 /// Whether a step of the agent's is waiting, going, done or failed: a tool call, the plan's
@@ -160,6 +160,8 @@ pub enum Item {
 pub enum Picking {
     Sessions(Vec<Session>),
     Note(String),
+    /// The agent is waking or the sessions loading: the header says so, so the bar shows nothing.
+    Loading,
 }
 
 #[derive(Clone, PartialEq, Debug, Default)]
@@ -387,14 +389,15 @@ fn item(what: String, on_press: impl Fn() + 'static) -> AnyElement {
 }
 
 /// A line in a header, like `3 threads · 1 asking`.
-fn status_line(line: String) -> Text {
-    caption(line).number_of_lines(1)
+fn status_line(line: String) -> View {
+    // The size and padding of the History button beside it, so the two sit on one rhythm.
+    view().flex_none().px(scale::s2()).py(scale::s1()).child(text(line).sized(text_sm()).text_color(Colors::muted()).number_of_lines(1))
 }
 
 /// The pane header of the conversation: the title, the statuses, the history button, the Control
 /// menu, and the window's own controls at the ends.
 fn pane(title: String, snap: &Snapshot) -> View {
-    let mut right = view().flex_row().items_center().gap(scale::s3());
+    let mut right = view().flex_row().items_center().gap(scale::s1());
     for line in &snap.statuses {
         right = right.child(status_line(line.clone()));
     }
@@ -1054,8 +1057,10 @@ fn picker_note(note: &str) -> AnyElement {
 
 /// The sessions to resume, above the composer while the picker is open.
 fn picker(picking: &Picking) -> AnyElement {
-    if let Picking::Note(note) = picking {
-        return picker_note(note);
+    match picking {
+        Picking::Note(note) => return picker_note(note),
+        Picking::Loading => return view().into_element(),
+        Picking::Sessions(_) => {}
     }
     let (title, rows) = match picking {
         Picking::Sessions(sessions) => ("Resume".to_string(), {
@@ -1082,7 +1087,7 @@ fn picker(picking: &Picking) -> AnyElement {
             }
             column.into_element()
         }),
-        Picking::Note(_) => unreachable!("a note is drawn by picker_note"),
+        Picking::Note(_) | Picking::Loading => unreachable!("drawn above"),
     };
     view()
         .flex_col()
@@ -1387,7 +1392,7 @@ fn bar(snap: Snapshot, draft: Signal<String>, field_ref: ElementRef) -> AnyEleme
                 .child(view().flex_row().flex_none().gap(scale::s2()).children(snap.busy.then(|| steer_button(snap.steer, low.clone(), has_pictures))).child(send_button(snap.clone(), low))),
         );
     let mut column = view().flex_none().flex_col().items_center().gap(scale::s1_5()).px(scale::s3()).pt(scale::s2()).pb(scale::s3());
-    if let Some(picking) = &snap.picking {
+    if let Some(picking) = snap.picking.as_ref().filter(|picking| **picking != Picking::Loading) {
         column = column.child(view().w_full().max_w(px(COLUMN)).child(picker(picking)));
     }
     if !snap.queue.is_empty() {
