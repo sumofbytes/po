@@ -5531,7 +5531,8 @@ impl Reader {
             statuses.push(line);
         }
         if !thread.status.is_empty() {
-            statuses.push(thread.status.clone());
+            // "ready" is set when the agent starts and nothing resets it, so a turn going on says so here.
+            statuses.push(if thread.busy && thread.status == "ready" { "working".to_string() } else { thread.status.clone() });
         }
         let picking = thread.picking.then(|| match &thread.sessions {
             Some(sessions) if !thread.loading && !sessions.is_empty() => chat::Picking::Sessions(sessions.iter().map(|session| chat::Session {
@@ -5545,7 +5546,7 @@ impl Reader {
         let grant = self.grants.get(&thread.id).copied().unwrap_or_default();
         chat::Snapshot {
             glass: cx.global::<Palette>().glass.is_some(),
-            title: thread.title(),
+            title: capitalized(thread.title()),
             lead,
             trail,
             statuses,

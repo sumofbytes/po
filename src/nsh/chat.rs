@@ -410,7 +410,7 @@ fn pane(title: String, snap: &Snapshot) -> View {
                 .hover(|s| s.bg(Colors::hover()))
                 .on_press(|| tell(Cmd::History))
                 .tooltip(tooltip("Resume an earlier session (Ctrl+Shift+H)"))
-                .child(body("History")),
+                .child(body("History").text_color(Colors::muted())),
         );
     }
     // The Control menu, once the thread's agent may do more than talk.
@@ -1359,17 +1359,20 @@ fn bar(snap: Snapshot, draft: Signal<String>, field_ref: ElementRef) -> AnyEleme
     if !snap.blank {
         chips = chips.child(grant_menu(snap.grant.unwrap_or_default()));
     }
-    // Two enclosures, the inner concentric with the outer: a tray holding the card, so the composer
-    // reads as one machined piece. The inset of its text is `scale::composer_text_inset`.
+    // One card: the field, the chips and the send. The inset of its text is
+    // `scale::composer_text_inset`.
     let core = view()
         .flex_col()
         .gap(scale::s2())
         .w_full()
+        .max_w(px(COLUMN))
         .p(scale::s2())
-        .rounded(super::surface_radius() - scale::s1())
+        .rounded(super::surface_radius())
         .border_1()
         .border_color(super::hairline())
-        .bg(Colors::sidebar())
+        .bg(Colors::input_background())
+        // The faintest lift, so the card stands off the page without floating over it.
+        .shadow_xs()
         .on_file_drop(move |drop: &FileDropEvent| tell(Cmd::Drop(drop.uris.clone())))
         .children(snap.note.as_deref().map(note_row))
         .children((!snap.pictures.is_empty()).then(|| pictures_row(&snap.pictures)))
@@ -1390,17 +1393,7 @@ fn bar(snap: Snapshot, draft: Signal<String>, field_ref: ElementRef) -> AnyEleme
     if !snap.queue.is_empty() {
         column = column.child(view().w_full().max_w(px(COLUMN)).flex_col().gap(scale::s1()).child(snap.queue.iter().cloned().map(queue_row).collect::<Vec<_>>()));
     }
-    let shell = view()
-        .w_full()
-        .max_w(px(COLUMN))
-        .p(scale::s1())
-        .rounded(super::surface_radius())
-        .border_1()
-        .border_color(super::hairline())
-        .bg(Colors::hover())
-        .shadow_lg()
-        .child(core);
-    column = column.child(shell);
+    column = column.child(core);
     column.into_element()
 }
 

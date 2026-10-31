@@ -33,6 +33,12 @@ impl Control {
 
 /// A ghost icon button that can be selected, as the header's controls are.
 pub fn toggle_button(name: IconName, tip: &'static str, selected: bool, on_press: impl Fn() + 'static) -> View {
+    ghost_button(name, tip, selected, true, on_press)
+}
+
+/// [`toggle_button`], with the fill of its selected state optional: the window's own controls say
+/// they are on in their icon alone, as a fill that stays on the bar is noise there.
+fn ghost_button(name: IconName, tip: &'static str, selected: bool, filled: bool, on_press: impl Fn() + 'static) -> View {
     let b = super::smooth(view())
         .role(AccessibilityRole::Button)
         .label(tip)
@@ -43,13 +49,13 @@ pub fn toggle_button(name: IconName, tip: &'static str, selected: bool, on_press
         .tooltip(tooltip(tip))
         .on_press(on_press)
         .child(icon(name, scale::s3_5(), move || if selected { Colors::foreground()() } else { Colors::muted()() }));
-    if selected { b.bg(Colors::selected()) } else { b.hover(|s| s.bg(Colors::hover())) }
+    if selected && filled { b.bg(Colors::selected()) } else { b.hover(|s| s.bg(Colors::hover())) }
 }
 
 fn controls(list: &[Control]) -> impl Iterator<Item = View> + '_ {
     list.iter().map(|control| {
         let (name, tip, selected, cmd) = control.parts();
-        toggle_button(name, tip, selected, move || send(cmd.clone()))
+        ghost_button(name, tip, selected, false, move || send(cmd.clone()))
     })
 }
 

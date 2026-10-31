@@ -176,7 +176,7 @@ impl Colors {
 
     /// The guide line down a project's threads.
     pub fn guide() -> impl Fn() -> AdaptiveColor + Copy {
-        move || Self::border()().opacity(0.4)
+        move || Self::border()().opacity(0.7)
     }
 
     pub fn input_background() -> impl Fn() -> AdaptiveColor + Copy {
@@ -250,7 +250,7 @@ pub mod scale {
     pub fn due_entry_width() -> Points { rems(13.0) }
     /// From the composer card's edge to its text: the card's padding and the field's, and the
     /// border, which is a point wide whatever the font size.
-    pub fn composer_text_inset() -> Points { s2() + s2() + s1() + Points(2.) }
+    pub fn composer_text_inset() -> Points { s2() + s2() + Points(1.) }
     /// `n` lines of small text, whose line is 1.25rem tall: a text area's minimum, a note's maximum.
     pub fn lines(n: f32) -> Points { rems(1.25 * n) }
 }

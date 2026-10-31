@@ -191,7 +191,8 @@ fn thread_row(thread: &Thread, project: Option<&str>, close_tip: &'static str, i
         .number_of_lines(1)
         .flex_shrink(1.)
         .sized(text_base())
-        .text_color(move || if selected { Colors::foreground()() } else { Colors::foreground()().opacity(crate::theme::tokens::HOVER) });
+        .text_color(Colors::foreground())
+        .style_when(selected, |s| s.font_weight(FontWeight::MEDIUM));
     let title = match project {
         // The title, then the project it is in, which the row no longer sits under.
         Some(project) => view()
@@ -220,7 +221,7 @@ fn thread_row(thread: &Thread, project: Option<&str>, close_tip: &'static str, i
         .child(title)
         .child(thread.controlled.then(grant_badge))
         .child(on_hover(icon_button(IconName::Close, scale::s3(), close_tip, move || send(Cmd::CloseThread(pid, tid)))))
-        .child(thread.ago.clone().map(|ago| text(ago).flex_none().sized(super::text_xs()).text_color(Colors::dim(Colors::muted()))))
+        .child(thread.ago.clone().map(|ago| text(ago).flex_none().sized(super::text_xs()).text_color(Colors::muted())))
         .child((thread.mark != Mark::Idle).then(|| mark(thread.mark)));
     // The selection takes the colour of the message bubbles; a hovered row only hints at it.
     if selected { row.bg(Colors::hover()) } else { row.hover(|s| s.bg(Colors::hint())) }
@@ -239,7 +240,7 @@ fn day_separator(day: &'static str) -> View {
         .pr(space::inset())
         .pt(space::section_gap())
         // The day, then a hairline that carries the eye to the edge.
-        .child(text(day).flex_none().sized(super::text_xs()).font_weight(FontWeight::MEDIUM).text_color(Colors::dim(Colors::muted())))
+        .child(text(day).flex_none().sized(super::text_xs()).font_weight(FontWeight::MEDIUM).text_color(Colors::muted()))
         .child(view().flex_1().h(Points(1.)).bg(super::hairline()))
 }
 
@@ -268,11 +269,11 @@ fn project_group(project: &Project) -> View {
     let fold = project.fold.map(|(expanded, hidden)| {
         let label = if expanded { "Show less".to_string() } else { format!("{hidden} more") };
         let chevron = if expanded { IconName::ChevronUp } else { IconName::ChevronDown };
-        side_row(Some(centered(icon(chevron, scale::s3(), Colors::dim(Colors::muted())))))
+        side_row(Some(centered(icon(chevron, scale::s3(), Colors::muted()))))
             .h(space::more())
             .hover(|s| s.bg(Colors::hover()))
             .on_press(move || send(Cmd::ToggleMore(pid)))
-            .child(text(label).sized(super::text_sm()).text_color(Colors::dim(Colors::muted())))
+            .child(text(label).sized(super::text_sm()).text_color(Colors::muted()))
     });
     view()
         .gap(space::item_gap())
@@ -345,7 +346,7 @@ fn action(icon_name: IconName, label: &'static str, tip: &'static str, selected:
         .h(space::row())
         .tooltip(super::tooltip(tip))
         .on_press(on_press)
-        .child(text(label).flex_1().sized(text_base()).text_color(move || if selected == Some(true) { Colors::foreground()() } else { Colors::foreground()().opacity(crate::theme::tokens::HOVER) }).style_when(selected == Some(true), |s| s.font_weight(FontWeight::MEDIUM)));
+        .child(text(label).flex_1().sized(text_base()).text_color(Colors::foreground()).style_when(selected == Some(true), |s| s.font_weight(FontWeight::MEDIUM)));
     if selected == Some(true) { row.bg(Colors::selected()) } else { row.hover(|s| s.bg(Colors::hover())) }
 }
 
