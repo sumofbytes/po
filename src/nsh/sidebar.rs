@@ -475,7 +475,7 @@ pub fn Sidebar() -> impl IntoElement {
                 .gap(space::action_gap())
                 .px(space::gutter())
                 .pt(space::actions_top())
-                .child(action(IconName::Plus, "New", "New thread (Ctrl+N)", None, || send(Cmd::NewThread)))
+                .child(action(IconName::PlusBold, "New", "New thread (Ctrl+N)", None, || send(Cmd::NewThread)))
                 .child(dynamic(search))
                 .child(dynamic(issues)),
         )
