@@ -5,7 +5,7 @@ use nsh_core::prelude::*;
 
 use super::bus::{Cmd, send};
 use super::overlay::{self, Height};
-use super::{Colors, body, caption, icon, icon_button, note, on_hover, scale, text_sm, text_xs};
+use super::{Colors, body, caption, icon, icon_button, note, on_hover, scale, text_sm, text_xs, Smooth};
 use crate::issues::query::{self, Filter, Group, parse_quick};
 use crate::issues::shared::{self, View as Data};
 use crate::issues::{Issue, Link, Priority, Status};
@@ -408,15 +408,15 @@ pub fn chip(label: impl Into<String>, selected: impl Fn() -> bool + 'static, on_
     let label: String = label.into();
     let selected = std::rc::Rc::new(selected);
     let (on, shown) = (selected.clone(), selected.clone());
-    view()
+    super::smooth(view())
         .role(AccessibilityRole::Button)
         .label(label.clone())
         .flex_none()
-        .px(scale::s2())
+        .px(scale::s3())
         .py(scale::s0_5())
-        .rounded(Colors::radius())
+        .rounded(super::pill())
         .border_1()
-        .border_color(Colors::border())
+        .border_color(super::hairline())
         .cursor_pointer()
         .hover(|s| s.bg(Colors::hover()))
         .style_when(move || on(), |s| s.bg(Colors::selected()))
@@ -429,18 +429,18 @@ pub fn icon_chip(name: IconName, tint: AdaptiveColor, label: impl Into<String>, 
     let label: String = label.into();
     let selected = std::rc::Rc::new(selected);
     let (on, shown) = (selected.clone(), selected.clone());
-    view()
+    super::smooth(view())
         .role(AccessibilityRole::Button)
         .label(label.clone())
         .flex_none()
         .flex_row()
         .items_center()
         .gap(scale::s1())
-        .px(scale::s2())
+        .px(scale::s3())
         .py(scale::s0_5())
-        .rounded(Colors::radius())
+        .rounded(super::pill())
         .border_1()
-        .border_color(Colors::border())
+        .border_color(super::hairline())
         .cursor_pointer()
         .hover(|s| s.bg(Colors::hover()))
         .style_when(move || on(), |s| s.bg(Colors::selected()))
@@ -456,13 +456,13 @@ pub fn line_input(id: &str, value: Signal<String>, placeholder: &'static str, on
 
 /// A button that deletes on the second press: the first changes its label to ask.
 pub fn delete_button(state: State, label: &'static str, on_press: impl Fn() + 'static) -> View {
-    view()
+    super::smooth(view())
         .role(AccessibilityRole::Button)
         .label(label)
         .flex_none()
-        .px(scale::s2())
+        .px(scale::s3())
         .py(scale::s1())
-        .rounded(Colors::radius())
+        .rounded(super::pill())
         .cursor_pointer()
         .hover(|s| s.bg(Colors::hover()))
         .on_press(on_press)
@@ -480,7 +480,7 @@ pub fn text_area(id: &str, value: Signal<String>, placeholder: &'static str, on_
         .px(scale::s2_5())
         .py(scale::s2())
         .min_h(scale::lines(4.))
-        .rounded(Colors::radius())
+        .rounded(super::card_radius())
         .border_1()
         .border_color(Colors::input_border())
         .bg(Colors::input_background())
@@ -508,8 +508,8 @@ pub fn boxed(lead: IconName, input: nsh_base::Input, hint: Option<View>) -> View
         .flex_row()
         .items_center()
         .gap(scale::s2())
-        .px(scale::s2_5())
-        .rounded(Colors::radius())
+        .px(scale::s3())
+        .rounded(super::card_radius())
         .border_1()
         .border_color(Colors::input_border())
         .bg(Colors::input_background())
@@ -548,10 +548,11 @@ fn header(state: State) -> View {
             .flex_row()
             .items_center()
             .gap(scale::s1_5())
-            .px(scale::s2())
+            .px(scale::s3())
             .py(scale::s1())
-            .rounded(Colors::radius())
+            .rounded(super::pill())
             .cursor_pointer()
+            .smooth()
             .hover(|s| s.bg(Colors::hover()))
             .style_when(move || state.page.with(|now| on(now)), |s| s.bg(Colors::selected()))
             .on_press(move || state.go(target.clone()))
@@ -563,11 +564,11 @@ fn header(state: State) -> View {
         .flex_row()
         .items_center()
         .gap(scale::s1())
-        .px(scale::s4())
-        .py(scale::s2())
+        .px(scale::s6())
+        .py(scale::s3())
         .border_b_1()
-        .border_color(Colors::border())
-        .child(text(name).number_of_lines(1).font_weight(FontWeight::SEMIBOLD).text_color(Colors::foreground()).mr(scale::s3()))
+        .border_color(super::hairline())
+        .child(text(name).number_of_lines(1).text_size(scale::s4() + scale::s1()).font_weight(FontWeight::SEMIBOLD).text_color(Colors::foreground()).mr(scale::s5()))
         .child(tab("List", IconName::List, Page::List, |p| matches!(p, Page::Issue(_))))
         .child(tab("Board", IconName::SquareKanban, Page::Board, |_| false))
         .child(tab("Epics", IconName::Layers, Page::Epics, |p| matches!(p, Page::Epic(_))))
@@ -594,7 +595,7 @@ fn problems_banner(state: State) -> View {
             .py(scale::s1_5())
             .bg(Colors::input_background())
             .border_b_1()
-            .border_color(Colors::border())
+            .border_color(super::hairline())
             .child(text(summary).number_of_lines(2).text_size(text_xs()).text_color(Colors::warning()))
     }).otherwise(|| {}))
 }
@@ -614,7 +615,7 @@ fn list_page(state: State) -> View {
             view()
                 .flex_1()
                 .child(
-                    view().px(scale::s4()).pt(scale::s3()).pb(scale::s2()).child(boxed(
+                    view().px(scale::s6()).pt(scale::s4()).pb(scale::s3()).child(boxed(
                         IconName::Plus,
                         line_input("issue-new-title", state.new_title, "New issue — try: Fix login !high #bug @epic", move || state.add(None)).auto_focus(true).element_ref(&state.add_field),
                         Some(
@@ -652,7 +653,7 @@ fn todo_offer(state: State) -> View {
             .py(scale::s2())
             .rounded(super::card_radius())
             .border_1()
-            .border_color(Colors::border())
+            .border_color(super::hairline())
             .child(body(move || format!("Your old todo list has {} items. Bring them in as issues here?", state.old_todos.get())).flex_1())
             .child(super::button("Import here", true, move || {
                 shared::change(|tracker, now| crate::issues::import::from_items(&crate::issues::import::read(&crate::issues::import::file()), tracker, now));
@@ -682,9 +683,9 @@ fn filter_bar(state: State) -> View {
         )
     };
     view()
-        .px(scale::s4())
-        .pb(scale::s2())
-        .gap(scale::s1_5())
+        .px(scale::s6())
+        .pb(scale::s3())
+        .gap(scale::s2())
         .child(
             view()
                 .flex_row()
@@ -730,19 +731,27 @@ fn rows(state: State) -> View {
                     .flex_row()
                     .items_baseline()
                     .gap(scale::s2())
-                    .mt(scale::s3())
-                    .px(scale::s2_5())
+                    .mt(scale::s5())
+                    .px(scale::s2())
                     .child(body(section.title.clone()).font_weight(FontWeight::SEMIBOLD))
                     .child(caption(section.issues.len().to_string())),
             );
         }
-        out.extend(section.issues.iter().map(|number| issue_row(state, *number)));
+        // One card for the section, its issues divided by hairlines.
+        let mut card = view().flex_col().rounded(super::card_radius()).border_1().border_color(super::hairline()).bg(Colors::sidebar()).overflow_hidden();
+        for (at, number) in section.issues.iter().enumerate() {
+            if at > 0 {
+                card = card.child(view().h(Points(1.)).flex_none().bg(super::hairline()));
+            }
+            card = card.child(issue_row(state, *number));
+        }
+        out.push(card);
     }
     if out.is_empty() {
         let message = if empty { "No issues yet. Add one above." } else { "Nothing matches." };
         out.push(view().py(scale::s6()).items_center().child(note(message)));
     }
-    view().gap(scale::s0_5()).px(scale::s3()).pb(scale::s3()).child(out)
+    view().gap(scale::s2()).px(scale::s6()).pb(scale::s6()).child(out)
 }
 
 pub fn issue_row(state: State, number: u64) -> View {
@@ -763,13 +772,13 @@ pub fn issue_row(state: State, number: u64) -> View {
     view()
         .group()
         .test_id(&format!("issue-{number}"))
-        .h(scale::s8())
+        .h(scale::s10())
         .flex_row()
         .items_center()
-        .gap(scale::s2())
-        .px(scale::s2_5())
-        .rounded(Colors::radius())
+        .gap(scale::s3())
+        .px(scale::s4())
         .cursor_pointer()
+        .smooth()
         .hover(|s| s.bg(Colors::hover()))
         .on_press(move || state.open_issue(number))
         .child(view().role(AccessibilityRole::Button).label(format!("Status: {}", status.name())).flex_none().on_press(move || state.advance(number)).child(icon(status_icon(status), scale::s3_5(), move || status_tint(status))))
@@ -837,6 +846,8 @@ fn column(status: Status, count: usize, cards: Vec<View>) -> View {
         .gap(scale::s1_5())
         .p(scale::s1_5())
         .rounded(super::card_radius())
+        .border_1()
+        .border_color(super::hairline())
         .bg(Colors::input_background())
         .child(
             view()
@@ -859,12 +870,14 @@ fn card(state: State, issue: &Issue, key: String) -> View {
         .group()
         .test_id(&format!("card-{number}"))
         .gap(scale::s1())
-        .p(scale::s2())
+        .p(scale::s3())
         .rounded(super::card_radius())
         .border_1()
-        .border_color(Colors::border())
+        .border_color(super::hairline())
         .bg(Colors::popover())
+        .shadow_sm()
         .cursor_pointer()
+        .smooth()
         .hover(|s| s.bg(Colors::hover()))
         .on_press(move || state.open_issue(number))
         // Dragging a card across the columns moves it to the one it ends over.

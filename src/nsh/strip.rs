@@ -51,13 +51,13 @@ pub fn publish(snapshot: Snapshot) {
 
 /// A small text button: an outline, or a ghost one with only its hover behind it.
 fn small_button(label: impl IntoReactive<SharedString> + Clone + 'static, outline: bool, tip: Option<&'static str>, on_press: impl Fn() + 'static) -> View {
-    let b = view()
+    let b = super::smooth(view())
         .role(AccessibilityRole::Button)
         .label(label.clone())
         .flex_none()
         .h(scale::s6())
-        .px(scale::s2())
-        .rounded(Colors::radius())
+        .px(scale::s3())
+        .rounded(super::pill())
         .cursor_pointer()
         .hover(|s| s.bg(Colors::hover()))
         .when_some(tip, |b, tip| b.tooltip(tooltip(tip)))
@@ -82,7 +82,7 @@ fn pr_strip(pr: Pr, spec: Signal<String>, on_open: impl Fn() + Clone + 'static) 
             .px(scale::s3())
             .py(scale::s2())
             .border_b_1()
-            .border_color(Colors::border())
+            .border_color(super::hairline())
             .child(caption(label).flex_1().min_w_0().number_of_lines(1))
             .child(small_button("Close", false, Some("Return to this repository, forgetting the review"), move || send(Cmd::ClosePr))),
         Pr::Asking { status, opening } => {
@@ -93,7 +93,7 @@ fn pr_strip(pr: Pr, spec: Signal<String>, on_open: impl Fn() + Clone + 'static) 
                 .px(scale::s3())
                 .py(scale::s2())
                 .border_b_1()
-                .border_color(Colors::border())
+                .border_color(super::hairline())
                 .child(
                     view()
                         .flex_row()
@@ -120,7 +120,7 @@ fn worktree_strip(wt: Worktree) -> View {
         .px(scale::s3())
         .py(scale::s2())
         .border_b_1()
-        .border_color(Colors::border())
+        .border_color(super::hairline())
         .child(
             text(format!("⎇ {}", wt.branch))
                 .flex_1()
