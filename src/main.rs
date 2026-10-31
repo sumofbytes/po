@@ -186,7 +186,7 @@ struct ToolBlock {
     title: String,
     status: Step,
     open: bool,
-    /// On the first call of a run of three or more: whether the run is folded to one line. `None`
+    /// On the first call of a run of [`MIN_RUN`] or more: whether the run is folded to one line. `None`
     /// leaves it to `run_folded`'s default, until the user clicks the run's header.
     fold: Option<bool>,
     /// The plan entry that was in progress when the call began: what the call is working towards.
@@ -1554,6 +1554,9 @@ impl Reader {
     }
 }
 
+/// The fewest tool calls in a row that fold to one line.
+const MIN_RUN: usize = 2;
+
 /// Whether a run of tool calls shows as one line. A run the user hasn't clicked starts folded,
 /// whether its calls are still going or not.
 fn run_folded(run: &[Block]) -> bool {
@@ -1586,7 +1589,7 @@ fn folded_runs(blocks: &[Block]) -> Vec<usize> {
             continue;
         }
         let len = blocks[n..].iter().take_while(|b| matches!(b, Block::Tool(_))).count();
-        if len >= 3 && run_folded(&blocks[n..n + len]) {
+        if len >= MIN_RUN && run_folded(&blocks[n..n + len]) {
             starts.push(n);
         }
         n += len;
@@ -1718,7 +1721,7 @@ fn run_task(run: &[Block]) -> Option<String> {
     tasks.all(|task| task == first).then(|| first.to_string())
 }
 
-/// One agent message's blocks for the conversation drawn by NSH. Runs of three or more tool calls
+/// One agent message's blocks for the conversation drawn by NSH. Runs of [`MIN_RUN`] or more tool calls
 /// also carry the row that folds them; the calls stay in place either way, so the indexes their
 /// answers are told by hold.
 fn chat_blocks(blocks: &[Block]) -> Vec<nsh::chat::Block> {
@@ -1727,7 +1730,7 @@ fn chat_blocks(blocks: &[Block]) -> Vec<nsh::chat::Block> {
     while n < blocks.len() {
         let run = n > 0 && matches!(&blocks[n - 1], Block::Tool(_));
         let len = if matches!(blocks[n], Block::Tool(_)) && !run { blocks[n..].iter().take_while(|b| matches!(b, Block::Tool(_))).count() } else { 0 };
-        if len >= 3 {
+        if len >= MIN_RUN {
             let run = &blocks[n..n + len];
             let (phase, failed) = run_outcome(run);
             let task = run_task(run);
@@ -2438,16 +2441,14 @@ mod tests {
     }
 
     #[test]
-    fn only_runs_of_three_or_more_are_found_folded() {
+    fn only_runs_of_two_or_more_are_found_folded() {
         let blocks = vec![
             tool("a", Step::Done),
-            tool("b", Step::Done),
             Block::Text("x".into()),
+            tool("b", Step::Done),
             tool("c", Step::Done),
-            tool("d", Step::Done),
-            tool("e", Step::Done),
         ];
-        assert_eq!(folded_runs(&blocks), vec![3]);
+        assert_eq!(folded_runs(&blocks), vec![2]);
     }
 
     #[test]

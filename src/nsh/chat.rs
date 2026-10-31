@@ -290,13 +290,13 @@ fn open_link(press: &nsh_base::TextViewLinkPressEvent) {
     super::bus::send(super::bus::Cmd::OpenUrl(press.url.to_string()));
 }
 
-/// What a phase is drawn with: quiet while it waits, principal while it goes, and what it
-/// reached in the tone it had.
+/// What a phase is drawn with: quiet while it waits or once it went well, principal while it
+/// goes, and a failure in the danger tone, the one outcome worth a colour.
 fn phase_tint(phase: Phase) -> AdaptiveColor {
     match phase {
         Phase::Waiting => Colors::muted()(),
         Phase::Working => Colors::primary()(),
-        Phase::Done => Colors::added()(),
+        Phase::Done => Colors::muted()(),
         Phase::Failed => Colors::danger()(),
     }
 }
