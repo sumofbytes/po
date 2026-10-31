@@ -1009,8 +1009,46 @@ fn note_row(note: &str) -> AnyElement {
         .into_element()
 }
 
+/// What the picker has to say while it has no sessions to list, such as that the agent is waking
+/// or the session loading: one quiet line with a dot, not a card with an empty body.
+fn picker_note(note: &str) -> AnyElement {
+    let mut shown = note.to_string();
+    if let Some(first) = shown.get(..1) {
+        shown = first.to_uppercase() + &shown[1..];
+    }
+    view()
+        .flex_row()
+        .items_center()
+        .gap(scale::s2())
+        .mb(scale::s2_5())
+        .pl(scale::s3())
+        .pr(scale::s1_5())
+        .py(scale::s1())
+        .rounded(super::soft_radius())
+        .bg(Colors::hover())
+        .child(view().flex_none().w(scale::s1_5()).h(scale::s1_5()).rounded(super::pill()).bg(Colors::primary()))
+        .child(text(shown).flex_1().min_w_0().sized(text_sm()).text_color(Colors::muted()))
+        .child(
+            view()
+                .role(AccessibilityRole::Button)
+                .label("Close")
+                .flex_none()
+                .p(scale::s0_5())
+                .rounded(super::pill())
+                .cursor_pointer()
+                .smooth()
+                .hover(|s| s.bg(Colors::selected()))
+                .on_press(|| tell(Cmd::ClosePicker))
+                .child(icon(IconName::Close, scale::s2_5(), Colors::muted())),
+        )
+        .into_element()
+}
+
 /// The sessions to resume, above the composer while the picker is open.
 fn picker(picking: &Picking) -> AnyElement {
+    if let Picking::Note(note) = picking {
+        return picker_note(note);
+    }
     let (title, rows) = match picking {
         Picking::Sessions(sessions) => ("Resume".to_string(), {
             let mut column = view().flex_col();
@@ -1036,7 +1074,7 @@ fn picker(picking: &Picking) -> AnyElement {
             }
             column.into_element()
         }),
-        Picking::Note(note) => (note.clone(), view().into_element()),
+        Picking::Note(_) => unreachable!("a note is drawn by picker_note"),
     };
     view()
         .flex_col()
