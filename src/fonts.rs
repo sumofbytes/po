@@ -1,20 +1,31 @@
 //! Which fonts po draws with: the settings (`font.*` in the config over the theme's), checked
-//! against the fonts installed, with a bundled monospace font as the last resort.
+//! against the fonts installed, with the bundled Geist and Geist Mono as the default and the last resort.
 
-use std::sync::{Once, OnceLock};
+use std::sync::Once;
 
-use gpui::{App, SharedString, font};
+use gpui::{App, SharedString};
 use serde_json::Value;
 
 const UI_SIZE: f32 = 15.0;
 const MONO_SIZE: f32 = 14.0;
 /// Sizes outside this are a typo, not a wish.
 pub const SIZES: std::ops::RangeInclusive<f32> = 8.0..=48.0;
-const SYSTEM: &str = ".SystemUIFont";
 
-/// The monospace font in the binary, so the viewer's columns line up even where no monospace font is installed.
-const BUNDLED_MONO: &[u8] = include_bytes!("../assets/fonts/FiraMono-Medium.ttf");
-const BUNDLED_MONO_FAMILY: &str = "Fira Mono";
+/// The fonts in the binary, so po looks the same whatever is installed.
+const BUNDLED: [&[u8]; 10] = [
+    include_bytes!("../assets/fonts/Geist-Regular.ttf"),
+    include_bytes!("../assets/fonts/Geist-Italic.ttf"),
+    include_bytes!("../assets/fonts/Geist-Medium.ttf"),
+    include_bytes!("../assets/fonts/Geist-SemiBold.ttf"),
+    include_bytes!("../assets/fonts/Geist-Bold.ttf"),
+    include_bytes!("../assets/fonts/GeistMono-Regular.ttf"),
+    include_bytes!("../assets/fonts/GeistMono-Italic.ttf"),
+    include_bytes!("../assets/fonts/GeistMono-Medium.ttf"),
+    include_bytes!("../assets/fonts/GeistMono-SemiBold.ttf"),
+    include_bytes!("../assets/fonts/GeistMono-Bold.ttf"),
+];
+pub const BUNDLED_UI_FAMILY: &str = "Geist";
+pub const BUNDLED_MONO_FAMILY: &str = "Geist Mono";
 
 /// The keys of the config's `font` block.
 const KEYS: [&str; 4] = ["family", "size", "mono_family", "mono_size"];
@@ -113,68 +124,12 @@ fn pick(wanted: &[String], installed: &[String], what: &str) -> Option<String> {
     })
 }
 
-/// The monospace fonts the system prefers: what fontconfig says `monospace` is, which is
-/// the user's own choice, else a few well-known ones per platform.
-fn system_mono() -> &'static [String] {
-    static FOUND: OnceLock<Vec<String>> = OnceLock::new();
-    FOUND.get_or_init(system_mono_uncached)
-}
-
-fn system_mono_uncached() -> Vec<String> {
-    let mut found = Vec::new();
-    if cfg!(all(unix, not(target_os = "macos"))) {
-        // A broken fontconfig can hang; give it a moment rather than hold up startup.
-        let child = std::process::Command::new("fc-match")
-            .args(["monospace", "-f", "%{family}"])
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
-            .spawn();
-        if let Ok(mut child) = child {
-            let (tx, rx) = std::sync::mpsc::channel();
-            if let Some(mut stdout) = child.stdout.take() {
-                std::thread::spawn(move || {
-                    let mut text = String::new();
-                    std::io::Read::read_to_string(&mut stdout, &mut text).ok();
-                    tx.send(text).ok();
-                });
-            }
-            match rx.recv_timeout(std::time::Duration::from_secs(2)) {
-                Ok(output) => found.extend(output.split(',').map(|name| name.trim().to_string()).filter(|name| !name.is_empty())),
-                Err(_) => log::warn!("fonts: fc-match did not answer; using the well-known monospace fonts"),
-            }
-            // A hung one is stopped, which also ends the thread reading from it.
-            child.kill().ok();
-            child.wait().ok();
-        }
-    }
-    let known: &[&str] = if cfg!(target_os = "macos") {
-        &["SF Mono", "Menlo", "Monaco"]
-    } else if cfg!(windows) {
-        &["Cascadia Mono", "Consolas", "Courier New"]
-    } else {
-        &["DejaVu Sans Mono", "Noto Sans Mono", "Liberation Mono", "Ubuntu Mono"]
-    };
-    found.extend(known.iter().map(|name| name.to_string()));
-    found
-}
-
-/// The family the system UI font resolves to, so text measured by name matches what is drawn.
-fn system_ui(installed: &[String], cx: &App) -> SharedString {
-    let text_system = cx.text_system();
-    let resolved = text_system.get_font_for_id(text_system.resolve_font(&font(SYSTEM))).map(|f| f.family);
-    match resolved {
-        Some(family) if family != SYSTEM && installed.contains(&family.to_string()) => family,
-        _ => SYSTEM.into(),
-    }
-}
-
-/// Makes the bundled font available by name. Once, as the fonts are kept for the whole run.
+/// Makes the bundled fonts available by name. Once, as the fonts are kept for the whole run.
 pub fn register(cx: &App) {
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
-        if let Err(error) = cx.text_system().add_fonts(vec![BUNDLED_MONO.into()]) {
-            log::error!("bundled font: {error}");
+        if let Err(error) = cx.text_system().add_fonts(BUNDLED.iter().map(|data| (*data).into()).collect()) {
+            log::error!("bundled fonts: {error}");
         }
     });
 }
@@ -184,22 +139,12 @@ pub fn resolve(theme: &Value, config: &Value, cx: &App) -> Fonts {
     register(cx);
     let installed = cx.text_system().all_font_names();
     let Settings { ui, mono } = settings(theme, config);
-    let ui_family = match pick(&ui.families, &installed, "UI") {
-        Some(family) => family.into(),
-        None => system_ui(&installed, cx),
-    };
-    let mono_family = match pick(&mono.families, &installed, "monospace") {
-        Some(family) => family.into(),
-        None => system_mono()
-            .iter()
-            .find_map(|family| installed_name(&installed, family))
-            .unwrap_or_else(|| BUNDLED_MONO_FAMILY.into())
-            .into(),
-    };
+    let ui_family = pick(&ui.families, &installed, "UI").unwrap_or_else(|| BUNDLED_UI_FAMILY.into());
+    let mono_family = pick(&mono.families, &installed, "monospace").unwrap_or_else(|| BUNDLED_MONO_FAMILY.into());
     Fonts {
-        ui: ui_family,
+        ui: ui_family.into(),
         ui_size: ui.size.unwrap_or(UI_SIZE),
-        mono: mono_family,
+        mono: mono_family.into(),
         mono_size: mono.size.unwrap_or(MONO_SIZE),
     }
 }
@@ -209,6 +154,15 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn bundled_fonts_are_truetype_files() {
+        // The text system only reports a bad font when it is added, which needs an app; the header is what a bad copy gets wrong.
+        for data in BUNDLED {
+            assert_eq!(data[..4], [0, 1, 0, 0], "not a TrueType file");
+            assert!(data.len() > 50_000);
+        }
+    }
 
     #[test]
     fn config_wins_over_the_theme() {
@@ -233,6 +187,6 @@ mod tests {
         let wanted = vec!["Nope".to_string(), "fira mono".to_string(), "Noto Sans".to_string()];
         assert_eq!(pick(&wanted, &installed, "test").as_deref(), Some("Fira Mono"));
         assert_eq!(pick(&["Nope".to_string()], &installed, "test"), None);
-        assert_eq!(pick(&[SYSTEM.to_string()], &installed, "test").as_deref(), Some(SYSTEM));
+        assert_eq!(pick(&[".SystemUIFont".to_string()], &installed, "test").as_deref(), Some(".SystemUIFont"));
     }
 }

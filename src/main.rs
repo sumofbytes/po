@@ -5509,7 +5509,7 @@ impl Reader {
     /// of the pane, as the viewer's panes are.
     fn chat_pane(&self, lead: Vec<nsh::header::Control>, trail: Vec<nsh::header::Control>, cx: &mut Context<Self>) -> gpui::Div {
         nsh::chat::publish(self.chat_snapshot(lead, trail, cx));
-        let tint = cx.global::<Palette>().primary.opacity(0.08);
+        let tint = cx.global::<Palette>().primary.opacity(theme::tokens::DROP_TINT);
         // Files dropped anywhere on the conversation join the draft: the platform under NSH does
         // not hand drops to its elements, so the window's own drop target takes them.
         div()

@@ -295,8 +295,7 @@ set `"theme"` to the absolute path of the file; a file there wins over a scheme
 of the same name. The `font` block overrides the theme's UI and monospace fonts
 and sizes. `family` and `mono_family` take a name or a list tried in order
 (`["JetBrains Mono", "Fira Code"]`); one that isn't installed is logged and
-skipped. Without one, the monospace font is the system's `monospace` (fontconfig
-on Linux), then a well-known one for the platform, then the bundled Fira Mono.
+skipped. Without one, po uses the bundled Geist and Geist Mono, not the system's fonts; set `mono_family` (say, to your fontconfig `monospace`) to use your own.
 `size` also scales the UI's spacing, since layout is measured in units of it.
 Edits to `config.json` and to theme files apply without a restart.
 
