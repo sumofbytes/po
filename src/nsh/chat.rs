@@ -137,9 +137,9 @@ pub enum Block {
     /// Its reasoning, with whether it is expanded.
     Thought { index: usize, text: String, open: bool },
     Tool(Tool),
-    /// A run of tool calls folded to one line: how many calls it keeps, how they went, and
+    /// A run of tool calls folded to one line: how many calls it keeps, how many of them failed, how they went, and
     /// where it sits in the message.
-    Run { index: usize, count: usize, phase: Phase, folded: bool },
+    Run { index: usize, count: usize, failed: usize, phase: Phase, folded: bool },
     Plan(Vec<Entry>),
     /// A permission request, with the ways it may be answered; answered, it says what went.
     Ask { index: usize, title: String, options: Vec<AskOption>, answered: Option<String> },
@@ -645,8 +645,10 @@ fn tool_row(message: usize, at: usize, tool: &Tool) -> AnyElement {
 
 /// A run of tool calls, folded to one row: what is in it and how it went; a press on the row
 /// folds or unfolds it.
-fn run_row(message: usize, at: usize, count: usize, phase: Phase, folded: bool) -> AnyElement {
+fn run_row(message: usize, at: usize, count: usize, failed: usize, phase: Phase, folded: bool) -> AnyElement {
     let label = format!("{count} tool calls");
+    // A failure the run got past is a quiet count after the label, not a failed run.
+    let aside = (failed > 0 && phase != Phase::Failed).then(|| format!("· {failed} failed"));
     view()
         .role(AccessibilityRole::Button)
         .label(label.clone())
@@ -662,7 +664,9 @@ fn run_row(message: usize, at: usize, count: usize, phase: Phase, folded: bool) 
         .hover(|s| s.bg(Colors::hover()))
         .on_press(move || tell(Cmd::Fold { message, block: at, folded: !folded }))
         .child(step_glyph(phase))
-        .child(text(label).flex_1().sized(text_sm()).text_color(Colors::muted()))
+        .child(text(label).sized(text_sm()).text_color(Colors::muted()))
+        .children(aside.map(|aside| text(aside).sized(text_sm()).text_color(Colors::muted())))
+        .child(view().flex_1())
         .child(trail_slot(icon(if folded { IconName::ChevronRight } else { IconName::ChevronDown }, STEP_ICON, Colors::muted())))
         .into_element()
 }
@@ -844,7 +848,7 @@ fn block_row(message: usize, block: &Block) -> AnyElement {
             .into_element(),
         Block::Thought { index, text: thought, open } => thought_row(message, *index, thought, *open),
         Block::Tool(tool) => tool_row(message, tool.index, tool),
-        Block::Run { index, count, phase, folded } => run_row(message, *index, *count, *phase, *folded),
+        Block::Run { index, count, failed, phase, folded } => run_row(message, *index, *count, *failed, *phase, *folded),
         Block::Plan(entries) => plan_rows(entries),
         Block::Ask { index, title, options, answered } => ask_row(message, *index, title, options, answered),
         Block::Approve { index, question, lines, answered } => approve_row(message, *index, question, lines, answered),
@@ -1608,10 +1612,10 @@ mod tests {
         let commands = guard.as_mut().expect("the channel");
         // Four calls in one run (the run's row stands before them), then a permission request at
         // the message's block 4, then a second run of three calls at 5..8.
-        let mut blocks = vec![Block::Run { index: 0, count: 4, phase: Phase::Done, folded: false }];
+        let mut blocks = vec![Block::Run { index: 0, count: 4, failed: 0, phase: Phase::Done, folded: false }];
         blocks.extend((0..4).map(tool));
         blocks.push(Block::Ask { index: 4, title: "Run rm?".into(), options: vec![AskOption { at: 0, label: "Allow once".into(), primary: true }], answered: None });
-        blocks.push(Block::Run { index: 5, count: 3, phase: Phase::Done, folded: false });
+        blocks.push(Block::Run { index: 5, count: 3, failed: 0, phase: Phase::Done, folded: false });
         blocks.extend((5..8).map(tool));
         let mut app = start(Snapshot { items: vec![Item::Agent { index: 0, blocks }], ..Snapshot::default() });
         app.press("label:Allow once").unwrap();

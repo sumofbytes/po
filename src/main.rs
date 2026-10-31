@@ -6054,7 +6054,22 @@ impl Reader {
 /// whether its calls are still going or not.
 fn run_folded(run: &[Block]) -> bool {
     let Some(Block::Tool(first)) = run.first() else { return false };
-    first.fold.unwrap_or(true)
+    first.fold.unwrap_or(run_outcome(run).0 != Step::Failed)
+}
+
+/// How a run of tool calls went, and how many of its calls failed. A failure the later calls got
+/// past is only counted; the run is failed when none of them went well or the last one failed.
+fn run_outcome(run: &[Block]) -> (Step, usize) {
+    let steps: Vec<Step> = run.iter().filter_map(|b| if let Block::Tool(t) = b { Some(t.status) } else { None }).collect();
+    let failed = steps.iter().filter(|s| **s == Step::Failed).count();
+    let step = if steps.iter().any(|s| matches!(s, Step::Waiting | Step::Working)) {
+        Step::Working
+    } else if failed == steps.len() || steps.last() == Some(&Step::Failed) {
+        Step::Failed
+    } else {
+        Step::Done
+    };
+    (step, failed)
 }
 
 /// Where each run of tool calls shown folded starts in `blocks`.
@@ -6193,14 +6208,8 @@ fn chat_blocks(blocks: &[Block]) -> Vec<nsh::chat::Block> {
         let len = if matches!(blocks[n], Block::Tool(_)) && !run { blocks[n..].iter().take_while(|b| matches!(b, Block::Tool(_))).count() } else { 0 };
         if len >= 3 {
             let run = &blocks[n..n + len];
-            let phase = if run.iter().any(|b| matches!(b, Block::Tool(t) if t.status == Step::Failed)) {
-                Step::Failed
-            } else if run.iter().all(|b| matches!(b, Block::Tool(t) if t.status == Step::Done)) {
-                Step::Done
-            } else {
-                Step::Working
-            };
-            out.push(nsh::chat::Block::Run { index: n, count: len, phase: chat_phase(phase), folded: run_folded(run) });
+            let (phase, failed) = run_outcome(run);
+            out.push(nsh::chat::Block::Run { index: n, count: len, failed, phase: chat_phase(phase), folded: run_folded(run) });
             for (k, block) in run.iter().enumerate() {
                 if let Block::Tool(tool) = block {
                     out.push(nsh::chat::Block::Tool(chat_tool(n + k, tool)));
