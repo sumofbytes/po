@@ -146,17 +146,26 @@ impl Reader {
     pub(crate) fn chat_pane(&self, lead: Vec<nsh::header::Control>, trail: Vec<nsh::header::Control>, cx: &mut Context<Self>) -> gpui::Div {
         nsh::chat::publish(self.chat_snapshot(lead, trail, cx));
         let tint = cx.global::<Palette>().primary.opacity(theme::tokens::DROP_TINT);
-        // Files dropped anywhere on the conversation join the draft: the platform under NSH does
-        // not hand drops to its elements, so the window's own drop target takes them.
+        // Files dropped anywhere on the conversation join the draft. NSH's views can sit over this
+        // element and keep it from being the hovered one, so while a file is being dragged a layer
+        // above them takes the drop; it is only there for the drag, so clicks are never blocked.
+        let dragging = cx.has_active_drag();
         div()
             .size_full()
+            .relative()
             .flex()
             .flex_col()
-            .drag_over::<gpui::ExternalPaths>(move |style, _, _, _| style.bg(tint))
-            .on_drop(cx.listener(|reader, dropped: &gpui::ExternalPaths, _, cx| {
-                reader.attach(dropped.paths().iter().cloned().map(Source::Path).collect(), cx);
-            }))
             .child(self.chat.clone())
+            .children(dragging.then(|| {
+                div()
+                    .absolute()
+                    .size_full()
+                    .occlude()
+                    .drag_over::<gpui::ExternalPaths>(move |style, _, _, _| style.bg(tint))
+                    .on_drop(cx.listener(|reader, dropped: &gpui::ExternalPaths, _, cx| {
+                        reader.attach(dropped.paths().iter().cloned().map(Source::Path).collect(), cx);
+                    }))
+            }))
     }
 
     /// What the conversation shows: the header, the transcript, and the composer.

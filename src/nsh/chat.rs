@@ -1374,7 +1374,6 @@ fn draft_field(draft: &Signal<String>, field_ref: ElementRef) -> Input {
             tell(Cmd::Draft(text.clone()));
             tell(Cmd::Send { later: false });
         })
-        .on_file_drop(move |drop: &FileDropEvent| tell(Cmd::Drop(drop.uris.clone())))
 }
 
 /// The field in its row. A value the app writes to a field the user has typed in is dropped as
@@ -1436,7 +1435,6 @@ fn bar(snap: Snapshot, draft: Signal<String>, field_ref: ElementRef) -> AnyEleme
         .shadow_opacity(1.)
         .shadow_radius(px(0.))
         .shadow_offset(point(px(0.), px(1.)))
-        .on_file_drop(move |drop: &FileDropEvent| tell(Cmd::Drop(drop.uris.clone())))
         .children(snap.note.as_deref().map(note_row))
         .children((!snap.pictures.is_empty()).then(|| pictures_row(&snap.pictures)))
         .child(fresh_field(snap.draft_reset, draft_field(&field, field_ref)))
