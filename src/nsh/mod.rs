@@ -120,6 +120,13 @@ impl Colors {
         || nsh_base::theme().border
     }
 
+    /// The color a card's shadow is cast in: black either way, but firmer in dark appearance,
+    /// where the same alpha vanishes against the page. Tight shadows need the alpha to stay crisp.
+    pub fn shadow() -> AdaptiveColor {
+        let black = AdaptiveColor::rgb(0x000000, 0x000000);
+        AdaptiveColor { light: black.light.opacity(0.22), dark: black.dark.opacity(0.8) }
+    }
+
     pub fn danger() -> impl Fn() -> AdaptiveColor + Copy {
         || nsh_base::theme().destructive
     }
@@ -169,6 +176,16 @@ impl Colors {
         Self::token("list-hover")
     }
 
+    /// A row's hover when the selected row already wears [`Colors::hover`]: a hint of it.
+    pub fn hint() -> impl Fn() -> AdaptiveColor + Copy {
+        move || Self::hover()().opacity(0.6)
+    }
+
+    /// The guide line down a project's threads.
+    pub fn guide() -> impl Fn() -> AdaptiveColor + Copy {
+        move || Self::border()().opacity(0.7)
+    }
+
     pub fn input_background() -> impl Fn() -> AdaptiveColor + Copy {
         Self::token("input-background")
     }
@@ -194,7 +211,22 @@ impl Colors {
 /// `n` rems, a rem being Po's UI font size, as GPUI's `rems` are in the rest of the window. Only
 /// [`scale`] calls it: a screen takes its lengths from there, so spacing stays on one scale.
 fn rems(n: f32) -> Points {
-    Points(n * nsh_base::theme().number("rem").unwrap_or(14.))
+    Points(snap(n * nsh_base::theme().number("rem").unwrap_or(14.)))
+}
+
+/// `px` as a whole, even number of points, so no edge falls between pixels: at a UI font size of
+/// 14, a quarter rem is 3.5, and every step off it would otherwise be a fraction.
+pub fn snap(px: f32) -> f32 {
+    if px <= 0. {
+        return 0.;
+    }
+    ((px / 2.).round() * 2.).max(2.)
+}
+
+/// `text` with its first letter in capitals, as a sentence starts.
+pub fn sentence(text: &str) -> String {
+    let mut chars = text.chars();
+    chars.next().map_or_else(String::new, |first| first.to_uppercase().chain(chars).collect())
 }
 
 /// The lengths of the screens: spacing, padding, gaps and sizes in rems. Each step `sN` is N quarter
@@ -231,7 +263,7 @@ pub mod scale {
     pub fn due_entry_width() -> Points { rems(13.0) }
     /// From the composer card's edge to its text: the card's padding and the field's, and the
     /// border, which is a point wide whatever the font size.
-    pub fn composer_text_inset() -> Points { s2() + s2() + s1() + Points(2.) }
+    pub fn composer_text_inset() -> Points { s2() + s2() + Points(1.) }
     /// `n` lines of small text, whose line is 1.25rem tall: a text area's minimum, a note's maximum.
     pub fn lines(n: f32) -> Points { rems(1.25 * n) }
 }
@@ -288,7 +320,7 @@ pub fn hairline() -> impl Fn() -> AdaptiveColor + Copy {
 
 /// The text of a row's label, GPUI's `text_base`.
 pub fn text_base() -> Points {
-    scale::s4()
+    font(1.)
 }
 
 /// A field's height.
@@ -303,12 +335,19 @@ pub fn header_height() -> Points {
 
 /// Small text, GPUI's `text_xs`: dates and counts.
 pub fn text_xs() -> Points {
-    scale::s3()
+    font(0.75)
 }
 
 /// GPUI's `text_sm`: the footer and quiet notes.
 pub fn text_sm() -> Points {
-    scale::s3_5()
+    font(0.875)
+}
+
+/// A font size of `n` rems, in whole points: spacing sits on an even grid, but text is free to
+/// take an odd size, so an odd UI font size or rem is followed as it is.
+fn font(n: f32) -> Points {
+    // Halves round down, as the even grid did for 10.5.
+    Points((n * nsh_base::theme().number("rem").unwrap_or(14.) - 0.5).ceil().max(1.))
 }
 
 /// The line height of text of `size`: the leading the fixed text sizes of GPUI have, which follows
@@ -317,7 +356,7 @@ pub fn leading(size: Points) -> Points {
     // GPUI's own steps: 4/3 for text_xs, 10/7 for text_sm, 3/2 from text_base up.
     let rem = nsh_base::theme().number("rem").unwrap_or(14.);
     let ratio = size.0 / rem;
-    Points(size.0 * if ratio <= 0.76 { 4. / 3. } else if ratio <= 0.88 { 10. / 7. } else { 1.5 })
+    Points(snap(size.0 * if ratio <= 0.76 { 4. / 3. } else if ratio <= 0.88 { 10. / 7. } else { 1.5 }))
 }
 
 /// Quiet small text: dates, counts, secondary labels.
@@ -343,6 +382,12 @@ pub fn body(content: impl IntoReactive<SharedString>) -> Text {
 /// A radius that makes a pill or dot of anything square.
 pub fn pill() -> Points {
     Points(999.)
+}
+
+/// The corner of a soft, flat surface: a sidebar row, a step of the agent's work, a message bubble.
+/// One size for them all keeps them of a family; 1.5 times the base radius.
+pub fn soft_radius() -> Points {
+    Colors::radius() * 1.5
 }
 
 /// The corner of a card or panel, which holds controls of the base radius: twice that radius.
@@ -456,4 +501,39 @@ pub fn field_with(id: &str, value: Signal<String>, placeholder: &'static str, on
         .duration(220.)
         .ease_out()
         .child(input)
+}
+
+#[cfg(test)]
+mod snap_tests {
+    use super::snap;
+
+    #[test]
+    fn lengths_are_whole_even_points() {
+        for rem in [12., 13., 14., 15., 16., 18.] {
+            for n in [0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 0.875, 1., 1.25, 1.5, 1.75, 2., 2.5, 2.75] {
+                let px = snap(n * rem);
+                assert!(px >= 2. && px % 2. == 0., "{n} rem at {rem} is {px}");
+            }
+        }
+        assert_eq!(snap(0.), 0.);
+        assert_eq!(snap(3.5), 4.);
+        assert_eq!(snap(10.5), 10.);
+        assert_eq!(snap(29.75), 30.);
+    }
+
+    #[test]
+    fn steps_never_swap_order() {
+        let steps = [0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 0.875, 1., 1.25, 1.5, 1.75, 2., 2.5, 2.75];
+        for rem in [12., 13., 14., 15., 16., 18.] {
+            let px: Vec<f32> = steps.iter().map(|n| snap(n * rem)).collect();
+            assert!(px.windows(2).all(|pair| pair[0] <= pair[1]), "at {rem}: {px:?}");
+        }
+    }
+
+    #[test]
+    fn a_sentence_starts_in_capitals() {
+        assert_eq!(super::sentence("working"), "Working");
+        assert_eq!(super::sentence("élan"), "Élan");
+        assert_eq!(super::sentence(""), "");
+    }
 }

@@ -33,19 +33,14 @@ pub struct Thread {
     pub controlled: bool,
     /// The day this one starts in its project's list ("Today", "Yesterday"...), if it does.
     pub day: Option<&'static str>,
-}
-
-#[derive(Clone, PartialEq, Debug)]
-pub struct Branch {
-    pub name: String,
-    pub dirty: bool,
+    /// How long ago it was last active (`5m`, `3h`, `2d`), if that is known.
+    pub ago: Option<String>,
 }
 
 #[derive(Clone, PartialEq, Debug)]
 pub struct Project {
     pub id: u64,
     pub name: String,
-    pub branch: Option<Branch>,
     /// The one on screen has its name at full strength.
     pub active: bool,
     pub collapsed: bool,
@@ -105,17 +100,19 @@ mod space {
     pub fn gutter() -> Points { scale::s3() }
     pub fn inset() -> Points { scale::s3() }
     pub fn lead() -> Points { scale::s4() }
-    pub fn row() -> Points { scale::s8() + scale::s0_5() }
-    pub fn tree() -> Points { scale::s7() + scale::s0_5() }
-    pub fn more() -> Points { scale::s7() }
+    /// Where a thread's title starts, in line with the name of its project above.
+    pub fn title() -> Points { inset() + lead() + scale::s2_5() }
+    pub fn row() -> Points { scale::s8() + scale::s1() }
+    pub fn tree() -> Points { scale::s8() + scale::s1() }
+    pub fn more() -> Points { scale::s8() }
     pub fn item_gap() -> Points { Points(0.) }
-    pub fn group_gap() -> Points { scale::s4() }
+    pub fn group_gap() -> Points { scale::s6() }
     pub fn list_top() -> Points { scale::s1() }
     pub fn list_bottom() -> Points { scale::s3() }
     pub fn action_gap() -> Points { scale::s1() }
     pub fn actions_top() -> Points { scale::s4() }
     pub fn section_gap() -> Points { scale::s2() }
-    pub fn section() -> Points { scale::s8() }
+    pub fn section_top() -> Points { scale::s5() }
 }
 
 /// Muted text at the size of every other line of the sidebar.
@@ -134,7 +131,7 @@ fn side_row(lead: Option<View>) -> View {
         .items_center()
         .gap(scale::s2_5())
         .px(space::inset())
-        .rounded(super::card_radius())
+        .rounded(super::soft_radius())
         .cursor_pointer()
         .smooth()
         .child(lead)
@@ -155,7 +152,7 @@ fn lead(content: impl IntoElement) -> View {
 fn mark(mark: Mark) -> View {
     let size = scale::s1_5() + scale::s0_5();
     let dot = |color: fn() -> AdaptiveColor| view().w(size).h(size).rounded(super::pill()).bg(color);
-    centered(match mark {
+    view().flex_none().items_center().justify_center().child(match mark {
         Mark::Idle => view().into_element(),
         Mark::Asking => text("!").text_size(text_base()).font_weight(FontWeight::BOLD).text_color(Colors::warning()).into_element(),
         Mark::Running => dot(|| Colors::primary()()).into_element(),
@@ -166,8 +163,8 @@ fn mark(mark: Mark) -> View {
 /// A quiet section title with what can be done there.
 fn section(title: impl IntoReactive<SharedString>, action: Option<View>) -> View {
     view()
-        .h(space::section() + space::section_gap())
-        .pt(space::section_gap())
+        .pt(space::section_top())
+        .pb(space::section_gap() / 2.)
         .flex_none()
         .flex_row()
         .items_center()
@@ -187,14 +184,16 @@ fn grant_badge() -> View {
         .child(small("⌁"))
 }
 
-fn thread_row(thread: &Thread, project: Option<&str>, close_tip: &'static str) -> View {
+/// The row of a thread. In a project's tree it starts to the right of the guide line, so its
+/// highlight never touches the line; in Needs you it starts at the edge. Its mark is at the end.
+fn thread_row(thread: &Thread, project: Option<&str>, close_tip: &'static str, in_tree: bool) -> View {
     let (pid, tid) = (thread.project, thread.id);
     let selected = thread.selected;
     let label = text(thread.label.clone())
         .number_of_lines(1)
         .flex_shrink(1.)
         .sized(text_base())
-        .text_color(move || if selected { Colors::foreground()() } else { Colors::muted()() })
+        .text_color(Colors::foreground())
         .style_when(selected, |s| s.font_weight(FontWeight::MEDIUM));
     let title = match project {
         // The title, then the project it is in, which the row no longer sits under.
@@ -207,14 +206,28 @@ fn thread_row(thread: &Thread, project: Option<&str>, close_tip: &'static str) -
             .child(quiet(project.to_string()).number_of_lines(1).flex_shrink(1.)),
         None => view().flex_1().flex_row().child(label.flex_1()),
     };
-    let row = side_row(Some(mark(thread.mark)))
+    // The highlight starts a step right of the guide line, and the text still lines up with the
+    // name of the project above.
+    let (left, pad) = if in_tree {
+        let left = space::inset() + space::lead() / 2. + scale::s2();
+        (left, space::title() - left)
+    } else {
+        (Points(0.), space::inset())
+    };
+    let row = side_row(None)
+        .ml(left)
+        .pl(pad)
+        .pr(space::inset())
         .h(space::tree())
         .test_id(&format!("agent-thread-{tid}"))
         .on_press(move || send(Cmd::OpenThread(pid, tid)))
         .child(title)
         .child(thread.controlled.then(grant_badge))
-        .child(on_hover(icon_button(IconName::Close, scale::s3(), close_tip, move || send(Cmd::CloseThread(pid, tid)))));
-    if selected { row.bg(Colors::selected()) } else { row.hover(|s| s.bg(Colors::hover())) }
+        .child(on_hover(icon_button(IconName::Close, scale::s3(), close_tip, move || send(Cmd::CloseThread(pid, tid)))))
+        .child(thread.ago.clone().map(|ago| text(ago).flex_none().sized(super::text_xs()).text_color(Colors::muted())))
+        .child((thread.mark != Mark::Idle).then(|| mark(thread.mark)));
+    // The selection takes the colour of the message bubbles; a hovered row only hints at it.
+    if selected { row.bg(Colors::hover()) } else { row.hover(|s| s.bg(Colors::hint())) }
 }
 
 /// The day, quietly, over the threads of that day.
@@ -224,17 +237,20 @@ fn day_separator(day: &'static str) -> View {
         .h(space::more() + space::section_gap())
         .flex_none()
         .flex_row()
-        .items_end()
-        .pl(space::inset() + space::lead() + scale::s2_5())
+        .items_center()
+        .gap(scale::s2())
+        .pl(space::title())
         .pr(space::inset())
-        .pb(space::section_gap())
-        .child(text(day).flex_none().sized(super::text_xs()).font_weight(FontWeight::MEDIUM).text_color(Colors::dim(Colors::muted())))
+        .pt(space::section_gap())
+        // The day, then a hairline that carries the eye to the edge.
+        .child(text(day).flex_none().sized(super::text_xs()).font_weight(FontWeight::MEDIUM).text_color(Colors::muted()))
+        .child(view().flex_1().h(Points(1.)).bg(super::hairline()))
 }
 
 fn project_group(project: &Project) -> View {
     let pid = project.id;
-    let active = project.active;
-    let label = move || if active { Colors::foreground()() } else { Colors::muted()() };
+    // With one of its threads selected, the highlight says where we are; the name steps back.
+    let label = Colors::foreground();
     let chevron = if project.collapsed { IconName::ChevronRight } else { IconName::ChevronDown };
     let name = text(project.name.clone())
         .number_of_lines(1)
@@ -251,26 +267,43 @@ fn project_group(project: &Project) -> View {
         .hover(|s| s.bg(Colors::hover()))
         .on_press(move || send(Cmd::ToggleProject(pid)))
         .child(name)
-        .child(on_hover(icon_button(IconName::Plus, scale::s3(), "New thread in this project", move || send(Cmd::StartThread(pid)))))
-        .child(project.closable.then(|| on_hover(icon_button(IconName::Close, scale::s3(), "Close project", move || send(Cmd::CloseProject(pid))))));
+        // The last button's padding hangs out, so its icon ends where the text of the rows below does.
+        .child(on_hover(icon_button(IconName::Plus, scale::s3(), "New thread in this project", move || send(Cmd::StartThread(pid)))).mr(if project.closable { Points(0.) } else { -scale::s1() }))
+        .child(project.closable.then(|| on_hover(icon_button(IconName::Close, scale::s3(), "Close project", move || send(Cmd::CloseProject(pid)))).mr(-scale::s1())));
     let fold = project.fold.map(|(expanded, hidden)| {
         let label = if expanded { "Show less".to_string() } else { format!("{hidden} more") };
-        side_row(Some(lead(view())))
+        let chevron = if expanded { IconName::ChevronUp } else { IconName::ChevronDown };
+        side_row(Some(centered(icon(chevron, scale::s3(), Colors::muted()))))
             .h(space::more())
             .hover(|s| s.bg(Colors::hover()))
             .on_press(move || send(Cmd::ToggleMore(pid)))
-            .child(text(label).sized(super::text_sm()).text_color(Colors::dim(Colors::muted())))
+            .child(text(label).sized(super::text_sm()).text_color(Colors::muted()))
     });
     view()
         .gap(space::item_gap())
         .child(head)
         .child(
-            project
-                .threads
-                .iter()
-                .flat_map(|thread| [thread.day.map(day_separator), Some(thread_row(thread, None, "Close thread"))])
-                .flatten()
-                .collect::<Vec<_>>(),
+            view()
+                .relative()
+                // A guide down the lead column, through the marks of the threads, like a timeline.
+                .child(
+                    view()
+                        .absolute()
+                        .top(scale::s1())
+                        .bottom(scale::s1())
+                        .left(space::inset() + space::lead() / 2. - Points(1.))
+                        .w(scale::s0_5())
+                        .rounded(super::pill())
+                        .bg(Colors::guide()),
+                )
+                .child(
+                    project
+                        .threads
+                        .iter()
+                        .flat_map(|thread| [thread.day.map(day_separator), Some(thread_row(thread, None, "Close thread", true))])
+                        .flatten()
+                        .collect::<Vec<_>>(),
+                ),
         )
         .child(fold)
 }
@@ -313,11 +346,11 @@ fn suggestion(item: &Suggestion) -> View {
 
 /// A plain text action below the title bar: it lights up under the pointer.
 fn action(icon_name: IconName, label: &'static str, tip: &'static str, selected: Option<bool>, on_press: impl Fn() + 'static) -> View {
-    let row = side_row(Some(lead(icon(icon_name, scale::s4(), Colors::muted()))))
+    let row = side_row(Some(lead(icon(icon_name, scale::s4(), Colors::foreground()))))
         .h(space::row())
         .tooltip(super::tooltip(tip))
         .on_press(on_press)
-        .child(text(label).flex_1().sized(text_base()).text_color(move || if selected == Some(true) { Colors::foreground()() } else { Colors::foreground()().opacity(crate::theme::tokens::HOVER) }).style_when(selected == Some(true), |s| s.font_weight(FontWeight::MEDIUM)));
+        .child(text(label).flex_1().sized(text_base()).text_color(Colors::foreground()).style_when(selected == Some(true), |s| s.font_weight(FontWeight::MEDIUM)));
     if selected == Some(true) { row.bg(Colors::selected()) } else { row.hover(|s| s.bg(Colors::hover())) }
 }
 
@@ -340,28 +373,23 @@ pub fn Sidebar() -> impl IntoElement {
     let search = move || {
         let filled = !query.get().is_empty();
         let in_use = filled || focused.get();
-        view()
+        // The row of the other actions, so its icon, gap and text line up with theirs.
+        side_row(Some(lead(icon(IconName::Search, scale::s4(), Colors::foreground()))))
             .h(space::row())
-            .flex_row()
-            .items_center()
-            .gap(scale::s2())
-            .px(space::inset())
-            .rounded(super::card_radius())
             .on_press(move || field.focus())
-            .smooth()
             .hover(|s| s.bg(Colors::hover()))
             .style_when(in_use, |s| s.bg(Colors::hover()))
-            .child(lead(icon(IconName::Search, scale::s4(), Colors::muted())))
             .child(
                 nsh_core::element::input()
                     .test_id("sidebar-search")
                     .element_ref(&field)
                     .value(move || query.get())
                     .placeholder("Search")
-                    .placeholder_color(Colors::one(Colors::muted()))
+                    // The same as the labels of the actions around it, and the typed text.
+                    .placeholder_color(Colors::one(|| Colors::foreground()()))
                     .selection_color(Colors::one(Colors::caret()))
-                    .text_size(text_base())
-                    .text_color(Colors::muted())
+                    .sized(text_base())
+                    .text_color(Colors::foreground())
                     .auto_correct(false)
                     .on_focus(move || focused.set(true))
                     .on_blur(move || focused.set(false))
@@ -411,7 +439,7 @@ pub fn Sidebar() -> impl IntoElement {
                             .px(space::gutter())
                             .pt(space::list_top())
                             .pb(space::list_bottom())
-                            .child(waiting.iter().map(|item| thread_row(&item.thread, Some(&item.project), "Close thread")).collect::<Vec<_>>()),
+                            .child(waiting.iter().map(|item| thread_row(&item.thread, Some(&item.project), "Close thread", false)).collect::<Vec<_>>()),
                     ),
                 )
         })
@@ -449,7 +477,7 @@ pub fn Sidebar() -> impl IntoElement {
                 .gap(space::action_gap())
                 .px(space::gutter())
                 .pt(space::actions_top())
-                .child(action(IconName::Plus, "New", "New thread (Ctrl+N)", None, || send(Cmd::NewThread)))
+                .child(action(IconName::PlusBold, "New", "New thread (Ctrl+N)", None, || send(Cmd::NewThread)))
                 .child(dynamic(search))
                 .child(dynamic(issues)),
         )
@@ -459,7 +487,8 @@ pub fn Sidebar() -> impl IntoElement {
                 .flex_1()
                 .child(section(
                     "Projects",
-                    Some(icon_button(IconName::Plus, scale::s3(), "Add a project: open a folder (Ctrl+Shift+O)", || send(Cmd::AddProject))),
+                    // The button's padding hangs out, so its icon ends where the text of the rows below does.
+                    Some(icon_button(IconName::Plus, scale::s3(), "Add a project: open a folder (Ctrl+Shift+O)", || send(Cmd::AddProject)).mr(-scale::s1())),
                 ))
                 .child(dynamic(move || {
                     state.with(|s| s.status.clone()).map(|status| {
@@ -488,7 +517,7 @@ mod tests {
     use super::*;
 
     fn thread(project: u64, id: u64, label: &str, mark: Mark, selected: bool) -> Thread {
-        Thread { project, id, label: label.into(), mark, selected, controlled: false, day: None }
+        Thread { project, id, label: label.into(), mark, selected, controlled: false, day: None, ago: None }
     }
 
     fn start() -> Headless {
@@ -512,14 +541,13 @@ mod tests {
                 Project {
                     id: 1,
                     name: "po".into(),
-                    branch: Some(Branch { name: "nsh".into(), dirty: true }),
                     active: true,
                     collapsed: false,
                     closable: true,
                     threads: vec![thread(1, 10, "Port the sidebar", Mark::Running, true), thread(1, 11, "Old idea", Mark::Idle, false)],
                     fold: Some((false, 3)),
                 },
-                Project { id: 2, name: "other".into(), branch: None, active: false, collapsed: true, closable: true, threads: vec![], fold: None },
+                Project { id: 2, name: "other".into(), active: false, collapsed: true, closable: true, threads: vec![], fold: None },
             ],
             suggestions: vec![Suggestion { id: 7, text: "“Fix the build” wants to open /tmp/x".into(), yes: "Open" }],
             issues_open: false,

@@ -833,6 +833,43 @@ impl Activity {
     }
 }
 
+/// How long ago `then` (ms since the epoch) was, as the sidebar says it: `5m`, `3h`, `2d`, `6w`,
+/// `4mo`. Nothing for the last minute, and for a time that was never recorded.
+fn ago(now: u64, then: u64) -> Option<String> {
+    // Threads from before the time was kept hold a counter, not a time.
+    if then < 1_000_000_000_000 || then > now {
+        return None;
+    }
+    let minutes = (now - then) / 60_000;
+    Some(match minutes {
+        0 => return None,
+        1..=59 => format!("{minutes}m"),
+        60..=1439 => format!("{}h", minutes / 60),
+        1440..=20159 => format!("{}d", minutes / 1440),
+        20160..=86399 => format!("{}w", minutes / 10080),
+        _ => format!("{}mo", minutes / 43200),
+    })
+}
+
+/// `title` with its first letter in capitals when it opens with a plain word, as "fix the build"
+/// does. One that opens with a path, a command or an identifier (`src/main.rs`, `cargo test`,
+/// `snake_case`, `v2`) is left as typed.
+fn capitalized(title: String) -> String {
+    let word = title.split_whitespace().next().unwrap_or("").trim_end_matches([',', ':', ';', '.', '?', '!']);
+    // A command (`cargo test`, `curl localhost`) opens with a plain word too, but is followed by
+    // arguments: a flag, a path, a URL or a number. Prose is words and punctuation only.
+    let prose = title.split_whitespace().skip(1).all(|w| w.chars().all(|c| c.is_alphabetic() || "'’,:;.?!-".contains(c)));
+    // Bare subcommands (`cargo test`, `git status`) read as prose, so the usual tools are named.
+    let tools = [
+        "cargo", "git", "npm", "npx", "pnpm", "yarn", "bun", "make", "cd", "ls", "cat", "rm", "grep", "sudo", "gh", "docker", "kubectl", "rustc", "python", "pip", "node", "go", "curl", "ssh",
+    ];
+    let plain = !word.is_empty() && word.chars().all(|c| c.is_lowercase()) && prose && !tools.contains(&word);
+    match title.chars().next() {
+        Some(_) if plain => crate::nsh::sentence(&title),
+        _ => title,
+    }
+}
+
 /// The time now in milliseconds since the Unix epoch.
 fn now_ms() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
@@ -884,7 +921,7 @@ impl Thread {
         match first {
             Some(line) => {
                 let line = line.trim();
-                let short: String = line.chars().take(28).collect();
+                let short: String = line.chars().take(72).collect();
                 if short.len() < line.len() { format!("{short}…") } else { short }
             }
             None => self.saved_title.clone().unwrap_or_else(|| "New thread".into()),
@@ -4586,7 +4623,15 @@ impl Reader {
             }
             Event::Stopped(reason) => {
                 self.thread.busy = false;
+                if self.thread.status == "working" {
+                    self.thread.status = "ready".into();
+                }
                 self.thread.unread = !visible;
+                // Only when nothing else holds the keyboard: the reader's own focus is where it
+                // rests, so an input (a search, the finder, a rename, the editor) has it otherwise.
+                if visible && self.focus.is_focused(window) && !self.settings_open && !self.finder_open && !self.issues_open {
+                    self.focus_draft(window, cx);
+                }
                 // A child's parent is told instead; the desktop hears of it only when nobody
                 // is waiting on the child.
                 let parent_hears = self.thread.parent.is_some() && self.thread.notify != Notify::Never;
@@ -5139,6 +5184,9 @@ impl Reader {
     fn begin_turn(&mut self, out: &Outgoing) {
         self.thread.blank = false;
         self.thread.busy = true;
+        if self.thread.status == "ready" {
+            self.thread.status = "working".into();
+        }
         self.thread.failed = false;
         self.thread.last_error = None;
         self.thread.touched = Instant::now();
@@ -5336,6 +5384,7 @@ impl Reader {
             selected: (pid, thread.id) == (active_project, active_thread),
             controlled: self.grants.get(&thread.id).is_some_and(|grant| *grant != command::Grant::default()),
             day: None,
+            ago: ago(now_ms(), thread.active_at),
         };
         let today = date::today();
         // Filtering keeps a project whose name matches, with all its threads, and any project with a
@@ -5380,11 +5429,9 @@ impl Reader {
                 if collapsed {
                     recent.clear();
                 }
-                let head = self.heads.get(&view.project.root).filter(|_| view.project.shows_branch());
                 side::Project {
                     id: pid,
                     name: view.project.name(),
-                    branch: head.map(|head| side::Branch { name: head.name.to_string(), dirty: head.dirty }),
                     active: pid == active_project,
                     collapsed,
                     closable: many,
@@ -5495,6 +5542,7 @@ impl Reader {
             statuses.push(line);
         }
         if !thread.status.is_empty() {
+            // "ready" is set when the agent starts and nothing resets it, so a turn going on says so here.
             statuses.push(thread.status.clone());
         }
         let picking = thread.picking.then(|| match &thread.sessions {
@@ -5504,12 +5552,12 @@ impl Reader {
                 when: session.updated.get(..16).unwrap_or_default().replace('T', " "),
             }).collect()),
             Some(_) if !thread.loading => chat::Picking::Note(format!("No sessions to resume in {}", self.project.root.display())),
-            _ => chat::Picking::Note(thread.status.clone()),
+            _ => chat::Picking::Loading,
         });
         let grant = self.grants.get(&thread.id).copied().unwrap_or_default();
         chat::Snapshot {
             glass: cx.global::<Palette>().glass.is_some(),
-            title: thread.title(),
+            title: capitalized(thread.title()),
             lead,
             trail,
             statuses,
@@ -5978,7 +6026,7 @@ impl Reader {
     fn thread_label(&self, thread: &Thread) -> String {
         match thread.parent.and_then(|parent| self.title_of(parent)) {
             Some(parent) => format!("↳ {parent}"),
-            None => thread.title(),
+            None => capitalized(thread.title()),
         }
     }
 
@@ -6006,7 +6054,22 @@ impl Reader {
 /// whether its calls are still going or not.
 fn run_folded(run: &[Block]) -> bool {
     let Some(Block::Tool(first)) = run.first() else { return false };
-    first.fold.unwrap_or(true)
+    first.fold.unwrap_or(run_outcome(run).0 != Step::Failed)
+}
+
+/// How a run of tool calls went, and how many of its calls failed. A failure the later calls got
+/// past is only counted; the run is failed when none of them went well or the last one failed.
+fn run_outcome(run: &[Block]) -> (Step, usize) {
+    let steps: Vec<Step> = run.iter().filter_map(|b| if let Block::Tool(t) = b { Some(t.status) } else { None }).collect();
+    let failed = steps.iter().filter(|s| **s == Step::Failed).count();
+    let step = if steps.iter().any(|s| matches!(s, Step::Waiting | Step::Working)) {
+        Step::Working
+    } else if failed == steps.len() || steps.last() == Some(&Step::Failed) {
+        Step::Failed
+    } else {
+        Step::Done
+    };
+    (step, failed)
 }
 
 /// Where each run of tool calls shown folded starts in `blocks`.
@@ -6145,14 +6208,8 @@ fn chat_blocks(blocks: &[Block]) -> Vec<nsh::chat::Block> {
         let len = if matches!(blocks[n], Block::Tool(_)) && !run { blocks[n..].iter().take_while(|b| matches!(b, Block::Tool(_))).count() } else { 0 };
         if len >= 3 {
             let run = &blocks[n..n + len];
-            let phase = if run.iter().any(|b| matches!(b, Block::Tool(t) if t.status == Step::Failed)) {
-                Step::Failed
-            } else if run.iter().all(|b| matches!(b, Block::Tool(t) if t.status == Step::Done)) {
-                Step::Done
-            } else {
-                Step::Working
-            };
-            out.push(nsh::chat::Block::Run { index: n, count: len, phase: chat_phase(phase), folded: run_folded(run) });
+            let (phase, failed) = run_outcome(run);
+            out.push(nsh::chat::Block::Run { index: n, count: len, failed, phase: chat_phase(phase), folded: run_folded(run) });
             for (k, block) in run.iter().enumerate() {
                 if let Block::Tool(tool) = block {
                     out.push(nsh::chat::Block::Tool(chat_tool(n + k, tool)));
@@ -6616,7 +6673,33 @@ fn preview_of(messages: &[Msg], busy: bool) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Queue, Where, route};
+    #[test]
+    fn a_thread_title_opens_with_a_capital_unless_it_is_code() {
+        let cap = |t: &str| super::capitalized(t.to_string());
+        assert_eq!(cap("fix the build"), "Fix the build");
+        assert_eq!(cap("why, though?"), "Why, though?");
+        assert_eq!(cap("Already fine"), "Already fine");
+        for as_typed in ["src/main.rs is slow", "cargo test fails", "snake_case rename", "v2 plan", "#115 review", "…", ""] {
+            assert_eq!(cap(as_typed), as_typed);
+        }
+    }
+
+    use super::{Queue, Where, ago, route};
+
+    #[test]
+    fn the_sidebar_says_how_long_ago_in_a_word() {
+        let now = 1_800_000_000_000;
+        let before = |ms: u64| ago(now, now - ms);
+        assert_eq!(before(30_000), None);
+        assert_eq!(before(5 * 60_000).as_deref(), Some("5m"));
+        assert_eq!(before(3 * 3_600_000).as_deref(), Some("3h"));
+        assert_eq!(before(2 * 86_400_000).as_deref(), Some("2d"));
+        assert_eq!(before(21 * 86_400_000).as_deref(), Some("3w"));
+        assert_eq!(before(120 * 86_400_000).as_deref(), Some("4mo"));
+        // A counter from before the time was kept, and a time in the future, say nothing.
+        assert_eq!(ago(now, 7), None);
+        assert_eq!(ago(now, now + 1), None);
+    }
 
     // submit's paths (§4.3 of the control plan): blank, unstarted, starting, asleep, ready,
     // busy for an agent that takes messages mid-turn (dex) and one that doesn't (ACP).
