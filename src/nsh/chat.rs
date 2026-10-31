@@ -139,7 +139,8 @@ pub enum Block {
     Tool(Tool),
     /// A run of tool calls folded to one line: how many calls it keeps, how many of them failed, how they went, and
     /// where it sits in the message.
-    Run { index: usize, count: usize, failed: usize, phase: Phase, folded: bool },
+    /// `task` is the plan entry it worked towards, which the row says in place of the count.
+    Run { index: usize, count: usize, failed: usize, phase: Phase, folded: bool, task: Option<String> },
     Plan(Vec<Entry>),
     /// A permission request, with the ways it may be answered; answered, it says what went.
     Ask { index: usize, title: String, options: Vec<AskOption>, answered: Option<String> },
@@ -289,20 +290,20 @@ fn open_link(press: &nsh_base::TextViewLinkPressEvent) {
     super::bus::send(super::bus::Cmd::OpenUrl(press.url.to_string()));
 }
 
-/// What a phase is drawn with: quiet while it waits, principal while it goes, and what it
-/// reached in the tone it had.
+/// What a phase is drawn with: quiet while it waits or once it went well, principal while it
+/// goes, and a failure in the danger tone, the one outcome worth a colour.
 fn phase_tint(phase: Phase) -> AdaptiveColor {
     match phase {
         Phase::Waiting => Colors::muted()(),
         Phase::Working => Colors::primary()(),
-        Phase::Done => Colors::added()(),
+        Phase::Done => Colors::muted()(),
         Phase::Failed => Colors::danger()(),
     }
 }
 
 /// The font the code the tools take is set in.
 fn mono_family() -> SharedString {
-    nsh_base::theme().font_mono.clone().unwrap_or_else(|| SharedString::from("monospace"))
+    nsh_base::theme().font_mono.clone().unwrap_or_else(|| SharedString::from(crate::fonts::BUNDLED_MONO_FAMILY))
 }
 
 /// A line between the groups of a menu's items.
@@ -390,7 +391,7 @@ fn item(what: String, on_press: impl Fn() + 'static) -> AnyElement {
 
 /// A line in a header, like `3 threads · 1 asking`.
 fn status_line(line: String) -> View {
-    // The size and padding of the History button beside it, so the two sit on one rhythm.
+    // The height of the History chip beside it, so the two sit on one rhythm.
     view().flex_none().px(scale::s2()).py(scale::s1()).child(text(super::sentence(&line)).sized(text_sm()).text_color(Colors::muted()).number_of_lines(1))
 }
 
@@ -405,14 +406,21 @@ fn pane(title: String, snap: &Snapshot) -> View {
         right = right.child(
             view()
                 .role(AccessibilityRole::Button)
+                .label("History")
                 .flex_none()
-                .px(scale::s2())
+                .flex_row()
+                .items_center()
+                .gap(scale::s1_5())
+                .px(scale::s3())
                 .py(scale::s1())
-                .rounded(Colors::radius())
+                .rounded(super::pill())
+                .bg(Colors::hover())
                 .cursor_pointer()
-                .hover(|s| s.bg(Colors::hover()))
+                .smooth()
+                .hover(|s| s.bg(Colors::selected()))
                 .on_press(|| tell(Cmd::History))
                 .tooltip(tooltip("Resume an earlier session (Ctrl+Shift+H)"))
+                .child(icon(IconName::History, scale::s3(), Colors::muted()))
                 .child(body("History").text_color(Colors::muted())),
         );
     }
@@ -645,13 +653,24 @@ fn tool_row(message: usize, at: usize, tool: &Tool) -> AnyElement {
 
 /// A run of tool calls, folded to one row: what is in it and how it went; a press on the row
 /// folds or unfolds it.
-fn run_row(message: usize, at: usize, count: usize, failed: usize, phase: Phase, folded: bool) -> AnyElement {
-    let label = format!("{count} tool calls");
+fn run_row(message: usize, at: usize, count: usize, failed: usize, phase: Phase, folded: bool, task: Option<&str>) -> AnyElement {
+    let calls = format!("{count} tool calls");
+    // The task the calls work towards, when the plan names one; the count then follows it.
+    let label = task.map_or_else(|| calls.clone(), str::to_string);
     // A failure the run got past is a quiet count after the label, not a failed run.
-    let aside = (failed > 0 && phase != Phase::Failed).then(|| format!("· {failed} failed"));
+    let mut aside: Vec<String> = Vec::new();
+    if task.is_some() {
+        aside.push(calls);
+    }
+    if failed > 0 && phase != Phase::Failed {
+        aside.push(format!("{failed} failed"));
+    }
+    let aside = (!aside.is_empty()).then(|| format!("· {}", aside.join(" · ")));
+    // What is read out is all the row says.
+    let spoken = aside.as_ref().map_or_else(|| label.clone(), |aside| format!("{label} {aside}"));
     view()
         .role(AccessibilityRole::Button)
-        .label(label.clone())
+        .label(spoken)
         .flex_row()
         .items_center()
         .gap(scale::s2())
@@ -664,7 +683,7 @@ fn run_row(message: usize, at: usize, count: usize, failed: usize, phase: Phase,
         .hover(|s| s.bg(Colors::hover()))
         .on_press(move || tell(Cmd::Fold { message, block: at, folded: !folded }))
         .child(step_glyph(phase))
-        .child(text(label).sized(text_sm()).text_color(Colors::muted()))
+        .child(text(label).min_w_0().sized(text_sm()).text_color(Colors::muted()))
         .children(aside.map(|aside| text(aside).sized(text_sm()).text_color(Colors::muted())))
         .child(view().flex_1())
         .child(trail_slot(icon(if folded { IconName::ChevronRight } else { IconName::ChevronDown }, STEP_ICON, Colors::muted())))
@@ -848,7 +867,7 @@ fn block_row(message: usize, block: &Block) -> AnyElement {
             .into_element(),
         Block::Thought { index, text: thought, open } => thought_row(message, *index, thought, *open),
         Block::Tool(tool) => tool_row(message, tool.index, tool),
-        Block::Run { index, count, failed, phase, folded } => run_row(message, *index, *count, *failed, *phase, *folded),
+        Block::Run { index, count, failed, phase, folded, task } => run_row(message, *index, *count, *failed, *phase, *folded, task.as_deref()),
         Block::Plan(entries) => plan_rows(entries),
         Block::Ask { index, title, options, answered } => ask_row(message, *index, title, options, answered),
         Block::Approve { index, question, lines, answered } => approve_row(message, *index, question, lines, answered),
@@ -901,11 +920,10 @@ fn transcript(items: &[Item], slot: ElementRef, at_end: Signal<bool>) -> AnyElem
     // offset that stays put: a transcript that was at its end follows it to the new one.
     let size = stored((0., 0.));
     let resized = {
-        let slot = slot.clone();
         move |bounds: &Bounds<Points>| {
             let now = (bounds.size.width.0, bounds.size.height.0);
             if size.replace(now) != now && at_end.get_untracked() {
-                let slot = slot.clone();
+                let slot = slot;
                 spawn(async move {
                     slot.scroll_to_end(false);
                 });
@@ -977,35 +995,48 @@ fn pictures_row(pictures: &[Picture]) -> AnyElement {
         .into_element()
 }
 
+/// What a queued message shows on its one row: its text with the line breaks folded into
+/// spaces, then how many pictures go with it; the pictures alone when it has no text; nothing when
+/// it has neither.
+fn queue_preview(text: &str, pictures: usize) -> String {
+    let line = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let word = match pictures {
+        0 => String::new(),
+        1 => "1 picture".to_string(),
+        n => format!("{n} pictures"),
+    };
+    match (line.is_empty(), word.is_empty()) {
+        (_, true) => line,
+        (true, false) => word,
+        (false, false) => format!("{line} · +{word}"),
+    }
+}
+
 /// One message waiting to be sent when the turn is over: its kind, what it says, and the
-/// take-back and drop buttons.
+/// take-back button. The rows share the tray that sits on the composer (see [`bar`]).
 fn queue_row(queued: Queued) -> AnyElement {
-    let mut row = view()
+    let kind = if queued.kind.is_empty() { "Queued".to_string() } else { queued.kind.clone() };
+    let preview = queue_preview(&queued.text, queued.pictures);
+    // Said of the take-back button, so the buttons of several rows tell apart.
+    let spoken = format!("Take back into the draft: {}", preview.chars().take(40).collect::<String>());
+    // Text in the foreground; pictures alone, muted.
+    let message = text(preview).number_of_lines(1).flex_1().min_w_0().sized(text_sm());
+    let message = if queued.text.split_whitespace().next().is_some() { message.text_color(Colors::foreground()) } else { message.text_color(Colors::muted()) };
+    view()
         .flex_row()
         .items_center()
         .gap(scale::s2())
         .px(scale::s3())
         .py(scale::s1_5())
-        .rounded(super::surface_radius())
-        .border_1()
-        .border_color(super::hairline())
-        .bg(Colors::selected());
-    row = if queued.kind.is_empty() {
-        row.child(text("Queued").flex_none().sized(text_xs()).font_weight(FontWeight::MEDIUM).text_color(Colors::muted()))
-    } else {
-        row.child(text(queued.kind.clone()).flex_none().sized(text_xs()).font_weight(FontWeight::MEDIUM).text_color(Colors::muted()))
-    };
-    row = if queued.text.is_empty() {
-        let word = if queued.pictures == 1 { "1 picture".to_string() } else { format!("{} pictures", queued.pictures) };
-        row.child(text(word).flex_1().min_w_0().sized(text_sm()).text_color(Colors::muted()))
-    } else {
-        row.child(text_view().markdown(queued.text.clone()).flex_1().min_w_0().sized(text_sm()).text_color(Colors::foreground()))
-    };
-    row = row
+        // At least this wide, so the messages of the rows start at the same place; a longer kind
+        // widens it rather than wrapping.
+        .child(text(kind).min_w(px(56.)).flex_none().number_of_lines(1).sized(text_xs()).font_weight(FontWeight::MEDIUM).text_color(Colors::muted()))
+        // One line, whatever the message: the end is cut.
+        .child(message)
         .child(
             view()
                 .role(AccessibilityRole::Button)
-                .label("Take back into the draft")
+                .label(spoken)
                 .flex_none()
                 .p(scale::s0_5())
                 .rounded(super::pill())
@@ -1013,8 +1044,8 @@ fn queue_row(queued: Queued) -> AnyElement {
                 .hover(|s| s.bg(Colors::hover()))
                 .on_press(move || tell(Cmd::Recall(queued.at)))
                 .child(icon(IconName::Pencil, scale::s2_5(), Colors::muted())),
-        );
-    row.into_element()
+        )
+        .into_element()
 }
 
 /// Why some of what was pasted or dropped was left out, with a way to dismiss it.
@@ -1235,7 +1266,7 @@ fn steer_button(steer: bool, draft: Signal<String>, has_pictures: bool) -> AnyEl
     } else {
         (IconName::ListPlus, "Queue: sent when this turn is over")
     };
-    let typed = draft.clone();
+    let typed = draft;
     view()
         .role(AccessibilityRole::Button)
         .label(tip)
@@ -1276,10 +1307,9 @@ fn send_button(snap: Snapshot, draft: Signal<String>) -> AnyElement {
     let busy = snap.busy;
     // Nothing to send while the agent is idle and the draft is blank.
     let empty = {
-        let draft = draft.clone();
         move || !busy && draft.get().trim().is_empty()
     };
-    let empty2 = empty.clone();
+    let empty2 = empty;
     view()
         .role(AccessibilityRole::Button)
         .label(tip)
@@ -1310,7 +1340,7 @@ fn send_button(snap: Snapshot, draft: Signal<String>) -> AnyElement {
 /// The field the draft is typed in, reporting what the user pasted:
 /// the pictures and files it came with; the text it says is inserted by the field itself.
 fn draft_field(draft: &Signal<String>, field_ref: ElementRef) -> Input {
-    let held = draft.clone();
+    let held = *draft;
     input()
         .test_id("chat-draft")
         .element_ref(&field_ref)
@@ -1353,7 +1383,7 @@ fn draft_field(draft: &Signal<String>, field_ref: ElementRef) -> Input {
 /// view rather than the one the user typed in.
 fn fresh_field(reset: u64, field: Input) -> AnyElement {
     let row = view().px(scale::s2()).py(scale::s1()).flex_row().child(field);
-    if reset % 2 == 0 {
+    if reset.is_multiple_of(2) {
         row.into_element()
     } else {
         view().flex_col().child(row).into_element()
@@ -1363,8 +1393,8 @@ fn fresh_field(reset: u64, field: Input) -> AnyElement {
 /// The composer: the note, the strip of pictures, the setup of a thread that waits to start,
 /// the field, and the send.
 fn bar(snap: Snapshot, draft: Signal<String>, field_ref: ElementRef) -> AnyElement {
-    let field = draft.clone();
-    let low = draft.clone();
+    let field = draft;
+    let low = draft;
     let has_pictures = !snap.pictures.is_empty();
     // The chips under the field: before the thread starts its agent is chosen here, after it the
     // agent is named; the settings and the Control menu follow, and the action ends the row.
@@ -1382,18 +1412,19 @@ fn bar(snap: Snapshot, draft: Signal<String>, field_ref: ElementRef) -> AnyEleme
     if !snap.settings.is_empty() {
         chips = chips.children(setting_chips(&snap.settings, snap.busy));
     }
-    if !snap.blank {
-        chips = chips.child(grant_menu(snap.grant.unwrap_or_default()));
-    }
+    chips = chips.child(grant_menu(snap.grant.unwrap_or_default()));
     // One card: the field, the chips and the send. The inset of its text is
     // `scale::composer_text_inset`.
+    let queued = !snap.queue.is_empty();
     let core = view()
         .flex_col()
         .gap(scale::s2())
         .w_full()
         .max_w(px(COLUMN))
         .p(scale::s2())
-        .rounded(super::surface_radius())
+        .rounded_b(super::surface_radius())
+        // Under a queue tray the top edge is flat, so the two read as one piece.
+        .rounded_t(if queued { Points(0.) } else { super::surface_radius() })
         .border_1()
         // The input's own border, firmer than the hairlines of the page, so the card reads as
         // the place to type.
@@ -1416,16 +1447,32 @@ fn bar(snap: Snapshot, draft: Signal<String>, field_ref: ElementRef) -> AnyEleme
                 .justify_between()
                 .gap(scale::s2())
                 .child(chips)
-                .child(view().flex_row().flex_none().gap(scale::s2()).children(snap.busy.then(|| steer_button(snap.steer, low.clone(), has_pictures))).child(send_button(snap.clone(), low))),
+                .child(view().flex_row().flex_none().gap(scale::s2()).children(snap.busy.then(|| steer_button(snap.steer, low, has_pictures))).child(send_button(snap.clone(), low))),
         );
     let mut column = view().flex_none().flex_col().items_center().gap(scale::s1_5()).px(scale::s3()).pt(scale::s2()).pb(scale::s3());
     if let Some(picking) = snap.picking.as_ref().filter(|picking| **picking != Picking::Loading) {
         column = column.child(view().w_full().max_w(px(COLUMN)).child(picker(picking)));
     }
-    if !snap.queue.is_empty() {
-        column = column.child(view().w_full().max_w(px(COLUMN)).flex_col().gap(scale::s1()).child(snap.queue.iter().cloned().map(queue_row).collect::<Vec<_>>()));
+    if queued {
+        // The waiting messages sit on the composer as a tray: its sides and top carry the
+        // composer's border, its bottom is the composer's top edge.
+        let tray = view()
+            .w_full()
+            .max_w(px(COLUMN))
+            .flex_col()
+            .gap(scale::s0_5())
+            .py(scale::s1())
+            .rounded_t(super::surface_radius())
+            .border_t_1()
+            .border_l_1()
+            .border_r_1()
+            .border_color(Colors::input_border())
+            .bg(Colors::selected())
+            .child(snap.queue.iter().cloned().map(queue_row).collect::<Vec<_>>());
+        column = column.child(view().w_full().max_w(px(COLUMN)).flex_col().child(tray).child(core));
+    } else {
+        column = column.child(core);
     }
-    column = column.child(core);
     column.into_element()
 }
 
@@ -1533,7 +1580,7 @@ pub fn Chat() -> impl IntoElement {
                 .children([text("What is this thread about?").sized(text_base()).text_color(Colors::muted()), text("Message an agent to begin.").sized(text_sm()).text_color(Colors::muted())])
                 .into_element()
         } else {
-            transcript(&snap.items, scrolled.clone(), at_end)
+            transcript(&snap.items, scrolled, at_end)
         };
         view()
             .flex_1()
@@ -1592,7 +1639,7 @@ mod tests {
             app.settle();
             std::iter::from_fn(|| commands.try_recv().ok()).collect::<Vec<_>>()
         };
-        app.press("label:Take back into the draft").unwrap();
+        app.press("label:Take back into the draft: then run the tests").unwrap();
         assert_eq!(drain(&mut app), [Bus::Chat(Cmd::Recall(0))]);
         app.press("label:Stop the agent").unwrap();
         assert_eq!(drain(&mut app), [Bus::Chat(Cmd::Stop)]);
@@ -1603,6 +1650,30 @@ mod tests {
         app.press("label:Steer: the agent reads it before its next step (Alt+Enter: after this turn)").unwrap();
         let sent = drain(&mut app);
         assert!(sent.contains(&Bus::Chat(Cmd::Send { later: false })), "{sent:?}");
+    }
+
+    #[test]
+    fn a_queued_message_previews_on_one_line_with_its_pictures() {
+        assert_eq!(queue_preview("first\n\n  second\tthird", 0), "first second third");
+        assert_eq!(queue_preview("", 2), "2 pictures");
+        assert_eq!(queue_preview(" \n ", 1), "1 picture");
+        assert_eq!(queue_preview("look at this", 3), "look at this · +3 pictures");
+        assert_eq!(queue_preview("  ", 0), "");
+    }
+
+    #[test]
+    fn each_queued_row_takes_back_its_own_message() {
+        let mut guard = crate::nsh::bus::lock();
+        let commands = guard.as_mut().expect("the channel");
+        let queue = vec![
+            Queued { at: 0, kind: "Steer".into(), text: "use the cache".into(), pictures: 0 },
+            Queued { at: 1, kind: String::new(), text: "and\nupdate the docs".into(), pictures: 0 },
+        ];
+        let mut app = start(Snapshot { title: "thread".into(), busy: true, queue, ..Snapshot::default() });
+        app.press("label:Take back into the draft: and update the docs").unwrap();
+        assert_eq!(drain(&mut app, commands), [Bus::Chat(Cmd::Recall(1))]);
+        app.press("label:Take back into the draft: use the cache").unwrap();
+        assert_eq!(drain(&mut app, commands), [Bus::Chat(Cmd::Recall(0))]);
     }
 
     fn start(snapshot: Snapshot) -> Headless {
@@ -1622,6 +1693,23 @@ mod tests {
         Block::Tool(Tool { index, title: format!("call {index}"), phase: Phase::Done, open: false, arguments: String::new(), result: String::new(), path: None })
     }
 
+    #[test]
+    fn a_run_with_a_task_is_named_by_it_and_says_its_calls_and_failures() {
+        let mut guard = crate::nsh::bus::lock();
+        let commands = guard.as_mut().expect("the channel");
+        let run = |task: Option<&str>, failed| {
+            let blocks = vec![Block::Run { index: 0, count: 4, failed, phase: Phase::Done, folded: true, task: task.map(str::to_string) }];
+            start(Snapshot { items: vec![Item::Agent { index: 0, blocks }], ..Snapshot::default() })
+        };
+        // The row's spoken name is all it says: the task, then the calls and the failures.
+        let mut app = run(Some("Fix the parser"), 1);
+        app.press("label:Fix the parser · 4 tool calls · 1 failed").unwrap();
+        assert_eq!(drain(&mut app, commands), [Bus::Chat(Cmd::Fold { message: 0, block: 0, folded: false })]);
+        let mut app = run(None, 0);
+        app.press("label:4 tool calls").unwrap();
+        assert_eq!(drain(&mut app, commands), [Bus::Chat(Cmd::Fold { message: 0, block: 0, folded: false })]);
+    }
+
     fn drain(app: &mut Headless, commands: &mut tokio::sync::mpsc::UnboundedReceiver<Bus>) -> Vec<Bus> {
         app.settle();
         std::iter::from_fn(|| commands.try_recv().ok()).collect()
@@ -1633,10 +1721,10 @@ mod tests {
         let commands = guard.as_mut().expect("the channel");
         // Four calls in one run (the run's row stands before them), then a permission request at
         // the message's block 4, then a second run of three calls at 5..8.
-        let mut blocks = vec![Block::Run { index: 0, count: 4, failed: 0, phase: Phase::Done, folded: false }];
+        let mut blocks = vec![Block::Run { index: 0, count: 4, failed: 0, phase: Phase::Done, folded: false, task: None }];
         blocks.extend((0..4).map(tool));
         blocks.push(Block::Ask { index: 4, title: "Run rm?".into(), options: vec![AskOption { at: 0, label: "Allow once".into(), primary: true }], answered: None });
-        blocks.push(Block::Run { index: 5, count: 3, failed: 0, phase: Phase::Done, folded: false });
+        blocks.push(Block::Run { index: 5, count: 3, failed: 0, phase: Phase::Done, folded: false, task: None });
         blocks.extend((5..8).map(tool));
         let mut app = start(Snapshot { items: vec![Item::Agent { index: 0, blocks }], ..Snapshot::default() });
         app.press("label:Allow once").unwrap();
@@ -1716,15 +1804,35 @@ mod tests {
     }
 
     #[test]
+    fn a_new_thread_offers_control_before_it_starts() {
+        let mut guard = crate::nsh::bus::lock();
+        let commands = guard.as_mut().expect("the channel");
+        let mut app = start(Snapshot {
+            blank: true,
+            agents: vec![("Claude".into(), "claude".into())],
+            chosen: Some("claude".into()),
+            grant: Some(Grant::default()),
+            ..Snapshot::default()
+        });
+        assert!(app.shows("Control"), "{:?}", app.screen().texts());
+        app.press("label:What this thread's agent may do through Po").unwrap();
+        app.settle();
+        app.press("text:Orchestrate").unwrap();
+        let sent = drain(&mut app, commands);
+        let set = Grant { scope: Scope::Orchestrate, ..Grant::default() };
+        assert!(sent.contains(&Bus::Chat(Cmd::Grant(GrantChange::Set(set)))), "{sent:?}");
+    }
+
+    #[test]
     fn the_field_empties_when_the_app_clears_the_draft() {
         let mut guard = crate::nsh::bus::lock();
         let commands = guard.as_mut().expect("the channel");
         let mut app = start(Snapshot { items: vec![Item::Agent { index: 0, blocks: vec![] }], ..Snapshot::default() });
         app.type_text("id:chat-draft", "hello there").unwrap();
         drain(&mut app, commands);
-        assert_eq!(app.screen().input_text("id:chat-draft").unwrap().as_deref(), Some("hello there"));
+        assert_eq!(app.screen().input_text("id:chat-draft").unwrap(), Some("hello there"));
         publish(Snapshot { draft: String::new(), draft_reset: 1, items: vec![Item::Agent { index: 0, blocks: vec![] }], ..Snapshot::default() });
         app.wait(std::time::Duration::from_millis(100)).unwrap();
-        assert_eq!(app.screen().input_text("id:chat-draft").unwrap().as_deref().unwrap_or(""), "");
+        assert_eq!(app.screen().input_text("id:chat-draft").unwrap().unwrap_or(""), "");
     }
 }

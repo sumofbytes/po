@@ -1,9 +1,9 @@
 {
   "theme": "Rose Pine",
   "font": {
-    "family": "Adwaita Sans",
+    "family": ["Geist", "Adwaita Sans"],
     "size": 14,
-    "mono_family": "Noto Sans Mono",
+    "mono_family": ["Geist Mono", "GeistMono Nerd Font Mono", "Noto Sans Mono"],
     "mono_size": 13
   },
   "notifications": true,

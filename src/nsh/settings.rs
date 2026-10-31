@@ -31,13 +31,13 @@ struct Agent {
 
 /// A group's eyebrow: small, upper-case and quiet, with room above it to set the groups apart.
 fn section(title: &'static str) -> View {
-    view().pt(scale::s8()).pb(scale::s2()).px(scale::s2()).child(caption(title.to_uppercase()).font_weight(FontWeight::MEDIUM))
+    view().pt(scale::s8()).pb(scale::s1()).child(caption(title.to_uppercase()).font_weight(FontWeight::MEDIUM))
 }
 
-/// The surface a group's rows sit on: one rounded card with a hairline, so a page reads as a few
-/// groups and not a long run of fields.
+/// The rows of a group: bare, set apart by hairlines alone, so the page is one surface and not
+/// cards holding rows holding boxes.
 fn group() -> View {
-    view().flex_col().rounded(super::card_radius()).border_1().border_color(super::hairline()).bg(Colors::sidebar()).overflow_hidden()
+    view().flex_col()
 }
 
 /// The line between two rows of a group.
@@ -51,30 +51,70 @@ fn row(label: &'static str, hint: &'static str, control: impl IntoElement) -> Vi
         .flex_row()
         .items_center()
         .gap(scale::s6())
-        .px(scale::s4())
         .py(scale::s3())
         .child(view().flex_1().min_w_0().gap(scale::s0_5()).child(body(label)).child(caption(hint)))
         .child(view().w(Points(260.)).flex_none().child(control))
 }
 
-/// An on / off button, or a choice of two when `highlight` is false.
-fn toggle(on: Signal<bool>, labels: (&'static str, &'static str), highlight: bool) -> View {
-    let shown = move || if on.get() { labels.0 } else { labels.1 };
-    let button = super::smooth(view())
-        .role(AccessibilityRole::Button)
-        .label(shown)
+/// An on / off switch, which says which in its label.
+fn switch(on: Signal<bool>, label: &'static str) -> View {
+    let state = move || format!("{label}, {}", if on.get() { "on" } else { "off" });
+    let knob = super::smooth(view())
+        .w(scale::s4())
+        .h(scale::s4())
         .flex_none()
-        .px(scale::s4())
-        .py(scale::s1_5())
         .rounded(super::pill())
-        .border_1()
-        .border_color(Colors::input_border())
+        .bg(Colors::popover())
+        .style_when(move || on.get(), |s| s.bg(Colors::primary_foreground()));
+    let track = super::smooth(view())
+        .role(AccessibilityRole::Switch)
+        .label(state)
+        .flex_none()
+        .w(scale::s8())
+        .h(scale::s5())
+        .px(scale::s0_5())
+        .flex_row()
+        .items_center()
+        .rounded(super::pill())
         .cursor_pointer()
-        .hover(|s| s.bg(Colors::hover()))
-        .style_when(move || highlight && on.get(), |s| s.bg(Colors::selected()))
+        .bg(Colors::input_border())
+        .style_when(move || on.get(), |s| s.bg(Colors::primary()).justify_end())
         .on_press(move || on.update(|on| *on = !*on))
-        .child(body(shown));
-    view().flex_row().justify_end().child(button)
+        .child(knob);
+    view().flex_row().justify_end().child(track)
+}
+
+/// A choice of two, the chosen one lifted: `true` is the first.
+fn choice(first: Signal<bool>, labels: (&'static str, &'static str)) -> View {
+    let option = move |name: &'static str, value: bool| {
+        view()
+            .role(AccessibilityRole::Button)
+            .label(name)
+            .px(scale::s4())
+            .py(scale::s1())
+            .rounded(super::pill())
+            .cursor_pointer()
+            .style_when(move || first.get() == value, |s| s.bg(Colors::selected()))
+            .hover(|s| s.bg(Colors::hover()))
+            .on_press(move || first.set(value))
+            .child(body(name))
+    };
+    view().flex_row().justify_end().child(view().flex_row().gap(scale::s0_5()).child(option(labels.0, true)).child(option(labels.1, false)))
+}
+
+/// What the columns of the agent rows hold, once above them, since a placeholder is gone as soon
+/// as the field has text. The fills and the gap are those of a row.
+fn agent_columns() -> View {
+    let column = |grow: f32, name: &'static str| view().flex_grow(grow).basis(Points(0.)).min_w_0().px(scale::s3()).child(caption(name));
+    view()
+        .flex_row()
+        .gap(scale::s2())
+        .pt(scale::s1())
+        .child(column(2., "Name"))
+        .child(column(2., "ID"))
+        .child(column(5., "Command"))
+        // The room of the remove button.
+        .child(view().w(scale::s6()).flex_none())
 }
 
 #[component]
@@ -147,43 +187,31 @@ pub fn Settings() -> impl IntoElement {
     };
     let agent_row = move |agent: ReadSignal<Agent>, _: ReadSignal<usize>| {
         let key = agent.get_untracked().key;
-        // A labelled field: its legend, then a bordered box that holds the bare input.
-        let input = move |label: &'static str, id: &str, placeholder: &'static str, value: fn(&AgentForm) -> String, change: fn(&mut AgentForm, String)| {
-            view().flex_1().min_w_0().gap(scale::s1()).child(super::caption(label)).child(
-                view().h(field_height()).flex_row().items_center().px(scale::s3()).rounded(super::card_radius()).border_1().border_color(Colors::input_border()).bg(Colors::input_background()).child(
-                    nsh_core::element::input()
-                        .test_id(&format!("agent-{key}-{id}"))
-                        .value(move || value(&agent.get().form))
-                        .placeholder(placeholder)
-                        .placeholder_color(Colors::one(Colors::muted()))
-                        .selection_color(Colors::one(Colors::caret()))
-                        .text_color(Colors::foreground())
-                        .auto_correct(false)
-                        .on_change(edit(key, change))
-                        .flex_1()
-                        .min_w(Points(0.)),
-                ),
+        // One bordered box holding the bare input; its placeholder says what it is.
+        let input = move |grow: f32, id: &str, placeholder: &'static str, value: fn(&AgentForm) -> String, change: fn(&mut AgentForm, String)| {
+            view().flex_grow(grow).basis(Points(0.)).min_w_0().h(field_height()).flex_row().items_center().px(scale::s3()).rounded(super::card_radius()).border_1().border_color(Colors::input_border()).bg(Colors::input_background()).child(
+                nsh_core::element::input()
+                    .test_id(&format!("agent-{key}-{id}"))
+                    .value(move || value(&agent.get().form))
+                    .placeholder(placeholder)
+                    .placeholder_color(Colors::one(Colors::muted()))
+                    .selection_color(Colors::one(Colors::caret()))
+                    .text_color(Colors::foreground())
+                    .auto_correct(false)
+                    .on_change(edit(key, change))
+                    .flex_1()
+                    .min_w(Points(0.)),
             )
         };
         view()
-            .flex_col()
+            .flex_row()
+            .items_center()
             .gap(scale::s2())
-            .px(scale::s4())
-            .py(scale::s3())
-            .border_t_1()
-            .border_color(super::hairline())
-            .child(
-                view()
-                    .flex_row()
-                    .items_end()
-                    .gap(scale::s2())
-                    .child(input("Name", "name", "Name", |a| a.name.clone(), |a, t| a.name = t))
-                    .child(input("ID", "id", "id", |a| a.id.clone(), |a, t| a.id = t))
-                    .child(view().h(field_height()).items_center().justify_center().child(
-                        super::icon_button(crate::ui::icon::IconName::Close, scale::s3(), "Remove", move || agents.update(|list| list.retain(|a| a.key != key))),
-                    )),
-            )
-            .child(input("Command", "command", "command --acp", |a| a.command.clone(), |a, t| a.command = t))
+            .py(scale::s2())
+            .child(input(2., "name", "Name", |a| a.name.clone(), |a, t| a.name = t))
+            .child(input(2., "id", "ID", |a| a.id.clone(), |a, t| a.id = t))
+            .child(input(5., "command", "command --acp", |a| a.command.clone(), |a, t| a.command = t))
+            .child(super::icon_button(crate::ui::icon::IconName::Close, scale::s3(), "Remove", move || agents.update(|list| list.retain(|a| a.key != key))))
     };
 
     view()
@@ -233,39 +261,34 @@ pub fn Settings() -> impl IntoElement {
                         })
                     }))
                     .child(divider())
-                    .child(row("Glass", "Translucent panes over the desktop", toggle(glass, ("On", "Off"), true)))
+                    .child(row("Glass", "Translucent panes over the desktop", switch(glass, "Glass")))
                     .child(divider())
-                    .child(row("UI font", "Names tried in order, comma separated", field("settings-font-family", font_family, "Adwaita Sans", || {})))
+                    .child(row("UI font", "Names tried in order, comma separated", field("settings-font-family", font_family, crate::fonts::BUNDLED_UI_FAMILY, || {})))
                     .child(divider())
                     .child(row("UI font size", "Also scales spacing", field("settings-font-size", font_size, "14", || {})))
                     .child(divider())
-                    .child(row("Monospace font", "Names tried in order, comma separated", field("settings-mono-family", mono_family, "system monospace", || {})))
+                    .child(row("Monospace font", "Names tried in order, comma separated", field("settings-mono-family", mono_family, crate::fonts::BUNDLED_MONO_FAMILY, || {})))
                     .child(divider())
                     .child(row("Monospace font size", "Code and diffs", field("settings-mono-size", mono_size, "13", || {}))))
                     .child(section("Layout"))
-                    .child(group().child(row("Viewer position", "Which side of the conversation (Ctrl+Shift+S)", toggle(viewer_left, ("Left", "Right"), false))))
+                    .child(group().child(row("Viewer position", "Which side of the conversation (Ctrl+Shift+S)", choice(viewer_left, ("Left", "Right")))))
                     .child(section("Behavior"))
                     .child(
                         group()
-                            .child(row("Notifications", "When a thread needs you in the background", toggle(notifications, ("On", "Off"), true)))
+                            .child(row("Notifications", "When a thread needs you in the background", switch(notifications, "Notifications")))
                             .child(divider())
                             .child(row("Idle minutes", "Stop an idle agent after this long; 0 never", field("settings-idle", idle_minutes, "15", || {})))
                             .child(divider())
                             .child(row("Max live agents", "Longest idle agents stop beyond this many", field("settings-max-live", max_live, "8", || {}))),
                     )
                     .child(section("Agents"))
+                    .child(caption("Added to the bundled agents; the same id replaces one. A new command asks before it first runs.").pb(scale::s2()))
                     .child(
-                        group()
-                            .child(
-                                text("Added to the bundled agents; the same id replaces one. A new command asks before it first runs.")
-                                    .text_size(text_xs())
-                                    .text_color(Colors::muted())
-                                    .px(scale::s4())
-                                    .pt(scale::s3())
-                                    .pb(scale::s3()),
-                            )
+                        view()
+                            .flex_col()
+                            .child(agent_columns())
                             .child(each(agents, |agent: &Agent| agent.key, agent_row))
-                            .child(view().px(scale::s4()).pt(scale::s1()).pb(scale::s3()).flex_row().child(button("Add agent", false, move || {
+                            .child(view().pt(scale::s2()).flex_row().child(button("Add agent", false, move || {
                                 let key = next_key.replace(next_key.get() + 1);
                                 agents.update(|list| list.push(Agent { key, form: AgentForm { id: String::new(), name: String::new(), command: String::new(), extra: Default::default() } }));
                             }))),

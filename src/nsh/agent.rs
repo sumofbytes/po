@@ -223,7 +223,7 @@ pub fn Agent() -> impl IntoElement {
                 .flex_col()
                 .gap(scale::s3())
                 .px(scale::s4())
-                .children(doc.map(|doc| markdown_text(doc)))
+                .children(doc.map(markdown_text))
                 .children(fields.iter().enumerate().map(move |(index, field)| {
                     field_row(index, field, drafts)
                 }))
@@ -237,9 +237,9 @@ pub fn Agent() -> impl IntoElement {
                         .child(if answered {
                             // The agent has the answers; the button could be pressed again, but
                             // answers nothing.
-                            submit_button("Answered", move || answer()).flex_none().opacity(crate::theme::tokens::DISABLED).into_element()
+                            submit_button("Answered", answer).flex_none().opacity(crate::theme::tokens::DISABLED).into_element()
                         } else {
-                            submit_button(submit.clone(), move || answer()).into_element()
+                            submit_button(submit.clone(), answer).into_element()
                         }),
                 );
             scroll()

@@ -23,8 +23,7 @@ list_projects and project_changes say what else Po has open. list_issues, get_is
 list_epics read the project's issues, which live in its .po folder. Reading the threads of others, \
 rather than your own, needs a grant the user gives in Po.";
 
-/// What an orchestrator may do, added when its grant says so. The tools of this scope arrive
-/// with phase 2 of the control plan.
+/// What an orchestrator may do, added when its grant says so.
 const ORCHESTRATE: &str = "You may start and steer other threads: each starts with the agent \
 and settings you choose, answers you when it finishes or asks, and is yours to read and close. \
 They start with the smallest grant, and nothing they do can reach further than yours does. \
@@ -63,7 +62,8 @@ fn tools() -> Vec<(&'static str, &'static str, &'static str, Value, Scope)> {
             "show_view",
             "view.show",
             "Show the user a markdown document in Po's viewer, as a tab of its own: a plan, a \
-             summary, a review. Giving the `id` of one of your views replaces it.",
+             summary, a review. Giving the `id` of one of your views replaces it. The reply \
+               carries the view's `id`, which update_view and close_view take.",
             json!({
                 "type": "object",
                 "properties": {
@@ -134,7 +134,8 @@ fn tools() -> Vec<(&'static str, &'static str, &'static str, Value, Scope)> {
             "form.show",
             "Put a form in front of the user in Po's viewer: text fields and choices you \
              define, with a submit button. They answer at their pace; form_wait brings you \
-             their answers. Giving the `id` of one of your forms replaces it.",
+             their answers, keyed by each field's name. Giving the `id` of one of your forms \
+               replaces it. The reply carries the form's `id`, which form_wait takes.",
             json!({
                 "type": "object",
                 "properties": {
@@ -142,9 +143,10 @@ fn tools() -> Vec<(&'static str, &'static str, &'static str, Value, Scope)> {
                     "body": string("What the form is for, in markdown, shown above the fields."),
                     "fields": {
                         "type": "array",
-                        "description": "The fields, in order. A text field is `{ \"name\", \"label\", \"kind\": \"text\", \"value\" }`; a choice adds `\"options\": [\"a\", \"b\"]`, and `value` is one of them picked to begin with.",
+                        "description": "The fields, in order.",
                         "items": {
                             "type": "object",
+                            "description": "A text field is `{ \"name\", \"label\", \"kind\": \"text\", \"value\" }`; a choice adds `\"options\": [\"a\", \"b\"]`, and `value` is one of them picked to begin with.",
                             "properties": {
                                 "name": string("The field's name, as the answers come back keyed by it."),
                                 "label": string("What the user sees; the name, when left out."),
@@ -329,8 +331,8 @@ fn tools() -> Vec<(&'static str, &'static str, &'static str, Value, Scope)> {
                 "type": "object",
                 "properties": {
                     "thread": { "type": "integer", "description": "The thread; yours when left out." },
-                    "id": string("The setting's id."),
-                    "value": string("One of the setting's choices."),
+                    "id": string("The setting's id, as thread_options says them."),
+                    "value": string("One of the setting's choices, as thread_options says on each."),
                 },
                 "required": ["id", "value"],
             }),
@@ -434,13 +436,13 @@ fn tools() -> Vec<(&'static str, &'static str, &'static str, Value, Scope)> {
             json!({
                 "type": "object",
                 "properties": {
-                    "scope": string("open (default), closed or all."),
-                    "status": string("backlog, todo, in-progress, in-review, done or canceled."),
-                    "epic": string("An epic's id."),
-                    "label": string("A label's name."),
-                    "priority": string("urgent, high, medium or low."),
-                    "text": string("Words to find in the key, title, description or labels."),
-                    "parent": string("An issue's key: only its sub-issues."),
+                    "scope": { "type": "string", "description": "Open ones (default), closed ones or all of them.", "enum": ["open", "closed", "all"] },
+                    "status": { "type": "string", "description": "The status to list.", "enum": ["backlog", "todo", "in-progress", "in-review", "done", "canceled"] },
+                    "epic": string("An epic's id, as list_epics says."),
+                    "label": string("A label's name, as list_labels says."),
+                    "priority": { "type": "string", "description": "How pressing.", "enum": ["urgent", "high", "medium", "low"] },
+                        "text": string("Words to find in the key, title, description or labels."),
+                        "parent": string("An issue's key, such as PO-12: only its sub-issues."),
                     "limit": number("At most this many (default 50, most 200)."),
                 },
             }),
@@ -463,14 +465,14 @@ fn tools() -> Vec<(&'static str, &'static str, &'static str, Value, Scope)> {
                 "properties": {
                     "title": string("What needs doing."),
                     "description": string("Markdown."),
-                    "status": string("backlog, todo (default), in-progress, in-review, done or canceled."),
-                    "priority": string("urgent, high, medium or low."),
+                    "status": { "type": "string", "description": "How it starts; `todo` by default.", "enum": ["backlog", "todo", "in-progress", "in-review", "done", "canceled"] },
+                    "priority": { "type": "string", "description": "How pressing.", "enum": ["urgent", "high", "medium", "low"] },
                     "labels": json!({ "type": "array", "items": { "type": "string" }, "description": "Label names." }),
                     "assignee": string("Who it is for."),
                     "parent": string("The key of the issue this is a sub-issue of."),
-                    "epic": string("An epic's id."),
-                    "milestone": string("A milestone's id in that epic."),
-                    "due": string("2026-11-02, or fri, nov 2."),
+                    "epic": string("An epic's id, as list_epics says."),
+                    "milestone": string("A milestone's id of that epic, as list_epics says."),
+                    "due": string("A date: 2026-11-02, or fri, nov 2."),
                     "estimate": number("A whole number."),
                 },
                 "required": ["title"],
@@ -491,17 +493,17 @@ fn tools() -> Vec<(&'static str, &'static str, &'static str, Value, Scope)> {
                     "title": string("A new title."),
                     "description": string("Replaces the description."),
                     "note": string("Appended to the description, dated."),
-                    "status": string("backlog, todo, in-progress, in-review, done or canceled."),
-                    "priority": string("urgent, high, medium, low or none."),
+                    "status": { "type": "string", "description": "A new status.", "enum": ["backlog", "todo", "in-progress", "in-review", "done", "canceled"] },
+                    "priority": { "type": "string", "description": "How pressing; `none` clears it.", "enum": ["urgent", "high", "medium", "low", "none"] },
                     "labels": json!({ "type": "array", "items": { "type": "string" }, "description": "Replaces the labels." }),
                     "add_labels": json!({ "type": "array", "items": { "type": "string" } }),
                     "remove_labels": json!({ "type": "array", "items": { "type": "string" } }),
                     "assignee": json!({ "type": ["string", "null"] }),
-                    "parent": json!({ "type": ["string", "null"], "description": "A key." }),
-                    "epic": json!({ "type": ["string", "null"], "description": "An epic's id." }),
-                    "milestone": json!({ "type": ["string", "null"] }),
-                    "due": json!({ "type": ["string", "null"] }),
-                    "estimate": json!({ "type": ["integer", "null"] }),
+                    "parent": json!({ "type": ["string", "null"], "description": "An issue's key, such as PO-12; null clears it." }),
+                    "epic": json!({ "type": ["string", "null"], "description": "An epic's id, as list_epics says; null clears it." }),
+                    "milestone": json!({ "type": ["string", "null"], "description": "A milestone's id, as list_epics says; null clears it." }),
+                    "due": json!({ "type": ["string", "null"], "description": "The date, in create_issue's `due` form, or null to clear it." }),
+                    "estimate": json!({ "type": ["integer", "null"], "description": "A whole number, or null to clear it." }),
                     "link": json!({ "type": "object", "description": "One of {thread: session}, {branch: name}, {pr: number}." }),
                     "unlink": json!({ "type": "object", "description": "A link to take off, in the same form." }),
                 },
@@ -512,7 +514,8 @@ fn tools() -> Vec<(&'static str, &'static str, &'static str, Value, Scope)> {
         (
             "list_epics",
             "epic.list",
-            "The project's epics, with their milestones and how far along each is.",
+            "The project's epics, with each one's `id` — which `epic` on list_issues and \
+               update_epic take —, its milestones and how far along it is.",
             json!({ "type": "object", "properties": {} }),
             Scope::Viewer,
         ),
@@ -525,7 +528,7 @@ fn tools() -> Vec<(&'static str, &'static str, &'static str, Value, Scope)> {
                 "properties": {
                     "name": string("The epic's name."),
                     "description": string("Markdown."),
-                    "status": string("planned (default), active, paused or done."),
+                    "status": { "type": "string", "description": "How it starts; `planned` by default.", "enum": ["planned", "active", "paused", "done"] },
                     "lead": string("Who leads it."),
                     "start": string("A date."),
                     "target": string("A date."),
@@ -545,7 +548,7 @@ fn tools() -> Vec<(&'static str, &'static str, &'static str, Value, Scope)> {
                     "epic": string("The epic's id, as list_epics says."),
                     "name": string("A new name."),
                     "description": string("Replaces the description."),
-                    "status": string("planned, active, paused or done."),
+                    "status": { "type": "string", "description": "A new status.", "enum": ["planned", "active", "paused", "done"] },
                     "lead": json!({ "type": ["string", "null"] }),
                     "start": json!({ "type": ["string", "null"] }),
                     "target": json!({ "type": ["string", "null"] }),
@@ -614,16 +617,16 @@ fn tools() -> Vec<(&'static str, &'static str, &'static str, Value, Scope)> {
             json!({
                 "type": "object",
                 "properties": {
-                    "view": string("list (default), board or epics."),
-                    "issue": string("An issue's key: open its page."),
-                    "epic": string("An epic's id: open its page."),
-                    "scope": string("open (default), closed or all."),
+                    "view": { "type": "string", "description": "The list (default), the board or the epics.", "enum": ["list", "board", "epics"] },
+                    "issue": string("An issue's key, such as PO-12: open its page."),
+                    "epic": string("An epic's id, as list_epics says: open its page."),
+                    "scope": { "type": "string", "description": "Open ones (default), closed ones or all of them.", "enum": ["open", "closed", "all"] },
                     "text": string("Words to filter the list by."),
-                    "label": string("A label's name."),
+                    "label": string("A label's name, as list_labels says."),
                     "filter_epic": string("An epic's id to list the issues of."),
-                    "priority": string("urgent, high, medium or low."),
+                    "priority": { "type": "string", "description": "How pressing.", "enum": ["urgent", "high", "medium", "low"] },
                     "late": json!({ "type": "boolean" }),
-                    "group": string("status, priority, epic or none."),
+                    "group": { "type": "string", "description": "How to group the list.", "enum": ["status", "priority", "epic", "none"] },
                 },
             }),
             Scope::Orchestrate,
@@ -640,7 +643,7 @@ fn tools() -> Vec<(&'static str, &'static str, &'static str, Value, Scope)> {
                 "properties": {
                     "issue": string("The issue's key, such as PO-12."),
                     "agent": string("The agent's id, as list_agents says."),
-                    "notify": string("done (default), all or never."),
+                    "notify": { "type": "string", "description": "How the thread reports to you: `done`, `all`, or `never`.", "enum": ["done", "all", "never"] },
                 },
                 "required": ["issue"],
             }),

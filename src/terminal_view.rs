@@ -25,6 +25,9 @@ type Selection = Option<((u16, u16), (u16, u16))>;
 /// The shell ended: the view has nothing left to show.
 pub struct Exited;
 
+/// What was last measured: the font, its size and the cell size.
+type Measured = (gpui::SharedString, Pixels, (f32, f32));
+
 pub struct TerminalView {
     root: PathBuf,
     focus: FocusHandle,
@@ -34,7 +37,7 @@ pub struct TerminalView {
     grid: Rc<Cell<(u16, u16, f32, f32)>>,
     /// The size of a cell in the font and size it was measured for: shaping text to measure it is
     /// not done again on every frame.
-    measured: Rc<Cell<Option<(gpui::SharedString, Pixels, (f32, f32))>>>,
+    measured: Rc<Cell<Option<Measured>>>,
     /// The colors the session was last told of.
     theme: Option<(Rgb, Rgb)>,
     /// The part of a line the wheel has turned and not yet scrolled: a touchpad sends fractions.
@@ -273,7 +276,7 @@ impl Render for TerminalView {
                     },
                     move |bounds, (), window, cx| {
                         let (_, _, cell_w, cell_h) = grid.get();
-                        paint(&session.frame(), selection.get(), bounds, (cell_w, cell_h), (&family, font_size), (caret, focus.is_focused(window)), window, cx);
+                        paint(&session.frame(), selection.get(), bounds, Face { cell: (cell_w, cell_h), family: &family, font_size, caret, focused: focus.is_focused(window) }, window, cx);
                     },
                 )
                 .size_full(),
@@ -351,7 +354,17 @@ fn selected_text(frame: &Frame, a: (u16, u16), b: (u16, u16)) -> String {
     out.join("\n")
 }
 
-fn paint(frame: &Frame, selection: Selection, bounds: Bounds<Pixels>, (cell_w, cell_h): (f32, f32), (family, font_size): (&gpui::SharedString, Pixels), (caret, focused): (Hsla, bool), window: &mut Window, cx: &mut App) {
+/// How the grid is drawn: the cell size, the font and the caret.
+struct Face<'a> {
+    cell: (f32, f32),
+    family: &'a gpui::SharedString,
+    font_size: Pixels,
+    caret: Hsla,
+    focused: bool,
+}
+
+fn paint(frame: &Frame, selection: Selection, bounds: Bounds<Pixels>, face: Face, window: &mut Window, cx: &mut App) {
+    let Face { cell: (cell_w, cell_h), family, font_size, caret, focused } = face;
     let origin = bounds.origin;
     let at = |col: u16, row: u16| point(origin.x + px(f32::from(col) * cell_w), origin.y + px(f32::from(row) * cell_h));
     let line_height = px(cell_h);
