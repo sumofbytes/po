@@ -1168,32 +1168,25 @@ fn setup(snap: &Snapshot) -> AnyElement {
 /// The settings of the session, as menus named for each.
 /// A menu for each of the session's settings. While a turn runs they wait: agents differ on
 /// changing them mid-turn.
-fn settings_rows(settings: &[Setting], busy: bool) -> AnyElement {
-    view()
-        .flex_row()
-        .flex_wrap()
-        .gap(scale::s2())
-        .children(
-            settings
-                .iter()
-                .map(|setting| {
-                    if busy {
-                        return menu_trigger(setting.current_name(), "Available when the agent is idle").opacity(crate::theme::tokens::DISABLED).into_element();
-                    }
-                    let mut menu = menu().popup_class(MENU).trigger(menu_trigger(setting.current_name(), "What the session uses"));
-                    for (value, name) in &setting.choices {
-                        let on = *value == setting.current;
-                        let (decided, id) = (value.clone(), setting.id.clone());
-                        menu = menu.child(item(choice(name.clone(), on), move || {
-                            let (id, decided) = (id.clone(), decided.clone());
-                            tell(Cmd::Setting { id, value: decided })
-                        }));
-                    }
-                    menu.into_element()
-                })
-                .collect::<Vec<_>>(),
-        )
-        .into_element()
+fn setting_chips(settings: &[Setting], busy: bool) -> Vec<AnyElement> {
+    settings
+        .iter()
+        .map(|setting| {
+            if busy {
+                return menu_trigger(setting.current_name(), "Available when the agent is idle").opacity(crate::theme::tokens::DISABLED).into_element();
+            }
+            let mut menu = menu().popup_class(MENU).trigger(menu_trigger(setting.current_name(), "What the session uses"));
+            for (value, name) in &setting.choices {
+                let on = *value == setting.current;
+                let (decided, id) = (value.clone(), setting.id.clone());
+                menu = menu.child(item(choice(name.clone(), on), move || {
+                    let (id, decided) = (id.clone(), decided.clone());
+                    tell(Cmd::Setting { id, value: decided })
+                }));
+            }
+            menu.into_element()
+        })
+        .collect()
 }
 
 /// Sends the draft, as `later`.
@@ -1354,7 +1347,7 @@ fn bar(snap: Snapshot, draft: Signal<String>, field_ref: ElementRef) -> AnyEleme
         chips = chips.child(text(name).px(scale::s2()).sized(text_sm()).text_color(Colors::muted()));
     }
     if !snap.settings.is_empty() {
-        chips = chips.child(settings_rows(&snap.settings, snap.busy));
+        chips = chips.children(setting_chips(&snap.settings, snap.busy));
     }
     if !snap.blank {
         chips = chips.child(grant_menu(snap.grant.unwrap_or_default()));
