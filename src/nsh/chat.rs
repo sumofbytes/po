@@ -1407,9 +1407,7 @@ fn bar(snap: Snapshot, draft: Signal<String>, field_ref: ElementRef) -> AnyEleme
     if !snap.settings.is_empty() {
         chips = chips.children(setting_chips(&snap.settings, snap.busy));
     }
-    if !snap.blank {
-        chips = chips.child(grant_menu(snap.grant.unwrap_or_default()));
-    }
+    chips = chips.child(grant_menu(snap.grant.unwrap_or_default()));
     // One card: the field, the chips and the send. The inset of its text is
     // `scale::composer_text_inset`.
     let queued = !snap.queue.is_empty();
@@ -1798,6 +1796,20 @@ mod tests {
         let sent = drain(&mut app, commands);
         let set = Grant { scope: Scope::Orchestrate, ..Grant::default() };
         assert!(sent.contains(&Bus::Chat(Cmd::Grant(GrantChange::Set(set)))), "{sent:?}");
+    }
+
+    #[test]
+    fn a_new_thread_offers_control_before_it_starts() {
+        let mut guard = crate::nsh::bus::lock();
+        let _commands = guard.as_mut().expect("the channel");
+        let app = start(Snapshot {
+            blank: true,
+            agents: vec![("Claude".into(), "claude".into())],
+            chosen: Some("claude".into()),
+            grant: Some(Grant::default()),
+            ..Snapshot::default()
+        });
+        assert!(app.shows("Control"), "{:?}", app.screen().texts());
     }
 
     #[test]
