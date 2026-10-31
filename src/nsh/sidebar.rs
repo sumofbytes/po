@@ -502,9 +502,9 @@ pub fn Sidebar() -> impl IntoElement {
             view()
                 .flex_none()
                 .px(space::gutter())
-                .py(scale::s3())
-                .border_t_1()
-                .border_color(super::hairline())
+                // Floats like the composer: no rule across the bottom, and the same inset below.
+                .pt(scale::s2())
+                .pb(scale::s3())
                 .child(action(IconName::Settings, "Settings", "Settings (Ctrl+,)", None, || send(Cmd::OpenSettings))),
         )
 }

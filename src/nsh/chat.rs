@@ -139,7 +139,8 @@ pub enum Block {
     Tool(Tool),
     /// A run of tool calls folded to one line: how many calls it keeps, how many of them failed, how they went, and
     /// where it sits in the message.
-    Run { index: usize, count: usize, failed: usize, phase: Phase, folded: bool },
+    /// `task` is the plan entry it worked towards, which the row says in place of the count.
+    Run { index: usize, count: usize, failed: usize, phase: Phase, folded: bool, task: Option<String> },
     Plan(Vec<Entry>),
     /// A permission request, with the ways it may be answered; answered, it says what went.
     Ask { index: usize, title: String, options: Vec<AskOption>, answered: Option<String> },
@@ -645,13 +646,24 @@ fn tool_row(message: usize, at: usize, tool: &Tool) -> AnyElement {
 
 /// A run of tool calls, folded to one row: what is in it and how it went; a press on the row
 /// folds or unfolds it.
-fn run_row(message: usize, at: usize, count: usize, failed: usize, phase: Phase, folded: bool) -> AnyElement {
-    let label = format!("{count} tool calls");
+fn run_row(message: usize, at: usize, count: usize, failed: usize, phase: Phase, folded: bool, task: Option<&str>) -> AnyElement {
+    let calls = format!("{count} tool calls");
+    // The task the calls work towards, when the plan names one; the count then follows it.
+    let label = task.map_or_else(|| calls.clone(), str::to_string);
     // A failure the run got past is a quiet count after the label, not a failed run.
-    let aside = (failed > 0 && phase != Phase::Failed).then(|| format!("· {failed} failed"));
+    let mut aside: Vec<String> = Vec::new();
+    if task.is_some() {
+        aside.push(calls);
+    }
+    if failed > 0 && phase != Phase::Failed {
+        aside.push(format!("{failed} failed"));
+    }
+    let aside = (!aside.is_empty()).then(|| format!("· {}", aside.join(" · ")));
+    // What is read out is all the row says.
+    let spoken = aside.as_ref().map_or_else(|| label.clone(), |aside| format!("{label} {aside}"));
     view()
         .role(AccessibilityRole::Button)
-        .label(label.clone())
+        .label(spoken)
         .flex_row()
         .items_center()
         .gap(scale::s2())
@@ -664,7 +676,7 @@ fn run_row(message: usize, at: usize, count: usize, failed: usize, phase: Phase,
         .hover(|s| s.bg(Colors::hover()))
         .on_press(move || tell(Cmd::Fold { message, block: at, folded: !folded }))
         .child(step_glyph(phase))
-        .child(text(label).sized(text_sm()).text_color(Colors::muted()))
+        .child(text(label).min_w_0().sized(text_sm()).text_color(Colors::muted()))
         .children(aside.map(|aside| text(aside).sized(text_sm()).text_color(Colors::muted())))
         .child(view().flex_1())
         .child(trail_slot(icon(if folded { IconName::ChevronRight } else { IconName::ChevronDown }, STEP_ICON, Colors::muted())))
@@ -848,7 +860,7 @@ fn block_row(message: usize, block: &Block) -> AnyElement {
             .into_element(),
         Block::Thought { index, text: thought, open } => thought_row(message, *index, thought, *open),
         Block::Tool(tool) => tool_row(message, tool.index, tool),
-        Block::Run { index, count, failed, phase, folded } => run_row(message, *index, *count, *failed, *phase, *folded),
+        Block::Run { index, count, failed, phase, folded, task } => run_row(message, *index, *count, *failed, *phase, *folded, task.as_deref()),
         Block::Plan(entries) => plan_rows(entries),
         Block::Ask { index, title, options, answered } => ask_row(message, *index, title, options, answered),
         Block::Approve { index, question, lines, answered } => approve_row(message, *index, question, lines, answered),
@@ -1622,6 +1634,23 @@ mod tests {
         Block::Tool(Tool { index, title: format!("call {index}"), phase: Phase::Done, open: false, arguments: String::new(), result: String::new(), path: None })
     }
 
+    #[test]
+    fn a_run_with_a_task_is_named_by_it_and_says_its_calls_and_failures() {
+        let mut guard = crate::nsh::bus::lock();
+        let commands = guard.as_mut().expect("the channel");
+        let run = |task: Option<&str>, failed| {
+            let blocks = vec![Block::Run { index: 0, count: 4, failed, phase: Phase::Done, folded: true, task: task.map(str::to_string) }];
+            start(Snapshot { items: vec![Item::Agent { index: 0, blocks }], ..Snapshot::default() })
+        };
+        // The row's spoken name is all it says: the task, then the calls and the failures.
+        let mut app = run(Some("Fix the parser"), 1);
+        app.press("label:Fix the parser · 4 tool calls · 1 failed").unwrap();
+        assert_eq!(drain(&mut app, commands), [Bus::Chat(Cmd::Fold { message: 0, block: 0, folded: false })]);
+        let mut app = run(None, 0);
+        app.press("label:4 tool calls").unwrap();
+        assert_eq!(drain(&mut app, commands), [Bus::Chat(Cmd::Fold { message: 0, block: 0, folded: false })]);
+    }
+
     fn drain(app: &mut Headless, commands: &mut tokio::sync::mpsc::UnboundedReceiver<Bus>) -> Vec<Bus> {
         app.settle();
         std::iter::from_fn(|| commands.try_recv().ok()).collect()
@@ -1633,10 +1662,10 @@ mod tests {
         let commands = guard.as_mut().expect("the channel");
         // Four calls in one run (the run's row stands before them), then a permission request at
         // the message's block 4, then a second run of three calls at 5..8.
-        let mut blocks = vec![Block::Run { index: 0, count: 4, failed: 0, phase: Phase::Done, folded: false }];
+        let mut blocks = vec![Block::Run { index: 0, count: 4, failed: 0, phase: Phase::Done, folded: false, task: None }];
         blocks.extend((0..4).map(tool));
         blocks.push(Block::Ask { index: 4, title: "Run rm?".into(), options: vec![AskOption { at: 0, label: "Allow once".into(), primary: true }], answered: None });
-        blocks.push(Block::Run { index: 5, count: 3, failed: 0, phase: Phase::Done, folded: false });
+        blocks.push(Block::Run { index: 5, count: 3, failed: 0, phase: Phase::Done, folded: false, task: None });
         blocks.extend((5..8).map(tool));
         let mut app = start(Snapshot { items: vec![Item::Agent { index: 0, blocks }], ..Snapshot::default() });
         app.press("label:Allow once").unwrap();
