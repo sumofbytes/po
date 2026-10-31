@@ -46,6 +46,7 @@ debug = "line-tables-only"
 # zed #65571's blend fix (destination alpha was `One`, so a translucent fill over a translucent
 # window background turned opaque — the glass look) ahead of a gpui-fast release with it.
 [patch.crates-io]
+gpui-fast-linux = { path = "vendor/gpui-fast-linux" }
 gpui-fast-wgpu = { path = "vendor/gpui-fast-wgpu" }
 gpui-fast-apple = { path = "vendor/gpui-fast-apple" }
 gpui-fast-windows = { path = "vendor/gpui-fast-windows" }

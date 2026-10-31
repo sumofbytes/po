@@ -1688,7 +1688,7 @@ fn chat_items(messages: &[Msg]) -> Vec<nsh::chat::Item> {
     messages.iter().enumerate().map(|(ix, msg)| match msg {
         Msg::User(text, pictures) => nsh::chat::Item::User {
             text: text.clone(),
-            pictures: pictures.iter().map(|a| nsh::chat::Picture { uri: a.data_uri() }).collect(),
+            pictures: pictures.iter().map(|a| nsh::chat::Picture { uri: a.data_uri(), size: a.size }).collect(),
         },
         Msg::Agent(blocks) => nsh::chat::Item::Agent { index: ix, blocks: chat_blocks(blocks) },
     }).collect()

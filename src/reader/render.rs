@@ -260,7 +260,7 @@ impl Reader {
                 text: queued.out.text.clone(),
                 pictures: queued.out.images.len(),
             }).collect(),
-            pictures: thread.attachments.iter().map(|a| chat::Picture { uri: a.data_uri() }).collect(),
+            pictures: thread.attachments.iter().map(|a| chat::Picture { uri: a.data_uri(), size: a.size }).collect(),
             note: thread.attach_note.clone(),
             items: chat_items(&thread.messages),
             picking,

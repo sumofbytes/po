@@ -64,6 +64,17 @@ pub struct Setting {
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Picture {
     pub uri: String,
+    /// Its pixels, which give the box it is drawn in its shape.
+    pub size: (u32, u32),
+}
+
+impl Picture {
+    /// The box the picture fills, as large as fits `w` by `h` points without a larger side than it has.
+    fn fit(&self, w: f32, h: f32) -> (f32, f32) {
+        let (pw, ph) = (self.size.0.max(1) as f32, self.size.1.max(1) as f32);
+        let scale = (w / pw).min(h / ph).min(1.);
+        ((pw * scale).round(), (ph * scale).round())
+    }
 }
 
 /// What waits to be sent when the turn is over: `kind` says how it got there (nothing is the
@@ -488,12 +499,14 @@ fn user_row(text_: &str, pictures: &[Picture]) -> AnyElement {
             pictures
                 .iter()
                 .map(|picture| {
+                    // A box of the picture's own shape: one from a `data:` URI has no size before it
+                    // loads, so it is given one rather than left to collapse.
+                    let (w, h) = picture.fit(360., 240.);
                     image(picture.uri.clone())
-                        .w_full()
-                        .max_h(px(280.))
+                        .w(px(w))
+                        .h(px(h))
+                        .resize_mode(ResizeMode::Cover)
                         .rounded(Colors::radius())
-                        .border_1()
-                        .border_color(super::hairline())
                         .overflow_hidden()
                         .flex_none()
                 })
@@ -951,6 +964,9 @@ fn transcript(items: &[Item], slot: ElementRef, at_end: Signal<bool>) -> AnyElem
 /// The pictures of the draft: their strip, each with a way to take it off.
 fn pictures_row(pictures: &[Picture]) -> AnyElement {
     view()
+        // The field's own padding, so the strip starts where its text does.
+        .px(scale::s2())
+        .py(scale::s1())
         .flex_row()
         .flex_wrap()
         .items_start()
@@ -964,13 +980,18 @@ fn pictures_row(pictures: &[Picture]) -> AnyElement {
                         .relative()
                         .flex_none()
                         .child(
-                            image(picture.uri.clone())
-                                .rounded(Colors::radius())
-                                .border_1()
-                                .border_color(super::hairline())
-                                .max_h(px(72.))
-                                .max_w(px(120.))
-                                .overflow_hidden(),
+                            {
+                                // A box of the picture's own shape (see `user_row`).
+                                let (w, h) = picture.fit(120., 72.);
+                                image(picture.uri.clone())
+                                    .rounded(Colors::radius())
+                                    .border_1()
+                                    .border_color(super::hairline())
+                                    .w(px(w))
+                                    .h(px(h))
+                                    .resize_mode(ResizeMode::Cover)
+                                    .overflow_hidden()
+                            },
                         )
                         .child(
                             view()

@@ -32,6 +32,8 @@ static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 /// A picture ready to send, and to show.
 pub struct Attachment {
     pub image: Arc<gpui::Image>,
+    /// Its width and height in pixels.
+    pub size: (u32, u32),
     /// Where dex is told to find it, once saved.
     saved: OnceLock<PathBuf>,
 }
@@ -39,7 +41,8 @@ pub struct Attachment {
 impl Attachment {
     fn new(format: ImageFormat, bytes: Vec<u8>) -> Self {
         let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-        Self { image: Arc::new(gpui::Image { format, bytes, id }), saved: OnceLock::new() }
+        let size = ImageReader::new(Cursor::new(&bytes)).with_guessed_format().ok().and_then(|reader| reader.into_dimensions().ok()).unwrap_or((1, 1));
+        Self { image: Arc::new(gpui::Image { format, bytes, id }), size, saved: OnceLock::new() }
     }
 
     /// Takes the bytes of an image file or clipboard image, shrinking it if an agent would refuse it.
