@@ -56,27 +56,32 @@ fn row(label: &'static str, hint: &'static str, control: impl IntoElement) -> Vi
         .child(view().w(Points(260.)).flex_none().child(control))
 }
 
-/// An on / off switch.
+/// An on / off switch, which says which in its label.
 fn switch(on: Signal<bool>, label: &'static str) -> View {
-    let track = move || {
-        let lit = on.get();
-        view()
-            .role(AccessibilityRole::Switch)
-            .label(label)
-            .flex_none()
-            .w(scale::s8())
-            .h(scale::s5())
-            .px(scale::s0_5())
-            .flex_row()
-            .items_center()
-            .when(lit, |v| v.justify_end())
-            .rounded(super::pill())
-            .cursor_pointer()
-            .bg(move || if lit { Colors::primary()() } else { Colors::input_border()() })
-            .on_press(move || on.update(|on| *on = !*on))
-            .child(view().w(scale::s4()).h(scale::s4()).flex_none().rounded(super::pill()).bg(move || if lit { Colors::primary_foreground()() } else { Colors::popover()() }))
-    };
-    view().flex_row().justify_end().child(dynamic(move || Some(track())))
+    let state = move || format!("{label}, {}", if on.get() { "on" } else { "off" });
+    let knob = super::smooth(view())
+        .w(scale::s4())
+        .h(scale::s4())
+        .flex_none()
+        .rounded(super::pill())
+        .bg(Colors::popover())
+        .style_when(move || on.get(), |s| s.bg(Colors::primary_foreground()));
+    let track = super::smooth(view())
+        .role(AccessibilityRole::Switch)
+        .label(state)
+        .flex_none()
+        .w(scale::s8())
+        .h(scale::s5())
+        .px(scale::s0_5())
+        .flex_row()
+        .items_center()
+        .rounded(super::pill())
+        .cursor_pointer()
+        .bg(Colors::input_border())
+        .style_when(move || on.get(), |s| s.bg(Colors::primary()).justify_end())
+        .on_press(move || on.update(|on| *on = !*on))
+        .child(knob);
+    view().flex_row().justify_end().child(track)
 }
 
 /// A choice of two, the chosen one lifted: `true` is the first.
@@ -95,6 +100,21 @@ fn choice(first: Signal<bool>, labels: (&'static str, &'static str)) -> View {
             .child(body(name))
     };
     view().flex_row().justify_end().child(view().flex_row().gap(scale::s0_5()).child(option(labels.0, true)).child(option(labels.1, false)))
+}
+
+/// What the columns of the agent rows hold, once above them, since a placeholder is gone as soon
+/// as the field has text. The fills and the gap are those of a row.
+fn agent_columns() -> View {
+    let column = |grow: f32, name: &'static str| view().flex_grow(grow).basis(Points(0.)).min_w_0().px(scale::s3()).child(caption(name));
+    view()
+        .flex_row()
+        .gap(scale::s2())
+        .pt(scale::s1())
+        .child(column(2., "Name"))
+        .child(column(2., "ID"))
+        .child(column(5., "Command"))
+        // The room of the remove button.
+        .child(view().w(scale::s6()).flex_none())
 }
 
 #[component]
@@ -266,6 +286,7 @@ pub fn Settings() -> impl IntoElement {
                     .child(
                         view()
                             .flex_col()
+                            .child(agent_columns())
                             .child(each(agents, |agent: &Agent| agent.key, agent_row))
                             .child(view().pt(scale::s2()).flex_row().child(button("Add agent", false, move || {
                                 let key = next_key.replace(next_key.get() + 1);

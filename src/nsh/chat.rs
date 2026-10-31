@@ -391,7 +391,7 @@ fn item(what: String, on_press: impl Fn() + 'static) -> AnyElement {
 
 /// A line in a header, like `3 threads · 1 asking`.
 fn status_line(line: String) -> View {
-    // The height and padding of the History chip beside it, so the two sit on one rhythm.
+    // The height of the History chip beside it, so the two sit on one rhythm.
     view().flex_none().px(scale::s2()).py(scale::s1()).child(text(super::sentence(&line)).sized(text_sm()).text_color(Colors::muted()).number_of_lines(1))
 }
 
