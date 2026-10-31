@@ -897,6 +897,21 @@ fn transcript(items: &[Item], slot: ElementRef, at_end: Signal<bool>) -> AnyElem
         };
         rows = rows.child(row);
     }
+    // The column re-wraps when the window is resized, and its height changes under a scroll
+    // offset that stays put: a transcript that was at its end follows it to the new one.
+    let size = stored((0., 0.));
+    let resized = {
+        let slot = slot.clone();
+        move |bounds: &Bounds<Points>| {
+            let now = (bounds.size.width.0, bounds.size.height.0);
+            if size.replace(now) != now && at_end.get_untracked() {
+                let slot = slot.clone();
+                spawn(async move {
+                    slot.scroll_to_end(false);
+                });
+            }
+        }
+    };
     view()
         .flex_1()
         .min_h_0()
@@ -907,7 +922,7 @@ fn transcript(items: &[Item], slot: ElementRef, at_end: Signal<bool>) -> AnyElem
             scroll()
                 .size_full()
                 .on_scroll(move |event: &ScrollEvent| at_end.set(event.offset.y + event.size.height >= event.content_size.height - px(24.)))
-                .child(view().flex_col().items_center().w_full().min_w_0().px(scale::s3()).child(rows.into_element()))
+                .child(view().flex_col().items_center().w_full().min_w_0().px(scale::s3()).on_layout(resized).child(rows.into_element()))
                 .element_ref(&slot),
         )
         .into_element()
