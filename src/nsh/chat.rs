@@ -326,6 +326,18 @@ fn step_glyph(phase: Phase) -> View {
     view().flex_none().w(scale::s4()).flex_row().justify_center().child(text(phase.glyph().to_string()).text_color(phase_tint(phase)))
 }
 
+/// A fixed slot for the small icon at the start of a step, as wide as [`step_glyph`], so the text
+/// of every step starts on one line.
+fn lead_slot(content: impl IntoElement) -> View {
+    view().flex_none().w(scale::s4()).flex_row().justify_center().child(content)
+}
+
+/// A fixed slot for what ends a step, as wide as the button that opens the file of a tool call
+/// (its icon and the padding of that button), so the ends of the steps line up too.
+fn trail_slot(content: impl IntoElement) -> View {
+    view().flex_none().w(scale::s7()).flex_row().justify_center().child(content)
+}
+
 /// The popovers of the menus: the theme's own surface, with a shadow.
 const MENU: &str = "bg-popover border border-border rounded-xl shadow-2xl p-1 min-w-44";
 
@@ -513,7 +525,7 @@ fn thought_row(message: usize, at: usize, text_: &str, open: bool) -> AnyElement
             .smooth()
             .hover(|s| s.bg(Colors::hover()))
             .on_press(move || tell(Cmd::ToggleThought { message, block: at }))
-            .child(icon(if open { IconName::ChevronDown } else { IconName::ChevronRight }, scale::s3(), Colors::muted()))
+            .child(lead_slot(icon(if open { IconName::ChevronDown } else { IconName::ChevronRight }, scale::s3(), Colors::muted())))
             .child(text("Thinking").flex_none().sized(text_sm()).font_weight(FontWeight::MEDIUM).text_color(Colors::muted()))
             .children((!open).then(|| {
                 text(thought_gist(text_))
@@ -610,6 +622,8 @@ fn tool_row(message: usize, at: usize, tool: &Tool) -> AnyElement {
             card = card.child(
                 view()
                     .max_h(px(448.))
+                    // Under the title, not under its glyph.
+                    .ml(scale::s4() + scale::s2())
                     .border_l_1()
                     .border_color(super::hairline())
                     .pl(scale::s3())
@@ -646,7 +660,7 @@ fn run_row(message: usize, at: usize, count: usize, phase: Phase, folded: bool) 
         .on_press(move || tell(Cmd::Fold { message, block: at, folded: !folded }))
         .child(step_glyph(phase))
         .child(text(label).flex_1().sized(text_sm()).text_color(Colors::muted()))
-        .child(icon(if folded { IconName::ChevronRight } else { IconName::ChevronDown }, scale::s3(), Colors::muted()))
+        .child(trail_slot(icon(if folded { IconName::ChevronRight } else { IconName::ChevronDown }, scale::s3(), Colors::muted())))
         .into_element()
 }
 
