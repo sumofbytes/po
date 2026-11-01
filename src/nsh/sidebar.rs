@@ -102,8 +102,6 @@ mod space {
     pub fn gutter() -> Points { scale::s3() }
     pub fn inset() -> Points { scale::s3() }
     pub fn lead() -> Points { scale::s4() }
-    /// Where a thread's title starts, in line with the name of its project above.
-    pub fn title() -> Points { inset() + lead() + scale::s2_5() }
     pub fn row() -> Points { scale::s8() + scale::s1() }
     pub fn tree() -> Points { scale::s8() + scale::s1() }
     pub fn more() -> Points { scale::s8() }
@@ -138,11 +136,6 @@ fn side_row(lead: Option<View>) -> View {
         .cursor_pointer()
         .smooth()
         .child(lead)
-}
-
-/// The lead column, its content centred, so a chevron and the marks under it share an axis.
-fn centered(content: impl IntoElement) -> View {
-    view().w(space::lead()).flex_none().items_center().justify_center().child(content)
 }
 
 /// The lead column, its content at the left edge, where a header's title starts.
@@ -239,7 +232,7 @@ fn day_separator(day: &'static str) -> View {
         .flex_row()
         .items_center()
         .gap(scale::s2())
-        .pl(space::title())
+        .pl(space::inset())
         .pr(space::inset())
         .pt(space::section_gap())
         // The day, then a hairline that carries the eye to the edge.
@@ -284,7 +277,7 @@ fn project_group(project: &Project) -> View {
     let fold = project.fold.map(|(expanded, hidden)| {
         let label = if expanded { "Show less".to_string() } else { format!("{hidden} more") };
         let chevron = if expanded { IconName::ChevronUp } else { IconName::ChevronDown };
-        side_row(Some(centered(icon(chevron, scale::s3(), Colors::muted()))))
+        side_row(Some(lead(icon(chevron, scale::s3(), Colors::muted()))))
             .h(space::more())
             .hover(|s| s.bg(Colors::hover()))
             .on_press(move || send(Cmd::ToggleMore(pid)))
