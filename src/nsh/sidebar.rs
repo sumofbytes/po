@@ -485,11 +485,14 @@ pub fn Sidebar() -> impl IntoElement {
                 .child(section(
                     "Projects",
                     Some(icon_button(IconName::Plus, scale::s3(), "Add a project: open a folder (Ctrl+Shift+O)", || send(Cmd::AddProject))
-                        // A box of its own, so it reads as a button; its edge ends where the time of a thread does.
+                        // A box of its own, so it reads as a button.
                         .border_1()
                         .border_color(super::hairline())
                         // The border is drawn inside the button; hung out, it leaves the header as tall as before.
-                        .my(px(-1.))),
+                        // Hung out at the end too, by what the box is wider than a row's chevron, so the + sits
+                        // on the same axis as the chevrons below it.
+                        .my(px(-1.))
+                        .mr(Points(-(scale::s3().0 / 2. + scale::s1().0 + 1. - scale::s4().0 / 2.)))),
                 ))
                 .child(dynamic(move || {
                     state.with(|s| s.status.clone()).map(|status| {
