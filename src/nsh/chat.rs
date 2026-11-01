@@ -1155,12 +1155,15 @@ fn queue_row(queued: Queued) -> AnyElement {
         .into_element()
 }
 
-/// Why some of what was pasted or dropped was left out, with a way to dismiss it.
+/// Why some of what was pasted or dropped was left out, with a way to dismiss it. The Dismiss
+/// button is carried the field's padding in, so the card's right-aligned controls all end at its
+/// text inset (see [`bar`]).
 fn note_row(note: &str) -> AnyElement {
     view()
         .flex_row()
         .items_center()
         .gap(scale::s2())
+        .pr(scale::s2())
         .child(text(note.to_string()).flex_1().min_w_0().sized(text_xs()).text_color(Colors::muted()))
         .child(
             view()
@@ -1456,8 +1459,10 @@ fn send_button(snap: Snapshot, draft: Signal<String>) -> AnyElement {
         .flex_row()
         .items_center()
         .justify_center()
-        .w(scale::s8())
-        .h(scale::s8())
+        // One size with the button beside it (the steer, or the stop when the turn runs), so
+        // the two round buttons read as one family (see [`steer_button`]).
+        .w(scale::s7())
+        .h(scale::s7())
         .rounded(super::pill())
         .cursor_pointer()
         .smooth()
@@ -1583,6 +1588,9 @@ fn bar(snap: Snapshot, draft: Signal<String>, field_ref: ElementRef) -> AnyEleme
                 .items_end()
                 .justify_between()
                 .gap(scale::s2())
+                // The field's own padding in on the right, so the send button's edge ends
+                // where the transcript's text does. The chips' own padding keeps the left as it is.
+                .pr(scale::s2())
                 .child(chips)
                 .child(view().flex_row().flex_none().gap(scale::s2()).children(snap.busy.then(|| steer_button(snap.steer, low, has_pictures))).child(send_button(snap.clone(), low))),
         );
