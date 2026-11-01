@@ -1913,11 +1913,15 @@ pub fn Chat() -> impl IntoElement {
         pane(title, &snap)
     };
 
-    let body = move || {
-        let snap = state.get();
+    // The page above the composer is built again only when what it shows changes: a change of
+    // the header or the composer (a pane taking focus, a status line) would otherwise build the
+    // transcript and its rail anew, and a press begun on a bar would end on one that is gone.
+    let page = computed(move || state.with(|s| (s.items.clone(), s.blank, s.busy)));
+    let top = move || {
+        let (items, blank, busy) = page.get();
         // A thread that has not started says so where the transcript will be; its composer, and
         // the choice of agent in it, are there all the same.
-        let top = if snap.items.is_empty() && snap.blank {
+        if items.is_empty() && blank {
             view()
                 .flex_1()
                 .min_h_0()
@@ -1929,15 +1933,11 @@ pub fn Chat() -> impl IntoElement {
                 .children([text("What is this thread about?").sized(text_base()).text_color(Colors::muted()), text("Message an agent to begin.").sized(text_sm()).text_color(Colors::muted())])
                 .into_element()
         } else {
-            transcript(&snap.items, scrolled, at_end, rail, snap.busy)
-        };
-        view()
-            .flex_1()
-            .min_h_0()
-            .flex_col()
-            .children([top, bar(snap, draft, field_ref)])
-            .into_element()
+            transcript(&items, scrolled, at_end, rail, busy)
+        }
     };
+    let composer = move || bar(state.get(), draft, field_ref);
+    let body = view().flex_1().min_h_0().flex_col().child(dynamic(top)).child(dynamic(composer));
 
     view()
         .flex_1()
@@ -1945,7 +1945,7 @@ pub fn Chat() -> impl IntoElement {
         .flex_col()
         .bg(Colors::background())
         .child(dynamic(header))
-        .child(dynamic(body))
+        .child(body)
 }
 
 #[cfg(test)]
