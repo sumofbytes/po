@@ -151,12 +151,12 @@ fn lead(content: impl IntoElement) -> View {
 }
 
 /// A thread's state, in the lead column of its row: a dot while it runs or has
-/// news, a ! when it asks, nothing when idle.
+/// news, a ! when it asks, a quiet ring when idle.
 fn mark(mark: Mark) -> View {
     let size = scale::s1_5() + scale::s0_5();
     let dot = |color: fn() -> AdaptiveColor| view().w(size).h(size).rounded(super::pill()).bg(color);
     view().flex_none().items_center().justify_center().child(match mark {
-        Mark::Idle => view().into_element(),
+        Mark::Idle => view().w(size).h(size).rounded(super::pill()).border_1().border_color(Colors::muted()).opacity(crate::theme::tokens::DIM).into_element(),
         Mark::Asking => text("!").text_size(text_base()).font_weight(FontWeight::BOLD).text_color(Colors::warning()).into_element(),
         Mark::Running => dot(|| Colors::primary()()).into_element(),
         Mark::Unread => dot(|| Colors::added()()).into_element(),
@@ -270,7 +270,7 @@ fn project_group(project: &Project) -> View {
         .text_color(label);
     // Pressing the row opens the project and folds or unfolds its threads; the buttons on it are
     // their own targets.
-    let head = side_row(Some(centered(view())))
+    let head = side_row(None)
         .h(space::tree())
         .test_id(&format!("agent-project-{pid}"))
         .hover(|s| s.bg(Colors::hover()))
