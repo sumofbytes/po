@@ -33,6 +33,7 @@ impl Reader {
             controlled: self.grants.get(&thread.id).is_some_and(|grant| *grant != command::Grant::default()),
             day: None,
             ago: ago(now_ms(), thread.active_at),
+            closing: self.closing == Some((pid, thread.id)) && self.close_loses_work(thread.id),
         };
         let today = date::today();
         // Filtering keeps a project whose name matches, with all its threads, and any project with a
@@ -205,11 +206,26 @@ impl Reader {
             statuses.push(thread.status.clone());
         }
         let picking = thread.picking.then(|| match &thread.sessions {
-            Some(sessions) if !thread.loading && !sessions.is_empty() => chat::Picking::Sessions(sessions.iter().map(|session| chat::Session {
-                id: session.id.clone(),
-                title: session.title.clone(),
-                when: session.updated.get(..16).unwrap_or_default().replace('T', " "),
-            }).collect()),
+            Some(sessions) if !thread.loading && !sessions.is_empty() => {
+                // What was closed here lately, in the order it was closed, if this agent still lists it.
+                let closed: Vec<&SessionInfo> = self
+                    .project
+                    .closed
+                    .iter()
+                    .filter(|closed| thread.agent.as_deref() == Some(closed.agent.as_str()))
+                    .filter_map(|closed| sessions.iter().find(|session| session.id == closed.session))
+                    .collect();
+                let session = |info: &SessionInfo, closed: bool| chat::Session {
+                    id: info.id.clone(),
+                    title: info.title.clone(),
+                    when: info.updated.get(..16).unwrap_or_default().replace('T', " "),
+                    closed,
+                };
+                // One that was picked again since is open, not closed.
+                let closed: Vec<&SessionInfo> = closed.into_iter().filter(|info| !self.threads_all().any(|t| t.session.as_deref() == Some(info.id.as_str()))).collect();
+                let rest = sessions.iter().filter(|info| !closed.iter().any(|c| c.id == info.id));
+                chat::Picking::Sessions(closed.iter().map(|info| session(info, true)).chain(rest.map(|info| session(info, false))).collect())
+            }
             Some(_) if !thread.loading => chat::Picking::Note(format!("No sessions to resume in {}", self.project.root.display())),
             _ => chat::Picking::Loading,
         });
@@ -339,6 +355,9 @@ impl Reader {
     /// Does what the user asked of a screen drawn by NSH.
     pub(crate) fn run(&mut self, cmd: nsh::bus::Cmd, window: &mut Window, cx: &mut Context<Self>) {
         use nsh::bus::Cmd;
+        if !matches!(cmd, Cmd::CloseThread(..)) && self.closing.take().is_some() {
+            cx.notify();
+        }
         match cmd {
             Cmd::SideQuery(query) => {
                 self.side_query = query;
@@ -366,7 +385,7 @@ impl Reader {
                 cx.notify();
             }
             Cmd::OpenThread(pid, tid) => self.open_thread(pid, tid, window, cx),
-            Cmd::CloseThread(pid, tid) => self.close_any_thread(pid, tid, window, cx),
+            Cmd::CloseThread(pid, tid) => self.close_asked(pid, tid, window, cx),
             Cmd::AddProject => self.pick_project(window, cx),
             Cmd::NewThread => self.new_blank_thread(window, cx),
             Cmd::OpenSettings => self.toggle_settings(window, cx),

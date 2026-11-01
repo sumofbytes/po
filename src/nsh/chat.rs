@@ -93,6 +93,8 @@ pub struct Session {
     pub title: String,
     /// When it was last at work, human-readable.
     pub when: String,
+    /// It was closed here lately, so it is listed first.
+    pub closed: bool,
 }
 
 /// A tool call of the agent's.
@@ -1112,7 +1114,20 @@ fn picker(picking: &Picking) -> AnyElement {
     let (title, rows) = match picking {
         Picking::Sessions(sessions) => ("Resume".to_string(), {
             let mut column = view().flex_col();
-            for session in sessions {
+            // Closed ones come first; when there are any, the rest is named so the two read apart.
+            let any_closed = sessions.first().is_some_and(|session| session.closed);
+            let rest = sessions.iter().position(|session| !session.closed);
+            for (at, session) in sessions.iter().enumerate() {
+                if any_closed && (at == 0 || Some(at) == rest) {
+                    column = column.child(
+                        text(if at == 0 { "Recently closed" } else { "Earlier" })
+                            .px(scale::s3())
+                            .py(scale::s1())
+                            .sized(text_xs())
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(Colors::muted()),
+                    );
+                }
                 let (id, name, when) = (session.id.clone(), session.title.clone(), session.when.clone());
                 let label = if name.is_empty() { "Untitled".to_string() } else { name };
                 column = column.child(
@@ -1748,6 +1763,24 @@ mod tests {
         assert_eq!(drain(&mut app, commands), [Bus::Chat(Cmd::ClosePicker)]);
         app.press("label:Dismiss").unwrap();
         assert_eq!(drain(&mut app, commands), [Bus::Chat(Cmd::DismissNote)]);
+    }
+
+    #[test]
+    fn the_picker_names_what_was_closed_lately_and_resumes_it_by_its_session() {
+        let mut guard = crate::nsh::bus::lock();
+        let commands = guard.as_mut().expect("the channel");
+        let session = |id: &str, title: &str, closed: bool| Session { id: id.into(), title: title.into(), when: "2026-11-01 10:00".into(), closed };
+        let mut app = start(Snapshot {
+            picking: Some(Picking::Sessions(vec![session("s2", "Fix the retry", true), session("s1", "Old idea", false)])),
+            ..Snapshot::default()
+        });
+        assert!(app.shows("Recently closed") && app.shows("Earlier"), "{:?}", app.screen().texts());
+        app.press("label:Fix the retry").unwrap();
+        assert_eq!(drain(&mut app, commands), [Bus::Chat(Cmd::Resume("s2".into()))]);
+        // With nothing closed lately the list is not split.
+        publish(Snapshot { picking: Some(Picking::Sessions(vec![session("s1", "Old idea", false)])), ..Snapshot::default() });
+        app.wait(std::time::Duration::from_millis(100)).unwrap();
+        assert!(!app.shows("Recently closed") && !app.shows("Earlier"), "{:?}", app.screen().texts());
     }
 
     #[test]

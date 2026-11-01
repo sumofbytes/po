@@ -35,6 +35,8 @@ pub struct Thread {
     pub day: Option<&'static str>,
     /// How long ago it was last active (`5m`, `3h`, `2d`), if that is known.
     pub ago: Option<String>,
+    /// Its close was pressed and closing it would lose work: pressing again closes it.
+    pub closing: bool,
 }
 
 #[derive(Clone, PartialEq, Debug)]
@@ -224,8 +226,16 @@ fn thread_row(thread: &Thread, project: Option<&str>, close_tip: &'static str, i
         .on_press(move || send(Cmd::OpenThread(pid, tid)))
         .child(title)
         .child(thread.controlled.then(grant_badge))
-        .child(on_hover(icon_button(IconName::Close, scale::s3(), close_tip, move || send(Cmd::CloseThread(pid, tid)))))
-        .child(thread.ago.clone().map(|ago| text(ago).flex_none().sized(super::text_xs()).text_color(Colors::muted())))
+        .child({
+            let close = icon_button(IconName::Close, scale::s3(), close_tip, move || send(Cmd::CloseThread(pid, tid)));
+            // Asked once, the button stays to be pressed again.
+            if thread.closing { close } else { on_hover(close) }
+        })
+        .child(if thread.closing {
+            Some(text("Close anyway?").flex_none().sized(super::text_xs()).text_color(Colors::warning()))
+        } else {
+            thread.ago.clone().map(|ago| text(ago).flex_none().sized(super::text_xs()).text_color(Colors::muted()))
+        })
         .child((thread.mark != Mark::Idle).then(|| mark(thread.mark)));
     // The selection takes the colour of the message bubbles; a hovered row only hints at it.
     if selected { row.bg(Colors::hover()) } else { row.hover(|s| s.bg(Colors::hint())) }
@@ -527,7 +537,7 @@ mod tests {
     use super::*;
 
     fn thread(project: u64, id: u64, label: &str, mark: Mark, selected: bool) -> Thread {
-        Thread { project, id, label: label.into(), mark, selected, controlled: false, day: None, ago: None }
+        Thread { project, id, label: label.into(), mark, selected, controlled: false, day: None, ago: None, closing: false }
     }
 
     fn start() -> Headless {
@@ -539,6 +549,34 @@ mod tests {
         let mut app = Headless::start(config).expect("engine");
         app.first_render().expect("first render");
         app
+    }
+
+    #[test]
+    fn a_thread_asked_to_close_with_work_to_lose_says_so_and_keeps_its_button() {
+        let mut guard = super::super::bus::lock();
+        let commands = guard.as_mut().expect("the channel");
+        let row = |closing: bool| Snapshot {
+            projects: vec![Project {
+                id: 1,
+                name: "po".into(),
+                active: true,
+                collapsed: false,
+                closable: false,
+                threads: vec![Thread { ago: Some("5m".into()), closing, ..thread(1, 10, "Port the sidebar", Mark::Running, true) }],
+                fold: None,
+            }],
+            ..Snapshot::default()
+        };
+        publish(row(false));
+        let mut app = start();
+        assert!(app.shows("5m") && !app.shows("Close anyway?"), "{:?}", app.screen().texts());
+        publish(row(true));
+        app.wait(std::time::Duration::from_millis(100)).unwrap();
+        assert!(app.shows("Close anyway?") && !app.shows("5m"), "{:?}", app.screen().texts());
+        // Without a hover, the button is there to press again.
+        app.press("id:agent-thread-10 >> label:Close thread").unwrap();
+        let sent: Vec<Cmd> = std::iter::from_fn(|| commands.try_recv().ok()).collect();
+        assert!(sent.contains(&Cmd::CloseThread(1, 10)), "{sent:?}");
     }
 
     #[test]
