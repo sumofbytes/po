@@ -405,7 +405,7 @@ fn menu_trigger(label: String, tip: &'static str) -> View {
 /// A menu item's own looks, under the popover's. `on` marks the choice that is set with a check in
 /// a slot at the end, which is kept when it is off so the labels don't move.
 fn item(what: String, on: Option<bool>, on_press: impl Fn() + 'static) -> AnyElement {
-    let mut row = view().flex_row().items_center().gap(scale::s3()).w_full().child(text(what).flex_1().text_size(text_sm()).text_color(Colors::foreground()));
+    let mut row = view().flex_row().items_center().gap(scale::s3()).w_full().child(text(what).flex_1().sized(text_sm()).text_color(Colors::foreground()));
     if let Some(on) = on {
         row = row.child(view().flex_none().w(scale::s3_5()).children(on.then(|| icon(IconName::Check, scale::s3_5(), Colors::foreground()))));
     }
