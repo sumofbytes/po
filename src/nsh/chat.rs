@@ -1214,6 +1214,9 @@ fn rail_bar(j: usize, active: Signal<usize>, hover: Signal<Option<usize>>, label
         .on_press(jump)
         .child(
             view()
+                // The slot takes the pointer, not the bar swelling inside it, so a press lands the
+                // same whether the bar has grown under it yet or not.
+                .pointer_events(PointerEvents::None)
                 .w_full()
                 .h(scale::s0_5())
                 .rounded(super::pill())
