@@ -1008,7 +1008,7 @@ fn transcript(items: &[Item], slot: ElementRef, at_end: Signal<bool>, rail: Posi
     // Non-reactive on purpose: the layout pass must not renotify the render. They live in the
     // caller, not here: this runs again on every change of the thread, and a layout event comes
     // only when a frame changes, so state made anew here would stay empty.
-    let Position { frames, origin, active, width } = rail;
+    let Position { frames, origin, active, hover, width } = rail;
     let count = items.len();
     let shown = count.min(MAX_BARS);
     frames.with(|sections| sections.truncate(count));
@@ -1076,7 +1076,7 @@ fn transcript(items: &[Item], slot: ElementRef, at_end: Signal<bool>, rail: Posi
                     // ([`MAX_BARS`]), then each bar stands for the messages before the next.
                     let rep = j * count / shown;
                     let jump = move || jump(rep);
-                    rail_bar(j, active, format!("Scroll to message {}", rep + 1), jump)
+                    rail_bar(j, active, hover, format!("Scroll to message {}", rep + 1), jump)
                 })
                 .collect::<Vec<_>>(),
         );
@@ -1134,13 +1134,15 @@ struct Position {
     frames: Stored<Vec<Points>>,
     origin: Stored<Points>,
     active: Signal<usize>,
+    /// The bar the pointer is over, which the bars near it lean towards.
+    hover: Signal<Option<usize>>,
     /// The stage's width, which says where the column's edge is and whether the rail has room.
     width: Signal<f32>,
 }
 
 impl Position {
     fn new() -> Self {
-        Self { frames: stored(Vec::new()), origin: stored(Points(0.)), active: signal(0), width: signal(0.) }
+        Self { frames: stored(Vec::new()), origin: stored(Points(0.)), active: signal(0), hover: signal(None), width: signal(0.) }
     }
 }
 
@@ -1167,10 +1169,12 @@ fn rail_gutter() -> Points {
 /// One bar of the rail, all of one length: quiet when its section is not in view, firmer when it
 /// is (as `active.get()` says), and a press on it scrolls to the section it marks. The target is
 /// the whole of a slot the thin bar is drawn in the middle of, so the space between bars takes a
-/// press as well, and over the slot the bar pops out: longer, thicker and firm, easing in.
-fn rail_bar(j: usize, active: Signal<usize>, label: String, jump: impl Fn() + 'static) -> View {
+/// press as well. Over a slot the bar pops out from its middle, longer, thicker and firm, easing
+/// in, and the bars above and below it swell a little less the further they are from it.
+fn rail_bar(j: usize, active: Signal<usize>, hover: Signal<Option<usize>>, label: String, jump: impl Fn() + 'static) -> View {
     let on = move || active.get() == j;
-    let hot = signal(false);
+    // How near the pointer is: 0 at the bar, 1 and 2 at the bars beside it, none beyond.
+    let near = move || hover.get().map(|at| at.abs_diff(j)).filter(|gap| *gap <= 2);
     view()
         .role(AccessibilityRole::Button)
         .label(label)
@@ -1180,19 +1184,32 @@ fn rail_bar(j: usize, active: Signal<usize>, label: String, jump: impl Fn() + 's
         .flex_col()
         .justify_center()
         .cursor_pointer()
-        .on_hover_in(move || hot.set(true))
-        .on_hover_out(move || hot.set(false))
+        .on_hover_in(move || hover.set(Some(j)))
+        .on_hover_out(move || {
+            if hover.get_untracked() == Some(j) {
+                hover.set(None);
+            }
+        })
         .on_press(jump)
         .child(
             view()
                 .w_full()
                 .h(scale::s0_5())
                 .rounded(super::pill())
-                .bg(move || if on() || hot.get() { Colors::muted()() } else { super::hairline()() })
-                // At rest a bar is shorter than its slot and thin; it grows from its right end.
-                .origin_right()
-                .scale_x(move || if hot.get() { 1_f32 } else { 0.7 })
-                .scale_y(move || if hot.get() { 2_f32 } else { 1. })
+                .bg(move || if on() || near() == Some(0) { Colors::muted()() } else { super::hairline()() })
+                // At rest a bar is shorter than its slot and thin.
+                .origin_center()
+                .scale_x(move || match near() {
+                    Some(0) => 1_f32,
+                    Some(1) => 0.85,
+                    Some(_) => 0.77,
+                    None => 0.7,
+                })
+                .scale_y(move || match near() {
+                    Some(0) => 2_f32,
+                    Some(1) => 1.5,
+                    _ => 1.,
+                })
                 .transition()
                 .duration(150.)
                 .ease_out(),
