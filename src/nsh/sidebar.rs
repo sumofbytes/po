@@ -234,7 +234,6 @@ fn day_separator(day: &'static str) -> View {
         .gap(scale::s2())
         .pl(space::inset())
         .pr(space::inset())
-        .pt(space::section_gap())
         // The day, then a hairline that carries the eye to the edge.
         .child(text(day).flex_none().sized(super::text_xs()).font_weight(FontWeight::MEDIUM).text_color(Colors::muted()))
         .child(view().flex_1().h(Points(1.)).bg(super::hairline()))
