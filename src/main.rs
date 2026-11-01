@@ -1032,11 +1032,13 @@ impl Thread {
     /// Lets a closed thread go. A running turn is asked to stop first and its agent given a
     /// moment to wind down before the process is killed, off the UI thread.
     fn retire(mut thread: Self) {
+        /// How long a stopped agent has to wind down before its process is killed.
+        const WIND_DOWN: Duration = Duration::from_secs(1);
         let Some(client) = thread.client.take() else { return };
         if thread.busy {
             client.cancel();
             std::thread::spawn(move || {
-                std::thread::sleep(Duration::from_secs(1));
+                std::thread::sleep(WIND_DOWN);
                 drop(client);
             });
         }
@@ -2302,7 +2304,11 @@ mod tests {
         thread.busy = busy;
         thread.client = Some(crate::agent::Client::Acp(client));
         super::Thread::retire(thread);
-        std::thread::sleep(std::time::Duration::from_millis(400));
+        // Waits for the cancel to arrive; when none is expected, long enough to have seen it.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(if busy { 3000 } else { 400 });
+        while std::time::Instant::now() < deadline && !(busy && std::fs::read_to_string(&path).unwrap().contains("session/cancel")) {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
         let sent = std::fs::read_to_string(&path).unwrap();
         std::fs::remove_file(&path).ok();
         sent

@@ -858,10 +858,7 @@ impl Reader {
         if before.is_some() && before != Some(crate::state::ThreadState::Closed) {
             self.changed(tid, crate::state::ThreadState::Closed, window, cx);
         }
-        let closed = self.threads_all().find(|thread| thread.id == tid).and_then(|thread| thread.closed_state());
-        if let (Some(closed), Some(slot)) = (closed, self.slots.iter_mut().find(|slot| slot.id == pid)) {
-            slot.project.remember(closed);
-        }
+        self.remember_closed(pid, tid);
         let last = self.slots.iter().find(|slot| slot.id == pid).is_some_and(|slot| slot.thread.id == tid && slot.parked.is_empty());
         let blank = last.then(|| self.blank_thread());
         let Some(slot) = self.slots.iter_mut().find(|slot| slot.id == pid) else { return };
@@ -876,9 +873,33 @@ impl Reader {
         cx.notify();
     }
 
-    /// The threads `tid` started, as (project, thread).
+    /// Notes thread `tid` in project `pid` as closed there, for the session picker to offer back.
+    fn remember_closed(&mut self, pid: u64, tid: u64) {
+        let Some(closed) = self.threads_all().find(|thread| thread.id == tid).and_then(|thread| thread.closed_state()) else { return };
+        if pid == self.project_id {
+            self.project.remember(closed);
+        } else if let Some(slot) = self.slots.iter_mut().find(|slot| slot.id == pid) {
+            slot.project.remember(closed);
+        }
+    }
+
+    /// The threads `tid` started, and the ones they started in turn, as (project, thread),
+    /// deepest first so each is closed before the thread that started it.
     pub(crate) fn children_of(&self, tid: u64) -> Vec<(u64, u64)> {
-        self.views().iter().flat_map(|view| view.threads.iter().filter(|thread| thread.parent == Some(tid)).map(move |thread| (view.id, thread.id))).collect()
+        let mut found: Vec<(u64, u64)> = vec![];
+        let mut queue = vec![tid];
+        while let Some(parent) = queue.pop() {
+            for view in self.views() {
+                for thread in view.threads.iter().filter(|thread| thread.parent == Some(parent)) {
+                    if !found.iter().any(|(_, known)| *known == thread.id) && thread.id != tid {
+                        found.push((view.id, thread.id));
+                        queue.push(thread.id);
+                    }
+                }
+            }
+        }
+        found.reverse();
+        found
     }
 
     /// Whether closing `tid`, with the threads it started, would lose work.
@@ -919,10 +940,7 @@ impl Reader {
         if before.is_some() && before != Some(crate::state::ThreadState::Closed) {
             self.changed(id, crate::state::ThreadState::Closed, window, cx);
         }
-        let closed = self.threads_all().find(|thread| thread.id == id).and_then(|thread| thread.closed_state());
-        if let Some(closed) = closed {
-            self.project.remember(closed);
-        }
+        self.remember_closed(self.project_id, id);
         if let Some(at) = self.parked.iter().position(|thread| thread.id == id) {
             Thread::retire(self.parked.remove(at));
         } else if self.thread.id == id {

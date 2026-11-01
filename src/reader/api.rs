@@ -943,6 +943,12 @@ impl Reader {
 
     /// Tells whoever listens that `id` now stands in `after`: its waiters, then its parent.
     pub(crate) fn changed(&mut self, id: u64, after: crate::state::ThreadState, window: &mut Window, cx: &mut Context<Self>) {
+        // A thread whose close waits for a second press may no longer be what was asked about.
+        if let Some((_, closing)) = self.closing
+            && (closing == id || self.children_of(closing).iter().any(|(_, child)| *child == id))
+        {
+            self.closing = None;
+        }
         self.wake_waiters(id, after);
         self.publish(id, after);
         self.notify_parent(id, after, window, cx);

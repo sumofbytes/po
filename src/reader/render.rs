@@ -221,6 +221,8 @@ impl Reader {
                     when: info.updated.get(..16).unwrap_or_default().replace('T', " "),
                     closed,
                 };
+                // One that was picked again since is open, not closed.
+                let closed: Vec<&SessionInfo> = closed.into_iter().filter(|info| !self.threads_all().any(|t| t.session.as_deref() == Some(info.id.as_str()))).collect();
                 let rest = sessions.iter().filter(|info| !closed.iter().any(|c| c.id == info.id));
                 chat::Picking::Sessions(closed.iter().map(|info| session(info, true)).chain(rest.map(|info| session(info, false))).collect())
             }
