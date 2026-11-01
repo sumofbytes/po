@@ -1008,7 +1008,7 @@ fn transcript(items: &[Item], slot: ElementRef, at_end: Signal<bool>, rail: Posi
     // Non-reactive on purpose: the layout pass must not renotify the render. They live in the
     // caller, not here: this runs again on every change of the thread, and a layout event comes
     // only when a frame changes, so state made anew here would stay empty.
-    let Position { frames, origin, active } = rail;
+    let Position { frames, origin, active, room } = rail;
     let count = items.len();
     let shown = count.min(MAX_BARS);
     frames.with(|sections| sections.truncate(count));
@@ -1063,6 +1063,8 @@ fn transcript(items: &[Item], slot: ElementRef, at_end: Signal<bool>, rail: Posi
         .top(Points(0.))
         .bottom(Points(0.))
         .right(rail_inset())
+        // Its own width, so it sits at the stage's edge whatever the column does.
+        .w(scale::s4())
         .flex_col()
         .items_end()
         .justify_center()
@@ -1085,6 +1087,9 @@ fn transcript(items: &[Item], slot: ElementRef, at_end: Signal<bool>, rail: Posi
         .flex()
         .justify_center()
         .overflow_hidden()
+        // The rail is for a stage with room beside the column; in a narrower one it would sit on
+        // the text, so it is not drawn.
+        .on_layout(move |bounds: &Bounds<Points>| room.set(bounds.size.width.0 >= COLUMN + 2. * rail_gutter().0))
         .child(
             scroll()
                 .size_full()
@@ -1112,12 +1117,10 @@ fn transcript(items: &[Item], slot: ElementRef, at_end: Signal<bool>, rail: Posi
                         }
                     }
                 })
-                // With a rail, the gutters are wide enough to hold it with room on its left, on both
-                // sides so the column stays centered under the composer.
-                .child(view().flex_col().items_center().w_full().min_w_0().px(if count >= 2 { rail_gutter() } else { scale::s3() }).on_layout(resized).child(rows.into_element()))
+                .child(view().flex_col().items_center().w_full().min_w_0().px(scale::s3()).on_layout(resized).child(rows.into_element()))
                 .element_ref(&slot),
         )
-        .children((count >= 2).then(|| rail.into_element()))
+        .child(dynamic(move || (count >= 2 && room.get()).then(|| rail.clone().into_element())))
         .into_element()
 }
 
@@ -1128,11 +1131,13 @@ struct Position {
     frames: Stored<Vec<Points>>,
     origin: Stored<Points>,
     active: Signal<usize>,
+    /// Whether the stage is wide enough to hold the rail beside the column.
+    room: Signal<bool>,
 }
 
 impl Position {
     fn new() -> Self {
-        Self { frames: stored(Vec::new()), origin: stored(Points(0.)), active: signal(0) }
+        Self { frames: stored(Vec::new()), origin: stored(Points(0.)), active: signal(0), room: signal(false) }
     }
 }
 
@@ -1145,8 +1150,8 @@ fn rail_inset() -> Points {
     scale::s1()
 }
 
-/// The transcript's gutter beside a rail: the rail's inset, a bar's length and a margin between
-/// the bars and the text.
+/// What the rail takes of the stage beside the column: its inset, a bar's length and a margin
+/// between the bars and the text.
 fn rail_gutter() -> Points {
     rail_inset() + scale::s4() + scale::s3()
 }
