@@ -381,10 +381,11 @@ fn trail_slot(content: impl IntoElement) -> View {
 const MENU: &str = "bg-popover border border-border rounded-xl shadow-2xl p-1 min-w-44";
 
 /// A menu's trigger: its label and the caret, as a ghost row the Menu opens on.
-fn menu_trigger(label: String, tip: &'static str) -> View {
+fn menu_trigger(label: String, tip: impl Into<String>) -> View {
+    let tip: String = tip.into();
     view()
         .role(AccessibilityRole::Button)
-        .label(tip)
+        .label(tip.clone())
         .flex_none()
         .flex_row()
         .items_center()
@@ -414,6 +415,19 @@ fn item(what: String, on: Option<bool>, on_press: impl Fn() + 'static) -> AnyEle
     if let Some(on) = on {
         row = row.child(view().flex_none().w(scale::s3_5()).children(on.then(|| icon(IconName::Check, scale::s3_5(), Colors::foreground()))));
     }
+    menu_item().cursor_pointer().px(scale::s3()).py(scale::s1_5()).hover(|s| s.bg(Colors::hover())).on_select(on_press).child(row).into_element()
+}
+
+/// A menu item with a line under its name that says what choosing it means, checked when `on`.
+fn described_item(what: &str, about: &str, on: bool, on_press: impl Fn() + 'static) -> AnyElement {
+    let words = view().flex_col().flex_1().gap(scale::s0_5()).child(text(what.to_string()).sized(text_sm()).text_color(Colors::foreground())).child(note(about.to_string()));
+    let row = view()
+        .flex_row()
+        .items_center()
+        .gap(scale::s3())
+        .w_full()
+        .child(words)
+        .child(view().flex_none().w(scale::s3_5()).children(on.then(|| icon(IconName::Check, scale::s3_5(), Colors::foreground()))));
     menu_item().cursor_pointer().px(scale::s3()).py(scale::s1_5()).hover(|s| s.bg(Colors::hover())).on_select(on_press).child(row).into_element()
 }
 
@@ -466,20 +480,27 @@ fn pane(title: String, snap: &Snapshot) -> View {
 /// What an agent that runs this thread may do through Po: the scope it reaches by, its reach
 /// besides that, and a way back. [`tell`] tells the Reader.
 fn grant_menu(grant: Grant) -> AnyElement {
+    // The chip names the level, as a setting's chip names its value; the menu says it is Control.
     let label = match grant.scope {
-        Scope::Viewer if !(grant.read || grant.approvals) => "Control".to_string(),
-        Scope::Viewer => "Control · reads".to_string(),
-        Scope::Orchestrate => "Control · orchestrate".to_string(),
-        Scope::Global => "Control · global".to_string(),
+        Scope::Viewer => "Basic".to_string(),
+        Scope::Orchestrate => "Delegate".to_string(),
+        Scope::Global => "Full access".to_string(),
     };
     let active = grant != Grant::default();
     let mut menu = menu()
         .popup_class(MENU)
         .trigger(menu_trigger(label.clone(), "What this thread's agent may do through Po"));
-    for (name, scope) in [("Viewer", Scope::Viewer), ("Orchestrate", Scope::Orchestrate), ("Global", Scope::Global)] {
+    menu = menu.child(menu_item().disabled(true).px(scale::s3()).py(scale::s1_5()).child(note("Control")).into_element());
+    // Each level also has what the ones above it in the list have.
+    let levels = [
+        ("Basic", "Show files, diffs and views; change its own settings", Scope::Viewer),
+        ("Delegate", "Also start and steer its own threads; edit issues", Scope::Orchestrate),
+        ("Full access", "Also open projects, use worktrees and merge them", Scope::Global),
+    ];
+    for (name, about, scope) in levels {
         let on = grant.scope == scope;
         let set = Grant { scope, ..grant };
-        menu = menu.child(item(name.to_string(), Some(on), move || tell(Cmd::Grant(GrantChange::Set(set)))));
+        menu = menu.child(described_item(name, about, on, move || tell(Cmd::Grant(GrantChange::Set(set)))));
     }
     menu = menu.child(separator());
     menu = menu.child(item("May read other threads here".to_string(), Some(grant.read), move || tell(Cmd::Grant(GrantChange::Read))));
@@ -1297,26 +1318,44 @@ fn setup(snap: &Snapshot) -> AnyElement {
     row.into_element()
 }
 
-/// The settings of the session, as menus named for each.
-/// A menu for each of the session's settings. While a turn runs they wait: agents differ on
-/// changing them mid-turn.
+/// A menu for each of the session's settings, its name as the tooltip. While a turn runs they
+/// wait: agents differ on changing them mid-turn.
 fn setting_chips(settings: &[Setting], busy: bool) -> Vec<AnyElement> {
     settings
         .iter()
         .map(|setting| {
+            let trigger = menu_trigger(setting.current_name(), setting.name.clone());
             if busy {
-                return menu_trigger(setting.current_name(), "Available when the agent is idle").opacity(crate::theme::tokens::DISABLED).into_element();
+                return trigger.opacity(crate::theme::tokens::DISABLED).into_element();
             }
-            let mut menu = menu().popup_class(MENU).trigger(menu_trigger(setting.current_name(), "What the session uses"));
-            for (value, name) in &setting.choices {
-                let on = *value == setting.current;
-                let (decided, id) = (value.clone(), setting.id.clone());
-                menu = menu.child(item(name.clone(), Some(on), move || {
-                    let (id, decided) = (id.clone(), decided.clone());
-                    tell(Cmd::Setting { id, value: decided })
-                }));
-            }
-            menu.into_element()
+            menu().popup_class(MENU).trigger(trigger).child(setting_heading(setting)).child(menu_list(choice_items(setting))).into_element()
+        })
+        .collect()
+}
+
+/// A menu's items in a column that scrolls once it is taller than fits, so a long list stays inside
+/// the popover's border.
+fn menu_list(entries: Vec<AnyElement>) -> AnyElement {
+    scroll().max_h(px(320.)).child(view().flex_col().children(entries)).into_element()
+}
+
+/// The name of `setting`, heading its choices in a menu.
+fn setting_heading(setting: &Setting) -> AnyElement {
+    menu_item().disabled(true).px(scale::s3()).py(scale::s1_5()).child(note(setting.name.clone())).into_element()
+}
+
+/// The choices of `setting` as menu items, the one in effect marked.
+fn choice_items(setting: &Setting) -> Vec<AnyElement> {
+    setting
+        .choices
+        .iter()
+        .map(|(value, name)| {
+            let on = *value == setting.current;
+            let (decided, id) = (value.clone(), setting.id.clone());
+            item(name.clone(), Some(on), move || {
+                let (id, decided) = (id.clone(), decided.clone());
+                tell(Cmd::Setting { id, value: decided })
+            })
         })
         .collect()
 }
@@ -1882,10 +1921,10 @@ mod tests {
         });
         assert!(app.shows("Claude"), "{:?}", app.screen().texts());
         let texts = app.screen().texts();
-        assert_eq!(texts.iter().filter(|t| **t == "Control · global").count(), 1, "only the composer's menu, not the header's: {texts:?}");
+        assert_eq!(texts.iter().filter(|t| **t == "Full access").count(), 1, "only the composer's menu, not the header's: {texts:?}");
         app.press("label:What this thread's agent may do through Po").unwrap();
         app.settle();
-        app.press("text:Orchestrate").unwrap();
+        app.press("text:Delegate").unwrap();
         let sent = drain(&mut app, commands);
         let set = Grant { scope: Scope::Orchestrate, ..Grant::default() };
         assert!(sent.contains(&Bus::Chat(Cmd::Grant(GrantChange::Set(set)))), "{sent:?}");
@@ -1902,10 +1941,10 @@ mod tests {
             grant: Some(Grant::initial()),
             ..Snapshot::default()
         });
-        assert!(app.shows("Control · global"), "{:?}", app.screen().texts());
+        assert!(app.shows("Full access"), "{:?}", app.screen().texts());
         app.press("label:What this thread's agent may do through Po").unwrap();
         app.settle();
-        app.press("text:Orchestrate").unwrap();
+        app.press("text:Delegate").unwrap();
         let sent = drain(&mut app, commands);
         let set = Grant { scope: Scope::Orchestrate, ..Grant::default() };
         assert!(sent.contains(&Bus::Chat(Cmd::Grant(GrantChange::Set(set)))), "{sent:?}");
