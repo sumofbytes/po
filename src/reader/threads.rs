@@ -858,14 +858,27 @@ impl Reader {
         let blank = last.then(|| self.blank_thread());
         let Some(slot) = self.slots.iter_mut().find(|slot| slot.id == pid) else { return };
         if let Some(at) = slot.parked.iter().position(|thread| thread.id == tid) {
-            slot.parked.remove(at);
+            Thread::retire(slot.parked.remove(at));
         } else if slot.thread.id == tid
             && let Some(next) = slot.parked.pop().or(blank)
         {
-            slot.thread = next;
+            Thread::retire(std::mem::replace(&mut slot.thread, next));
         }
         self.request_save(cx);
         cx.notify();
+    }
+
+    /// The user pressed close on a thread. One that would lose work (a running turn, a question,
+    /// queued messages) is only marked the first time, and closed by the second press.
+    pub(crate) fn close_asked(&mut self, pid: u64, tid: u64, window: &mut Window, cx: &mut Context<Self>) {
+        let at_risk = self.threads_all().find(|thread| thread.id == tid).is_some_and(|thread| thread.at_risk());
+        if at_risk && self.closing != Some((pid, tid)) {
+            self.closing = Some((pid, tid));
+            cx.notify();
+            return;
+        }
+        self.closing = None;
+        self.close_any_thread(pid, tid, window, cx);
     }
 
     /// Opens a blank thread in project `pid`.
@@ -885,13 +898,13 @@ impl Reader {
             self.changed(id, crate::state::ThreadState::Closed, window, cx);
         }
         if let Some(at) = self.parked.iter().position(|thread| thread.id == id) {
-            self.parked.remove(at);
+            Thread::retire(self.parked.remove(at));
         } else if self.thread.id == id {
             let next = match self.parked.pop() {
                 Some(next) => next,
                 None => self.blank_thread(),
             };
-            self.thread = next;
+            Thread::retire(std::mem::replace(&mut self.thread, next));
             self.thread.unread = false;
             self.wake_thread(window, cx);
         }

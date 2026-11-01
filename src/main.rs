@@ -1014,6 +1014,25 @@ impl Thread {
         self.client.is_some() && self.session.is_some() && self.activity() != Activity::Asking && !self.busy && self.queue.is_empty()
     }
 
+    /// Whether closing it would lose something: a turn is running, a question waits or
+    /// messages are queued. A blank thread has nothing to lose.
+    fn at_risk(&self) -> bool {
+        !self.blank && (self.busy || self.activity() == Activity::Asking || !self.queue.is_empty())
+    }
+
+    /// Lets a closed thread go. A running turn is asked to stop first and its agent given a
+    /// moment to wind down before the process is killed, off the UI thread.
+    fn retire(mut thread: Self) {
+        let Some(client) = thread.client.take() else { return };
+        if thread.busy {
+            client.cancel();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_secs(1));
+                drop(client);
+            });
+        }
+    }
+
     /// Stops the agent, keeping what has been said so it can be shown and resumed.
     fn sleep(&mut self) {
         self.drop_agent();
@@ -1299,6 +1318,9 @@ struct Reader {
     chat_reset: std::cell::Cell<u64>,
     /// What [`nsh::chat::Snapshot::focus`] carries next.
     chat_focus: std::cell::Cell<u64>,
+    /// The thread (project, thread) whose close was pressed once and waits for a second press,
+    /// because closing it would lose work. Any other command puts it away.
+    closing: Option<(u64, u64)>,
     /// The issues page, shown in place of the conversation while `issues_open`; the sidebar has a row for it.
     issues: Entity<nsh::overlay::Overlay>,
     issues_open: bool,
@@ -1478,6 +1500,7 @@ impl Reader {
             pane_controls: Default::default(),
             reveal: None,
             reveal_serial: 0,
+            closing: None,
             sidebar,
             _sidebar_theme: sidebar_theme,
             chat: chat_pane,
@@ -2224,6 +2247,42 @@ mod tests {
         // A counter from before the time was kept, and a time in the future, say nothing.
         assert_eq!(ago(now, 7), None);
         assert_eq!(ago(now, now + 1), None);
+    }
+
+    // A stand-in agent that copies what it is sent to a file, to see that a running thread's
+    // agent is asked to stop before it is killed, and that an idle one is simply let go.
+    fn closed_with(busy: bool) -> String {
+        let path = std::env::temp_dir().join(format!("po-retire-{}-{busy}", std::process::id()));
+        std::fs::write(&path, "").unwrap();
+        let (client, _events) = crate::acp::Client::spawn(&format!("tee {}", path.display()), &std::env::temp_dir(), false, |_| vec![]).expect("spawns tee");
+        client.load("s1");
+        let mut thread = super::Thread::blank(1);
+        thread.busy = busy;
+        thread.client = Some(crate::agent::Client::Acp(client));
+        super::Thread::retire(thread);
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        let sent = std::fs::read_to_string(&path).unwrap();
+        std::fs::remove_file(&path).ok();
+        sent
+    }
+
+    #[test]
+    fn a_running_thread_is_asked_to_stop_when_closed_and_an_idle_one_is_not() {
+        assert!(closed_with(true).contains("session/cancel"));
+        assert!(!closed_with(false).contains("session/cancel"));
+    }
+
+    #[test]
+    fn only_a_thread_with_work_to_lose_asks_before_closing() {
+        let mut thread = super::Thread::blank(1);
+        assert!(!thread.at_risk(), "blank");
+        thread.blank = false;
+        assert!(!thread.at_risk(), "idle");
+        thread.busy = true;
+        assert!(thread.at_risk(), "running");
+        thread.busy = false;
+        thread.queue.push(super::Queued { out: super::Outgoing { text: "next".into(), origin: super::Origin::User, images: vec![] }, kind: None });
+        assert!(thread.at_risk(), "queued");
     }
 
     // submit's paths (§4.3 of the control plan): blank, unstarted, starting, asleep, ready,

@@ -33,6 +33,7 @@ impl Reader {
             controlled: self.grants.get(&thread.id).is_some_and(|grant| *grant != command::Grant::default()),
             day: None,
             ago: ago(now_ms(), thread.active_at),
+            closing: self.closing == Some((pid, thread.id)) && thread.at_risk(),
         };
         let today = date::today();
         // Filtering keeps a project whose name matches, with all its threads, and any project with a
@@ -339,6 +340,9 @@ impl Reader {
     /// Does what the user asked of a screen drawn by NSH.
     pub(crate) fn run(&mut self, cmd: nsh::bus::Cmd, window: &mut Window, cx: &mut Context<Self>) {
         use nsh::bus::Cmd;
+        if !matches!(cmd, Cmd::CloseThread(..)) && self.closing.take().is_some() {
+            cx.notify();
+        }
         match cmd {
             Cmd::SideQuery(query) => {
                 self.side_query = query;
@@ -366,7 +370,7 @@ impl Reader {
                 cx.notify();
             }
             Cmd::OpenThread(pid, tid) => self.open_thread(pid, tid, window, cx),
-            Cmd::CloseThread(pid, tid) => self.close_any_thread(pid, tid, window, cx),
+            Cmd::CloseThread(pid, tid) => self.close_asked(pid, tid, window, cx),
             Cmd::AddProject => self.pick_project(window, cx),
             Cmd::NewThread => self.new_blank_thread(window, cx),
             Cmd::OpenSettings => self.toggle_settings(window, cx),
