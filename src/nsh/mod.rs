@@ -313,6 +313,11 @@ pub fn hairline() -> impl Fn() -> AdaptiveColor + Copy {
     || Colors::border()().opacity(0.6)
 }
 
+/// The muted color at `weight` of its strength: a mark that is part way to firm.
+pub fn muted_at(weight: f32) -> AdaptiveColor {
+    Colors::muted()().opacity(weight)
+}
+
 /// The text of a row's label, GPUI's `text_base`.
 pub fn text_base() -> Points {
     font(1.)

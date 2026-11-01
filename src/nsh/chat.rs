@@ -1199,8 +1199,8 @@ fn rail_bar(j: usize, active: Signal<usize>, hover: Signal<Option<usize>>, label
                 .bg(move || match near() {
                     Some(0) => Colors::muted()(),
                     // The bars beside it take the firm color in part, less the further they are.
-                    Some(1) => Colors::muted()().opacity(0.75),
-                    Some(_) => Colors::muted()().opacity(0.5),
+                    Some(1) => super::muted_at(0.75),
+                    Some(_) => super::muted_at(0.5),
                     None if on() => Colors::muted()(),
                     None => super::hairline()(),
                 })
