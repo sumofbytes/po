@@ -212,8 +212,8 @@ Three shortcuts set how the layout is used:
 - **Chat** (Ctrl+3): the viewer closed, so the conversation has the middle to
   itself.
 
-In a conversation, thinking starts folded behind a **Thinking** row; click it to
-read it. Two shortcuts act on the whole thread: Ctrl+O opens every tool
+In a conversation, the agent's reasoning starts folded behind a **Thinking** row — which
+says **Thought** once the thought is all there. Click the row to read it. Two shortcuts act on the whole thread: Ctrl+O opens every tool
 call's details (or folds them all when they are already open), and Ctrl+T
 does the same for thinking.
 
