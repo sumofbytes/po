@@ -1094,7 +1094,8 @@ fn transcript(items: &[Item], slot: ElementRef, at_end: Signal<bool>, rail: Posi
                 .on_scroll({
                     let (active, frames, origin) = (active, frames, origin);
                     move |event: &ScrollEvent| {
-                        at_end.set(event.offset.y + event.size.height >= event.content_size.height - px(24.));
+                        let end = event.offset.y + event.size.height >= event.content_size.height - px(24.);
+                        at_end.set(end);
                         let sections = frames.get();
                         if sections.is_empty() {
                             return;
@@ -1109,7 +1110,9 @@ fn transcript(items: &[Item], slot: ElementRef, at_end: Signal<bool>, rail: Posi
                                 message = at;
                             }
                         }
-                        let section = message * shown / count;
+                        // At the end of the page the last messages start below the eye line, and
+                        // scrolling cannot bring them up to it: the last bar is the one in view.
+                        let section = if end { shown - 1 } else { message * shown / count };
                         if active.get_untracked() != section {
                             active.set(section);
                         }
