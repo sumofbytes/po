@@ -1008,7 +1008,7 @@ fn transcript(items: &[Item], slot: ElementRef, at_end: Signal<bool>, rail: Posi
     // Non-reactive on purpose: the layout pass must not renotify the render. They live in the
     // caller, not here: this runs again on every change of the thread, and a layout event comes
     // only when a frame changes, so state made anew here would stay empty.
-    let Position { frames, origin, active, room } = rail;
+    let Position { frames, origin, active, width } = rail;
     let count = items.len();
     let shown = count.min(MAX_BARS);
     frames.with(|sections| sections.truncate(count));
@@ -1058,12 +1058,13 @@ fn transcript(items: &[Item], slot: ElementRef, at_end: Signal<bool>, rail: Posi
             });
         }
     };
-    let rail = view()
+    // The rail floats beside the column: its bars start a margin out from the column's right
+    // edge, which is half of what the stage has over the column from the stage's.
+    let rail = move |stage: f32| view()
         .absolute()
         .top(Points(0.))
         .bottom(Points(0.))
-        .right(rail_inset())
-        // Its own width, so it sits at the stage's edge whatever the column does.
+        .right(Points(((stage - COLUMN) / 2. - rail_gutter().0).max(rail_inset().0)))
         .w(scale::s4())
         .flex_col()
         .items_end()
@@ -1087,9 +1088,7 @@ fn transcript(items: &[Item], slot: ElementRef, at_end: Signal<bool>, rail: Posi
         .flex()
         .justify_center()
         .overflow_hidden()
-        // The rail is for a stage with room beside the column; in a narrower one it would sit on
-        // the text, so it is not drawn.
-        .on_layout(move |bounds: &Bounds<Points>| room.set(bounds.size.width.0 >= COLUMN + 2. * rail_gutter().0))
+        .on_layout(move |bounds: &Bounds<Points>| width.set(bounds.size.width.0))
         .child(
             scroll()
                 .size_full()
@@ -1120,7 +1119,12 @@ fn transcript(items: &[Item], slot: ElementRef, at_end: Signal<bool>, rail: Posi
                 .child(view().flex_col().items_center().w_full().min_w_0().px(scale::s3()).on_layout(resized).child(rows.into_element()))
                 .element_ref(&slot),
         )
-        .child(dynamic(move || (count >= 2 && room.get()).then(|| rail.clone().into_element())))
+        .child(dynamic(move || {
+            // The rail is for a stage with room beside the column; in a narrower one it would
+            // sit on the text, so it is not drawn.
+            let stage = width.get();
+            (count >= 2 && stage >= COLUMN + 2. * (rail_gutter().0 + rail_inset().0)).then(|| rail(stage).into_element())
+        }))
         .into_element()
 }
 
@@ -1131,13 +1135,13 @@ struct Position {
     frames: Stored<Vec<Points>>,
     origin: Stored<Points>,
     active: Signal<usize>,
-    /// Whether the stage is wide enough to hold the rail beside the column.
-    room: Signal<bool>,
+    /// The stage's width, which says where the column's edge is and whether the rail has room.
+    width: Signal<f32>,
 }
 
 impl Position {
     fn new() -> Self {
-        Self { frames: stored(Vec::new()), origin: stored(Points(0.)), active: signal(0), room: signal(false) }
+        Self { frames: stored(Vec::new()), origin: stored(Points(0.)), active: signal(0), width: signal(0.) }
     }
 }
 
@@ -1145,15 +1149,15 @@ impl Position {
 /// nearest bar, so the rail stays a hand's worth of lines.
 const MAX_BARS: usize = 24;
 
-/// From the stage's right edge to the rail's bars.
+/// The least between the stage's right edge and the rail's bars.
 fn rail_inset() -> Points {
     scale::s1()
 }
 
-/// What the rail takes of the stage beside the column: its inset, a bar's length and a margin
-/// between the bars and the text.
+/// What the rail takes of the stage beside the column: a bar's length and the margin between
+/// the column and the bars.
 fn rail_gutter() -> Points {
-    rail_inset() + scale::s4() + scale::s3()
+    scale::s4() + scale::s3()
 }
 
 /// One bar of the rail, all of one length: quiet when its section is not in view, firmer when it
