@@ -522,13 +522,16 @@ behaviour, at scope `Viewer`, reach self.
 
 ## 7. UI
 
-- **Control menu** in the composer's settings row, next to the model:
-  - It sets Viewer, Orchestrate or Global, plus "may read other threads here" and "may answer
-    its threads' permission asks".
-  - It shows "applies when the agent restarts" when the grant is raised.
+- **Control menu** in the composer's settings row, next to the model. Its chip shows the level:
+  - A pick-one list: **Basic** (Viewer), **Delegate** (Orchestrate), **Full access** (Global),
+    each with a line saying what it adds. These are the names on screen; the scopes keep theirs.
+  - Under **Extras**, two checkboxes: read other threads, and answer its threads' permission
+    asks. No level turns them on.
+  - "Restart the agent to apply" shows only while the grant is higher than the agent's was when
+    it started.
 - **Grant indicator:** any thread above `Viewer` shows a small badge in its header and in the
-  sidebar. Clicking it opens the menu. **Stop agent control** lowers the grant to `Viewer`,
-  cancels its waiters, and leaves its children running as ordinary threads.
+  sidebar. Clicking it opens the menu. Picking **Basic** lowers the grant to `Viewer` with the
+  extras off, cancels its waiters, and leaves its children running as ordinary threads.
 - **Children** show `↳ <parent title>` in the project list. Their first
   message shows `from <parent>`, and notifications in the parent show `Po`.
 - **The parent's header** shows a status line with its children: "3 threads · 1 asking ·

@@ -223,6 +223,8 @@ pub struct Snapshot {
     pub isolate: Option<bool>,
     /// What the thread's agent may do through Po: the Control menu reads and changes it.
     pub grant: Option<Grant>,
+    /// The grant was raised after the agent started, so it has not reached the agent yet.
+    pub grant_pending: bool,
     pub queue: Vec<Queued>,
     pub pictures: Vec<Picture>,
     /// Why some of what was pasted or dropped was left out.
@@ -380,6 +382,10 @@ fn trail_slot(content: impl IntoElement) -> View {
 /// The popovers of the menus: the theme's own surface, with a shadow.
 const MENU: &str = "bg-popover border border-border rounded-xl shadow-2xl p-1 min-w-44";
 
+/// The Control menu: a fixed width, so the lines of its descriptions wrap to the same breaks
+/// when the popover is measured as when it is drawn, and its height holds them all.
+const WIDE_MENU: &str = "bg-popover border border-border rounded-xl shadow-2xl p-1 w-80";
+
 /// A menu's trigger: its label and the caret, as a ghost row the Menu opens on.
 fn menu_trigger(label: String, tip: impl Into<String>) -> View {
     let tip: String = tip.into();
@@ -431,6 +437,24 @@ fn described_item(what: &str, about: &str, on: bool, on_press: impl Fn() + 'stat
     menu_item().cursor_pointer().px(scale::s3()).py(scale::s1_5()).hover(|s| s.bg(Colors::hover())).on_select(on_press).child(row).into_element()
 }
 
+/// A menu item for something switched on or off, with a box at its start that is ticked when `on`:
+/// unlike the check ending a choice, it says the item can be on while its neighbours are too.
+fn check_item(what: &str, on: bool, on_press: impl Fn() + 'static) -> AnyElement {
+    let boxed = view()
+        .flex_none()
+        .w(scale::s3_5())
+        .h(scale::s3_5())
+        .flex_row()
+        .items_center()
+        .justify_center()
+        .rounded(Points(3.))
+        .border_1()
+        .border_color(Colors::input_border())
+        .children(on.then(|| icon(IconName::Check, scale::s3(), Colors::foreground())));
+    let row = view().flex_row().items_center().gap(scale::s3()).w_full().child(boxed).child(text(what.to_string()).flex_1().sized(text_sm()).text_color(Colors::foreground()));
+    menu_item().cursor_pointer().px(scale::s3()).py(scale::s1_5()).hover(|s| s.bg(Colors::hover())).on_select(on_press).child(row).into_element()
+}
+
 /// A line in a header, like `3 threads · 1 asking`.
 fn status_line(line: String) -> View {
     // The height of the History button beside it, so the two sit on one rhythm.
@@ -472,47 +496,41 @@ fn pane(title: String, snap: &Snapshot) -> View {
     }
     // The Control menu, once the user has set what the thread's agent may do.
     if let Some(grant) = snap.grant.filter(|grant| *grant != Grant::initial()) {
-        right = right.child(grant_menu(grant));
+        right = right.child(grant_menu(grant, snap.grant_pending));
     }
     pane_header(title, right, &snap.lead, &snap.trail, snap.glass)
 }
 
-/// What an agent that runs this thread may do through Po: the scope it reaches by, its reach
-/// besides that, and a way back. [`tell`] tells the Reader.
-fn grant_menu(grant: Grant) -> AnyElement {
-    // The chip names the level, as a setting's chip names its value; the menu says it is Control.
+/// What an agent that runs this thread may do through Po: one level of reach, picked from a
+/// list, and two extras switched on or off beside it. [`tell`] tells the Reader.
+fn grant_menu(grant: Grant, pending: bool) -> AnyElement {
+    // The chip names the level, as a setting's chip names its value; the menu says it is control.
     let label = match grant.scope {
         Scope::Viewer => "Basic".to_string(),
         Scope::Orchestrate => "Delegate".to_string(),
         Scope::Global => "Full access".to_string(),
     };
-    let active = grant != Grant::default();
-    let mut menu = menu()
-        .popup_class(MENU)
-        .trigger(menu_trigger(label.clone(), "What this thread's agent may do through Po"));
-    menu = menu.child(menu_heading("Control"));
-    // Each level also has what the ones above it in the list have.
+    let mut menu = menu().popup_class(WIDE_MENU).trigger(menu_trigger(label, "Agent control"));
+    menu = menu.child(menu_heading("Agent control"));
+    // Each level has what the ones above it in the list have. Basic is the way back: it also
+    // clears the extras and quiets the threads the agent started.
     let levels = [
-        ("Basic", "Show files, diffs and views; change its own settings", Scope::Viewer),
-        ("Delegate", "Also start, steer and close its own threads; edit issues", Scope::Orchestrate),
-        ("Full access", "Also open and close projects, use worktrees, delete issues", Scope::Global),
+        ("Basic", "Show files and views", Scope::Viewer),
+        ("Delegate", "Also run its own threads, edit issues", Scope::Orchestrate),
+        ("Full access", "Also open projects, use worktrees", Scope::Global),
     ];
     for (name, about, scope) in levels {
         let on = grant.scope == scope;
-        let set = Grant { scope, ..grant };
-        menu = menu.child(described_item(name, about, on, move || tell(Cmd::Grant(GrantChange::Set(set)))));
-    }
-    // No level has these: each is turned on by itself.
-    menu = menu.child(separator());
-    menu = menu.child(menu_heading("Also allow"));
-    menu = menu.child(item("May read other threads here".to_string(), Some(grant.read), move || tell(Cmd::Grant(GrantChange::Read))));
-    if grant.approvals || grant.scope != Scope::Viewer {
-        menu = menu.child(item("May answer its threads' permission asks".to_string(), Some(grant.approvals), move || tell(Cmd::Grant(GrantChange::Approvals))));
+        let change = if scope == Scope::Viewer { GrantChange::Stop } else { GrantChange::Set(Grant { scope, ..grant }) };
+        menu = menu.child(described_item(name, about, on, move || tell(Cmd::Grant(change.clone()))));
     }
     menu = menu.child(separator());
-    menu = menu.child(menu_item().disabled(true).px(scale::s3()).py(scale::s1_5()).child(note("A raise takes effect when the agent restarts")).into_element());
-    if active {
-        menu = menu.child(item("Stop agent control".to_string(), None, move || tell(Cmd::Grant(GrantChange::Stop))));
+    menu = menu.child(menu_heading("Extras"));
+    menu = menu.child(check_item("Read other threads", grant.read, move || tell(Cmd::Grant(GrantChange::Read))));
+    menu = menu.child(check_item("Answer its threads' asks", grant.approvals, move || tell(Cmd::Grant(GrantChange::Approvals))));
+    if pending {
+        menu = menu.child(separator());
+        menu = menu.child(menu_heading("Restart the agent to apply"));
     }
     menu.into_element()
 }
@@ -1525,7 +1543,7 @@ fn bar(snap: Snapshot, draft: Signal<String>, field_ref: ElementRef) -> AnyEleme
     if !snap.settings.is_empty() {
         chips = chips.children(setting_chips(&snap.settings, snap.busy));
     }
-    chips = chips.child(grant_menu(snap.grant.unwrap_or_default()));
+    chips = chips.child(grant_menu(snap.grant.unwrap_or_default(), snap.grant_pending));
     // One card: the field, the chips and the send. The inset of its text is
     // `scale::composer_text_inset`.
     let queued = !snap.queue.is_empty();
@@ -1943,12 +1961,38 @@ mod tests {
         assert!(app.shows("Claude"), "{:?}", app.screen().texts());
         let texts = app.screen().texts();
         assert_eq!(texts.iter().filter(|t| **t == "Full access").count(), 1, "only the composer's menu, not the header's: {texts:?}");
-        app.press("label:What this thread's agent may do through Po").unwrap();
+        app.press("label:Agent control").unwrap();
         app.settle();
         app.press("text:Delegate").unwrap();
         let sent = drain(&mut app, commands);
         let set = Grant { scope: Scope::Orchestrate, ..Grant::default() };
         assert!(sent.contains(&Bus::Chat(Cmd::Grant(GrantChange::Set(set)))), "{sent:?}");
+    }
+
+    #[test]
+    fn the_control_menu_picks_a_level_toggles_extras_and_asks_for_a_restart_only_when_raised() {
+        let mut guard = crate::nsh::bus::lock();
+        let commands = guard.as_mut().expect("the channel");
+        let mut app = start(Snapshot { grant: Some(Grant::initial()), items: vec![Item::Agent { index: 0, blocks: vec![] }], ..Snapshot::default() });
+        app.press("label:Agent control").unwrap();
+        app.settle();
+        let texts = app.screen().texts().into_iter().map(String::from).collect::<Vec<_>>();
+        assert!(texts.iter().any(|t| t == "Extras") && !texts.iter().any(|t| t == "Stop agent control" || t.contains("Restart the agent")), "{texts:?}");
+        app.press("text:Read other threads").unwrap();
+        app.settle();
+        app.press("label:Agent control").unwrap();
+        app.settle();
+        // Basic is the way back: it asks for the reset the Stop row used to.
+        app.press("text:Basic").unwrap();
+        let sent = drain(&mut app, commands);
+        assert!(sent.contains(&Bus::Chat(Cmd::Grant(GrantChange::Read))), "{sent:?}");
+        assert!(sent.contains(&Bus::Chat(Cmd::Grant(GrantChange::Stop))), "{sent:?}");
+
+        publish(Snapshot { grant: Some(Grant::initial()), grant_pending: true, items: vec![Item::Agent { index: 0, blocks: vec![] }], ..Snapshot::default() });
+        app.wait(std::time::Duration::from_millis(100)).unwrap();
+        app.press("label:Agent control").unwrap();
+        app.settle();
+        assert!(app.shows("Restart the agent to apply"), "{:?}", app.screen().texts());
     }
 
     #[test]
@@ -1963,7 +2007,7 @@ mod tests {
             ..Snapshot::default()
         });
         assert!(app.shows("Full access"), "{:?}", app.screen().texts());
-        app.press("label:What this thread's agent may do through Po").unwrap();
+        app.press("label:Agent control").unwrap();
         app.settle();
         app.press("text:Delegate").unwrap();
         let sent = drain(&mut app, commands);

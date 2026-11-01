@@ -675,6 +675,9 @@ struct Thread {
     client: Option<Client>,
     agent: Option<String>,
     generation: u64,
+    /// What the agent was granted when it started: its tools were listed under that, so a raise
+    /// since takes a restart to reach it.
+    started_grant: Option<command::Grant>,
     draft: String,
     /// Pictures attached to the draft, sent with it.
     attachments: Vec<Arc<Attachment>>,
@@ -938,6 +941,7 @@ impl Thread {
             client: None,
             agent: None,
             generation: 0,
+            started_grant: None,
             draft: String::new(),
             attachments: vec![],
             attach_note: None,

@@ -167,6 +167,7 @@ impl Reader {
         match Client::spawn(&agent, &self.project.root, resume, registered) {
             Ok((client, mut events)) => {
                 self.thread.client = Some(client);
+                self.thread.started_grant = Some(self.grants.get(&id).copied().unwrap_or_else(command::Grant::initial));
                 let handle = window.window_handle();
                 cx.spawn(async move |this, cx| {
                     // An agent that never answers the handshake would leave the thread on "starting…".
