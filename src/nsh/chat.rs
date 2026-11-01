@@ -594,14 +594,17 @@ fn thought_gist(text_: &str) -> String {
     gist.to_string()
 }
 
-/// The agent's reasoning: a quiet one-line row that opens to all of it in italics.
-fn thought_row(message: usize, at: usize, text_: &str, open: bool) -> AnyElement {
+/// The agent's reasoning: a quiet one-line row that opens to all of it in italics. What it says
+/// follows whether the thought is still coming: `Thinking` while it streams, `Thought` once it is
+/// all there.
+fn thought_row(message: usize, at: usize, text_: &str, open: bool, done: bool) -> AnyElement {
+    let word = if done { "Thought" } else { "Thinking" };
     let mut column = view().flex_col().gap(scale::s1()).child(
         view()
             .role(AccessibilityRole::Button)
             .label(match thought_gist(text_) {
-                gist if gist.is_empty() => "Thinking".to_string(),
-                gist => format!("Thinking: {gist}"),
+                gist if gist.is_empty() => word.to_string(),
+                gist => format!("{word}: {gist}"),
             })
             .flex_row()
             .items_center()
@@ -615,7 +618,7 @@ fn thought_row(message: usize, at: usize, text_: &str, open: bool) -> AnyElement
             .hover(|s| s.bg(Colors::hover()))
             .on_press(move || tell(Cmd::ToggleThought { message, block: at }))
             .child(lead_slot(icon(IconName::Lightbulb, STEP_ICON, Colors::muted())))
-            .child(text("Thinking").flex_none().sized(text_sm()).font_weight(FontWeight::MEDIUM).text_color(Colors::muted()))
+            .child(text(word).flex_none().sized(text_sm()).font_weight(FontWeight::MEDIUM).text_color(Colors::muted()))
             .children((!open).then(|| {
                 text(thought_gist(text_))
                     .number_of_lines(1)
@@ -948,7 +951,8 @@ fn approve_row(message: usize, at: usize, question: &str, lines: &[String], answ
 
 /// One block of the agent's message. What it reports is its own place in the message
 /// ([`Block`]'s `index`), not its place among the rows drawn: a folded run adds a row of its own.
-fn block_row(message: usize, block: &Block) -> AnyElement {
+/// `thought_streaming` only matters to a thought: still coming, it reads `Thinking`, not `Thought`.
+fn block_row(message: usize, block: &Block, thought_streaming: bool) -> AnyElement {
     match block {
         Block::Markdown(markdown) => text_view()
             .markdown(markdown.0.to_string())
@@ -957,7 +961,7 @@ fn block_row(message: usize, block: &Block) -> AnyElement {
             .sized(text_base())
             .text_color(Colors::foreground())
             .into_element(),
-        Block::Thought { index, text: thought, open } => thought_row(message, *index, thought, *open),
+        Block::Thought { index, text: thought, open } => thought_row(message, *index, thought, *open, !thought_streaming),
         Block::Tool(tool) => tool_row(message, tool.index, tool),
         Block::Run { index, count, failed, phase, folded, task } => run_row(message, *index, *count, *failed, *phase, *folded, task.as_deref()),
         Block::Plan(entries) => plan_rows(entries),
@@ -967,14 +971,14 @@ fn block_row(message: usize, block: &Block) -> AnyElement {
 }
 
 /// One message of the agent's: its blocks, a run's own row standing in for the tools it hides.
-fn agent_row(message: usize, blocks: &[Block]) -> AnyElement {
+fn agent_row(message: usize, blocks: &[Block], live: bool) -> AnyElement {
     let mut column = view().flex_col().min_w_0();
     let mut skip = 0;
     let mut before: Option<&Block> = None;
     if blocks.is_empty() {
         column = column.child(text("Working…").sized(text_sm()).text_color(Colors::muted()));
     }
-    for block in blocks {
+    for (at, block) in blocks.iter().enumerate() {
         if skip > 0 {
             skip -= 1;
             continue;
@@ -990,21 +994,24 @@ fn agent_row(message: usize, blocks: &[Block]) -> AnyElement {
             Some(before) if is_step(before) && is_step(block) => scale::s0_5(),
             Some(_) => scale::s4(),
         };
-        column = column.child(view().mt(gap).child(block_row(message, block)));
+        column = column.child(view().mt(gap).child(block_row(message, block, live && at + 1 == blocks.len())));
         before = Some(block);
     }
     column.into_element()
 }
 
 /// The conversation: the messages, in order, as a center column.
-fn transcript(items: &[Item], slot: ElementRef, at_end: Signal<bool>) -> AnyElement {
+fn transcript(items: &[Item], slot: ElementRef, at_end: Signal<bool>, busy: bool) -> AnyElement {
     // The transcript's column is the composer card's width, and its text starts where the
     // composer's does: the card's border, its padding and the field's padding in (see [`bar`]).
     let mut rows = view().w_full().min_w_0().max_w(px(COLUMN)).flex_col().gap(scale::s6()).px(scale::composer_text_inset()).py(scale::s6());
+    // A thought still streaming reads as `Thinking`; every thought that something came after, or
+    // that belongs to a turn already over, reads as `Thought`.
+    let last = items.iter().rposition(|item| matches!(item, Item::Agent { .. }));
     for (message, item) in items.iter().enumerate() {
         let row = match item {
             Item::User { text, pictures } => user_row(text, pictures),
-            Item::Agent { blocks, .. } => agent_row(message, blocks),
+            Item::Agent { blocks, .. } => agent_row(message, blocks, busy && Some(message) == last),
         };
         rows = rows.child(row);
     }
@@ -1710,7 +1717,7 @@ pub fn Chat() -> impl IntoElement {
                 .children([text("What is this thread about?").sized(text_base()).text_color(Colors::muted()), text("Message an agent to begin.").sized(text_sm()).text_color(Colors::muted())])
                 .into_element()
         } else {
-            transcript(&snap.items, scrolled, at_end)
+            transcript(&snap.items, scrolled, at_end, snap.busy)
         };
         view()
             .flex_1()
@@ -1909,6 +1916,32 @@ mod tests {
         publish(Snapshot { settings, busy: true, items: vec![Item::Agent { index: 0, blocks: vec![] }], ..Snapshot::default() });
         app.wait(std::time::Duration::from_millis(100)).unwrap();
         assert!(app.shows("Smart"), "{:?}", app.screen().texts());
+    }
+
+    #[test]
+    fn a_thought_says_thinking_while_it_streams_and_thought_once_it_is_over() {
+        let mut guard = crate::nsh::bus::lock();
+        let _commands = guard.as_mut().expect("the channel");
+        let thought = |text: &str| Block::Thought { index: 0, text: text.into(), open: false };
+        // The last thought of a turn going on is still coming; a finished one is in the past.
+        let app = start(Snapshot {
+            busy: true,
+            items: vec![Item::Agent { index: 0, blocks: vec![thought("settled"), thought("still going")] }],
+            ..Snapshot::default()
+        });
+        // The finished one says Thought ahead of its gist; only the streaming one says Thinking.
+        assert!(app.screen().texts().windows(2).any(|pair| pair == ["Thought", "settled"]), "{:?}", app.screen().texts());
+        assert!(app.shows("Thinking"), "{:?}", app.screen().texts());
+        assert!(app.shows("still going"), "{:?}", app.screen().texts());
+        drop(app);
+        // The turn is over, so the last thought has become one too; nothing says Thinking.
+        let app = start(Snapshot {
+            busy: false,
+            items: vec![Item::Agent { index: 0, blocks: vec![thought("settled")] }],
+            ..Snapshot::default()
+        });
+        assert!(app.shows("Thought"), "{:?}", app.screen().texts());
+        assert!(!app.shows("Thinking"), "{:?}", app.screen().texts());
     }
 
     #[test]

@@ -31,11 +31,9 @@ impl Reader {
             },
             selected: (pid, thread.id) == (active_project, active_thread),
             controlled: self.grants.get(&thread.id).is_some_and(|grant| *grant != command::Grant::initial() && *grant != command::Grant::default()),
-            day: None,
             ago: ago(now_ms(), thread.active_at),
             closing: self.closing == Some((pid, thread.id)) && self.close_loses_work(thread.id),
         };
-        let today = date::today();
         // Filtering keeps a project whose name matches, with all its threads, and any project with a
         // thread that does. A thread waiting on the user is in Needs you instead.
         let project_hit = |view: &View<'_>| view.project.name().to_lowercase().contains(&query);
@@ -84,24 +82,10 @@ impl Reader {
                     active: pid == active_project,
                     collapsed,
                     closable: many,
-                    threads: {
-                        let mut last = None;
-                        recent
-                            .into_iter()
-                            .map(|t| {
-                                let day = match today.days_since(date::Date::of_ms(t.active_at)) {
-                                    ..=0 => "",
-                                    1 => "Yesterday",
-                                    2..=6 => "Previous 7 days",
-                                    _ => "Older",
-                                };
-                                let mut row = thread_row(pid, t);
-                                row.day = (last != Some(day) && !day.is_empty()).then_some(day);
-                                last = Some(day);
-                                row
-                            })
-                            .collect()
-                    },
+                    threads: recent
+                        .into_iter()
+                        .map(|t| thread_row(pid, t))
+                        .collect(),
                     fold: (foldable && !collapsed && (hidden > 0 || expanded)).then_some((expanded, hidden)),
                 }
             })
