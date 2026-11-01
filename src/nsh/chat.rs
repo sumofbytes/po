@@ -568,7 +568,7 @@ fn thought_row(message: usize, at: usize, text_: &str, open: bool) -> AnyElement
             .smooth()
             .hover(|s| s.bg(Colors::hover()))
             .on_press(move || tell(Cmd::ToggleThought { message, block: at }))
-            .child(lead_slot(icon(if open { IconName::ChevronDown } else { IconName::ChevronRight }, STEP_ICON, Colors::muted())))
+            .child(lead_slot(icon(IconName::Lightbulb, STEP_ICON, Colors::muted())))
             .child(text("Thinking").flex_none().sized(text_sm()).font_weight(FontWeight::MEDIUM).text_color(Colors::muted()))
             .children((!open).then(|| {
                 text(thought_gist(text_))
@@ -578,7 +578,9 @@ fn thought_row(message: usize, at: usize, text_: &str, open: bool) -> AnyElement
                     .sized(text_sm())
                     .text_color(Colors::muted())
                     .opacity(crate::theme::tokens::DIM)
-            })),
+            }))
+            .child(view().flex_1().min_w_0())
+            .child(trail_slot(icon(if open { IconName::ChevronDown } else { IconName::ChevronRight }, STEP_ICON, Colors::muted()))),
     );
     if open {
         column = column.child(
@@ -652,7 +654,13 @@ fn tool_row(message: usize, at: usize, tool: &Tool) -> AnyElement {
                         .hover(|s| s.bg(Colors::hover()))
                         .on_press(move || tell(Cmd::Open(path.clone())))
                         .child(icon(IconName::FileText, STEP_ICON, Colors::muted()))
-                })),
+                }))
+                .child(
+                    view()
+                        .cursor_pointer()
+                        .on_press(move || tell(Cmd::ToggleTool { message, block: at }))
+                        .child(trail_slot(icon(if tool.open { IconName::ChevronDown } else { IconName::ChevronRight }, STEP_ICON, Colors::muted()))),
+                ),
         );
     if tool.open {
         for piece in [&tool.arguments, &tool.result] {
