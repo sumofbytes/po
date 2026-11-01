@@ -1456,8 +1456,10 @@ fn send_button(snap: Snapshot, draft: Signal<String>) -> AnyElement {
         .flex_row()
         .items_center()
         .justify_center()
-        .w(scale::s8())
-        .h(scale::s8())
+        // One size with the button beside it (the steer, or the stop when the turn runs), so
+        // the two round buttons read as one family (see [`steer_button`]).
+        .w(scale::s7())
+        .h(scale::s7())
         .rounded(super::pill())
         .cursor_pointer()
         .smooth()
@@ -1583,6 +1585,9 @@ fn bar(snap: Snapshot, draft: Signal<String>, field_ref: ElementRef) -> AnyEleme
                 .items_end()
                 .justify_between()
                 .gap(scale::s2())
+                // The field's own padding in, so the send button's edge ends where the
+                // transcript's text does: at the card's text inset on both sides.
+                .pr(scale::s2())
                 .child(chips)
                 .child(view().flex_row().flex_none().gap(scale::s2()).children(snap.busy.then(|| steer_button(snap.steer, low, has_pictures))).child(send_button(snap.clone(), low))),
         );
