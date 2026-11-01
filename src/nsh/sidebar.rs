@@ -403,15 +403,17 @@ pub fn Sidebar() -> impl IntoElement {
     let issues = move || {
         let (left, late) = state.with(|s| s.issues);
         let open = state.with(|s| s.issues_open);
+        // Snapped to the 2px grid (18, where `s5` is 17.5), so the circle's edge falls on a pixel.
+        let size = Points(super::snap(scale::s5().0));
         let count = (left > 0).then(|| {
             view()
                 // A circle for one digit, stretching into a pill only for more.
-                .h(scale::s5())
-                .min_w(scale::s5())
+                .h(size)
+                .min_w(size)
                 .flex_none()
                 .items_center()
                 .justify_center()
-                .px(scale::s1())
+                .px(Points(super::snap(scale::s1().0)))
                 .rounded(super::pill())
                 .bg(Colors::selected())
                 .tooltip(super::tooltip(if late > 0 { "Some are late" } else { "Open issues" }))
