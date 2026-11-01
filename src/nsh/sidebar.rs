@@ -31,8 +31,6 @@ pub struct Thread {
     pub selected: bool,
     /// What its agent may do through Po's API is more than talk.
     pub controlled: bool,
-    /// The day this one starts in its project's list ("Today", "Yesterday"...), if it does.
-    pub day: Option<&'static str>,
     /// How long ago it was last active (`5m`, `3h`, `2d`), if that is known.
     pub ago: Option<String>,
     /// Its close was pressed and closing it would lose work: pressing again closes it.
@@ -228,22 +226,6 @@ fn thread_row(thread: &Thread, project: Option<&str>, close_tip: &'static str) -
     if selected { row.bg(Colors::hover()) } else { row.hover(|s| s.bg(Colors::hint())) }
 }
 
-/// The day, quietly, over the threads of that day.
-fn day_separator(day: &'static str) -> View {
-    view()
-        .w_full()
-        .h(space::more() + space::section_gap())
-        .flex_none()
-        .flex_row()
-        .items_center()
-        .gap(scale::s2())
-        .pl(space::inset())
-        .pr(space::inset())
-        // The day, then a hairline that carries the eye to the edge.
-        .child(text(day).flex_none().sized(super::text_xs()).font_weight(FontWeight::MEDIUM).text_color(Colors::muted()))
-        .child(view().flex_1().h(Points(1.)).bg(super::hairline()))
-}
-
 /// A color of the project's own, the same each time it is open: its name picks the hue, as its
 /// id is only a count of what was opened this run.
 fn accent(name: &str) -> AdaptiveColor {
@@ -295,7 +277,7 @@ fn project_group(project: &Project) -> View {
             project
                 .threads
                 .iter()
-                .flat_map(|thread| [thread.day.map(day_separator), Some(thread_row(thread, None, "Close thread"))])
+                .flat_map(|thread| [Some(thread_row(thread, None, "Close thread"))])
                 .flatten()
                 .collect::<Vec<_>>(),
         )
@@ -522,7 +504,7 @@ mod tests {
     use super::*;
 
     fn thread(project: u64, id: u64, label: &str, mark: Mark, selected: bool) -> Thread {
-        Thread { project, id, label: label.into(), mark, selected, controlled: false, day: None, ago: None, closing: false }
+        Thread { project, id, label: label.into(), mark, selected, controlled: false, ago: None, closing: false }
     }
 
     fn start() -> Headless {
