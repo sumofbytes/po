@@ -998,7 +998,8 @@ fn agent_row(message: usize, blocks: &[Block], live: bool) -> AnyElement {
     column.into_element()
 }
 
-/// The conversation: the messages, in order, as a center column.
+/// The conversation: the messages, in order, as a center column that scrolls. Its stage, and the
+/// rail beside it, are the caller's ([`stage`]), so a change of the messages leaves them be.
 fn transcript(items: &[Item], slot: ElementRef, at_end: Signal<bool>, rail: Position, busy: bool) -> AnyElement {
     // The transcript's column is the composer card's width, and its text starts where the
     // composer's does: the card's border, its padding and the field's padding in (see [`bar`]).
@@ -1008,7 +1009,7 @@ fn transcript(items: &[Item], slot: ElementRef, at_end: Signal<bool>, rail: Posi
     // Non-reactive on purpose: the layout pass must not renotify the render. They live in the
     // caller, not here: this runs again on every change of the thread, and a layout event comes
     // only when a frame changes, so state made anew here would stay empty.
-    let Position { frames, origin, active, hover, pinned, width } = rail;
+    let Position { frames, origin, active, pinned, .. } = rail;
     let count = items.len();
     let shown = count.min(MAX_BARS);
     frames.with(|sections| sections.truncate(count));
@@ -1044,57 +1045,9 @@ fn transcript(items: &[Item], slot: ElementRef, at_end: Signal<bool>, rail: Posi
             });
         }
     };
-    // The rail's jump: scroll so the section the bar marks sits just under the top of the view.
-    let jump = {
-        let (frames, origin, pinned, slot) = (frames, origin, pinned, slot);
-        move |bar: usize, rep: usize| {
-            let target = match frames.get().get(rep) {
-                Some(at) => message_stop(at.0 - origin.get().0),
-                None => return,
-            };
-            // Short messages at the end cannot all reach the top, and the bars of those that
-            // cannot would end up in one place: the press says which of them was meant.
-            pinned.replace(Some((bar, target)));
-            let slot = slot;
-            spawn(async move {
-                slot.scroll_to(point(px(0.), px(target)), true);
-            });
-        }
-    };
-    // The rail floats beside the column: its bars start a margin out from the column's right
-    // edge, which is half of what the stage has over the column from the stage's.
-    let rail = move |stage: f32| view()
-        .absolute()
-        .top(Points(0.))
-        .bottom(Points(0.))
-        .right(Points(((stage - COLUMN) / 2. - rail_gutter().0).max(rail_inset().0)))
-        .w(rail_width())
-        .flex_col()
-        .items_end()
-        .justify_center()
-        .children(
-            (0..shown)
-                .map(|j| {
-                    // The message under the bar: one bar per message until there are too many
-                    // ([`MAX_BARS`]), then each bar stands for the messages before the next.
-                    let rep = j * count / shown;
-                    let jump = move || jump(j, rep);
-                    rail_bar(j, active, hover, format!("Scroll to message {}", rep + 1), jump)
-                })
-                .collect::<Vec<_>>(),
-        );
-    view()
-        .flex_1()
-        .min_h_0()
-        .relative()
-        .flex()
-        .justify_center()
-        .overflow_hidden()
-        .on_layout(move |bounds: &Bounds<Points>| width.set(bounds.size.width.0))
-        .child(
-            scroll()
-                .size_full()
-                .on_scroll({
+    scroll()
+        .size_full()
+        .on_scroll({
                     let (active, frames, origin) = (active, frames, origin);
                     move |event: &ScrollEvent| {
                         let end = event.offset.y + event.size.height >= event.content_size.height - px(24.);
@@ -1121,17 +1074,83 @@ fn transcript(items: &[Item], slot: ElementRef, at_end: Signal<bool>, rail: Posi
                         }
                     }
                 })
-                .child(view().flex_col().items_center().w_full().min_w_0().px(scale::s3()).on_layout(resized).child(rows.into_element()))
-                .element_ref(&slot),
-        )
+        .child(view().flex_col().items_center().w_full().min_w_0().px(scale::s3()).on_layout(resized).child(rows.into_element()))
+        .element_ref(&slot)
+        .into_element()
+}
+
+/// The stage the page is drawn on: `page` (the transcript, or the note of a thread not started)
+/// and, beside the column, the rail of its `count` messages. Each is a region of its own, so text
+/// streaming into a message builds the transcript again but leaves the rail, and a press begun on
+/// a bar, as they are; the rail is built again only when the bars change, with the count or the
+/// stage's width.
+fn stage(page: impl Fn() -> AnyElement + 'static, count: Memo<usize>, slot: ElementRef, position: Position) -> AnyElement {
+    let width = position.width;
+    view()
+        .flex_1()
+        .min_h_0()
+        .relative()
+        .flex()
+        .justify_center()
+        .overflow_hidden()
+        .on_layout(move |bounds: &Bounds<Points>| width.set(bounds.size.width.0))
+        .child(dynamic(page))
         .child(dynamic(move || {
             // The rail is for a stage with room beside the column; in a narrower one it would
             // sit on the text, so it is not drawn.
-            let stage = width.get();
-            (count >= 2 && stage >= COLUMN + 2. * (rail_gutter().0 + rail_inset().0)).then(|| rail(stage).into_element())
+            let (count, stage) = (count.get(), width.get());
+            (count >= 2 && stage >= COLUMN + 2. * (rail_gutter().0 + rail_inset().0)).then(|| rail(count, stage, slot, position))
         }))
         .into_element()
 }
+
+/// The rail of a page of `count` messages on a stage `stage` wide: a bar per message (or per run
+/// of them), and a press on one scrolls `slot` to it.
+fn rail(count: usize, stage: f32, slot: ElementRef, position: Position) -> AnyElement {
+    let Position { frames, origin, active, hover, pinned, .. } = position;
+    let shown = count.min(MAX_BARS);
+    // The rail's jump: scroll so the section the bar marks sits just under the top of the view.
+    let jump = {
+        let (frames, origin, pinned, slot) = (frames, origin, pinned, slot);
+        move |bar: usize, rep: usize| {
+            let target = match frames.get().get(rep) {
+                Some(at) => message_stop(at.0 - origin.get().0),
+                None => return,
+            };
+            // Short messages at the end cannot all reach the top, and the bars of those that
+            // cannot would end up in one place: the press says which of them was meant.
+            pinned.replace(Some((bar, target)));
+            let slot = slot;
+            spawn(async move {
+                slot.scroll_to(point(px(0.), px(target)), true);
+            });
+        }
+    };
+    // The rail floats beside the column: its bars start a margin out from the column's right
+    // edge, which is half of what the stage has over the column from the stage's.
+    view()
+        .absolute()
+        .top(Points(0.))
+        .bottom(Points(0.))
+        .right(Points(((stage - COLUMN) / 2. - rail_gutter().0).max(rail_inset().0)))
+        .w(rail_width())
+        .flex_col()
+        .items_end()
+        .justify_center()
+        .children(
+            (0..shown)
+                .map(|j| {
+                    // The message under the bar: one bar per message until there are too many
+                    // ([`MAX_BARS`]), then each bar stands for the messages before the next.
+                    let rep = j * count / shown;
+                    let jump = move || jump(j, rep);
+                    rail_bar(j, active, hover, format!("Scroll to message {}", rep + 1), jump)
+                })
+                .collect::<Vec<_>>(),
+        )
+        .into_element()
+}
+
 
 /// What the rail knows of the page, kept across the renders of the transcript: where each message
 /// sits in the column, where the column starts, and the section the viewport holds.
@@ -1937,7 +1956,8 @@ pub fn Chat() -> impl IntoElement {
         }
     };
     let composer = move || bar(state.get(), draft, field_ref);
-    let body = view().flex_1().min_h_0().flex_col().child(dynamic(top)).child(dynamic(composer));
+    let count = computed(move || page.with(|(items, _, _)| items.len()));
+    let body = view().flex_1().min_h_0().flex_col().child(stage(top, count, scrolled, rail)).child(dynamic(composer));
 
     view()
         .flex_1()
