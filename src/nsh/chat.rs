@@ -1157,7 +1157,8 @@ fn rail_inset() -> Points {
 
 /// A bar's length, and the width of its target.
 fn rail_width() -> Points {
-    scale::s6()
+    // A step and a half of the 24 points it was: the scale has no step of 36.
+    scale::s6() + scale::s3()
 }
 
 /// What the rail takes of the stage beside the column: a bar's length and the margin between
