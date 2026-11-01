@@ -931,7 +931,7 @@ fn agent_row(message: usize, blocks: &[Block]) -> AnyElement {
     let mut skip = 0;
     let mut before: Option<&Block> = None;
     if blocks.is_empty() {
-        column = column.child(text("Thinking…").sized(text_sm()).text_color(Colors::muted()));
+        column = column.child(text("Working…").sized(text_sm()).text_color(Colors::muted()));
     }
     for block in blocks {
         if skip > 0 {
@@ -1839,13 +1839,13 @@ mod tests {
     }
 
     #[test]
-    fn settings_stay_after_the_thread_starts_wait_while_it_is_busy_and_a_new_turn_says_it_is_thinking() {
+    fn settings_stay_after_the_thread_starts_wait_while_it_is_busy_and_a_new_turn_says_it_is_working() {
         let mut guard = crate::nsh::bus::lock();
         let _commands = guard.as_mut().expect("the channel");
         let settings = vec![Setting { id: "model".into(), name: "Model".into(), current: "b".into(), choices: vec![("a".into(), "Fast".into()), ("b".into(), "Smart".into())] }];
         let mut app = start(Snapshot { settings: settings.clone(), items: vec![Item::Agent { index: 0, blocks: vec![] }], ..Snapshot::default() });
         assert!(app.shows("Smart"), "{:?}", app.screen().texts());
-        assert!(app.shows("Thinking…"), "{:?}", app.screen().texts());
+        assert!(app.shows("Working…"), "{:?}", app.screen().texts());
         publish(Snapshot { settings, busy: true, items: vec![Item::Agent { index: 0, blocks: vec![] }], ..Snapshot::default() });
         app.wait(std::time::Duration::from_millis(100)).unwrap();
         assert!(app.shows("Smart"), "{:?}", app.screen().texts());
