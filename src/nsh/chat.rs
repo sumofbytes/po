@@ -537,8 +537,6 @@ fn grant_menu(grant: Grant, pending: bool) -> AnyElement {
 
 // ============ the transcript ============
 
-// ============ the transcript ============
-
 /// The widths the conversation and the composer share, so the text of each starts and ends on
 /// the same lines: the column's, the space outside it, and from the composer card's edge to its
 /// text (the card's 1px border, its 0.5rem padding and the field's 0.5rem): `scale::s3` outside the
@@ -1000,6 +998,12 @@ fn agent_row(message: usize, blocks: &[Block], live: bool) -> AnyElement {
     column.into_element()
 }
 
+/// A hairline ruled between the messages of the transcript, so scrolling shows the turns of the
+/// conversation stacked on a page (the divider the settings page rules its fields apart with).
+fn page_line() -> AnyElement {
+    view().h(Points(1.)).w_full().flex_none().bg(super::hairline()).into_element()
+}
+
 /// The conversation: the messages, in order, as a center column.
 fn transcript(items: &[Item], slot: ElementRef, at_end: Signal<bool>, busy: bool) -> AnyElement {
     // The transcript's column is the composer card's width, and its text starts where the
@@ -1009,6 +1013,10 @@ fn transcript(items: &[Item], slot: ElementRef, at_end: Signal<bool>, busy: bool
     // that belongs to a turn already over, reads as `Thought`.
     let last = items.iter().rposition(|item| matches!(item, Item::Agent { .. }));
     for (message, item) in items.iter().enumerate() {
+        // A line between the turns, not after the last one.
+        if message > 0 {
+            rows = rows.child(page_line());
+        }
         let row = match item {
             Item::User { text, pictures } => user_row(text, pictures),
             Item::Agent { blocks, .. } => agent_row(message, blocks, busy && Some(message) == last),
