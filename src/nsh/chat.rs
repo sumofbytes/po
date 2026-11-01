@@ -1065,11 +1065,10 @@ fn transcript(items: &[Item], slot: ElementRef, at_end: Signal<bool>, rail: Posi
         .top(Points(0.))
         .bottom(Points(0.))
         .right(Points(((stage - COLUMN) / 2. - rail_gutter().0).max(rail_inset().0)))
-        .w(scale::s4())
+        .w(rail_width())
         .flex_col()
         .items_end()
         .justify_center()
-        .gap(scale::s1())
         .children(
             (0..shown)
                 .map(|j| {
@@ -1154,26 +1153,34 @@ fn rail_inset() -> Points {
     scale::s1()
 }
 
+/// A bar's length, and the width of its target.
+fn rail_width() -> Points {
+    scale::s6()
+}
+
 /// What the rail takes of the stage beside the column: a bar's length and the margin between
 /// the column and the bars.
 fn rail_gutter() -> Points {
-    scale::s4() + scale::s3()
+    rail_width() + scale::s3()
 }
 
 /// One bar of the rail, all of one length: quiet when its section is not in view, firmer when it
-/// is (as `active.get()` says), and a press on it scrolls to the section it marks.
+/// is (as `active.get()` says), and a press on it scrolls to the section it marks. The target is
+/// the whole of a tall slot the bars are drawn in the middle of, so the bars stay thin but are
+/// easy to hit, with no gap between one target and the next.
 fn rail_bar(j: usize, active: Signal<usize>, label: String, jump: impl Fn() + 'static) -> View {
     let on = move || active.get() == j;
     view()
         .role(AccessibilityRole::Button)
         .label(label)
         .flex_none()
-        .w(scale::s4())
-        .h(scale::s1())
-        .rounded(super::pill())
-        .bg(move || if on() { Colors::muted()() } else { super::hairline()() })
+        .w(rail_width())
+        .h(scale::s3())
+        .flex_col()
+        .justify_center()
         .cursor_pointer()
         .on_press(jump)
+        .child(view().w_full().h(scale::s1()).rounded(super::pill()).bg(move || if on() { Colors::muted()() } else { super::hairline()() }))
 }
 
 // ============ the composer ============
