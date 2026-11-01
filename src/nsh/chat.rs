@@ -41,6 +41,13 @@ pub struct Grant {
     pub approvals: bool,
 }
 
+impl Grant {
+    /// What a thread's agent has until the user sets it; the Reader's `Grant::initial`.
+    pub fn initial() -> Self {
+        Self { scope: Scope::Global, read: false, approvals: false }
+    }
+}
+
 impl Default for Grant {
     fn default() -> Self {
         Self { scope: Scope::Viewer, read: false, approvals: false }
@@ -453,8 +460,8 @@ fn pane(title: String, snap: &Snapshot) -> View {
     if snap.picking.is_none() {
         right = right.child(super::header::toggle_button(IconName::History, "Resume an earlier session (Ctrl+Shift+H)", false, || tell(Cmd::History)));
     }
-    // The Control menu, once the thread's agent may do more than talk.
-    if let Some(grant) = snap.grant.filter(|grant| *grant != Grant::default()) {
+    // The Control menu, once the user has set what the thread's agent may do.
+    if let Some(grant) = snap.grant.filter(|grant| *grant != Grant::initial()) {
         right = right.child(grant_menu(grant));
     }
     pane_header(title, right, &snap.lead, &snap.trail, snap.glass)
@@ -1819,19 +1826,19 @@ mod tests {
     }
 
     #[test]
-    fn a_started_thread_names_its_agent_and_offers_control_before_any_grant() {
+    fn a_started_thread_names_its_agent_and_offers_control_before_any_change() {
         let mut guard = crate::nsh::bus::lock();
         let commands = guard.as_mut().expect("the channel");
         let mut app = start(Snapshot {
             agents: vec![("Claude".into(), "claude".into())],
             chosen: Some("claude".into()),
-            grant: Some(Grant::default()),
+            grant: Some(Grant::initial()),
             items: vec![Item::Agent { index: 0, blocks: vec![] }],
             ..Snapshot::default()
         });
         assert!(app.shows("Claude"), "{:?}", app.screen().texts());
         let texts = app.screen().texts();
-        assert_eq!(texts.iter().filter(|t| **t == "Control").count(), 1, "only the composer's menu, not the header's: {texts:?}");
+        assert_eq!(texts.iter().filter(|t| **t == "Control · global").count(), 1, "only the composer's menu, not the header's: {texts:?}");
         app.press("label:What this thread's agent may do through Po").unwrap();
         app.settle();
         app.press("text:Orchestrate").unwrap();
@@ -1848,10 +1855,10 @@ mod tests {
             blank: true,
             agents: vec![("Claude".into(), "claude".into())],
             chosen: Some("claude".into()),
-            grant: Some(Grant::default()),
+            grant: Some(Grant::initial()),
             ..Snapshot::default()
         });
-        assert!(app.shows("Control"), "{:?}", app.screen().texts());
+        assert!(app.shows("Control · global"), "{:?}", app.screen().texts());
         app.press("label:What this thread's agent may do through Po").unwrap();
         app.settle();
         app.press("text:Orchestrate").unwrap();

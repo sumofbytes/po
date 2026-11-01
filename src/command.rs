@@ -51,7 +51,7 @@ impl Default for Grant {
 
 impl Grant {
     /// What a thread's agent has until the user sets it: Global scope, no reading of other
-    /// threads, no answering of asks. [`Grant::default`] is what Stop leaves, and the Viewer floor.
+    /// threads, no answering of asks. [`Grant::default`] is the least, which Stop leaves.
     pub fn initial() -> Self {
         Self { scope: Scope::Global, ..Self::default() }
     }

@@ -30,7 +30,7 @@ impl Reader {
                 Activity::Asking => side::Mark::Asking,
             },
             selected: (pid, thread.id) == (active_project, active_thread),
-            controlled: self.grants.get(&thread.id).is_some_and(|grant| grant.read_project || grant.approvals),
+            controlled: self.grants.get(&thread.id).is_some_and(|grant| *grant != command::Grant::initial() && *grant != command::Grant::default()),
             day: None,
             ago: ago(now_ms(), thread.active_at),
         };

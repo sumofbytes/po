@@ -1207,7 +1207,7 @@ struct Reader {
     control: Option<control::Control>,
     /// What each thread's agent may do, held in memory only: it is lost on restart and is not
     /// shared between windows, so nothing an agent can read or write raises its own reach.
-    /// A thread without an entry has [`command::Grant::default`], and the grants can only be
+    /// A thread without an entry has [`command::Grant::initial`], and the grants can only be
     /// changed from the UI, never from anything an agent could write to.
     grants: HashMap<u64, command::Grant>,
     /// Projects the API opened, which it alone may close again (and only if the user has no
