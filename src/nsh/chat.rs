@@ -375,15 +375,6 @@ fn trail_slot(content: impl IntoElement) -> View {
 /// The popovers of the menus: the theme's own surface, with a shadow.
 const MENU: &str = "bg-popover border border-border rounded-xl shadow-2xl p-1 min-w-44";
 
-/// A menu item's row: the check when it is the one on, else the label alone.
-fn choice(label: String, on: bool) -> String {
-    if on {
-        format!("✓ {label}")
-    } else {
-        label
-    }
-}
-
 /// A menu's trigger: its label and the caret, as a ghost row the Menu opens on.
 fn menu_trigger(label: String, tip: &'static str) -> View {
     view()
@@ -411,16 +402,14 @@ fn menu_trigger(label: String, tip: &'static str) -> View {
         )
 }
 
-/// A menu item's own looks, under the popover's.
-fn item(what: String, on_press: impl Fn() + 'static) -> AnyElement {
-    menu_item()
-        .cursor_pointer()
-        .px(scale::s3())
-        .py(scale::s1_5())
-        .hover(|s| s.bg(Colors::hover()))
-        .on_select(on_press)
-        .child(text(what).text_size(text_sm()).text_color(Colors::foreground()))
-        .into_element()
+/// A menu item's own looks, under the popover's. `on` marks the choice that is set with a check in
+/// a slot at the end, which is kept when it is off so the labels don't move.
+fn item(what: String, on: Option<bool>, on_press: impl Fn() + 'static) -> AnyElement {
+    let mut row = view().flex_row().items_center().gap(scale::s3()).w_full().child(text(what).flex_1().text_size(text_sm()).text_color(Colors::foreground()));
+    if let Some(on) = on {
+        row = row.child(view().flex_none().w(scale::s3_5()).children(on.then(|| icon(IconName::Check, scale::s3_5(), Colors::foreground()))));
+    }
+    menu_item().cursor_pointer().px(scale::s3()).py(scale::s1_5()).hover(|s| s.bg(Colors::hover())).on_select(on_press).child(row).into_element()
 }
 
 /// A line in a header, like `3 threads · 1 asking`.
@@ -485,17 +474,17 @@ fn grant_menu(grant: Grant) -> AnyElement {
     for (name, scope) in [("Viewer", Scope::Viewer), ("Orchestrate", Scope::Orchestrate), ("Global", Scope::Global)] {
         let on = grant.scope == scope;
         let set = Grant { scope, ..grant };
-        menu = menu.child(item(choice(name.to_string(), on), move || tell(Cmd::Grant(GrantChange::Set(set)))));
+        menu = menu.child(item(name.to_string(), Some(on), move || tell(Cmd::Grant(GrantChange::Set(set)))));
     }
     menu = menu.child(separator());
-    menu = menu.child(item(choice("May read other threads here".to_string(), grant.read), move || tell(Cmd::Grant(GrantChange::Read))));
+    menu = menu.child(item("May read other threads here".to_string(), Some(grant.read), move || tell(Cmd::Grant(GrantChange::Read))));
     if grant.approvals || grant.scope != Scope::Viewer {
-        menu = menu.child(item(choice("May answer its threads' permission asks".to_string(), grant.approvals), move || tell(Cmd::Grant(GrantChange::Approvals))));
+        menu = menu.child(item("May answer its threads' permission asks".to_string(), Some(grant.approvals), move || tell(Cmd::Grant(GrantChange::Approvals))));
     }
     menu = menu.child(separator());
     menu = menu.child(menu_item().disabled(true).px(scale::s3()).py(scale::s1_5()).child(note("A raise takes effect when the agent restarts")).into_element());
     if active {
-        menu = menu.child(item("Stop agent control".to_string(), move || tell(Cmd::Grant(GrantChange::Stop))));
+        menu = menu.child(item("Stop agent control".to_string(), None, move || tell(Cmd::Grant(GrantChange::Stop))));
     }
     menu.into_element()
 }
@@ -1254,7 +1243,7 @@ fn setup(snap: &Snapshot) -> AnyElement {
     let pick = snap.chosen.clone();
     for (agent_name, id) in snap.agents.clone() {
         let on = pick.as_ref() == Some(&id);
-        agents = agents.child(item(choice(agent_name, on), move || {
+        agents = agents.child(item(agent_name, Some(on), move || {
             let id = id.clone();
             tell(Cmd::PickAgent(id))
         }));
@@ -1300,7 +1289,7 @@ fn setting_chips(settings: &[Setting], busy: bool) -> Vec<AnyElement> {
             for (value, name) in &setting.choices {
                 let on = *value == setting.current;
                 let (decided, id) = (value.clone(), setting.id.clone());
-                menu = menu.child(item(choice(name.clone(), on), move || {
+                menu = menu.child(item(name.clone(), Some(on), move || {
                     let (id, decided) = (id.clone(), decided.clone());
                     tell(Cmd::Setting { id, value: decided })
                 }));
