@@ -1234,9 +1234,9 @@ fn rail_bar(j: usize, active: Signal<usize>, hover: Signal<Option<usize>>, label
                     None => 0.5,
                 })
                 .scale_y(move || match near() {
-                    Some(0) => 3_f32,
-                    Some(1) => 2.,
-                    Some(_) => 1.5,
+                    Some(0) => 2.5_f32,
+                    Some(1) => 1.75,
+                    Some(_) => 1.25,
                     None => 1.,
                 })
                 .transition()
