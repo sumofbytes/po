@@ -419,7 +419,7 @@ fn item(what: String, on_press: impl Fn() + 'static) -> AnyElement {
         .py(scale::s1_5())
         .hover(|s| s.bg(Colors::hover()))
         .on_select(on_press)
-        .child(text(what).text_size(text_sm()))
+        .child(text(what).text_size(text_sm()).text_color(Colors::foreground()))
         .into_element()
 }
 
