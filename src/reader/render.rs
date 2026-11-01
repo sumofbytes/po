@@ -265,6 +265,7 @@ impl Reader {
                 current: option.current.clone(),
                 choices: option.choices.clone(),
             }).collect(),
+            grant_pending: thread.started_grant.is_some_and(|started| grant.scope > started.scope || (grant.read_project && !started.read_project) || (grant.approvals && !started.approvals)),
             isolate: worktree::in_repo(&self.project.root).then_some(thread.isolate),
             grant: Some(grant).map(|g| chat::Grant {
                 scope: match g.scope {
