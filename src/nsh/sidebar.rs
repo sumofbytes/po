@@ -159,6 +159,9 @@ fn mark(mark: Mark) -> View {
 
 /// A quiet section title with what can be done there.
 fn section(title: impl IntoReactive<SharedString>, action: Option<View>) -> View {
+    // An action is a button box wider than a row's chevron (its padding and border); the header runs
+    // past the row's edge by half the difference, so the action sits on the chevrons' axis.
+    let end = if action.is_some() { scale::s3().0 / 2. + scale::s1().0 + 1. - scale::s4().0 / 2. } else { 0. };
     view()
         .pt(space::section_top())
         .pb(space::section_gap() / 2.)
@@ -166,7 +169,8 @@ fn section(title: impl IntoReactive<SharedString>, action: Option<View>) -> View
         .flex_row()
         .items_center()
         .justify_between()
-        .px(space::gutter() + space::inset())
+        .pl(space::gutter() + space::inset())
+        .pr(space::gutter() + space::inset() - Points(end))
         .child(text(title).sized(super::text_sm()).font_weight(FontWeight::MEDIUM).text_color(Colors::muted()))
         .child(action)
 }
@@ -485,7 +489,7 @@ pub fn Sidebar() -> impl IntoElement {
                 .child(section(
                     "Projects",
                     Some(icon_button(IconName::Plus, scale::s3(), "Add a project: open a folder (Ctrl+Shift+O)", || send(Cmd::AddProject))
-                        // A box of its own, so it reads as a button; its edge ends where the time of a thread does.
+                        // A box of its own, so it reads as a button.
                         .border_1()
                         .border_color(super::hairline())
                         // The border is drawn inside the button; hung out, it leaves the header as tall as before.
