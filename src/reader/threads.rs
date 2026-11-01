@@ -1067,7 +1067,10 @@ impl Reader {
                 self.thread.unread = !visible;
                 // Only when nothing else holds the keyboard: the reader's own focus is where it
                 // rests, so an input (a search, the finder, a rename, the editor) has it otherwise.
-                if visible && self.focus.is_focused(window) && !self.settings_open && !self.finder_open && !self.issues_open {
+                // Nothing focused, or the conversation holding it (its transcript, a chip, the Stop
+                // button), counts as nothing else: the field is where the next message goes.
+                let resting = window.focused(cx).is_none() || self.focus.is_focused(window) || self.chat.focus_handle(cx).contains_focused(window, cx);
+                if visible && resting && !self.settings_open && !self.finder_open && !self.issues_open {
                     self.focus_draft(window, cx);
                 }
                 // A child's parent is told instead; the desktop hears of it only when nobody
