@@ -537,8 +537,6 @@ fn grant_menu(grant: Grant, pending: bool) -> AnyElement {
 
 // ============ the transcript ============
 
-// ============ the transcript ============
-
 /// The widths the conversation and the composer share, so the text of each starts and ends on
 /// the same lines: the column's, the space outside it, and from the composer card's edge to its
 /// text (the card's 1px border, its 0.5rem padding and the field's 0.5rem): `scale::s3` outside the
@@ -594,14 +592,17 @@ fn thought_gist(text_: &str) -> String {
     gist.to_string()
 }
 
-/// The agent's reasoning: a quiet one-line row that opens to all of it in italics.
-fn thought_row(message: usize, at: usize, text_: &str, open: bool) -> AnyElement {
+/// The agent's reasoning: a quiet one-line row that opens to all of it in italics. What it says
+/// follows whether the thought is still coming: `Thinking` while it streams, `Thought` once it is
+/// all there.
+fn thought_row(message: usize, at: usize, text_: &str, open: bool, done: bool) -> AnyElement {
+    let word = if done { "Thought" } else { "Thinking" };
     let mut column = view().flex_col().gap(scale::s1()).child(
         view()
             .role(AccessibilityRole::Button)
             .label(match thought_gist(text_) {
-                gist if gist.is_empty() => "Thinking".to_string(),
-                gist => format!("Thinking: {gist}"),
+                gist if gist.is_empty() => word.to_string(),
+                gist => format!("{word}: {gist}"),
             })
             .flex_row()
             .items_center()
@@ -615,7 +616,7 @@ fn thought_row(message: usize, at: usize, text_: &str, open: bool) -> AnyElement
             .hover(|s| s.bg(Colors::hover()))
             .on_press(move || tell(Cmd::ToggleThought { message, block: at }))
             .child(lead_slot(icon(IconName::Lightbulb, STEP_ICON, Colors::muted())))
-            .child(text("Thinking").flex_none().sized(text_sm()).font_weight(FontWeight::MEDIUM).text_color(Colors::muted()))
+            .child(text(word).flex_none().sized(text_sm()).font_weight(FontWeight::MEDIUM).text_color(Colors::muted()))
             .children((!open).then(|| {
                 text(thought_gist(text_))
                     .number_of_lines(1)
@@ -948,7 +949,8 @@ fn approve_row(message: usize, at: usize, question: &str, lines: &[String], answ
 
 /// One block of the agent's message. What it reports is its own place in the message
 /// ([`Block`]'s `index`), not its place among the rows drawn: a folded run adds a row of its own.
-fn block_row(message: usize, block: &Block) -> AnyElement {
+/// `thought_streaming` only matters to a thought: still coming, it reads `Thinking`, not `Thought`.
+fn block_row(message: usize, block: &Block, thought_streaming: bool) -> AnyElement {
     match block {
         Block::Markdown(markdown) => text_view()
             .markdown(markdown.0.to_string())
@@ -957,7 +959,7 @@ fn block_row(message: usize, block: &Block) -> AnyElement {
             .sized(text_base())
             .text_color(Colors::foreground())
             .into_element(),
-        Block::Thought { index, text: thought, open } => thought_row(message, *index, thought, *open),
+        Block::Thought { index, text: thought, open } => thought_row(message, *index, thought, *open, !thought_streaming),
         Block::Tool(tool) => tool_row(message, tool.index, tool),
         Block::Run { index, count, failed, phase, folded, task } => run_row(message, *index, *count, *failed, *phase, *folded, task.as_deref()),
         Block::Plan(entries) => plan_rows(entries),
@@ -967,14 +969,14 @@ fn block_row(message: usize, block: &Block) -> AnyElement {
 }
 
 /// One message of the agent's: its blocks, a run's own row standing in for the tools it hides.
-fn agent_row(message: usize, blocks: &[Block]) -> AnyElement {
+fn agent_row(message: usize, blocks: &[Block], live: bool) -> AnyElement {
     let mut column = view().flex_col().min_w_0();
     let mut skip = 0;
     let mut before: Option<&Block> = None;
     if blocks.is_empty() {
         column = column.child(text("Working…").sized(text_sm()).text_color(Colors::muted()));
     }
-    for block in blocks {
+    for (at, block) in blocks.iter().enumerate() {
         if skip > 0 {
             skip -= 1;
             continue;
@@ -990,52 +992,279 @@ fn agent_row(message: usize, blocks: &[Block]) -> AnyElement {
             Some(before) if is_step(before) && is_step(block) => scale::s0_5(),
             Some(_) => scale::s4(),
         };
-        column = column.child(view().mt(gap).child(block_row(message, block)));
+        column = column.child(view().mt(gap).child(block_row(message, block, live && at + 1 == blocks.len())));
         before = Some(block);
     }
     column.into_element()
 }
 
-/// The conversation: the messages, in order, as a center column.
-fn transcript(items: &[Item], slot: ElementRef, at_end: Signal<bool>) -> AnyElement {
+/// The conversation: the messages, in order, as a center column that scrolls. Its stage, and the
+/// rail beside it, are the caller's ([`stage`]), so a change of the messages leaves them be.
+fn transcript(items: &[Item], slot: ElementRef, at_end: Signal<bool>, rail: Position, busy: bool) -> AnyElement {
     // The transcript's column is the composer card's width, and its text starts where the
     // composer's does: the card's border, its padding and the field's padding in (see [`bar`]).
     let mut rows = view().w_full().min_w_0().max_w(px(COLUMN)).flex_col().gap(scale::s6()).px(scale::composer_text_inset()).py(scale::s6());
+    // Where each message sits in the column, for the position rail: every row reports the height
+    // it was laid out at (window coordinates), and the column's own is taken off all of them.
+    // Non-reactive on purpose: the layout pass must not renotify the render. They live in the
+    // caller, not here: this runs again on every change of the thread, and a layout event comes
+    // only when a frame changes, so state made anew here would stay empty.
+    let Position { frames, origin, active, pinned, .. } = rail;
+    let count = items.len();
+    let shown = count.min(MAX_BARS);
+    frames.with(|sections| sections.truncate(count));
+    // A thought still streaming reads as `Thinking`; every thought that something came after, or
+    // that belongs to a turn already over, reads as `Thought`.
+    let last = items.iter().rposition(|item| matches!(item, Item::Agent { .. }));
     for (message, item) in items.iter().enumerate() {
+        let locate = move |bounds: &Bounds<Points>| {
+            frames.with(|sections| {
+                if sections.len() <= message {
+                    sections.resize(message + 1, Points(0.));
+                }
+                sections[message] = bounds.origin.y;
+            });
+        };
         let row = match item {
             Item::User { text, pictures } => user_row(text, pictures),
-            Item::Agent { blocks, .. } => agent_row(message, blocks),
+            Item::Agent { blocks, .. } => agent_row(message, blocks, busy && Some(message) == last),
         };
-        rows = rows.child(row);
+        rows = rows.child(view().on_layout(locate).child(row));
     }
     // The column re-wraps when the window is resized, and its height changes under a scroll
-    // offset that stays put: a transcript that was at its end follows it to the new one.
+    // offset that stays put: a transcript that was at its end follows it to the new one. The
+    // column's own frame is what the row frames are measured against.
     let size = stored((0., 0.));
-    let resized = {
-        move |bounds: &Bounds<Points>| {
-            let now = (bounds.size.width.0, bounds.size.height.0);
-            if size.replace(now) != now && at_end.get_untracked() {
-                let slot = slot;
-                spawn(async move {
-                    slot.scroll_to_end(false);
-                });
-            }
+    let resized = move |bounds: &Bounds<Points>| {
+        origin.replace(bounds.origin.y);
+        let now = (bounds.size.width.0, bounds.size.height.0);
+        if size.replace(now) != now && at_end.get_untracked() {
+            let slot = slot;
+            spawn(async move {
+                slot.scroll_to_end(false);
+            });
         }
     };
+    scroll()
+        .size_full()
+        .on_scroll({
+                    let (active, frames, origin) = (active, frames, origin);
+                    move |event: &ScrollEvent| {
+                        let end = event.offset.y + event.size.height >= event.content_size.height - px(24.);
+                        at_end.set(end);
+                        let sections = frames.get();
+                        if sections.is_empty() {
+                            return;
+                        }
+                        // Where the view stops for a press on a bar is a bar's place: the last
+                        // message whose stop the view has reached is the one the rail points at.
+                        // A stop cannot lie past the end of the page, so the messages at the end
+                        // that scrolling cannot bring up to the top are reached at its end.
+                        let offset = event.offset.y.0;
+                        let reach = (event.content_size.height - event.size.height).0.max(0.);
+                        let top = origin.get().0;
+                        let message = sections.iter().rposition(|at| message_stop(at.0 - top).min(reach) <= offset + 1.).unwrap_or(0);
+                        let mut section = bar_of(message, shown, count);
+                        // A press that scrolled to its stop lights the bar that was pressed.
+                        if let Some(bar) = pinned.get().filter(|(_, stop)| (offset - stop.min(reach)).abs() < 1.).map(|(bar, _)| bar) {
+                            section = bar;
+                        }
+                        if active.get_untracked() != section {
+                            active.set(section);
+                        }
+                    }
+                })
+        .child(view().flex_col().items_center().w_full().min_w_0().px(scale::s3()).on_layout(resized).child(rows.into_element()))
+        .element_ref(&slot)
+        .into_element()
+}
+
+/// The stage the page is drawn on: `page` (the transcript, or the note of a thread not started)
+/// and, beside the column, the rail of its `count` messages. Each is a region of its own, so text
+/// streaming into a message builds the transcript again but leaves the rail, and a press begun on
+/// a bar, as they are; the rail is built again only when the bars change, with the count or the
+/// stage's width.
+fn stage(page: impl Fn() -> AnyElement + 'static, count: Memo<usize>, slot: ElementRef, position: Position) -> AnyElement {
+    let width = position.width;
     view()
         .flex_1()
         .min_h_0()
+        .relative()
         .flex()
         .justify_center()
         .overflow_hidden()
-        .child(
-            scroll()
-                .size_full()
-                .on_scroll(move |event: &ScrollEvent| at_end.set(event.offset.y + event.size.height >= event.content_size.height - px(24.)))
-                .child(view().flex_col().items_center().w_full().min_w_0().px(scale::s3()).on_layout(resized).child(rows.into_element()))
-                .element_ref(&slot),
+        .on_layout(move |bounds: &Bounds<Points>| width.set(bounds.size.width.0))
+        .child(dynamic(page))
+        .child(dynamic(move || {
+            // The rail is for a stage with room beside the column; in a narrower one it would
+            // sit on the text, so it is not drawn.
+            let (count, stage) = (count.get(), width.get());
+            (count >= 2 && stage >= COLUMN + 2. * (rail_gutter().0 + rail_inset().0)).then(|| rail(count, stage, slot, position))
+        }))
+        .into_element()
+}
+
+/// The rail of a page of `count` messages on a stage `stage` wide: a bar per message (or per run
+/// of them), and a press on one scrolls `slot` to it.
+fn rail(count: usize, stage: f32, slot: ElementRef, position: Position) -> AnyElement {
+    let Position { frames, origin, active, hover, pinned, .. } = position;
+    let shown = count.min(MAX_BARS);
+    // The rail's jump: scroll so the section the bar marks sits just under the top of the view.
+    let jump = {
+        let (frames, origin, pinned, slot) = (frames, origin, pinned, slot);
+        move |bar: usize, rep: usize| {
+            let target = match frames.get().get(rep) {
+                Some(at) => message_stop(at.0 - origin.get().0),
+                None => return,
+            };
+            // Short messages at the end cannot all reach the top, and the bars of those that
+            // cannot would end up in one place: the press says which of them was meant.
+            pinned.replace(Some((bar, target)));
+            let slot = slot;
+            spawn(async move {
+                slot.scroll_to(point(px(0.), px(target)), true);
+            });
+        }
+    };
+    // The rail floats beside the column: its bars start a margin out from the column's right
+    // edge, which is half of what the stage has over the column from the stage's.
+    view()
+        .absolute()
+        .top(Points(0.))
+        .bottom(Points(0.))
+        .right(Points(((stage - COLUMN) / 2. - rail_gutter().0).max(rail_inset().0)))
+        .w(rail_width())
+        .flex_col()
+        .items_end()
+        .justify_center()
+        .children(
+            (0..shown)
+                .map(|j| {
+                    // The message under the bar: one bar per message until there are too many
+                    // ([`MAX_BARS`]), then each bar stands for the messages before the next.
+                    let rep = j * count / shown;
+                    let jump = move || jump(j, rep);
+                    rail_bar(j, active, hover, format!("Scroll to message {}", rep + 1), jump)
+                })
+                .collect::<Vec<_>>(),
         )
         .into_element()
+}
+
+
+/// What the rail knows of the page, kept across the renders of the transcript: where each message
+/// sits in the column, where the column starts, and the section the viewport holds.
+#[derive(Clone, Copy)]
+struct Position {
+    frames: Stored<Vec<Points>>,
+    origin: Stored<Points>,
+    active: Signal<usize>,
+    /// The bar last pressed and the offset its press scrolled to.
+    pinned: Stored<Option<(usize, f32)>>,
+    /// The bar the pointer is over, which the bars near it lean towards.
+    hover: Signal<Option<usize>>,
+    /// The stage's width, which says where the column's edge is and whether the rail has room.
+    width: Signal<f32>,
+}
+
+impl Position {
+    fn new() -> Self {
+        Self { frames: stored(Vec::new()), origin: stored(Points(0.)), active: signal(0), hover: signal(None), pinned: stored(None), width: signal(0.) }
+    }
+}
+
+/// The scroll offset a press on the bar of a message goes to: its top, a step below the top of
+/// the view. `top` is the message's place in the column.
+fn message_stop(top: f32) -> f32 {
+    (top - scale::s6().0).max(0.)
+}
+
+/// The bar that stands for `message`: the last of the bars whose message is not after it (the
+/// bar `j` stands for message `j * count / shown`, so this is the inverse of that).
+fn bar_of(message: usize, shown: usize, count: usize) -> usize {
+    ((message + 1) * shown - 1) / count
+}
+
+/// How many bars the rail shows at most: a longer conversation folds its sections under the
+/// nearest bar, so the rail stays a hand's worth of lines.
+const MAX_BARS: usize = 24;
+
+/// The least between the stage's right edge and the rail's bars.
+fn rail_inset() -> Points {
+    scale::s1()
+}
+
+/// A bar's length, and the width of its target.
+fn rail_width() -> Points {
+    // A step and a half of the 24 points it was: the scale has no step of 36.
+    scale::s6() + scale::s3()
+}
+
+/// What the rail takes of the stage beside the column: a bar's length and the margin between
+/// the column and the bars.
+fn rail_gutter() -> Points {
+    rail_width() + scale::s3()
+}
+
+/// One bar of the rail, all of one length: quiet when its section is not in view, firmer when it
+/// is (as `active.get()` says), and a press on it scrolls to the section it marks. The target is
+/// the whole of a slot the thin bar is drawn in the middle of, so the space between bars takes a
+/// press as well. Over a slot the bar pops out from its middle, longer, thicker and firm, easing
+/// in, and the bars above and below it swell a little less the further they are from it.
+fn rail_bar(j: usize, active: Signal<usize>, hover: Signal<Option<usize>>, label: String, jump: impl Fn() + 'static) -> View {
+    let on = move || active.get() == j;
+    // How near the pointer is: 0 at the bar, 1 and 2 at the bars beside it, none beyond.
+    let near = move || hover.get().map(|at| at.abs_diff(j)).filter(|gap| *gap <= 2);
+    view()
+        .role(AccessibilityRole::Button)
+        .label(label)
+        .flex_none()
+        .w(rail_width())
+        .h(scale::s2())
+        .flex_col()
+        .justify_center()
+        .cursor_pointer()
+        .on_hover_in(move || hover.set(Some(j)))
+        .on_hover_out(move || {
+            if hover.get_untracked() == Some(j) {
+                hover.set(None);
+            }
+        })
+        .on_press(jump)
+        .child(
+            view()
+                // The slot takes the pointer, not the bar swelling inside it, so a press lands the
+                // same whether the bar has grown under it yet or not.
+                .pointer_events(PointerEvents::None)
+                .w_full()
+                .h(scale::s0_5())
+                .rounded(super::pill())
+                .bg(move || match near() {
+                    Some(0) => Colors::muted()(),
+                    // The bars beside it take the firm color in part, less the further they are.
+                    Some(1) => super::muted_at(0.75),
+                    Some(_) => super::muted_at(0.5),
+                    None if on() => Colors::muted()(),
+                    None => super::hairline()(),
+                })
+                // At rest a bar is shorter than its slot and thin.
+                .origin_center()
+                .scale_x(move || match near() {
+                    Some(0) => 1_f32,
+                    Some(1) => 0.8,
+                    Some(_) => 0.65,
+                    None => 0.5,
+                })
+                .scale_y(move || match near() {
+                    Some(0) => 2.5_f32,
+                    Some(1) => 1.75,
+                    Some(_) => 1.25,
+                    None => 1.,
+                })
+                .transition()
+                .duration(150.)
+                .ease_out(),
+        )
 }
 
 // ============ the composer ============
@@ -1148,12 +1377,15 @@ fn queue_row(queued: Queued) -> AnyElement {
         .into_element()
 }
 
-/// Why some of what was pasted or dropped was left out, with a way to dismiss it.
+/// Why some of what was pasted or dropped was left out, with a way to dismiss it. The Dismiss
+/// button is carried the field's padding in, so the card's right-aligned controls all end at its
+/// text inset (see [`bar`]).
 fn note_row(note: &str) -> AnyElement {
     view()
         .flex_row()
         .items_center()
         .gap(scale::s2())
+        .pr(scale::s2())
         .child(text(note.to_string()).flex_1().min_w_0().sized(text_xs()).text_color(Colors::muted()))
         .child(
             view()
@@ -1449,8 +1681,10 @@ fn send_button(snap: Snapshot, draft: Signal<String>) -> AnyElement {
         .flex_row()
         .items_center()
         .justify_center()
-        .w(scale::s8())
-        .h(scale::s8())
+        // One size with the button beside it (the steer, or the stop when the turn runs), so
+        // the two round buttons read as one family (see [`steer_button`]).
+        .w(scale::s7())
+        .h(scale::s7())
         .rounded(super::pill())
         .cursor_pointer()
         .smooth()
@@ -1576,6 +1810,9 @@ fn bar(snap: Snapshot, draft: Signal<String>, field_ref: ElementRef) -> AnyEleme
                 .items_end()
                 .justify_between()
                 .gap(scale::s2())
+                // The field's own padding in on the right, so the send button's edge ends
+                // where the transcript's text does. The chips' own padding keeps the left as it is.
+                .pr(scale::s2())
                 .child(chips)
                 .child(view().flex_row().flex_none().gap(scale::s2()).children(snap.busy.then(|| steer_button(snap.steer, low, has_pictures))).child(send_button(snap.clone(), low))),
         );
@@ -1677,6 +1914,7 @@ pub fn Chat() -> impl IntoElement {
     let seen = stored(u64::MAX);
     let seen_soft = stored(u64::MAX);
     let at_end = signal(true);
+    let rail = Position::new();
     effect(move || {
         let (bump, soft) = state.with(|s| (s.follow, s.follow_soft));
         let grown = seen_soft.replace(soft) != soft && at_end.get_untracked();
@@ -1694,11 +1932,15 @@ pub fn Chat() -> impl IntoElement {
         pane(title, &snap)
     };
 
-    let body = move || {
-        let snap = state.get();
+    // The page above the composer is built again only when what it shows changes: a change of
+    // the header or the composer (a pane taking focus, a status line) would otherwise build the
+    // transcript and its rail anew, and a press begun on a bar would end on one that is gone.
+    let page = computed(move || state.with(|s| (s.items.clone(), s.blank, s.busy)));
+    let top = move || {
+        let (items, blank, busy) = page.get();
         // A thread that has not started says so where the transcript will be; its composer, and
         // the choice of agent in it, are there all the same.
-        let top = if snap.items.is_empty() && snap.blank {
+        if items.is_empty() && blank {
             view()
                 .flex_1()
                 .min_h_0()
@@ -1710,15 +1952,12 @@ pub fn Chat() -> impl IntoElement {
                 .children([text("What is this thread about?").sized(text_base()).text_color(Colors::muted()), text("Message an agent to begin.").sized(text_sm()).text_color(Colors::muted())])
                 .into_element()
         } else {
-            transcript(&snap.items, scrolled, at_end)
-        };
-        view()
-            .flex_1()
-            .min_h_0()
-            .flex_col()
-            .children([top, bar(snap, draft, field_ref)])
-            .into_element()
+            transcript(&items, scrolled, at_end, rail, busy)
+        }
     };
+    let composer = move || bar(state.get(), draft, field_ref);
+    let count = computed(move || page.with(|(items, _, _)| items.len()));
+    let body = view().flex_1().min_h_0().flex_col().child(stage(top, count, scrolled, rail)).child(dynamic(composer));
 
     view()
         .flex_1()
@@ -1726,7 +1965,7 @@ pub fn Chat() -> impl IntoElement {
         .flex_col()
         .bg(Colors::background())
         .child(dynamic(header))
-        .child(dynamic(body))
+        .child(body)
 }
 
 #[cfg(test)]
@@ -1735,6 +1974,23 @@ mod tests {
     use nsh_testing::Headless;
 
     use super::*;
+
+    #[test]
+    fn a_bar_is_lit_for_the_messages_it_stands_for() {
+        for count in 2..=100usize {
+            let shown = count.min(MAX_BARS);
+            let mut last = 0;
+            for message in 0..count {
+                let bar = bar_of(message, shown, count);
+                assert!(bar >= last && bar < shown, "{count}: message {message} is under bar {bar}");
+                last = bar;
+            }
+            // A press on a bar scrolls to the message it stands for, and that message lights it.
+            for bar in 0..shown {
+                assert_eq!(bar_of(bar * count / shown, shown, count), bar, "{count}: bar {bar}");
+            }
+        }
+    }
 
     #[test]
     fn a_thought_folds_to_its_first_line_of_prose() {
@@ -1909,6 +2165,32 @@ mod tests {
         publish(Snapshot { settings, busy: true, items: vec![Item::Agent { index: 0, blocks: vec![] }], ..Snapshot::default() });
         app.wait(std::time::Duration::from_millis(100)).unwrap();
         assert!(app.shows("Smart"), "{:?}", app.screen().texts());
+    }
+
+    #[test]
+    fn a_thought_says_thinking_while_it_streams_and_thought_once_it_is_over() {
+        let mut guard = crate::nsh::bus::lock();
+        let _commands = guard.as_mut().expect("the channel");
+        let thought = |text: &str| Block::Thought { index: 0, text: text.into(), open: false };
+        // The last thought of a turn going on is still coming; a finished one is in the past.
+        let app = start(Snapshot {
+            busy: true,
+            items: vec![Item::Agent { index: 0, blocks: vec![thought("settled"), thought("still going")] }],
+            ..Snapshot::default()
+        });
+        // The finished one says Thought ahead of its gist; only the streaming one says Thinking.
+        assert!(app.screen().texts().windows(2).any(|pair| pair == ["Thought", "settled"]), "{:?}", app.screen().texts());
+        assert!(app.shows("Thinking"), "{:?}", app.screen().texts());
+        assert!(app.shows("still going"), "{:?}", app.screen().texts());
+        drop(app);
+        // The turn is over, so the last thought has become one too; nothing says Thinking.
+        let app = start(Snapshot {
+            busy: false,
+            items: vec![Item::Agent { index: 0, blocks: vec![thought("settled")] }],
+            ..Snapshot::default()
+        });
+        assert!(app.shows("Thought"), "{:?}", app.screen().texts());
+        assert!(!app.shows("Thinking"), "{:?}", app.screen().texts());
     }
 
     #[test]
