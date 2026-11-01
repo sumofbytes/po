@@ -1008,7 +1008,7 @@ fn transcript(items: &[Item], slot: ElementRef, at_end: Signal<bool>, rail: Posi
     // Non-reactive on purpose: the layout pass must not renotify the render. They live in the
     // caller, not here: this runs again on every change of the thread, and a layout event comes
     // only when a frame changes, so state made anew here would stay empty.
-    let Position { frames, origin, active, hover, width } = rail;
+    let Position { frames, origin, active, hover, pinned, width } = rail;
     let count = items.len();
     let shown = count.min(MAX_BARS);
     frames.with(|sections| sections.truncate(count));
@@ -1046,12 +1046,15 @@ fn transcript(items: &[Item], slot: ElementRef, at_end: Signal<bool>, rail: Posi
     };
     // The rail's jump: scroll so the section the bar marks sits just under the top of the view.
     let jump = {
-        let (frames, origin, slot) = (frames, origin, slot);
-        move |rep: usize| {
+        let (frames, origin, pinned, slot) = (frames, origin, pinned, slot);
+        move |bar: usize, rep: usize| {
             let target = match frames.get().get(rep) {
-                Some(at) => (at.0 - origin.get().0 - scale::s6().0).max(0.),
+                Some(at) => message_stop(at.0 - origin.get().0),
                 None => return,
             };
+            // Short messages at the end cannot all reach the top, and the bars of those that
+            // cannot would end up in one place: the press says which of them was meant.
+            pinned.replace(Some((bar, target)));
             let slot = slot;
             spawn(async move {
                 slot.scroll_to(point(px(0.), px(target)), true);
@@ -1075,7 +1078,7 @@ fn transcript(items: &[Item], slot: ElementRef, at_end: Signal<bool>, rail: Posi
                     // The message under the bar: one bar per message until there are too many
                     // ([`MAX_BARS`]), then each bar stands for the messages before the next.
                     let rep = j * count / shown;
-                    let jump = move || jump(rep);
+                    let jump = move || jump(j, rep);
                     rail_bar(j, active, hover, format!("Scroll to message {}", rep + 1), jump)
                 })
                 .collect::<Vec<_>>(),
@@ -1100,19 +1103,19 @@ fn transcript(items: &[Item], slot: ElementRef, at_end: Signal<bool>, rail: Posi
                         if sections.is_empty() {
                             return;
                         }
-                        // The line two fifths down the viewport is where the eye rests: the
-                        // last section above it is the one the rail points at.
-                        let eye = event.offset.y.0 + event.size.height.0 * 0.4;
+                        // Where the view stops for a press on a bar is a bar's place: the last
+                        // message whose stop the view has reached is the one the rail points at.
+                        // A stop cannot lie past the end of the page, so the messages at the end
+                        // that scrolling cannot bring up to the top are reached at its end.
+                        let offset = event.offset.y.0;
+                        let reach = (event.content_size.height - event.size.height).0.max(0.);
                         let top = origin.get().0;
-                        let mut message = 0usize;
-                        for (at, section) in sections.iter().enumerate() {
-                            if section.0 - top <= eye {
-                                message = at;
-                            }
+                        let message = sections.iter().rposition(|at| message_stop(at.0 - top).min(reach) <= offset + 1.).unwrap_or(0);
+                        let mut section = bar_of(message, shown, count);
+                        // A press that scrolled to its stop lights the bar that was pressed.
+                        if let Some(bar) = pinned.get().filter(|(_, stop)| (offset - stop.min(reach)).abs() < 1.).map(|(bar, _)| bar) {
+                            section = bar;
                         }
-                        // At the end of the page the last messages start below the eye line, and
-                        // scrolling cannot bring them up to it: the last bar is the one in view.
-                        let section = if end { shown - 1 } else { message * shown / count };
                         if active.get_untracked() != section {
                             active.set(section);
                         }
@@ -1137,6 +1140,8 @@ struct Position {
     frames: Stored<Vec<Points>>,
     origin: Stored<Points>,
     active: Signal<usize>,
+    /// The bar last pressed and the offset its press scrolled to.
+    pinned: Stored<Option<(usize, f32)>>,
     /// The bar the pointer is over, which the bars near it lean towards.
     hover: Signal<Option<usize>>,
     /// The stage's width, which says where the column's edge is and whether the rail has room.
@@ -1145,8 +1150,20 @@ struct Position {
 
 impl Position {
     fn new() -> Self {
-        Self { frames: stored(Vec::new()), origin: stored(Points(0.)), active: signal(0), hover: signal(None), width: signal(0.) }
+        Self { frames: stored(Vec::new()), origin: stored(Points(0.)), active: signal(0), hover: signal(None), pinned: stored(None), width: signal(0.) }
     }
+}
+
+/// The scroll offset a press on the bar of a message goes to: its top, a step below the top of
+/// the view. `top` is the message's place in the column.
+fn message_stop(top: f32) -> f32 {
+    (top - scale::s6().0).max(0.)
+}
+
+/// The bar that stands for `message`: the last of the bars whose message is not after it (the
+/// bar `j` stands for message `j * count / shown`, so this is the inverse of that).
+fn bar_of(message: usize, shown: usize, count: usize) -> usize {
+    ((message + 1) * shown - 1) / count
 }
 
 /// How many bars the rail shows at most: a longer conversation folds its sections under the
@@ -1934,6 +1951,23 @@ mod tests {
     use nsh_testing::Headless;
 
     use super::*;
+
+    #[test]
+    fn a_bar_is_lit_for_the_messages_it_stands_for() {
+        for count in 2..=100usize {
+            let shown = count.min(MAX_BARS);
+            let mut last = 0;
+            for message in 0..count {
+                let bar = bar_of(message, shown, count);
+                assert!(bar >= last && bar < shown, "{count}: message {message} is under bar {bar}");
+                last = bar;
+            }
+            // A press on a bar scrolls to the message it stands for, and that message lights it.
+            for bar in 0..shown {
+                assert_eq!(bar_of(bar * count / shown, shown, count), bar, "{count}: bar {bar}");
+            }
+        }
+    }
 
     #[test]
     fn a_thought_folds_to_its_first_line_of_prose() {
