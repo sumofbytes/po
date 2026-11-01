@@ -150,7 +150,7 @@ fn lead(content: impl IntoElement) -> View {
     view().w(space::lead()).flex_none().items_center().justify_start().child(content)
 }
 
-/// A thread's state, in the lead column under its project's chevron: a dot while it runs or has
+/// A thread's state, in the lead column of its row: a dot while it runs or has
 /// news, a ! when it asks, nothing when idle.
 fn mark(mark: Mark) -> View {
     let size = scale::s1_5() + scale::s0_5();
@@ -161,12 +161,6 @@ fn mark(mark: Mark) -> View {
         Mark::Running => dot(|| Colors::primary()()).into_element(),
         Mark::Unread => dot(|| Colors::added()()).into_element(),
     })
-}
-
-/// The plus glyph leaves a sixth of its box empty at the end of its stroke; hanging that out too
-/// puts the visible plus at the same edge as the text of the rows.
-fn plus_gap() -> Points {
-    scale::s3() / 6.
 }
 
 /// A quiet section title with what can be done there.
@@ -193,9 +187,9 @@ fn grant_badge() -> View {
         .child(small("⌁"))
 }
 
-/// The row of a thread. In a project's tree it starts to the right of the guide line, so its
-/// highlight never touches the line; in Needs you it starts at the edge. Its mark is at the end.
-fn thread_row(thread: &Thread, project: Option<&str>, close_tip: &'static str, in_tree: bool) -> View {
+/// The row of a thread, its mark first, as a step in the transcript starts with its status, and
+/// its title in line with the name of the project above.
+fn thread_row(thread: &Thread, project: Option<&str>, close_tip: &'static str) -> View {
     let (pid, tid) = (thread.project, thread.id);
     let selected = thread.selected;
     let label = text(thread.label.clone())
@@ -215,17 +209,7 @@ fn thread_row(thread: &Thread, project: Option<&str>, close_tip: &'static str, i
             .child(quiet(project.to_string()).number_of_lines(1).flex_shrink(1.)),
         None => view().flex_1().flex_row().child(label.flex_1()),
     };
-    // The highlight starts a step right of the guide line, and the text still lines up with the
-    // name of the project above.
-    let (left, pad) = if in_tree {
-        let left = space::inset() + space::lead() / 2. + scale::s2();
-        (left, space::title() - left)
-    } else {
-        (Points(0.), space::inset())
-    };
-    let row = side_row(None)
-        .ml(left)
-        .pl(pad)
+    let row = side_row(Some(centered(mark(thread.mark))))
         .pr(space::inset())
         .h(space::tree())
         .test_id(&format!("agent-thread-{tid}"))
@@ -241,8 +225,7 @@ fn thread_row(thread: &Thread, project: Option<&str>, close_tip: &'static str, i
             Some(text("Close anyway?").flex_none().sized(super::text_xs()).text_color(Colors::warning()))
         } else {
             thread.ago.clone().map(|ago| text(ago).flex_none().sized(super::text_xs()).text_color(Colors::muted()))
-        })
-        .child((thread.mark != Mark::Idle).then(|| mark(thread.mark)));
+        });
     // The selection takes the colour of the message bubbles; a hovered row only hints at it.
     if selected { row.bg(Colors::hover()) } else { row.hover(|s| s.bg(Colors::hint())) }
 }
@@ -287,15 +270,17 @@ fn project_group(project: &Project) -> View {
         .text_color(label);
     // Pressing the row opens the project and folds or unfolds its threads; the buttons on it are
     // their own targets.
-    let head = side_row(Some(centered(icon(chevron, scale::s4(), move || tint))))
+    let head = side_row(Some(centered(view())))
         .h(space::tree())
         .test_id(&format!("agent-project-{pid}"))
         .hover(|s| s.bg(Colors::hover()))
         .on_press(move || send(Cmd::ToggleProject(pid)))
         .child(name)
         // The last button's padding hangs out, so its icon ends where the text of the rows below does.
-        .child(on_hover(icon_button(IconName::Plus, scale::s3(), "New thread in this project", move || send(Cmd::StartThread(pid)))).mr(if project.closable { Points(0.) } else { -scale::s1() - plus_gap() }))
-        .child(project.closable.then(|| on_hover(icon_button(IconName::Close, scale::s3(), "Close project", move || send(Cmd::CloseProject(pid)))).mr(-scale::s1())));
+        .child(on_hover(icon_button(IconName::Plus, scale::s3(), "New thread in this project", move || send(Cmd::StartThread(pid)))))
+        .child(project.closable.then(|| on_hover(icon_button(IconName::Close, scale::s3(), "Close project", move || send(Cmd::CloseProject(pid))))))
+        // The chevron ends the row, as in the transcript.
+        .child(icon(chevron, scale::s4(), move || tint));
     let fold = project.fold.map(|(expanded, hidden)| {
         let label = if expanded { "Show less".to_string() } else { format!("{hidden} more") };
         let chevron = if expanded { IconName::ChevronUp } else { IconName::ChevronDown };
@@ -326,7 +311,7 @@ fn project_group(project: &Project) -> View {
                     project
                         .threads
                         .iter()
-                        .flat_map(|thread| [thread.day.map(day_separator), Some(thread_row(thread, None, "Close thread", true))])
+                        .flat_map(|thread| [thread.day.map(day_separator), Some(thread_row(thread, None, "Close thread"))])
                         .flatten()
                         .collect::<Vec<_>>(),
                 ),
@@ -468,7 +453,7 @@ pub fn Sidebar() -> impl IntoElement {
                             .px(space::gutter())
                             .pt(space::list_top())
                             .pb(space::list_bottom())
-                            .child(waiting.iter().map(|item| thread_row(&item.thread, Some(&item.project), "Close thread", false)).collect::<Vec<_>>()),
+                            .child(waiting.iter().map(|item| thread_row(&item.thread, Some(&item.project), "Close thread")).collect::<Vec<_>>()),
                     ),
                 )
         })
