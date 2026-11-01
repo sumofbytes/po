@@ -102,8 +102,6 @@ mod space {
     pub fn gutter() -> Points { scale::s3() }
     pub fn inset() -> Points { scale::s3() }
     pub fn lead() -> Points { scale::s4() }
-    /// Where a thread's title starts, in line with the name of its project above.
-    pub fn title() -> Points { inset() + lead() + scale::s2_5() }
     pub fn row() -> Points { scale::s8() + scale::s1() }
     pub fn tree() -> Points { scale::s8() + scale::s1() }
     pub fn more() -> Points { scale::s8() }
@@ -126,7 +124,8 @@ fn quiet(content: impl IntoReactive<SharedString>) -> Text {
 /// The most rows Needs you shows before it scrolls.
 const NEEDS_YOU_ROWS: f32 = 5.;
 
-/// A row of the sidebar: its icon in the lead column if it has one, then what is added.
+/// A row of the sidebar: what leads it (a thread's mark, a fold chevron or an icon) in the lead
+/// column if it has one, then what is added.
 fn side_row(lead: Option<View>) -> View {
     view()
         .group()
@@ -140,33 +139,22 @@ fn side_row(lead: Option<View>) -> View {
         .child(lead)
 }
 
-/// The lead column, its content centred, so a chevron and the marks under it share an axis.
-fn centered(content: impl IntoElement) -> View {
-    view().w(space::lead()).flex_none().items_center().justify_center().child(content)
-}
-
-/// The lead column, its content at the left edge, where a header's title starts.
+/// The lead column, its content at the left edge, where the names of the projects start.
 fn lead(content: impl IntoElement) -> View {
-    view().w(space::lead()).flex_none().items_center().justify_start().child(content)
+    view().w(space::lead()).flex_none().flex_row().items_center().justify_start().child(content)
 }
 
-/// A thread's state, in the lead column under its project's chevron: a dot while it runs or has
-/// news, a ! when it asks, nothing when idle.
+/// A thread's state, in the lead column of its row: a dot while it runs or has
+/// news, a ! when it asks, a quiet ring when idle.
 fn mark(mark: Mark) -> View {
     let size = scale::s1_5() + scale::s0_5();
     let dot = |color: fn() -> AdaptiveColor| view().w(size).h(size).rounded(super::pill()).bg(color);
     view().flex_none().items_center().justify_center().child(match mark {
-        Mark::Idle => view().into_element(),
+        Mark::Idle => view().w(size).h(size).rounded(super::pill()).border_1().border_color(Colors::muted()).opacity(crate::theme::tokens::DIM).into_element(),
         Mark::Asking => text("!").text_size(text_base()).font_weight(FontWeight::BOLD).text_color(Colors::warning()).into_element(),
         Mark::Running => dot(|| Colors::primary()()).into_element(),
         Mark::Unread => dot(|| Colors::added()()).into_element(),
     })
-}
-
-/// The plus glyph leaves a sixth of its box empty at the end of its stroke; hanging that out too
-/// puts the visible plus at the same edge as the text of the rows.
-fn plus_gap() -> Points {
-    scale::s3() / 6.
 }
 
 /// A quiet section title with what can be done there.
@@ -193,9 +181,9 @@ fn grant_badge() -> View {
         .child(small("⌁"))
 }
 
-/// The row of a thread. In a project's tree it starts to the right of the guide line, so its
-/// highlight never touches the line; in Needs you it starts at the edge. Its mark is at the end.
-fn thread_row(thread: &Thread, project: Option<&str>, close_tip: &'static str, in_tree: bool) -> View {
+/// The row of a thread, its mark first, as a step in the transcript starts with its status. Its
+/// title is a step right of the name of the project above.
+fn thread_row(thread: &Thread, project: Option<&str>, close_tip: &'static str) -> View {
     let (pid, tid) = (thread.project, thread.id);
     let selected = thread.selected;
     let label = text(thread.label.clone())
@@ -215,17 +203,7 @@ fn thread_row(thread: &Thread, project: Option<&str>, close_tip: &'static str, i
             .child(quiet(project.to_string()).number_of_lines(1).flex_shrink(1.)),
         None => view().flex_1().flex_row().child(label.flex_1()),
     };
-    // The highlight starts a step right of the guide line, and the text still lines up with the
-    // name of the project above.
-    let (left, pad) = if in_tree {
-        let left = space::inset() + space::lead() / 2. + scale::s2();
-        (left, space::title() - left)
-    } else {
-        (Points(0.), space::inset())
-    };
-    let row = side_row(None)
-        .ml(left)
-        .pl(pad)
+    let row = side_row(Some(lead(mark(thread.mark))))
         .pr(space::inset())
         .h(space::tree())
         .test_id(&format!("agent-thread-{tid}"))
@@ -241,8 +219,7 @@ fn thread_row(thread: &Thread, project: Option<&str>, close_tip: &'static str, i
             Some(text("Close anyway?").flex_none().sized(super::text_xs()).text_color(Colors::warning()))
         } else {
             thread.ago.clone().map(|ago| text(ago).flex_none().sized(super::text_xs()).text_color(Colors::muted()))
-        })
-        .child((thread.mark != Mark::Idle).then(|| mark(thread.mark)));
+        });
     // The selection takes the colour of the message bubbles; a hovered row only hints at it.
     if selected { row.bg(Colors::hover()) } else { row.hover(|s| s.bg(Colors::hint())) }
 }
@@ -256,9 +233,8 @@ fn day_separator(day: &'static str) -> View {
         .flex_row()
         .items_center()
         .gap(scale::s2())
-        .pl(space::title())
+        .pl(space::inset())
         .pr(space::inset())
-        .pt(space::section_gap())
         // The day, then a hairline that carries the eye to the edge.
         .child(text(day).flex_none().sized(super::text_xs()).font_weight(FontWeight::MEDIUM).text_color(Colors::muted()))
         .child(view().flex_1().h(Points(1.)).bg(super::hairline()))
@@ -287,19 +263,22 @@ fn project_group(project: &Project) -> View {
         .text_color(label);
     // Pressing the row opens the project and folds or unfolds its threads; the buttons on it are
     // their own targets.
-    let head = side_row(Some(centered(icon(chevron, scale::s4(), move || tint))))
+    let head = side_row(None)
         .h(space::tree())
         .test_id(&format!("agent-project-{pid}"))
         .hover(|s| s.bg(Colors::hover()))
         .on_press(move || send(Cmd::ToggleProject(pid)))
         .child(name)
-        // The last button's padding hangs out, so its icon ends where the text of the rows below does.
-        .child(on_hover(icon_button(IconName::Plus, scale::s3(), "New thread in this project", move || send(Cmd::StartThread(pid)))).mr(if project.closable { Points(0.) } else { -scale::s1() - plus_gap() }))
-        .child(project.closable.then(|| on_hover(icon_button(IconName::Close, scale::s3(), "Close project", move || send(Cmd::CloseProject(pid)))).mr(-scale::s1())));
+        // The buttons show on hover; the chevron ends the row.
+        .child(on_hover(icon_button(IconName::Plus, scale::s3(), "New thread in this project", move || send(Cmd::StartThread(pid)))))
+        .child(project.closable.then(|| on_hover(icon_button(IconName::Close, scale::s3(), "Close project", move || send(Cmd::CloseProject(pid))))))
+        // As in the transcript, the chevron is the last thing in the row.
+        .child(icon(chevron, scale::s4(), move || tint));
     let fold = project.fold.map(|(expanded, hidden)| {
         let label = if expanded { "Show less".to_string() } else { format!("{hidden} more") };
         let chevron = if expanded { IconName::ChevronUp } else { IconName::ChevronDown };
-        side_row(Some(centered(icon(chevron, scale::s3(), Colors::muted()))))
+        // The chevron draws from a quarter of its box in, so the box hangs out to put the stroke at the ring's edge.
+        side_row(Some(lead(view().ml(-scale::s3() / 4.).child(icon(chevron, scale::s3(), Colors::muted())))))
             .h(space::more())
             .hover(|s| s.bg(Colors::hover()))
             .on_press(move || send(Cmd::ToggleMore(pid)))
@@ -309,27 +288,12 @@ fn project_group(project: &Project) -> View {
         .gap(space::item_gap())
         .child(head)
         .child(
-            view()
-                .relative()
-                // A guide down the lead column, through the marks of the threads, like a timeline.
-                .child(
-                    view()
-                        .absolute()
-                        .top(scale::s1())
-                        .bottom(scale::s1())
-                        .left(space::inset() + space::lead() / 2. - Points(1.))
-                        .w(scale::s0_5())
-                        .rounded(super::pill())
-                        .bg(Colors::guide()),
-                )
-                .child(
-                    project
-                        .threads
-                        .iter()
-                        .flat_map(|thread| [thread.day.map(day_separator), Some(thread_row(thread, None, "Close thread", true))])
-                        .flatten()
-                        .collect::<Vec<_>>(),
-                ),
+            project
+                .threads
+                .iter()
+                .flat_map(|thread| [thread.day.map(day_separator), Some(thread_row(thread, None, "Close thread"))])
+                .flatten()
+                .collect::<Vec<_>>(),
         )
         .child(fold)
 }
@@ -468,7 +432,7 @@ pub fn Sidebar() -> impl IntoElement {
                             .px(space::gutter())
                             .pt(space::list_top())
                             .pb(space::list_bottom())
-                            .child(waiting.iter().map(|item| thread_row(&item.thread, Some(&item.project), "Close thread", false)).collect::<Vec<_>>()),
+                            .child(waiting.iter().map(|item| thread_row(&item.thread, Some(&item.project), "Close thread")).collect::<Vec<_>>()),
                     ),
                 )
         })
