@@ -566,9 +566,18 @@ struct Project {
     /// shows it.
     terminal: Option<Entity<terminal_view::TerminalView>>,
     terminal_shown: bool,
+    /// Threads closed here, newest first, offered back by the session picker.
+    closed: Vec<workspace::ThreadState>,
 }
 
 impl Project {
+    /// Notes a closed thread, newest first. A session is there once, and only so many are kept.
+    fn remember(&mut self, thread: workspace::ThreadState) {
+        self.closed.retain(|known| known.session != thread.session);
+        self.closed.insert(0, thread);
+        self.closed.truncate(workspace::CLOSED_KEPT);
+    }
+
     /// Whether the list shows the branch this project has checked out. A PR is a checkout of
     /// its own and a thread's worktree already names its branch.
     fn shows_branch(&self) -> bool {
@@ -1031,6 +1040,14 @@ impl Thread {
                 drop(client);
             });
         }
+    }
+
+    /// What is kept of it once closed, if it has a session to come back from.
+    fn closed_state(&self) -> Option<workspace::ThreadState> {
+        if self.blank {
+            return None;
+        }
+        Some(workspace::ThreadState { agent: self.agent.clone()?, session: self.session.clone()?, title: self.title(), active_at: self.active_at, parent_session: None })
     }
 
     /// Stops the agent, keeping what has been said so it can be shown and resumed.
@@ -2247,6 +2264,31 @@ mod tests {
         // A counter from before the time was kept, and a time in the future, say nothing.
         assert_eq!(ago(now, 7), None);
         assert_eq!(ago(now, now + 1), None);
+    }
+
+    #[test]
+    fn a_project_remembers_the_threads_closed_in_it_newest_first_once_each_and_not_too_many() {
+        let mut project = super::Reader::build_project(std::path::PathBuf::from("/x"), None, vec![]);
+        let state = |session: &str| crate::workspace::ThreadState { agent: "a".into(), session: session.into(), title: String::new(), active_at: 0, parent_session: None };
+        for n in 0..15 {
+            project.remember(state(&format!("s{n}")));
+        }
+        project.remember(state("s10"));
+        assert_eq!(project.closed.len(), crate::workspace::CLOSED_KEPT);
+        assert_eq!(project.closed[0].session, "s10");
+        assert_eq!(project.closed.iter().filter(|c| c.session == "s10").count(), 1);
+        assert_eq!(project.closed[1].session, "s14");
+    }
+
+    #[test]
+    fn a_blank_thread_or_one_without_a_session_is_not_remembered_when_closed() {
+        let mut thread = super::Thread::blank(1);
+        assert!(thread.closed_state().is_none(), "blank");
+        thread.blank = false;
+        thread.agent = Some("a".into());
+        assert!(thread.closed_state().is_none(), "no session");
+        thread.session = Some("s".into());
+        assert_eq!(thread.closed_state().map(|c| c.session), Some("s".to_string()));
     }
 
     // A stand-in agent that copies what it is sent to a file, to see that a running thread's

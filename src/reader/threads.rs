@@ -669,6 +669,7 @@ impl Reader {
                 .collect();
             let shown = (!threads.is_empty()).then(|| threads.remove(state.active.min(threads.len() - 1)));
             if start {
+                self.project.closed = state.closed;
                 if let Some(shown) = shown {
                     self.thread = shown;
                     self.parked = threads;
@@ -677,6 +678,7 @@ impl Reader {
                 continue;
             }
             let mut project = Self::build_project(state.root, None, vec![]);
+            project.closed = state.closed;
             if let Some(wt) = worktree {
                 project.base = wt.spec.base.clone();
                 project.worktree = Some(wt);
@@ -757,7 +759,9 @@ impl Reader {
             .map(|view| {
                 let mut threads: Vec<&Thread> = view.threads.into_iter().filter(|t| !t.blank && t.agent.is_some() && t.session.is_some()).collect();
                 threads.sort_by_key(|t| t.id);
+                let open: HashSet<&str> = all.iter().filter_map(|t| t.session.as_deref()).collect();
                 workspace::ProjectState {
+                    closed: view.project.closed.iter().filter(|c| !open.contains(c.session.as_str())).cloned().collect(),
                     root: view.project.root.clone(),
                     review: AgentChange::saved(self.agent_modes.get(&view.id), view.mode) == Mode::Diff,
                     worktree: view.project.worktree.as_ref().map(|wt| wt.spec.clone()),
@@ -854,6 +858,10 @@ impl Reader {
         if before.is_some() && before != Some(crate::state::ThreadState::Closed) {
             self.changed(tid, crate::state::ThreadState::Closed, window, cx);
         }
+        let closed = self.threads_all().find(|thread| thread.id == tid).and_then(|thread| thread.closed_state());
+        if let (Some(closed), Some(slot)) = (closed, self.slots.iter_mut().find(|slot| slot.id == pid)) {
+            slot.project.remember(closed);
+        }
         let last = self.slots.iter().find(|slot| slot.id == pid).is_some_and(|slot| slot.thread.id == tid && slot.parked.is_empty());
         let blank = last.then(|| self.blank_thread());
         let Some(slot) = self.slots.iter_mut().find(|slot| slot.id == pid) else { return };
@@ -896,6 +904,10 @@ impl Reader {
         let before = self.threads_all().find(|thread| thread.id == id).map(|thread| crate::state::state(&thread.facts()));
         if before.is_some() && before != Some(crate::state::ThreadState::Closed) {
             self.changed(id, crate::state::ThreadState::Closed, window, cx);
+        }
+        let closed = self.threads_all().find(|thread| thread.id == id).and_then(|thread| thread.closed_state());
+        if let Some(closed) = closed {
+            self.project.remember(closed);
         }
         if let Some(at) = self.parked.iter().position(|thread| thread.id == id) {
             Thread::retire(self.parked.remove(at));

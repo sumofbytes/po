@@ -206,11 +206,24 @@ impl Reader {
             statuses.push(thread.status.clone());
         }
         let picking = thread.picking.then(|| match &thread.sessions {
-            Some(sessions) if !thread.loading && !sessions.is_empty() => chat::Picking::Sessions(sessions.iter().map(|session| chat::Session {
-                id: session.id.clone(),
-                title: session.title.clone(),
-                when: session.updated.get(..16).unwrap_or_default().replace('T', " "),
-            }).collect()),
+            Some(sessions) if !thread.loading && !sessions.is_empty() => {
+                // What was closed here lately, in the order it was closed, if this agent still lists it.
+                let closed: Vec<&SessionInfo> = self
+                    .project
+                    .closed
+                    .iter()
+                    .filter(|closed| thread.agent.as_deref() == Some(closed.agent.as_str()))
+                    .filter_map(|closed| sessions.iter().find(|session| session.id == closed.session))
+                    .collect();
+                let session = |info: &SessionInfo, closed: bool| chat::Session {
+                    id: info.id.clone(),
+                    title: info.title.clone(),
+                    when: info.updated.get(..16).unwrap_or_default().replace('T', " "),
+                    closed,
+                };
+                let rest = sessions.iter().filter(|info| !closed.iter().any(|c| c.id == info.id));
+                chat::Picking::Sessions(closed.iter().map(|info| session(info, true)).chain(rest.map(|info| session(info, false))).collect())
+            }
             Some(_) if !thread.loading => chat::Picking::Note(format!("No sessions to resume in {}", self.project.root.display())),
             _ => chat::Picking::Loading,
         });
