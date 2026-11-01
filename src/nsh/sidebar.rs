@@ -294,27 +294,12 @@ fn project_group(project: &Project) -> View {
         .gap(space::item_gap())
         .child(head)
         .child(
-            view()
-                .relative()
-                // A guide down the lead column, through the marks of the threads, like a timeline.
-                .child(
-                    view()
-                        .absolute()
-                        .top(scale::s1())
-                        .bottom(scale::s1())
-                        .left(space::inset() + space::lead() / 2. - Points(1.))
-                        .w(scale::s0_5())
-                        .rounded(super::pill())
-                        .bg(Colors::guide()),
-                )
-                .child(
-                    project
-                        .threads
-                        .iter()
-                        .flat_map(|thread| [thread.day.map(day_separator), Some(thread_row(thread, None, "Close thread"))])
-                        .flatten()
-                        .collect::<Vec<_>>(),
-                ),
+            project
+                .threads
+                .iter()
+                .flat_map(|thread| [thread.day.map(day_separator), Some(thread_row(thread, None, "Close thread"))])
+                .flatten()
+                .collect::<Vec<_>>(),
         )
         .child(fold)
 }

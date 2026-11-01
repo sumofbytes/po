@@ -181,11 +181,6 @@ impl Colors {
         move || Self::hover()().opacity(0.6)
     }
 
-    /// The guide line down a project's threads.
-    pub fn guide() -> impl Fn() -> AdaptiveColor + Copy {
-        move || Self::border()().opacity(0.7)
-    }
-
     pub fn input_background() -> impl Fn() -> AdaptiveColor + Copy {
         Self::token("input-background")
     }
