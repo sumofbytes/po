@@ -490,19 +490,21 @@ fn grant_menu(grant: Grant) -> AnyElement {
     let mut menu = menu()
         .popup_class(MENU)
         .trigger(menu_trigger(label.clone(), "What this thread's agent may do through Po"));
-    menu = menu.child(menu_item().disabled(true).px(scale::s3()).py(scale::s1_5()).child(note("Control")).into_element());
+    menu = menu.child(menu_heading("Control"));
     // Each level also has what the ones above it in the list have.
     let levels = [
         ("Basic", "Show files, diffs and views; change its own settings", Scope::Viewer),
-        ("Delegate", "Also start and steer its own threads; edit issues", Scope::Orchestrate),
-        ("Full access", "Also open projects, use worktrees and merge them", Scope::Global),
+        ("Delegate", "Also start, steer and close its own threads; edit issues", Scope::Orchestrate),
+        ("Full access", "Also open and close projects, use worktrees, delete issues", Scope::Global),
     ];
     for (name, about, scope) in levels {
         let on = grant.scope == scope;
         let set = Grant { scope, ..grant };
         menu = menu.child(described_item(name, about, on, move || tell(Cmd::Grant(GrantChange::Set(set)))));
     }
+    // No level has these: each is turned on by itself.
     menu = menu.child(separator());
+    menu = menu.child(menu_heading("Also allow"));
     menu = menu.child(item("May read other threads here".to_string(), Some(grant.read), move || tell(Cmd::Grant(GrantChange::Read))));
     if grant.approvals || grant.scope != Scope::Viewer {
         menu = menu.child(item("May answer its threads' permission asks".to_string(), Some(grant.approvals), move || tell(Cmd::Grant(GrantChange::Approvals))));
@@ -1328,7 +1330,7 @@ fn setting_chips(settings: &[Setting], busy: bool) -> Vec<AnyElement> {
             if busy {
                 return trigger.opacity(crate::theme::tokens::DISABLED).into_element();
             }
-            menu().popup_class(MENU).trigger(trigger).child(setting_heading(setting)).child(menu_list(choice_items(setting))).into_element()
+            menu().popup_class(MENU).trigger(trigger).child(menu_heading(setting.name.clone())).child(menu_list(choice_items(setting))).into_element()
         })
         .collect()
 }
@@ -1339,9 +1341,10 @@ fn menu_list(entries: Vec<AnyElement>) -> AnyElement {
     scroll().max_h(px(320.)).child(view().flex_col().children(entries)).into_element()
 }
 
-/// The name of `setting`, heading its choices in a menu.
-fn setting_heading(setting: &Setting) -> AnyElement {
-    menu_item().disabled(true).px(scale::s3()).py(scale::s1_5()).child(note(setting.name.clone())).into_element()
+/// A heading over a menu's items: a line of text, not an item, so it is neither pressed nor
+/// counted among the choices.
+fn menu_heading(title: impl Into<String>) -> AnyElement {
+    view().focusable(false).px(scale::s3()).py(scale::s1_5()).child(note(title.into())).into_element()
 }
 
 /// The choices of `setting` as menu items, the one in effect marked.
@@ -1888,6 +1891,24 @@ mod tests {
         publish(Snapshot { settings, busy: true, items: vec![Item::Agent { index: 0, blocks: vec![] }], ..Snapshot::default() });
         app.wait(std::time::Duration::from_millis(100)).unwrap();
         assert!(app.shows("Smart"), "{:?}", app.screen().texts());
+    }
+
+    #[test]
+    fn a_setting_is_chosen_from_its_menu_under_its_name() {
+        let mut guard = crate::nsh::bus::lock();
+        let commands = guard.as_mut().expect("the channel");
+        let settings = vec![Setting { id: "model".into(), name: "Model".into(), current: "b".into(), choices: vec![("a".into(), "Fast".into()), ("b".into(), "Smart".into())] }];
+        let mut app = start(Snapshot { settings, items: vec![Item::Agent { index: 0, blocks: vec![] }], ..Snapshot::default() });
+        app.press("label:Model").unwrap();
+        app.settle();
+        assert!(app.shows("Fast"), "{:?}", app.screen().texts());
+        // The heading names the setting and chooses nothing.
+        let _ = app.press("text:Model");
+        let before = drain(&mut app, commands);
+        assert!(!before.iter().any(|bus| matches!(bus, Bus::Chat(Cmd::Setting { .. }))), "{before:?}");
+        app.press("text:Fast").unwrap();
+        let sent = drain(&mut app, commands);
+        assert!(sent.contains(&Bus::Chat(Cmd::Setting { id: "model".into(), value: "a".into() })), "{sent:?}");
     }
 
     #[test]
