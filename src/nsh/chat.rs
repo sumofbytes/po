@@ -360,6 +360,11 @@ fn step_glyph(phase: Phase) -> View {
 /// The size of every icon of a step: its status, its chevron and its file.
 const STEP_ICON: Points = Points(14.);
 
+/// The padding at each side of the icon of a button in a step, such as the one that opens a file.
+fn step_button_pad() -> Points {
+    scale::s2()
+}
+
 /// A fixed slot for the small icon at the start of a step, as wide as [`step_glyph`], so the text
 /// of every step starts on one line.
 fn lead_slot(content: impl IntoElement) -> View {
@@ -369,7 +374,7 @@ fn lead_slot(content: impl IntoElement) -> View {
 /// A fixed slot for what ends a step, as wide as the button that opens the file of a tool call
 /// (its icon and the padding of that button), so the ends of the steps line up too.
 fn trail_slot(content: impl IntoElement) -> View {
-    view().flex_none().w(scale::s2() + scale::s2() + STEP_ICON).flex_row().justify_center().child(content)
+    view().flex_none().w(step_button_pad() + step_button_pad() + STEP_ICON).flex_row().justify_center().child(content)
 }
 
 /// The popovers of the menus: the theme's own surface, with a shadow.
@@ -579,7 +584,7 @@ fn thought_row(message: usize, at: usize, text_: &str, open: bool) -> AnyElement
                     .text_color(Colors::muted())
                     .opacity(crate::theme::tokens::DIM)
             }))
-            .child(view().flex_1().min_w_0())
+            .children(open.then(|| view().flex_1().min_w_0()))
             .child(trail_slot(icon(if open { IconName::ChevronDown } else { IconName::ChevronRight }, STEP_ICON, Colors::muted()))),
     );
     if open {
@@ -625,6 +630,8 @@ fn tool_row(message: usize, at: usize, tool: &Tool) -> AnyElement {
                 .gap(scale::s2())
                 .child(
                     view()
+                        .role(AccessibilityRole::Button)
+                        .label(title.clone())
                         .flex_row()
                         .items_center()
                         .gap(scale::s2())
@@ -647,7 +654,7 @@ fn tool_row(message: usize, at: usize, tool: &Tool) -> AnyElement {
                         .role(AccessibilityRole::Button)
                         .label("Open the file it changed")
                         .flex_none()
-                        .px(scale::s2())
+                        .px(step_button_pad())
                         .py(scale::s0_5())
                         .rounded(Colors::radius())
                         .cursor_pointer()
@@ -657,7 +664,13 @@ fn tool_row(message: usize, at: usize, tool: &Tool) -> AnyElement {
                 }))
                 .child(
                     view()
+                        .role(AccessibilityRole::Button)
+                        .label(if tool.open { "Hide the call's details" } else { "Show the call's details" })
+                        .flex_none()
+                        .py(scale::s0_5())
+                        .rounded(Colors::radius())
                         .cursor_pointer()
+                        .hover(|s| s.bg(Colors::hover()))
                         .on_press(move || tell(Cmd::ToggleTool { message, block: at }))
                         .child(trail_slot(icon(if tool.open { IconName::ChevronDown } else { IconName::ChevronRight }, STEP_ICON, Colors::muted()))),
                 ),
