@@ -47,6 +47,7 @@ debug = "line-tables-only"
 # window background turned opaque — the glass look) ahead of a gpui-fast release with it.
 [patch.crates-io]
 gpui-fast-linux = { path = "vendor/gpui-fast-linux" }
+nsh-platform-gpui = { path = "vendor/nsh-platform-gpui" }
 gpui-fast-wgpu = { path = "vendor/gpui-fast-wgpu" }
 gpui-fast-apple = { path = "vendor/gpui-fast-apple" }
 gpui-fast-windows = { path = "vendor/gpui-fast-windows" }
