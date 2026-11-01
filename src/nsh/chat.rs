@@ -596,7 +596,8 @@ fn thought_row(message: usize, at: usize, text_: &str, open: bool) -> AnyElement
                 .sized(text_sm())
                 .px(scale::s3())
                 .py(scale::s1())
-                .pl(scale::s5())
+                // Under the title, not under its icon.
+                .pl(scale::s4() + scale::s2())
                 .opacity(crate::theme::tokens::DIM)
                 .text_color(Colors::muted()),
         );
