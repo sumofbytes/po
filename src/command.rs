@@ -50,6 +50,12 @@ impl Default for Grant {
 }
 
 impl Grant {
+    /// What a thread's agent has until the user sets it: Global scope, no reading of other
+    /// threads, no answering of asks. [`Grant::default`] is the least, which Stop leaves.
+    pub fn initial() -> Self {
+        Self { scope: Scope::Global, ..Self::default() }
+    }
+
     /// What the user has, when `po ctl` asks: everything. Nothing here may approve an agent
     /// command or an MCP server through the API; `approvals` answers permission asks only.
     pub fn user() -> Self {

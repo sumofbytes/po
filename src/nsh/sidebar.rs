@@ -163,6 +163,12 @@ fn mark(mark: Mark) -> View {
     })
 }
 
+/// The plus glyph leaves a sixth of its box empty at the end of its stroke; hanging that out too
+/// puts the visible plus at the same edge as the text of the rows.
+fn plus_gap() -> Points {
+    scale::s3() / 6.
+}
+
 /// A quiet section title with what can be done there.
 fn section(title: impl IntoReactive<SharedString>, action: Option<View>) -> View {
     view()
@@ -288,7 +294,7 @@ fn project_group(project: &Project) -> View {
         .on_press(move || send(Cmd::ToggleProject(pid)))
         .child(name)
         // The last button's padding hangs out, so its icon ends where the text of the rows below does.
-        .child(on_hover(icon_button(IconName::Plus, scale::s3(), "New thread in this project", move || send(Cmd::StartThread(pid)))).mr(if project.closable { Points(0.) } else { -scale::s1() }))
+        .child(on_hover(icon_button(IconName::Plus, scale::s3(), "New thread in this project", move || send(Cmd::StartThread(pid)))).mr(if project.closable { Points(0.) } else { -scale::s1() - plus_gap() }))
         .child(project.closable.then(|| on_hover(icon_button(IconName::Close, scale::s3(), "Close project", move || send(Cmd::CloseProject(pid)))).mr(-scale::s1())));
     let fold = project.fold.map(|(expanded, hidden)| {
         let label = if expanded { "Show less".to_string() } else { format!("{hidden} more") };
@@ -439,6 +445,9 @@ pub fn Sidebar() -> impl IntoElement {
                 .flex_none()
                 .items_center()
                 .justify_center()
+                .px(scale::s1_5())
+                .rounded(super::pill())
+                .bg(Colors::selected())
                 .tooltip(super::tooltip(if late > 0 { "Some are late" } else { "Open issues" }))
                 .child(text(left.to_string()).text_size(text_base()).text_color(if late > 0 { Colors::danger()() } else { Colors::muted()() }))
         });
@@ -507,8 +516,12 @@ pub fn Sidebar() -> impl IntoElement {
                 .flex_1()
                 .child(section(
                     "Projects",
-                    // The button's padding hangs out, so its icon ends where the text of the rows below does.
-                    Some(icon_button(IconName::Plus, scale::s3(), "Add a project: open a folder (Ctrl+Shift+O)", || send(Cmd::AddProject)).mr(-scale::s1())),
+                    Some(icon_button(IconName::Plus, scale::s3(), "Add a project: open a folder (Ctrl+Shift+O)", || send(Cmd::AddProject))
+                        // A box of its own, so it reads as a button; its edge ends where the time of a thread does.
+                        .border_1()
+                        .border_color(super::hairline())
+                        // The border is drawn inside the button; hung out, it leaves the header as tall as before.
+                        .my(px(-1.))),
                 ))
                 .child(dynamic(move || {
                     state.with(|s| s.status.clone()).map(|status| {

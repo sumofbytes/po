@@ -1245,7 +1245,7 @@ struct Reader {
     control: Option<control::Control>,
     /// What each thread's agent may do, held in memory only: it is lost on restart and is not
     /// shared between windows, so nothing an agent can read or write raises its own reach.
-    /// A thread without an entry has [`command::Grant::default`], and the grants can only be
+    /// A thread without an entry has [`command::Grant::initial`], and the grants can only be
     /// changed from the UI, never from anything an agent could write to.
     grants: HashMap<u64, command::Grant>,
     /// Projects the API opened, which it alone may close again (and only if the user has no
@@ -1730,7 +1730,7 @@ fn chat_items(messages: &[Msg]) -> Vec<nsh::chat::Item> {
     messages.iter().enumerate().map(|(ix, msg)| match msg {
         Msg::User(text, pictures) => nsh::chat::Item::User {
             text: text.clone(),
-            pictures: pictures.iter().map(|a| nsh::chat::Picture { uri: a.data_uri() }).collect(),
+            pictures: pictures.iter().map(|a| nsh::chat::Picture { uri: a.data_uri(), size: a.size }).collect(),
         },
         Msg::Agent(blocks) => nsh::chat::Item::Agent { index: ix, blocks: chat_blocks(blocks) },
     }).collect()

@@ -413,7 +413,7 @@ pub fn icon(name: IconName, size: Points, tint: impl Fn() -> AdaptiveColor + 'st
 }
 
 /// A tooltip in Po's look: a small popover with a line of text.
-pub fn tooltip(label: &'static str) -> Text {
+pub fn tooltip(label: impl IntoReactive<SharedString>) -> Text {
     small(label)
         .bg(Colors::popover())
         .border_1()

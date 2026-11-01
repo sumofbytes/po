@@ -41,6 +41,13 @@ pub struct Grant {
     pub approvals: bool,
 }
 
+impl Grant {
+    /// What a thread's agent has until the user sets it; the Reader's `Grant::initial`.
+    pub fn initial() -> Self {
+        Self { scope: Scope::Global, read: false, approvals: false }
+    }
+}
+
 impl Default for Grant {
     fn default() -> Self {
         Self { scope: Scope::Viewer, read: false, approvals: false }
@@ -64,6 +71,17 @@ pub struct Setting {
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Picture {
     pub uri: String,
+    /// Its pixels, which give the box it is drawn in its shape.
+    pub size: (u32, u32),
+}
+
+impl Picture {
+    /// The box the picture fills, as large as fits `w` by `h` points without a larger side than it has.
+    fn fit(&self, w: f32, h: f32) -> (f32, f32) {
+        let (pw, ph) = (self.size.0.max(1) as f32, self.size.1.max(1) as f32);
+        let scale = (w / pw).min(h / ph).min(1.);
+        ((pw * scale).round(), (ph * scale).round())
+    }
 }
 
 /// What waits to be sent when the turn is over: `kind` says how it got there (nothing is the
@@ -167,6 +185,18 @@ pub enum Picking {
     Loading,
 }
 
+/// What the header's status icon says.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Tone {
+    /// Ready, or asleep.
+    Idle,
+    /// Starting, or a turn going on.
+    Working,
+    /// Waiting on the user.
+    Attention,
+    Failed,
+}
+
 #[derive(Clone, PartialEq, Debug, Default)]
 pub struct Snapshot {
     pub glass: bool,
@@ -175,6 +205,8 @@ pub struct Snapshot {
     pub trail: Vec<Control>,
     /// The status lines of the header's right, like `3 threads · 1 asking`.
     pub statuses: Vec<String>,
+    /// How the thread itself is doing, drawn as an icon; `None` before it has anything to say.
+    pub state: Option<(Tone, String)>,
     /// Nothing on screen yet: the agent is picked below, and the thread starts when something
     /// is sent.
     pub blank: bool,
@@ -393,8 +425,28 @@ fn item(what: String, on_press: impl Fn() + 'static) -> AnyElement {
 
 /// A line in a header, like `3 threads · 1 asking`.
 fn status_line(line: String) -> View {
-    // The height of the History chip beside it, so the two sit on one rhythm.
+    // The height of the History button beside it, so the two sit on one rhythm.
     view().flex_none().px(scale::s2()).py(scale::s1()).child(text(super::sentence(&line)).sized(text_sm()).text_color(Colors::muted()).number_of_lines(1))
+}
+
+/// The thread's state as an icon in the header's right, its words in the tooltip. Idle shows
+/// nothing, and the shapes differ so the state doesn't rest on color alone.
+fn status_icon(tone: Tone, text: &str) -> Option<View> {
+    let (name, color): (IconName, fn() -> AdaptiveColor) = match tone {
+        Tone::Idle => return None,
+        Tone::Working => (IconName::CircleHalf, || Colors::warning()()),
+        Tone::Attention => (IconName::CircleDot, || Colors::info()()),
+        Tone::Failed => (IconName::CircleX, || Colors::danger()()),
+    };
+    Some(
+        view()
+            .role(AccessibilityRole::Image)
+            .label(text.to_string())
+            .flex_none()
+            .p(scale::s1_5())
+            .tooltip(tooltip(text.to_string()))
+            .child(icon(name, scale::s3_5(), color)),
+    )
 }
 
 /// The pane header of the conversation: the title, the statuses, the history button, the Control
@@ -404,30 +456,14 @@ fn pane(title: String, snap: &Snapshot) -> View {
     for line in &snap.statuses {
         right = right.child(status_line(line.clone()));
     }
-    if snap.picking.is_none() {
-        right = right.child(
-            view()
-                .role(AccessibilityRole::Button)
-                .label("History")
-                .flex_none()
-                .flex_row()
-                .items_center()
-                .gap(scale::s1_5())
-                .px(scale::s3())
-                .py(scale::s1())
-                .rounded(super::pill())
-                .bg(Colors::hover())
-                .cursor_pointer()
-                .smooth()
-                .hover(|s| s.bg(Colors::selected()))
-                .on_press(|| tell(Cmd::History))
-                .tooltip(tooltip("Resume an earlier session (Ctrl+Shift+H)"))
-                .child(icon(IconName::History, scale::s3(), Colors::muted()))
-                .child(body("History").text_color(Colors::muted())),
-        );
+    if let Some((tone, text)) = &snap.state {
+        right = right.child(status_icon(*tone, text));
     }
-    // The Control menu, once the thread's agent may do more than talk.
-    if let Some(grant) = snap.grant.filter(|grant| *grant != Grant::default()) {
+    if snap.picking.is_none() {
+        right = right.child(super::header::toggle_button(IconName::History, "Resume an earlier session (Ctrl+Shift+H)", false, || tell(Cmd::History)));
+    }
+    // The Control menu, once the user has set what the thread's agent may do.
+    if let Some(grant) = snap.grant.filter(|grant| *grant != Grant::initial()) {
         right = right.child(grant_menu(grant));
     }
     pane_header(title, right, &snap.lead, &snap.trail, snap.glass)
@@ -490,12 +526,14 @@ fn user_row(text_: &str, pictures: &[Picture]) -> AnyElement {
             pictures
                 .iter()
                 .map(|picture| {
+                    // A box of the picture's own shape: one from a `data:` URI has no size before it
+                    // loads, so it is given one rather than left to collapse.
+                    let (w, h) = picture.fit(360., 240.);
                     image(picture.uri.clone())
-                        .w_full()
-                        .max_h(px(280.))
+                        .w(px(w))
+                        .h(px(h))
+                        .resize_mode(ResizeMode::Cover)
                         .rounded(Colors::radius())
-                        .border_1()
-                        .border_color(super::hairline())
                         .overflow_hidden()
                         .flex_none()
                 })
@@ -953,6 +991,9 @@ fn transcript(items: &[Item], slot: ElementRef, at_end: Signal<bool>) -> AnyElem
 /// The pictures of the draft: their strip, each with a way to take it off.
 fn pictures_row(pictures: &[Picture]) -> AnyElement {
     view()
+        // The field's own padding, so the strip starts where its text does.
+        .px(scale::s2())
+        .py(scale::s1())
         .flex_row()
         .flex_wrap()
         .items_start()
@@ -966,13 +1007,18 @@ fn pictures_row(pictures: &[Picture]) -> AnyElement {
                         .relative()
                         .flex_none()
                         .child(
-                            image(picture.uri.clone())
-                                .rounded(Colors::radius())
-                                .border_1()
-                                .border_color(super::hairline())
-                                .max_h(px(72.))
-                                .max_w(px(120.))
-                                .overflow_hidden(),
+                            {
+                                // A box of the picture's own shape (see `user_row`).
+                                let (w, h) = picture.fit(120., 72.);
+                                image(picture.uri.clone())
+                                    .rounded(Colors::radius())
+                                    .border_1()
+                                    .border_color(super::hairline())
+                                    .w(px(w))
+                                    .h(px(h))
+                                    .resize_mode(ResizeMode::Cover)
+                                    .overflow_hidden()
+                            },
                         )
                         .child(
                             view()
@@ -1389,7 +1435,6 @@ fn draft_field(draft: &Signal<String>, field_ref: ElementRef) -> Input {
             tell(Cmd::Draft(text.clone()));
             tell(Cmd::Send { later: false });
         })
-        .on_file_drop(move |drop: &FileDropEvent| tell(Cmd::Drop(drop.uris.clone())))
 }
 
 /// The field in its row. A value the app writes to a field the user has typed in is dropped as
@@ -1451,7 +1496,6 @@ fn bar(snap: Snapshot, draft: Signal<String>, field_ref: ElementRef) -> AnyEleme
         .shadow_opacity(1.)
         .shadow_radius(px(0.))
         .shadow_offset(point(px(0.), px(1.)))
-        .on_file_drop(move |drop: &FileDropEvent| tell(Cmd::Drop(drop.uris.clone())))
         .children(snap.note.as_deref().map(note_row))
         .children((!snap.pictures.is_empty()).then(|| pictures_row(&snap.pictures)))
         .child(fresh_field(snap.draft_reset, draft_field(&field, field_ref)))
@@ -1815,19 +1859,19 @@ mod tests {
     }
 
     #[test]
-    fn a_started_thread_names_its_agent_and_offers_control_before_any_grant() {
+    fn a_started_thread_names_its_agent_and_offers_control_before_any_change() {
         let mut guard = crate::nsh::bus::lock();
         let commands = guard.as_mut().expect("the channel");
         let mut app = start(Snapshot {
             agents: vec![("Claude".into(), "claude".into())],
             chosen: Some("claude".into()),
-            grant: Some(Grant::default()),
+            grant: Some(Grant::initial()),
             items: vec![Item::Agent { index: 0, blocks: vec![] }],
             ..Snapshot::default()
         });
         assert!(app.shows("Claude"), "{:?}", app.screen().texts());
         let texts = app.screen().texts();
-        assert_eq!(texts.iter().filter(|t| **t == "Control").count(), 1, "only the composer's menu, not the header's: {texts:?}");
+        assert_eq!(texts.iter().filter(|t| **t == "Control · global").count(), 1, "only the composer's menu, not the header's: {texts:?}");
         app.press("label:What this thread's agent may do through Po").unwrap();
         app.settle();
         app.press("text:Orchestrate").unwrap();
@@ -1844,10 +1888,10 @@ mod tests {
             blank: true,
             agents: vec![("Claude".into(), "claude".into())],
             chosen: Some("claude".into()),
-            grant: Some(Grant::default()),
+            grant: Some(Grant::initial()),
             ..Snapshot::default()
         });
-        assert!(app.shows("Control"), "{:?}", app.screen().texts());
+        assert!(app.shows("Control · global"), "{:?}", app.screen().texts());
         app.press("label:What this thread's agent may do through Po").unwrap();
         app.settle();
         app.press("text:Orchestrate").unwrap();
