@@ -124,7 +124,8 @@ fn quiet(content: impl IntoReactive<SharedString>) -> Text {
 /// The most rows Needs you shows before it scrolls.
 const NEEDS_YOU_ROWS: f32 = 5.;
 
-/// A row of the sidebar: its icon in the lead column if it has one, then what is added.
+/// A row of the sidebar: what leads it (a thread's mark, a fold chevron or an icon) in the lead
+/// column if it has one, then what is added.
 fn side_row(lead: Option<View>) -> View {
     view()
         .group()
@@ -138,7 +139,7 @@ fn side_row(lead: Option<View>) -> View {
         .child(lead)
 }
 
-/// The lead column, its content at the left edge, where a header's title starts.
+/// The lead column, its content at the left edge, where the names of the projects start.
 fn lead(content: impl IntoElement) -> View {
     view().w(space::lead()).flex_none().flex_row().items_center().justify_start().child(content)
 }
@@ -180,8 +181,8 @@ fn grant_badge() -> View {
         .child(small("⌁"))
 }
 
-/// The row of a thread, its mark first, as a step in the transcript starts with its status, and
-/// its title in line with the name of the project above.
+/// The row of a thread, its mark first, as a step in the transcript starts with its status. Its
+/// title is a step right of the name of the project above.
 fn thread_row(thread: &Thread, project: Option<&str>, close_tip: &'static str) -> View {
     let (pid, tid) = (thread.project, thread.id);
     let selected = thread.selected;
@@ -268,10 +269,10 @@ fn project_group(project: &Project) -> View {
         .hover(|s| s.bg(Colors::hover()))
         .on_press(move || send(Cmd::ToggleProject(pid)))
         .child(name)
-        // The last button's padding hangs out, so its icon ends where the text of the rows below does.
+        // The buttons show on hover; the chevron ends the row.
         .child(on_hover(icon_button(IconName::Plus, scale::s3(), "New thread in this project", move || send(Cmd::StartThread(pid)))))
         .child(project.closable.then(|| on_hover(icon_button(IconName::Close, scale::s3(), "Close project", move || send(Cmd::CloseProject(pid))))))
-        // The chevron ends the row, as in the transcript.
+        // As in the transcript, the chevron is the last thing in the row.
         .child(icon(chevron, scale::s4(), move || tint));
     let fold = project.fold.map(|(expanded, hidden)| {
         let label = if expanded { "Show less".to_string() } else { format!("{hidden} more") };
