@@ -209,7 +209,7 @@ fn thread_row(thread: &Thread, project: Option<&str>, close_tip: &'static str) -
             .child(quiet(project.to_string()).number_of_lines(1).flex_shrink(1.)),
         None => view().flex_1().flex_row().child(label.flex_1()),
     };
-    let row = side_row(Some(centered(mark(thread.mark))))
+    let row = side_row(Some(lead(mark(thread.mark))))
         .pr(space::inset())
         .h(space::tree())
         .test_id(&format!("agent-thread-{tid}"))
