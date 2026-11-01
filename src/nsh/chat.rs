@@ -998,59 +998,145 @@ fn agent_row(message: usize, blocks: &[Block], live: bool) -> AnyElement {
     column.into_element()
 }
 
-/// A hairline ruled between the messages of the transcript, so scrolling shows the turns of the
-/// conversation stacked on a page (the divider the settings page rules its fields apart with).
-fn page_line() -> AnyElement {
-    view().h(Points(1.)).w_full().flex_none().bg(super::hairline()).into_element()
-}
-
 /// The conversation: the messages, in order, as a center column.
 fn transcript(items: &[Item], slot: ElementRef, at_end: Signal<bool>, busy: bool) -> AnyElement {
     // The transcript's column is the composer card's width, and its text starts where the
     // composer's does: the card's border, its padding and the field's padding in (see [`bar`]).
     let mut rows = view().w_full().min_w_0().max_w(px(COLUMN)).flex_col().gap(scale::s6()).px(scale::composer_text_inset()).py(scale::s6());
+    // Where each message sits in the column, for the position rail: every row reports the height
+    // it was laid out at (window coordinates), and the column's own is taken off all of them.
+    // Non-reactive on purpose: the layout pass must not renotify the render.
+    let frames = stored(Vec::<Points>::new());
+    let origin = stored(Points(0.));
+    // The section of the page the viewport holds, as the rail knows it.
+    let count = items.len();
+    let shown = count.min(MAX_BARS);
+    let active = signal(0usize);
     // A thought still streaming reads as `Thinking`; every thought that something came after, or
     // that belongs to a turn already over, reads as `Thought`.
     let last = items.iter().rposition(|item| matches!(item, Item::Agent { .. }));
     for (message, item) in items.iter().enumerate() {
-        // A line between the turns, not after the last one.
-        if message > 0 {
-            rows = rows.child(page_line());
-        }
+        let locate = move |bounds: &Bounds<Points>| {
+            frames.with(|sections| {
+                if sections.len() <= message {
+                    sections.resize(message + 1, Points(0.));
+                }
+                sections[message] = bounds.origin.y;
+            });
+        };
         let row = match item {
             Item::User { text, pictures } => user_row(text, pictures),
             Item::Agent { blocks, .. } => agent_row(message, blocks, busy && Some(message) == last),
         };
-        rows = rows.child(row);
+        rows = rows.child(view().on_layout(locate).child(row));
     }
     // The column re-wraps when the window is resized, and its height changes under a scroll
-    // offset that stays put: a transcript that was at its end follows it to the new one.
+    // offset that stays put: a transcript that was at its end follows it to the new one. The
+    // column's own frame is what the row frames are measured against.
     let size = stored((0., 0.));
-    let resized = {
-        move |bounds: &Bounds<Points>| {
-            let now = (bounds.size.width.0, bounds.size.height.0);
-            if size.replace(now) != now && at_end.get_untracked() {
-                let slot = slot;
-                spawn(async move {
-                    slot.scroll_to_end(false);
-                });
-            }
+    let resized = move |bounds: &Bounds<Points>| {
+        origin.replace(bounds.origin.y);
+        let now = (bounds.size.width.0, bounds.size.height.0);
+        if size.replace(now) != now && at_end.get_untracked() {
+            let slot = slot;
+            spawn(async move {
+                slot.scroll_to_end(false);
+            });
         }
     };
+    // The rail's jump: scroll so the section the bar marks sits just under the top of the view.
+    let jump = {
+        let (frames, origin, slot) = (frames, origin, slot);
+        move |rep: usize| {
+            let target = match frames.get().get(rep) {
+                Some(at) => (at.0 - origin.get().0 - scale::s6().0).max(0.),
+                None => return,
+            };
+            let slot = slot;
+            spawn(async move {
+                slot.scroll_to(point(px(0.), px(target)), true);
+            });
+        }
+    };
+    let rail = view()
+        .absolute()
+        .top(Points(0.))
+        .bottom(Points(0.))
+        .right(scale::s2())
+        .flex_col()
+        .items_end()
+        .justify_center()
+        .gap(scale::s1())
+        .children(
+            (0..shown)
+                .map(|j| {
+                    // The message under the bar: one bar per message until there are too many
+                    // ([`MAX_BARS`]), then each bar stands for the messages before the next.
+                    let rep = j * count / shown;
+                    let jump = move || jump(rep);
+                    rail_bar(j, active, format!("Scroll to message {}", rep + 1), jump)
+                })
+                .collect::<Vec<_>>(),
+        );
     view()
         .flex_1()
         .min_h_0()
+        .relative()
         .flex()
         .justify_center()
         .overflow_hidden()
         .child(
             scroll()
                 .size_full()
-                .on_scroll(move |event: &ScrollEvent| at_end.set(event.offset.y + event.size.height >= event.content_size.height - px(24.)))
+                .on_scroll({
+                    let (active, frames, origin) = (active, frames, origin);
+                    move |event: &ScrollEvent| {
+                        at_end.set(event.offset.y + event.size.height >= event.content_size.height - px(24.));
+                        let sections = frames.get();
+                        if sections.is_empty() {
+                            return;
+                        }
+                        // The line two fifths down the viewport is where the eye rests: the
+                        // last section above it is the one the rail points at.
+                        let eye = event.offset.y.0 + event.size.height.0 * 0.4;
+                        let top = origin.get().0;
+                        let mut message = 0usize;
+                        for (at, section) in sections.iter().enumerate() {
+                            if section.0 - top <= eye {
+                                message = at;
+                            }
+                        }
+                        let section = message * shown / count;
+                        if active.get_untracked() != section {
+                            active.set(section);
+                        }
+                    }
+                })
                 .child(view().flex_col().items_center().w_full().min_w_0().px(scale::s3()).on_layout(resized).child(rows.into_element()))
                 .element_ref(&slot),
         )
+        .children((count >= 2).then(|| rail.into_element()))
         .into_element()
+}
+
+/// How many bars the rail shows at most: a longer conversation folds its sections under the
+/// nearest bar, so the rail stays a hand's worth of lines.
+const MAX_BARS: usize = 24;
+
+/// One bar of the rail: quiet when its section is not in view, longer and firmer when it is
+/// (as `active.get()` says), and a press on it scrolls to the section it marks.
+fn rail_bar(j: usize, active: Signal<usize>, label: String, jump: impl Fn() + 'static) -> View {
+    let on = move || active.get() == j;
+    view()
+        .role(AccessibilityRole::Button)
+        .label(label)
+        .flex_none()
+        .w(move || if on() { scale::s6() } else { scale::s4() })
+        .h(scale::s1())
+        .rounded(super::pill())
+        .bg(move || if on() { Colors::muted()() } else { super::hairline()() })
+        .cursor_pointer()
+        .on_press(jump)
 }
 
 // ============ the composer ============
