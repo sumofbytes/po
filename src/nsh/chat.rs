@@ -1062,7 +1062,7 @@ fn transcript(items: &[Item], slot: ElementRef, at_end: Signal<bool>, busy: bool
         .absolute()
         .top(Points(0.))
         .bottom(Points(0.))
-        .right(scale::s2())
+        .right(rail_inset())
         .flex_col()
         .items_end()
         .justify_center()
@@ -1112,7 +1112,9 @@ fn transcript(items: &[Item], slot: ElementRef, at_end: Signal<bool>, busy: bool
                         }
                     }
                 })
-                .child(view().flex_col().items_center().w_full().min_w_0().px(scale::s3()).on_layout(resized).child(rows.into_element()))
+                // With a rail, the gutters are wide enough to hold it with room on its left, on both
+                // sides so the column stays centered under the composer.
+                .child(view().flex_col().items_center().w_full().min_w_0().px(if count >= 2 { rail_gutter() } else { scale::s3() }).on_layout(resized).child(rows.into_element()))
                 .element_ref(&slot),
         )
         .children((count >= 2).then(|| rail.into_element()))
@@ -1123,15 +1125,26 @@ fn transcript(items: &[Item], slot: ElementRef, at_end: Signal<bool>, busy: bool
 /// nearest bar, so the rail stays a hand's worth of lines.
 const MAX_BARS: usize = 24;
 
-/// One bar of the rail: quiet when its section is not in view, longer and firmer when it is
-/// (as `active.get()` says), and a press on it scrolls to the section it marks.
+/// From the stage's right edge to the rail's bars.
+fn rail_inset() -> Points {
+    scale::s1()
+}
+
+/// The transcript's gutter beside a rail: the rail's inset, a bar's length and a margin between
+/// the bars and the text.
+fn rail_gutter() -> Points {
+    rail_inset() + scale::s4() + scale::s3()
+}
+
+/// One bar of the rail, all of one length: quiet when its section is not in view, firmer when it
+/// is (as `active.get()` says), and a press on it scrolls to the section it marks.
 fn rail_bar(j: usize, active: Signal<usize>, label: String, jump: impl Fn() + 'static) -> View {
     let on = move || active.get() == j;
     view()
         .role(AccessibilityRole::Button)
         .label(label)
         .flex_none()
-        .w(move || if on() { scale::s6() } else { scale::s4() })
+        .w(scale::s4())
         .h(scale::s1())
         .rounded(super::pill())
         .bg(move || if on() { Colors::muted()() } else { super::hairline()() })
