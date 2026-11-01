@@ -277,8 +277,7 @@ fn project_group(project: &Project) -> View {
             project
                 .threads
                 .iter()
-                .flat_map(|thread| [Some(thread_row(thread, None, "Close thread"))])
-                .flatten()
+                .map(|thread| thread_row(thread, None, "Close thread"))
                 .collect::<Vec<_>>(),
         )
         .child(fold)

@@ -951,8 +951,8 @@ fn approve_row(message: usize, at: usize, question: &str, lines: &[String], answ
 
 /// One block of the agent's message. What it reports is its own place in the message
 /// ([`Block`]'s `index`), not its place among the rows drawn: a folded run adds a row of its own.
-/// A thought passes on whether it is still streaming, which reads as `Thinking`, not `Thought`.
-fn block_row(message: usize, block: &Block, streaming: bool) -> AnyElement {
+/// `thought_streaming` only matters to a thought: still coming, it reads `Thinking`, not `Thought`.
+fn block_row(message: usize, block: &Block, thought_streaming: bool) -> AnyElement {
     match block {
         Block::Markdown(markdown) => text_view()
             .markdown(markdown.0.to_string())
@@ -961,7 +961,7 @@ fn block_row(message: usize, block: &Block, streaming: bool) -> AnyElement {
             .sized(text_base())
             .text_color(Colors::foreground())
             .into_element(),
-        Block::Thought { index, text: thought, open } => thought_row(message, *index, thought, *open, !streaming),
+        Block::Thought { index, text: thought, open } => thought_row(message, *index, thought, *open, !thought_streaming),
         Block::Tool(tool) => tool_row(message, tool.index, tool),
         Block::Run { index, count, failed, phase, folded, task } => run_row(message, *index, *count, *failed, *phase, *folded, task.as_deref()),
         Block::Plan(entries) => plan_rows(entries),
