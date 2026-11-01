@@ -405,15 +405,17 @@ pub fn Sidebar() -> impl IntoElement {
         let open = state.with(|s| s.issues_open);
         let count = (left > 0).then(|| {
             view()
+                // A circle for one digit, stretching into a pill only for more.
+                .h(scale::s5())
                 .min_w(scale::s5())
                 .flex_none()
                 .items_center()
                 .justify_center()
-                .px(scale::s1_5())
+                .px(scale::s1())
                 .rounded(super::pill())
                 .bg(Colors::selected())
                 .tooltip(super::tooltip(if late > 0 { "Some are late" } else { "Open issues" }))
-                .child(text(left.to_string()).text_size(text_base()).text_color(if late > 0 { Colors::danger()() } else { Colors::muted()() }))
+                .child(text(left.to_string()).text_size(super::text_sm()).line_height(leading(super::text_sm())).text_color(if late > 0 { Colors::danger()() } else { Colors::muted()() }))
         });
         action(IconName::CircleDot, "Issues", "Issues", Some(open), || send(Cmd::ToggleIssues)).child(count)
     };
