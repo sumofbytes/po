@@ -360,6 +360,11 @@ fn step_glyph(phase: Phase) -> View {
 /// The size of every icon of a step: its status, its chevron and its file.
 const STEP_ICON: Points = Points(14.);
 
+/// The padding at each side of the icon of a button in a step, such as the one that opens a file.
+fn step_button_pad() -> Points {
+    scale::s2()
+}
+
 /// A fixed slot for the small icon at the start of a step, as wide as [`step_glyph`], so the text
 /// of every step starts on one line.
 fn lead_slot(content: impl IntoElement) -> View {
@@ -369,7 +374,7 @@ fn lead_slot(content: impl IntoElement) -> View {
 /// A fixed slot for what ends a step, as wide as the button that opens the file of a tool call
 /// (its icon and the padding of that button), so the ends of the steps line up too.
 fn trail_slot(content: impl IntoElement) -> View {
-    view().flex_none().w(scale::s2() + scale::s2() + STEP_ICON).flex_row().justify_center().child(content)
+    view().flex_none().w(step_button_pad() + step_button_pad() + STEP_ICON).flex_row().justify_center().child(content)
 }
 
 /// The popovers of the menus: the theme's own surface, with a shadow.
@@ -568,7 +573,7 @@ fn thought_row(message: usize, at: usize, text_: &str, open: bool) -> AnyElement
             .smooth()
             .hover(|s| s.bg(Colors::hover()))
             .on_press(move || tell(Cmd::ToggleThought { message, block: at }))
-            .child(lead_slot(icon(if open { IconName::ChevronDown } else { IconName::ChevronRight }, STEP_ICON, Colors::muted())))
+            .child(lead_slot(icon(IconName::Lightbulb, STEP_ICON, Colors::muted())))
             .child(text("Thinking").flex_none().sized(text_sm()).font_weight(FontWeight::MEDIUM).text_color(Colors::muted()))
             .children((!open).then(|| {
                 text(thought_gist(text_))
@@ -578,7 +583,9 @@ fn thought_row(message: usize, at: usize, text_: &str, open: bool) -> AnyElement
                     .sized(text_sm())
                     .text_color(Colors::muted())
                     .opacity(crate::theme::tokens::DIM)
-            })),
+            }))
+            .children(open.then(|| view().flex_1().min_w_0()))
+            .child(trail_slot(icon(if open { IconName::ChevronDown } else { IconName::ChevronRight }, STEP_ICON, Colors::muted()))),
     );
     if open {
         column = column.child(
@@ -589,7 +596,8 @@ fn thought_row(message: usize, at: usize, text_: &str, open: bool) -> AnyElement
                 .sized(text_sm())
                 .px(scale::s3())
                 .py(scale::s1())
-                .pl(scale::s5())
+                // Under the title, not under its icon.
+                .pl(scale::s4() + scale::s2())
                 .opacity(crate::theme::tokens::DIM)
                 .text_color(Colors::muted()),
         );
@@ -623,6 +631,8 @@ fn tool_row(message: usize, at: usize, tool: &Tool) -> AnyElement {
                 .gap(scale::s2())
                 .child(
                     view()
+                        .role(AccessibilityRole::Button)
+                        .label(title.clone())
                         .flex_row()
                         .items_center()
                         .gap(scale::s2())
@@ -645,14 +655,26 @@ fn tool_row(message: usize, at: usize, tool: &Tool) -> AnyElement {
                         .role(AccessibilityRole::Button)
                         .label("Open the file it changed")
                         .flex_none()
-                        .px(scale::s2())
+                        .px(step_button_pad())
                         .py(scale::s0_5())
                         .rounded(Colors::radius())
                         .cursor_pointer()
                         .hover(|s| s.bg(Colors::hover()))
                         .on_press(move || tell(Cmd::Open(path.clone())))
                         .child(icon(IconName::FileText, STEP_ICON, Colors::muted()))
-                })),
+                }))
+                .child(
+                    view()
+                        .role(AccessibilityRole::Button)
+                        .label(if tool.open { "Hide the call's details" } else { "Show the call's details" })
+                        .flex_none()
+                        .py(scale::s0_5())
+                        .rounded(Colors::radius())
+                        .cursor_pointer()
+                        .hover(|s| s.bg(Colors::hover()))
+                        .on_press(move || tell(Cmd::ToggleTool { message, block: at }))
+                        .child(trail_slot(icon(if tool.open { IconName::ChevronDown } else { IconName::ChevronRight }, STEP_ICON, Colors::muted()))),
+                ),
         );
     if tool.open {
         for piece in [&tool.arguments, &tool.result] {
@@ -909,7 +931,7 @@ fn agent_row(message: usize, blocks: &[Block]) -> AnyElement {
     let mut skip = 0;
     let mut before: Option<&Block> = None;
     if blocks.is_empty() {
-        column = column.child(text("Thinking…").sized(text_sm()).text_color(Colors::muted()));
+        column = column.child(text("Working…").sized(text_sm()).text_color(Colors::muted()));
     }
     for block in blocks {
         if skip > 0 {
@@ -1817,13 +1839,13 @@ mod tests {
     }
 
     #[test]
-    fn settings_stay_after_the_thread_starts_wait_while_it_is_busy_and_a_new_turn_says_it_is_thinking() {
+    fn settings_stay_after_the_thread_starts_wait_while_it_is_busy_and_a_new_turn_says_it_is_working() {
         let mut guard = crate::nsh::bus::lock();
         let _commands = guard.as_mut().expect("the channel");
         let settings = vec![Setting { id: "model".into(), name: "Model".into(), current: "b".into(), choices: vec![("a".into(), "Fast".into()), ("b".into(), "Smart".into())] }];
         let mut app = start(Snapshot { settings: settings.clone(), items: vec![Item::Agent { index: 0, blocks: vec![] }], ..Snapshot::default() });
         assert!(app.shows("Smart"), "{:?}", app.screen().texts());
-        assert!(app.shows("Thinking…"), "{:?}", app.screen().texts());
+        assert!(app.shows("Working…"), "{:?}", app.screen().texts());
         publish(Snapshot { settings, busy: true, items: vec![Item::Agent { index: 0, blocks: vec![] }], ..Snapshot::default() });
         app.wait(std::time::Duration::from_millis(100)).unwrap();
         assert!(app.shows("Smart"), "{:?}", app.screen().texts());
