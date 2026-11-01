@@ -277,7 +277,8 @@ fn project_group(project: &Project) -> View {
     let fold = project.fold.map(|(expanded, hidden)| {
         let label = if expanded { "Show less".to_string() } else { format!("{hidden} more") };
         let chevron = if expanded { IconName::ChevronUp } else { IconName::ChevronDown };
-        side_row(Some(lead(icon(chevron, scale::s3(), Colors::muted()))))
+        // The chevron draws from a quarter of its box in, so the box hangs out to put the stroke at the ring's edge.
+        side_row(Some(lead(view().ml(-scale::s3() / 4.).child(icon(chevron, scale::s3(), Colors::muted())))))
             .h(space::more())
             .hover(|s| s.bg(Colors::hover()))
             .on_press(move || send(Cmd::ToggleMore(pid)))
