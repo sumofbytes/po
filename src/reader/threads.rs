@@ -876,16 +876,30 @@ impl Reader {
         cx.notify();
     }
 
-    /// The user pressed close on a thread. One that would lose work (a running turn, a question,
-    /// queued messages) is only marked the first time, and closed by the second press.
+    /// The threads `tid` started, as (project, thread).
+    pub(crate) fn children_of(&self, tid: u64) -> Vec<(u64, u64)> {
+        self.views().iter().flat_map(|view| view.threads.iter().filter(|thread| thread.parent == Some(tid)).map(move |thread| (view.id, thread.id))).collect()
+    }
+
+    /// Whether closing `tid`, with the threads it started, would lose work.
+    pub(crate) fn close_loses_work(&self, tid: u64) -> bool {
+        let children = self.children_of(tid);
+        self.threads_all().filter(|thread| thread.id == tid || children.iter().any(|(_, child)| *child == thread.id)).any(|thread| thread.at_risk())
+    }
+
+    /// The user pressed close on a thread. It goes with the threads it started, which have no
+    /// parent left to report to. If that would lose work (a running turn, a question, queued
+    /// messages) in any of them, the first press only marks it and the second closes.
     pub(crate) fn close_asked(&mut self, pid: u64, tid: u64, window: &mut Window, cx: &mut Context<Self>) {
-        let at_risk = self.threads_all().find(|thread| thread.id == tid).is_some_and(|thread| thread.at_risk());
-        if at_risk && self.closing != Some((pid, tid)) {
+        if self.close_loses_work(tid) && self.closing != Some((pid, tid)) {
             self.closing = Some((pid, tid));
             cx.notify();
             return;
         }
         self.closing = None;
+        for (child_project, child) in self.children_of(tid) {
+            self.close_any_thread(child_project, child, window, cx);
+        }
         self.close_any_thread(pid, tid, window, cx);
     }
 

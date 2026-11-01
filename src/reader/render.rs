@@ -33,7 +33,7 @@ impl Reader {
             controlled: self.grants.get(&thread.id).is_some_and(|grant| *grant != command::Grant::default()),
             day: None,
             ago: ago(now_ms(), thread.active_at),
-            closing: self.closing == Some((pid, thread.id)) && thread.at_risk(),
+            closing: self.closing == Some((pid, thread.id)) && self.close_loses_work(thread.id),
         };
         let today = date::today();
         // Filtering keeps a project whose name matches, with all its threads, and any project with a
