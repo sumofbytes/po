@@ -1196,19 +1196,27 @@ fn rail_bar(j: usize, active: Signal<usize>, hover: Signal<Option<usize>>, label
                 .w_full()
                 .h(scale::s0_5())
                 .rounded(super::pill())
-                .bg(move || if on() || near() == Some(0) { Colors::muted()() } else { super::hairline()() })
+                .bg(move || match near() {
+                    Some(0) => Colors::muted()(),
+                    // The bars beside it take the firm color in part, less the further they are.
+                    Some(1) => Colors::muted()().opacity(0.75),
+                    Some(_) => Colors::muted()().opacity(0.5),
+                    None if on() => Colors::muted()(),
+                    None => super::hairline()(),
+                })
                 // At rest a bar is shorter than its slot and thin.
                 .origin_center()
                 .scale_x(move || match near() {
                     Some(0) => 1_f32,
-                    Some(1) => 0.85,
-                    Some(_) => 0.77,
-                    None => 0.7,
+                    Some(1) => 0.8,
+                    Some(_) => 0.65,
+                    None => 0.5,
                 })
                 .scale_y(move || match near() {
-                    Some(0) => 2_f32,
-                    Some(1) => 1.5,
-                    _ => 1.,
+                    Some(0) => 3_f32,
+                    Some(1) => 2.,
+                    Some(_) => 1.5,
+                    None => 1.,
                 })
                 .transition()
                 .duration(150.)
