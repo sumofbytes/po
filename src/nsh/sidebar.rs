@@ -147,7 +147,7 @@ fn centered(content: impl IntoElement) -> View {
 
 /// The lead column, its content at the left edge, where a header's title starts.
 fn lead(content: impl IntoElement) -> View {
-    view().w(space::lead()).flex_none().items_center().justify_start().child(content)
+    view().w(space::lead()).flex_none().flex_row().items_center().justify_start().child(content)
 }
 
 /// A thread's state, in the lead column of its row: a dot while it runs or has
