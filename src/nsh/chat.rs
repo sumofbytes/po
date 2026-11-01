@@ -41,6 +41,13 @@ pub struct Grant {
     pub approvals: bool,
 }
 
+impl Grant {
+    /// What a thread's agent has until the user sets it; the Reader's `Grant::initial`.
+    pub fn initial() -> Self {
+        Self { scope: Scope::Global, read: false, approvals: false }
+    }
+}
+
 impl Default for Grant {
     fn default() -> Self {
         Self { scope: Scope::Viewer, read: false, approvals: false }
@@ -64,6 +71,17 @@ pub struct Setting {
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Picture {
     pub uri: String,
+    /// Its pixels, which give the box it is drawn in its shape.
+    pub size: (u32, u32),
+}
+
+impl Picture {
+    /// The box the picture fills, as large as fits `w` by `h` points without a larger side than it has.
+    fn fit(&self, w: f32, h: f32) -> (f32, f32) {
+        let (pw, ph) = (self.size.0.max(1) as f32, self.size.1.max(1) as f32);
+        let scale = (w / pw).min(h / ph).min(1.);
+        ((pw * scale).round(), (ph * scale).round())
+    }
 }
 
 /// What waits to be sent when the turn is over: `kind` says how it got there (nothing is the
@@ -93,6 +111,8 @@ pub struct Session {
     pub title: String,
     /// When it was last at work, human-readable.
     pub when: String,
+    /// It was closed here lately, so it is listed first.
+    pub closed: bool,
 }
 
 /// A tool call of the agent's.
@@ -165,6 +185,18 @@ pub enum Picking {
     Loading,
 }
 
+/// What the header's status icon says.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Tone {
+    /// Ready, or asleep.
+    Idle,
+    /// Starting, or a turn going on.
+    Working,
+    /// Waiting on the user.
+    Attention,
+    Failed,
+}
+
 #[derive(Clone, PartialEq, Debug, Default)]
 pub struct Snapshot {
     pub glass: bool,
@@ -173,6 +205,8 @@ pub struct Snapshot {
     pub trail: Vec<Control>,
     /// The status lines of the header's right, like `3 threads · 1 asking`.
     pub statuses: Vec<String>,
+    /// How the thread itself is doing, drawn as an icon; `None` before it has anything to say.
+    pub state: Option<(Tone, String)>,
     /// Nothing on screen yet: the agent is picked below, and the thread starts when something
     /// is sent.
     pub blank: bool,
@@ -326,6 +360,11 @@ fn step_glyph(phase: Phase) -> View {
 /// The size of every icon of a step: its status, its chevron and its file.
 const STEP_ICON: Points = Points(14.);
 
+/// The padding at each side of the icon of a button in a step, such as the one that opens a file.
+fn step_button_pad() -> Points {
+    scale::s2()
+}
+
 /// A fixed slot for the small icon at the start of a step, as wide as [`step_glyph`], so the text
 /// of every step starts on one line.
 fn lead_slot(content: impl IntoElement) -> View {
@@ -335,20 +374,11 @@ fn lead_slot(content: impl IntoElement) -> View {
 /// A fixed slot for what ends a step, as wide as the button that opens the file of a tool call
 /// (its icon and the padding of that button), so the ends of the steps line up too.
 fn trail_slot(content: impl IntoElement) -> View {
-    view().flex_none().w(scale::s2() + scale::s2() + STEP_ICON).flex_row().justify_center().child(content)
+    view().flex_none().w(step_button_pad() + step_button_pad() + STEP_ICON).flex_row().justify_center().child(content)
 }
 
 /// The popovers of the menus: the theme's own surface, with a shadow.
 const MENU: &str = "bg-popover border border-border rounded-xl shadow-2xl p-1 min-w-44";
-
-/// A menu item's row: the check when it is the one on, else the label alone.
-fn choice(label: String, on: bool) -> String {
-    if on {
-        format!("✓ {label}")
-    } else {
-        label
-    }
-}
 
 /// A menu's trigger: its label and the caret, as a ghost row the Menu opens on.
 fn menu_trigger(label: String, tip: &'static str) -> View {
@@ -377,22 +407,40 @@ fn menu_trigger(label: String, tip: &'static str) -> View {
         )
 }
 
-/// A menu item's own looks, under the popover's.
-fn item(what: String, on_press: impl Fn() + 'static) -> AnyElement {
-    menu_item()
-        .cursor_pointer()
-        .px(scale::s3())
-        .py(scale::s1_5())
-        .hover(|s| s.bg(Colors::hover()))
-        .on_select(on_press)
-        .child(text(what).text_size(text_sm()))
-        .into_element()
+/// A menu item's own looks, under the popover's. `on` marks the choice that is set with a check in
+/// a slot at the end, which is kept when it is off so the labels don't move.
+fn item(what: String, on: Option<bool>, on_press: impl Fn() + 'static) -> AnyElement {
+    let mut row = view().flex_row().items_center().gap(scale::s3()).w_full().child(text(what).flex_1().sized(text_sm()).text_color(Colors::foreground()));
+    if let Some(on) = on {
+        row = row.child(view().flex_none().w(scale::s3_5()).children(on.then(|| icon(IconName::Check, scale::s3_5(), Colors::foreground()))));
+    }
+    menu_item().cursor_pointer().px(scale::s3()).py(scale::s1_5()).hover(|s| s.bg(Colors::hover())).on_select(on_press).child(row).into_element()
 }
 
 /// A line in a header, like `3 threads · 1 asking`.
 fn status_line(line: String) -> View {
-    // The height of the History chip beside it, so the two sit on one rhythm.
+    // The height of the History button beside it, so the two sit on one rhythm.
     view().flex_none().px(scale::s2()).py(scale::s1()).child(text(super::sentence(&line)).sized(text_sm()).text_color(Colors::muted()).number_of_lines(1))
+}
+
+/// The thread's state as an icon in the header's right, its words in the tooltip. Idle shows
+/// nothing, and the shapes differ so the state doesn't rest on color alone.
+fn status_icon(tone: Tone, text: &str) -> Option<View> {
+    let (name, color): (IconName, fn() -> AdaptiveColor) = match tone {
+        Tone::Idle => return None,
+        Tone::Working => (IconName::CircleHalf, || Colors::warning()()),
+        Tone::Attention => (IconName::CircleDot, || Colors::info()()),
+        Tone::Failed => (IconName::CircleX, || Colors::danger()()),
+    };
+    Some(
+        view()
+            .role(AccessibilityRole::Image)
+            .label(text.to_string())
+            .flex_none()
+            .p(scale::s1_5())
+            .tooltip(tooltip(text.to_string()))
+            .child(icon(name, scale::s3_5(), color)),
+    )
 }
 
 /// The pane header of the conversation: the title, the statuses, the history button, the Control
@@ -402,30 +450,14 @@ fn pane(title: String, snap: &Snapshot) -> View {
     for line in &snap.statuses {
         right = right.child(status_line(line.clone()));
     }
-    if snap.picking.is_none() {
-        right = right.child(
-            view()
-                .role(AccessibilityRole::Button)
-                .label("History")
-                .flex_none()
-                .flex_row()
-                .items_center()
-                .gap(scale::s1_5())
-                .px(scale::s3())
-                .py(scale::s1())
-                .rounded(super::pill())
-                .bg(Colors::hover())
-                .cursor_pointer()
-                .smooth()
-                .hover(|s| s.bg(Colors::selected()))
-                .on_press(|| tell(Cmd::History))
-                .tooltip(tooltip("Resume an earlier session (Ctrl+Shift+H)"))
-                .child(icon(IconName::History, scale::s3(), Colors::muted()))
-                .child(body("History").text_color(Colors::muted())),
-        );
+    if let Some((tone, text)) = &snap.state {
+        right = right.child(status_icon(*tone, text));
     }
-    // The Control menu, once the thread's agent may do more than talk.
-    if let Some(grant) = snap.grant.filter(|grant| *grant != Grant::default()) {
+    if snap.picking.is_none() {
+        right = right.child(super::header::toggle_button(IconName::History, "Resume an earlier session (Ctrl+Shift+H)", false, || tell(Cmd::History)));
+    }
+    // The Control menu, once the user has set what the thread's agent may do.
+    if let Some(grant) = snap.grant.filter(|grant| *grant != Grant::initial()) {
         right = right.child(grant_menu(grant));
     }
     pane_header(title, right, &snap.lead, &snap.trail, snap.glass)
@@ -447,17 +479,17 @@ fn grant_menu(grant: Grant) -> AnyElement {
     for (name, scope) in [("Viewer", Scope::Viewer), ("Orchestrate", Scope::Orchestrate), ("Global", Scope::Global)] {
         let on = grant.scope == scope;
         let set = Grant { scope, ..grant };
-        menu = menu.child(item(choice(name.to_string(), on), move || tell(Cmd::Grant(GrantChange::Set(set)))));
+        menu = menu.child(item(name.to_string(), Some(on), move || tell(Cmd::Grant(GrantChange::Set(set)))));
     }
     menu = menu.child(separator());
-    menu = menu.child(item(choice("May read other threads here".to_string(), grant.read), move || tell(Cmd::Grant(GrantChange::Read))));
+    menu = menu.child(item("May read other threads here".to_string(), Some(grant.read), move || tell(Cmd::Grant(GrantChange::Read))));
     if grant.approvals || grant.scope != Scope::Viewer {
-        menu = menu.child(item(choice("May answer its threads' permission asks".to_string(), grant.approvals), move || tell(Cmd::Grant(GrantChange::Approvals))));
+        menu = menu.child(item("May answer its threads' permission asks".to_string(), Some(grant.approvals), move || tell(Cmd::Grant(GrantChange::Approvals))));
     }
     menu = menu.child(separator());
     menu = menu.child(menu_item().disabled(true).px(scale::s3()).py(scale::s1_5()).child(note("A raise takes effect when the agent restarts")).into_element());
     if active {
-        menu = menu.child(item("Stop agent control".to_string(), move || tell(Cmd::Grant(GrantChange::Stop))));
+        menu = menu.child(item("Stop agent control".to_string(), None, move || tell(Cmd::Grant(GrantChange::Stop))));
     }
     menu.into_element()
 }
@@ -488,12 +520,14 @@ fn user_row(text_: &str, pictures: &[Picture]) -> AnyElement {
             pictures
                 .iter()
                 .map(|picture| {
+                    // A box of the picture's own shape: one from a `data:` URI has no size before it
+                    // loads, so it is given one rather than left to collapse.
+                    let (w, h) = picture.fit(360., 240.);
                     image(picture.uri.clone())
-                        .w_full()
-                        .max_h(px(280.))
+                        .w(px(w))
+                        .h(px(h))
+                        .resize_mode(ResizeMode::Cover)
                         .rounded(Colors::radius())
-                        .border_1()
-                        .border_color(super::hairline())
                         .overflow_hidden()
                         .flex_none()
                 })
@@ -539,7 +573,7 @@ fn thought_row(message: usize, at: usize, text_: &str, open: bool) -> AnyElement
             .smooth()
             .hover(|s| s.bg(Colors::hover()))
             .on_press(move || tell(Cmd::ToggleThought { message, block: at }))
-            .child(lead_slot(icon(if open { IconName::ChevronDown } else { IconName::ChevronRight }, STEP_ICON, Colors::muted())))
+            .child(lead_slot(icon(IconName::Lightbulb, STEP_ICON, Colors::muted())))
             .child(text("Thinking").flex_none().sized(text_sm()).font_weight(FontWeight::MEDIUM).text_color(Colors::muted()))
             .children((!open).then(|| {
                 text(thought_gist(text_))
@@ -549,7 +583,9 @@ fn thought_row(message: usize, at: usize, text_: &str, open: bool) -> AnyElement
                     .sized(text_sm())
                     .text_color(Colors::muted())
                     .opacity(crate::theme::tokens::DIM)
-            })),
+            }))
+            .children(open.then(|| view().flex_1().min_w_0()))
+            .child(trail_slot(icon(if open { IconName::ChevronDown } else { IconName::ChevronRight }, STEP_ICON, Colors::muted()))),
     );
     if open {
         column = column.child(
@@ -560,7 +596,8 @@ fn thought_row(message: usize, at: usize, text_: &str, open: bool) -> AnyElement
                 .sized(text_sm())
                 .px(scale::s3())
                 .py(scale::s1())
-                .pl(scale::s5())
+                // Under the title, not under its icon.
+                .pl(scale::s4() + scale::s2())
                 .opacity(crate::theme::tokens::DIM)
                 .text_color(Colors::muted()),
         );
@@ -594,6 +631,8 @@ fn tool_row(message: usize, at: usize, tool: &Tool) -> AnyElement {
                 .gap(scale::s2())
                 .child(
                     view()
+                        .role(AccessibilityRole::Button)
+                        .label(title.clone())
                         .flex_row()
                         .items_center()
                         .gap(scale::s2())
@@ -616,14 +655,26 @@ fn tool_row(message: usize, at: usize, tool: &Tool) -> AnyElement {
                         .role(AccessibilityRole::Button)
                         .label("Open the file it changed")
                         .flex_none()
-                        .px(scale::s2())
+                        .px(step_button_pad())
                         .py(scale::s0_5())
                         .rounded(Colors::radius())
                         .cursor_pointer()
                         .hover(|s| s.bg(Colors::hover()))
                         .on_press(move || tell(Cmd::Open(path.clone())))
                         .child(icon(IconName::FileText, STEP_ICON, Colors::muted()))
-                })),
+                }))
+                .child(
+                    view()
+                        .role(AccessibilityRole::Button)
+                        .label(if tool.open { "Hide the call's details" } else { "Show the call's details" })
+                        .flex_none()
+                        .py(scale::s0_5())
+                        .rounded(Colors::radius())
+                        .cursor_pointer()
+                        .hover(|s| s.bg(Colors::hover()))
+                        .on_press(move || tell(Cmd::ToggleTool { message, block: at }))
+                        .child(trail_slot(icon(if tool.open { IconName::ChevronDown } else { IconName::ChevronRight }, STEP_ICON, Colors::muted()))),
+                ),
         );
     if tool.open {
         for piece in [&tool.arguments, &tool.result] {
@@ -880,7 +931,7 @@ fn agent_row(message: usize, blocks: &[Block]) -> AnyElement {
     let mut skip = 0;
     let mut before: Option<&Block> = None;
     if blocks.is_empty() {
-        column = column.child(text("Thinking…").sized(text_sm()).text_color(Colors::muted()));
+        column = column.child(text("Working…").sized(text_sm()).text_color(Colors::muted()));
     }
     for block in blocks {
         if skip > 0 {
@@ -951,6 +1002,9 @@ fn transcript(items: &[Item], slot: ElementRef, at_end: Signal<bool>) -> AnyElem
 /// The pictures of the draft: their strip, each with a way to take it off.
 fn pictures_row(pictures: &[Picture]) -> AnyElement {
     view()
+        // The field's own padding, so the strip starts where its text does.
+        .px(scale::s2())
+        .py(scale::s1())
         .flex_row()
         .flex_wrap()
         .items_start()
@@ -964,13 +1018,18 @@ fn pictures_row(pictures: &[Picture]) -> AnyElement {
                         .relative()
                         .flex_none()
                         .child(
-                            image(picture.uri.clone())
-                                .rounded(Colors::radius())
-                                .border_1()
-                                .border_color(super::hairline())
-                                .max_h(px(72.))
-                                .max_w(px(120.))
-                                .overflow_hidden(),
+                            {
+                                // A box of the picture's own shape (see `user_row`).
+                                let (w, h) = picture.fit(120., 72.);
+                                image(picture.uri.clone())
+                                    .rounded(Colors::radius())
+                                    .border_1()
+                                    .border_color(super::hairline())
+                                    .w(px(w))
+                                    .h(px(h))
+                                    .resize_mode(ResizeMode::Cover)
+                                    .overflow_hidden()
+                            },
                         )
                         .child(
                             view()
@@ -1112,7 +1171,20 @@ fn picker(picking: &Picking) -> AnyElement {
     let (title, rows) = match picking {
         Picking::Sessions(sessions) => ("Resume".to_string(), {
             let mut column = view().flex_col();
-            for session in sessions {
+            // Closed ones come first; when there are any, the rest is named so the two read apart.
+            let any_closed = sessions.first().is_some_and(|session| session.closed);
+            let rest = sessions.iter().position(|session| !session.closed);
+            for (at, session) in sessions.iter().enumerate() {
+                if any_closed && (at == 0 || Some(at) == rest) {
+                    column = column.child(
+                        text(if at == 0 { "Recently closed" } else { "Earlier" })
+                            .px(scale::s3())
+                            .py(scale::s1())
+                            .sized(text_xs())
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(Colors::muted()),
+                    );
+                }
                 let (id, name, when) = (session.id.clone(), session.title.clone(), session.when.clone());
                 let label = if name.is_empty() { "Untitled".to_string() } else { name };
                 column = column.child(
@@ -1193,7 +1265,7 @@ fn setup(snap: &Snapshot) -> AnyElement {
     let pick = snap.chosen.clone();
     for (agent_name, id) in snap.agents.clone() {
         let on = pick.as_ref() == Some(&id);
-        agents = agents.child(item(choice(agent_name, on), move || {
+        agents = agents.child(item(agent_name, Some(on), move || {
             let id = id.clone();
             tell(Cmd::PickAgent(id))
         }));
@@ -1239,7 +1311,7 @@ fn setting_chips(settings: &[Setting], busy: bool) -> Vec<AnyElement> {
             for (value, name) in &setting.choices {
                 let on = *value == setting.current;
                 let (decided, id) = (value.clone(), setting.id.clone());
-                menu = menu.child(item(choice(name.clone(), on), move || {
+                menu = menu.child(item(name.clone(), Some(on), move || {
                     let (id, decided) = (id.clone(), decided.clone());
                     tell(Cmd::Setting { id, value: decided })
                 }));
@@ -1374,7 +1446,6 @@ fn draft_field(draft: &Signal<String>, field_ref: ElementRef) -> Input {
             tell(Cmd::Draft(text.clone()));
             tell(Cmd::Send { later: false });
         })
-        .on_file_drop(move |drop: &FileDropEvent| tell(Cmd::Drop(drop.uris.clone())))
 }
 
 /// The field in its row. A value the app writes to a field the user has typed in is dropped as
@@ -1436,7 +1507,6 @@ fn bar(snap: Snapshot, draft: Signal<String>, field_ref: ElementRef) -> AnyEleme
         .shadow_opacity(1.)
         .shadow_radius(px(0.))
         .shadow_offset(point(px(0.), px(1.)))
-        .on_file_drop(move |drop: &FileDropEvent| tell(Cmd::Drop(drop.uris.clone())))
         .children(snap.note.as_deref().map(note_row))
         .children((!snap.pictures.is_empty()).then(|| pictures_row(&snap.pictures)))
         .child(fresh_field(snap.draft_reset, draft_field(&field, field_ref)))
@@ -1751,13 +1821,31 @@ mod tests {
     }
 
     #[test]
-    fn settings_stay_after_the_thread_starts_wait_while_it_is_busy_and_a_new_turn_says_it_is_thinking() {
+    fn the_picker_names_what_was_closed_lately_and_resumes_it_by_its_session() {
+        let mut guard = crate::nsh::bus::lock();
+        let commands = guard.as_mut().expect("the channel");
+        let session = |id: &str, title: &str, closed: bool| Session { id: id.into(), title: title.into(), when: "2026-11-01 10:00".into(), closed };
+        let mut app = start(Snapshot {
+            picking: Some(Picking::Sessions(vec![session("s2", "Fix the retry", true), session("s1", "Old idea", false)])),
+            ..Snapshot::default()
+        });
+        assert!(app.shows("Recently closed") && app.shows("Earlier"), "{:?}", app.screen().texts());
+        app.press("label:Fix the retry").unwrap();
+        assert_eq!(drain(&mut app, commands), [Bus::Chat(Cmd::Resume("s2".into()))]);
+        // With nothing closed lately the list is not split.
+        publish(Snapshot { picking: Some(Picking::Sessions(vec![session("s1", "Old idea", false)])), ..Snapshot::default() });
+        app.wait(std::time::Duration::from_millis(100)).unwrap();
+        assert!(!app.shows("Recently closed") && !app.shows("Earlier"), "{:?}", app.screen().texts());
+    }
+
+    #[test]
+    fn settings_stay_after_the_thread_starts_wait_while_it_is_busy_and_a_new_turn_says_it_is_working() {
         let mut guard = crate::nsh::bus::lock();
         let _commands = guard.as_mut().expect("the channel");
         let settings = vec![Setting { id: "model".into(), name: "Model".into(), current: "b".into(), choices: vec![("a".into(), "Fast".into()), ("b".into(), "Smart".into())] }];
         let mut app = start(Snapshot { settings: settings.clone(), items: vec![Item::Agent { index: 0, blocks: vec![] }], ..Snapshot::default() });
         assert!(app.shows("Smart"), "{:?}", app.screen().texts());
-        assert!(app.shows("Thinking…"), "{:?}", app.screen().texts());
+        assert!(app.shows("Working…"), "{:?}", app.screen().texts());
         publish(Snapshot { settings, busy: true, items: vec![Item::Agent { index: 0, blocks: vec![] }], ..Snapshot::default() });
         app.wait(std::time::Duration::from_millis(100)).unwrap();
         assert!(app.shows("Smart"), "{:?}", app.screen().texts());
@@ -1782,19 +1870,19 @@ mod tests {
     }
 
     #[test]
-    fn a_started_thread_names_its_agent_and_offers_control_before_any_grant() {
+    fn a_started_thread_names_its_agent_and_offers_control_before_any_change() {
         let mut guard = crate::nsh::bus::lock();
         let commands = guard.as_mut().expect("the channel");
         let mut app = start(Snapshot {
             agents: vec![("Claude".into(), "claude".into())],
             chosen: Some("claude".into()),
-            grant: Some(Grant::default()),
+            grant: Some(Grant::initial()),
             items: vec![Item::Agent { index: 0, blocks: vec![] }],
             ..Snapshot::default()
         });
         assert!(app.shows("Claude"), "{:?}", app.screen().texts());
         let texts = app.screen().texts();
-        assert_eq!(texts.iter().filter(|t| **t == "Control").count(), 1, "only the composer's menu, not the header's: {texts:?}");
+        assert_eq!(texts.iter().filter(|t| **t == "Control · global").count(), 1, "only the composer's menu, not the header's: {texts:?}");
         app.press("label:What this thread's agent may do through Po").unwrap();
         app.settle();
         app.press("text:Orchestrate").unwrap();
@@ -1811,10 +1899,10 @@ mod tests {
             blank: true,
             agents: vec![("Claude".into(), "claude".into())],
             chosen: Some("claude".into()),
-            grant: Some(Grant::default()),
+            grant: Some(Grant::initial()),
             ..Snapshot::default()
         });
-        assert!(app.shows("Control"), "{:?}", app.screen().texts());
+        assert!(app.shows("Control · global"), "{:?}", app.screen().texts());
         app.press("label:What this thread's agent may do through Po").unwrap();
         app.settle();
         app.press("text:Orchestrate").unwrap();

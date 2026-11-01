@@ -30,9 +30,10 @@ impl Reader {
                 Activity::Asking => side::Mark::Asking,
             },
             selected: (pid, thread.id) == (active_project, active_thread),
-            controlled: self.grants.get(&thread.id).is_some_and(|grant| *grant != command::Grant::default()),
+            controlled: self.grants.get(&thread.id).is_some_and(|grant| *grant != command::Grant::initial() && *grant != command::Grant::default()),
             day: None,
             ago: ago(now_ms(), thread.active_at),
+            closing: self.closing == Some((pid, thread.id)) && self.close_loses_work(thread.id),
         };
         let today = date::today();
         // Filtering keeps a project whose name matches, with all its threads, and any project with a
@@ -146,17 +147,26 @@ impl Reader {
     pub(crate) fn chat_pane(&self, lead: Vec<nsh::header::Control>, trail: Vec<nsh::header::Control>, cx: &mut Context<Self>) -> gpui::Div {
         nsh::chat::publish(self.chat_snapshot(lead, trail, cx));
         let tint = cx.global::<Palette>().primary.opacity(theme::tokens::DROP_TINT);
-        // Files dropped anywhere on the conversation join the draft: the platform under NSH does
-        // not hand drops to its elements, so the window's own drop target takes them.
+        // Files dropped anywhere on the conversation join the draft. NSH's views can sit over this
+        // element and keep it from being the hovered one, so while a file is being dragged a layer
+        // above them takes the drop; it is only there for the drag, so clicks are never blocked.
+        let dragging = cx.has_active_drag();
         div()
             .size_full()
+            .relative()
             .flex()
             .flex_col()
-            .drag_over::<gpui::ExternalPaths>(move |style, _, _, _| style.bg(tint))
-            .on_drop(cx.listener(|reader, dropped: &gpui::ExternalPaths, _, cx| {
-                reader.attach(dropped.paths().iter().cloned().map(Source::Path).collect(), cx);
-            }))
             .child(self.chat.clone())
+            .children(dragging.then(|| {
+                div()
+                    .absolute()
+                    .size_full()
+                    .occlude()
+                    .drag_over::<gpui::ExternalPaths>(move |style, _, _, _| style.bg(tint))
+                    .on_drop(cx.listener(|reader, dropped: &gpui::ExternalPaths, _, cx| {
+                        reader.attach(dropped.paths().iter().cloned().map(Source::Path).collect(), cx);
+                    }))
+            }))
     }
 
     /// What the conversation shows: the header, the transcript, and the composer.
@@ -200,26 +210,50 @@ impl Reader {
         if let Some(line) = self.children_status(thread.id) {
             statuses.push(line);
         }
-        if !thread.status.is_empty() {
+        let state = (!thread.status.is_empty()).then(|| {
+            use crate::state::ThreadState as S;
+            let tone = match crate::state::state(&thread.facts()) {
+                S::Ready | S::Asleep | S::Closed => chat::Tone::Idle,
+                S::Starting | S::Running => chat::Tone::Working,
+                S::Approval | S::Asking => chat::Tone::Attention,
+                S::Failed => chat::Tone::Failed,
+            };
             // "ready" is set when the agent starts and nothing resets it, so a turn going on says so here.
-            statuses.push(thread.status.clone());
-        }
+            let text = if tone == chat::Tone::Working && thread.status == "ready" { "working" } else { thread.status.as_str() };
+            (tone, text.to_string())
+        });
         let picking = thread.picking.then(|| match &thread.sessions {
-            Some(sessions) if !thread.loading && !sessions.is_empty() => chat::Picking::Sessions(sessions.iter().map(|session| chat::Session {
-                id: session.id.clone(),
-                title: session.title.clone(),
-                when: session.updated.get(..16).unwrap_or_default().replace('T', " "),
-            }).collect()),
+            Some(sessions) if !thread.loading && !sessions.is_empty() => {
+                // What was closed here lately, in the order it was closed, if this agent still lists it.
+                let closed: Vec<&SessionInfo> = self
+                    .project
+                    .closed
+                    .iter()
+                    .filter(|closed| thread.agent.as_deref() == Some(closed.agent.as_str()))
+                    .filter_map(|closed| sessions.iter().find(|session| session.id == closed.session))
+                    .collect();
+                let session = |info: &SessionInfo, closed: bool| chat::Session {
+                    id: info.id.clone(),
+                    title: info.title.clone(),
+                    when: info.updated.get(..16).unwrap_or_default().replace('T', " "),
+                    closed,
+                };
+                // One that was picked again since is open, not closed.
+                let closed: Vec<&SessionInfo> = closed.into_iter().filter(|info| !self.threads_all().any(|t| t.session.as_deref() == Some(info.id.as_str()))).collect();
+                let rest = sessions.iter().filter(|info| !closed.iter().any(|c| c.id == info.id));
+                chat::Picking::Sessions(closed.iter().map(|info| session(info, true)).chain(rest.map(|info| session(info, false))).collect())
+            }
             Some(_) if !thread.loading => chat::Picking::Note(format!("No sessions to resume in {}", self.project.root.display())),
             _ => chat::Picking::Loading,
         });
-        let grant = self.grants.get(&thread.id).copied().unwrap_or_default();
+        let grant = self.grants.get(&thread.id).copied().unwrap_or_else(command::Grant::initial);
         chat::Snapshot {
             glass: cx.global::<Palette>().glass.is_some(),
             title: capitalized(thread.title()),
             lead,
             trail,
             statuses,
+            state,
             blank: thread.blank,
             busy,
             steer: thread.client.as_ref().is_some_and(|client| client.queues()),
@@ -251,7 +285,7 @@ impl Reader {
                 text: queued.out.text.clone(),
                 pictures: queued.out.images.len(),
             }).collect(),
-            pictures: thread.attachments.iter().map(|a| chat::Picture { uri: a.data_uri() }).collect(),
+            pictures: thread.attachments.iter().map(|a| chat::Picture { uri: a.data_uri(), size: a.size }).collect(),
             note: thread.attach_note.clone(),
             items: chat_items(&thread.messages),
             picking,
@@ -308,7 +342,7 @@ impl Reader {
             }
             Chat::Grant(change) => {
                 let id = self.thread.id;
-                let grant = self.grants.get(&id).copied().unwrap_or_default();
+                let grant = self.grants.get(&id).copied().unwrap_or_else(command::Grant::initial);
                 match change {
                     GrantChange::Set(set) => {
                         let scope = match set.scope {
@@ -326,7 +360,7 @@ impl Reader {
                 // started: it starts again so that the first message goes out under this grant.
                 if self.thread.blank
                     && self.thread.client.is_some()
-                    && self.grants.get(&id).copied().unwrap_or_default() != grant
+                    && self.grants.get(&id).copied().unwrap_or_else(command::Grant::initial) != grant
                     && let Some(key) = self.thread.agent.clone().or_else(|| self.chosen().map(|agent| agent.id.clone()))
                 {
                     log::info!("agent: blank thread restarts {key} under its new grant");
@@ -339,6 +373,9 @@ impl Reader {
     /// Does what the user asked of a screen drawn by NSH.
     pub(crate) fn run(&mut self, cmd: nsh::bus::Cmd, window: &mut Window, cx: &mut Context<Self>) {
         use nsh::bus::Cmd;
+        if !matches!(cmd, Cmd::CloseThread(..)) && self.closing.take().is_some() {
+            cx.notify();
+        }
         match cmd {
             Cmd::SideQuery(query) => {
                 self.side_query = query;
@@ -366,7 +403,7 @@ impl Reader {
                 cx.notify();
             }
             Cmd::OpenThread(pid, tid) => self.open_thread(pid, tid, window, cx),
-            Cmd::CloseThread(pid, tid) => self.close_any_thread(pid, tid, window, cx),
+            Cmd::CloseThread(pid, tid) => self.close_asked(pid, tid, window, cx),
             Cmd::AddProject => self.pick_project(window, cx),
             Cmd::NewThread => self.new_blank_thread(window, cx),
             Cmd::OpenSettings => self.toggle_settings(window, cx),

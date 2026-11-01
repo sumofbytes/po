@@ -41,7 +41,7 @@ impl Reader {
     pub(crate) fn authorize(&self, caller: command::Caller, command: &command::Command) -> Result<(), String> {
         let (grant, id) = match caller {
             command::Caller::User => (command::Grant::user(), None),
-            command::Caller::Thread(id) => (self.grants.get(&id).copied().unwrap_or_default(), Some(id)),
+            command::Caller::Thread(id) => (self.grants.get(&id).copied().unwrap_or_else(command::Grant::initial), Some(id)),
         };
         if command.user_only() && id.is_some() {
             return Err("only the user, from `po ctl`, may ask this".into());
@@ -360,7 +360,7 @@ impl Reader {
     pub(crate) fn grant_of(&self, caller: command::Caller) -> command::Grant {
         match caller {
             command::Caller::User => command::Grant::user(),
-            command::Caller::Thread(id) => self.grants.get(&id).copied().unwrap_or_default(),
+            command::Caller::Thread(id) => self.grants.get(&id).copied().unwrap_or_else(command::Grant::initial),
         }
     }
 
@@ -943,6 +943,12 @@ impl Reader {
 
     /// Tells whoever listens that `id` now stands in `after`: its waiters, then its parent.
     pub(crate) fn changed(&mut self, id: u64, after: crate::state::ThreadState, window: &mut Window, cx: &mut Context<Self>) {
+        // A thread whose close waits for a second press may no longer be what was asked about.
+        if let Some((_, closing)) = self.closing
+            && (closing == id || self.children_of(closing).iter().any(|(_, child)| *child == id))
+        {
+            self.closing = None;
+        }
         self.wake_waiters(id, after);
         self.publish(id, after);
         self.notify_parent(id, after, window, cx);
@@ -1111,7 +1117,8 @@ impl Reader {
         let grant = command::Grant { scope, read_project, approvals };
         // Any reach taken away, not only the scope: the waits asked under it would answer what
         // the thread can no longer ask.
-        let lowered = self.grants.get(&id).is_some_and(|before| before.scope > grant.scope || (before.read_project && !grant.read_project) || (before.approvals && !grant.approvals));
+        let before = self.grants.get(&id).copied().unwrap_or_else(command::Grant::initial);
+        let lowered = before.scope > grant.scope || (before.read_project && !grant.read_project) || (before.approvals && !grant.approvals);
         if self.grants.get(&id) == Some(&grant) {
             return;
         }

@@ -9,6 +9,7 @@ use serde_json::{Value, json};
 use crate::worktree::Spec;
 
 /// A thread that had an agent session, which is what it is resumed from.
+#[derive(Clone)]
 pub struct ThreadState {
     pub agent: String,
     pub session: String,
@@ -29,7 +30,13 @@ pub struct ProjectState {
     /// Which of `threads` was on screen.
     pub active: usize,
     pub threads: Vec<ThreadState>,
+    /// Threads closed in it, newest first, for the session picker to offer them back. Each is
+    /// kept as the agent's session; `active_at` is when it last did anything.
+    pub closed: Vec<ThreadState>,
 }
+
+/// How many closed threads a project keeps.
+pub const CLOSED_KEPT: usize = 10;
 
 #[derive(Default)]
 pub struct Workspace {
@@ -95,6 +102,9 @@ impl Workspace {
                     "threads": project.threads.iter().map(|t| json!({
                         "agent": t.agent, "session": t.session, "title": t.title, "active_at": t.active_at, "parent_session": t.parent_session,
                     })).collect::<Vec<_>>(),
+                    "closed": project.closed.iter().map(|t| json!({
+                        "agent": t.agent, "session": t.session, "title": t.title, "active_at": t.active_at,
+                    })).collect::<Vec<_>>(),
                 })
             })
             .collect();
@@ -123,12 +133,21 @@ impl Workspace {
                         Some(ThreadState { agent: text(&t["agent"])?, session: text(&t["session"])?, title: text(&t["title"]).unwrap_or_default(), active_at: t["active_at"].as_u64().unwrap_or(0), parent_session: text(&t["parent_session"]) })
                     })
                     .collect();
+                // The file can be written by anything, so its size is not trusted either.
+                let closed = entry["closed"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .take(CLOSED_KEPT)
+                    .filter_map(|t| Some(ThreadState { agent: text(&t["agent"])?, session: text(&t["session"])?, title: text(&t["title"]).unwrap_or_default(), active_at: t["active_at"].as_u64().unwrap_or(0), parent_session: None }))
+                    .collect();
                 Some(ProjectState {
                     root: path(&entry["root"])?,
                     review: entry["review"].as_bool().unwrap_or(false),
                     worktree,
                     active: entry["active"].as_u64().unwrap_or(0) as usize,
                     threads,
+                    closed,
                 })
             })
             .collect();
@@ -277,6 +296,7 @@ mod tests {
                         ThreadState { agent: "dex".into(), session: "s1".into(), title: "fix the retry".into(), active_at: 1_700_000_000_000, parent_session: None },
                         ThreadState { agent: "opencode".into(), session: "s2".into(), title: "quote \"this\"".into(), active_at: 0, parent_session: Some("s1".into()) },
                     ],
+                    closed: vec![ThreadState { agent: "dex".into(), session: "s0".into(), title: "old idea".into(), active_at: 5, parent_session: None }],
                 },
                 ProjectState {
                     root: "/data/worktrees/po-1".into(),
@@ -284,6 +304,7 @@ mod tests {
                     worktree: Some(Spec { path: "/data/worktrees/po-1".into(), branch: "po/1".into(), base: "abc".into(), repo: "/work/po".into() }),
                     active: 0,
                     threads: vec![],
+                    closed: vec![],
                 },
             ],
         };
@@ -297,6 +318,7 @@ mod tests {
         assert_eq!(back.projects.len(), 2);
         assert_eq!(back.projects[0].active, 1);
         assert_eq!(back.projects[0].threads[1].title, "quote \"this\"");
+        assert_eq!((back.projects[0].closed.len(), back.projects[0].closed[0].session.as_str()), (1, "s0"));
         let wt = back.projects[1].worktree.as_ref().expect("worktree");
         assert_eq!((wt.branch.as_str(), wt.base.as_str()), ("po/1", "abc"));
         assert!(back.projects[1].review);
@@ -310,6 +332,14 @@ mod tests {
         assert!(old_files.viewer_open);
         let neither = Workspace::from_json(&json!({ "projects": [] })).expect("parses");
         assert!(neither.viewer_open);
+    }
+
+    #[test]
+    fn a_file_with_too_many_closed_threads_keeps_the_newest() {
+        let closed: Vec<Value> = (0..50).map(|n| json!({ "agent": "a", "session": format!("s{n}") })).collect();
+        let back = Workspace::from_json(&json!({ "projects": [ { "root": "/x", "closed": closed } ] })).expect("parses");
+        assert_eq!(back.projects[0].closed.len(), CLOSED_KEPT);
+        assert_eq!(back.projects[0].closed[0].session, "s0");
     }
 
     #[test]
@@ -330,7 +360,7 @@ mod tests {
 
     fn project(root: &str, sessions: &[&str]) -> ProjectState {
         let threads = sessions.iter().map(|s| ThreadState { agent: "a".into(), session: s.to_string(), title: String::new(), active_at: 1, parent_session: None }).collect();
-        ProjectState { root: root.into(), review: false, worktree: None, active: 0, threads }
+        ProjectState { root: root.into(), review: false, worktree: None, active: 0, threads, closed: vec![] }
     }
 
     fn window(projects: Vec<ProjectState>) -> Workspace {

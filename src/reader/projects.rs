@@ -32,6 +32,7 @@ impl Reader {
             worktree: None,
             terminal: None,
             terminal_shown: false,
+            closed: vec![],
         }
     }
 
