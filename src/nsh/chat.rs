@@ -999,19 +999,19 @@ fn agent_row(message: usize, blocks: &[Block], live: bool) -> AnyElement {
 }
 
 /// The conversation: the messages, in order, as a center column.
-fn transcript(items: &[Item], slot: ElementRef, at_end: Signal<bool>, busy: bool) -> AnyElement {
+fn transcript(items: &[Item], slot: ElementRef, at_end: Signal<bool>, rail: Position, busy: bool) -> AnyElement {
     // The transcript's column is the composer card's width, and its text starts where the
     // composer's does: the card's border, its padding and the field's padding in (see [`bar`]).
     let mut rows = view().w_full().min_w_0().max_w(px(COLUMN)).flex_col().gap(scale::s6()).px(scale::composer_text_inset()).py(scale::s6());
     // Where each message sits in the column, for the position rail: every row reports the height
     // it was laid out at (window coordinates), and the column's own is taken off all of them.
-    // Non-reactive on purpose: the layout pass must not renotify the render.
-    let frames = stored(Vec::<Points>::new());
-    let origin = stored(Points(0.));
-    // The section of the page the viewport holds, as the rail knows it.
+    // Non-reactive on purpose: the layout pass must not renotify the render. They live in the
+    // caller, not here: this runs again on every change of the thread, and a layout event comes
+    // only when a frame changes, so state made anew here would stay empty.
+    let Position { frames, origin, active } = rail;
     let count = items.len();
     let shown = count.min(MAX_BARS);
-    let active = signal(0usize);
+    frames.with(|sections| sections.truncate(count));
     // A thought still streaming reads as `Thinking`; every thought that something came after, or
     // that belongs to a turn already over, reads as `Thought`.
     let last = items.iter().rposition(|item| matches!(item, Item::Agent { .. }));
@@ -1119,6 +1119,21 @@ fn transcript(items: &[Item], slot: ElementRef, at_end: Signal<bool>, busy: bool
         )
         .children((count >= 2).then(|| rail.into_element()))
         .into_element()
+}
+
+/// What the rail knows of the page, kept across the renders of the transcript: where each message
+/// sits in the column, where the column starts, and the section the viewport holds.
+#[derive(Clone, Copy)]
+struct Position {
+    frames: Stored<Vec<Points>>,
+    origin: Stored<Points>,
+    active: Signal<usize>,
+}
+
+impl Position {
+    fn new() -> Self {
+        Self { frames: stored(Vec::new()), origin: stored(Points(0.)), active: signal(0) }
+    }
 }
 
 /// How many bars the rail shows at most: a longer conversation folds its sections under the
@@ -1799,6 +1814,7 @@ pub fn Chat() -> impl IntoElement {
     let seen = stored(u64::MAX);
     let seen_soft = stored(u64::MAX);
     let at_end = signal(true);
+    let rail = Position::new();
     effect(move || {
         let (bump, soft) = state.with(|s| (s.follow, s.follow_soft));
         let grown = seen_soft.replace(soft) != soft && at_end.get_untracked();
@@ -1832,7 +1848,7 @@ pub fn Chat() -> impl IntoElement {
                 .children([text("What is this thread about?").sized(text_base()).text_color(Colors::muted()), text("Message an agent to begin.").sized(text_sm()).text_color(Colors::muted())])
                 .into_element()
         } else {
-            transcript(&snap.items, scrolled, at_end, snap.busy)
+            transcript(&snap.items, scrolled, at_end, rail, snap.busy)
         };
         view()
             .flex_1()
