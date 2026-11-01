@@ -417,7 +417,7 @@ pub fn Sidebar() -> impl IntoElement {
                 .rounded(super::pill())
                 .bg(Colors::selected())
                 .tooltip(super::tooltip(if late > 0 { "Some are late" } else { "Open issues" }))
-                .child(text(left.to_string()).text_size(super::text_sm()).line_height(leading(super::text_sm())).text_color(if late > 0 { Colors::danger()() } else { Colors::muted()() }))
+                .child(text(left.to_string()).sized(super::text_sm()).text_color(if late > 0 { Colors::danger()() } else { Colors::muted()() }))
         });
         action(IconName::CircleDot, "Issues", "Issues", Some(open), || send(Cmd::ToggleIssues)).child(count)
     };
