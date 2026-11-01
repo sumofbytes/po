@@ -403,17 +403,21 @@ pub fn Sidebar() -> impl IntoElement {
     let issues = move || {
         let (left, late) = state.with(|s| s.issues);
         let open = state.with(|s| s.issues_open);
+        // Snapped to the 2px grid (18, where `s5` is 17.5), so the circle's edge falls on a pixel.
+        let size = Points(super::snap(scale::s5().0));
         let count = (left > 0).then(|| {
             view()
-                .min_w(scale::s5())
+                // A circle for one digit, stretching into a pill only for more.
+                .h(size)
+                .min_w(size)
                 .flex_none()
                 .items_center()
                 .justify_center()
-                .px(scale::s1_5())
+                .px(Points(super::snap(scale::s1().0)))
                 .rounded(super::pill())
                 .bg(Colors::selected())
                 .tooltip(super::tooltip(if late > 0 { "Some are late" } else { "Open issues" }))
-                .child(text(left.to_string()).text_size(text_base()).text_color(if late > 0 { Colors::danger()() } else { Colors::muted()() }))
+                .child(text(left.to_string()).sized(super::text_sm()).text_color(if late > 0 { Colors::danger()() } else { Colors::muted()() }))
         });
         action(IconName::CircleDot, "Issues", "Issues", Some(open), || send(Cmd::ToggleIssues)).child(count)
     };
