@@ -1166,21 +1166,37 @@ fn rail_gutter() -> Points {
 
 /// One bar of the rail, all of one length: quiet when its section is not in view, firmer when it
 /// is (as `active.get()` says), and a press on it scrolls to the section it marks. The target is
-/// the whole of a tall slot the bars are drawn in the middle of, so the bars stay thin but are
-/// easy to hit, with no gap between one target and the next.
+/// the whole of a slot the thin bar is drawn in the middle of, so the space between bars takes a
+/// press as well, and over the slot the bar pops out: longer, thicker and firm, easing in.
 fn rail_bar(j: usize, active: Signal<usize>, label: String, jump: impl Fn() + 'static) -> View {
     let on = move || active.get() == j;
+    let hot = signal(false);
     view()
         .role(AccessibilityRole::Button)
         .label(label)
         .flex_none()
         .w(rail_width())
-        .h(scale::s3())
+        .h(scale::s2())
         .flex_col()
         .justify_center()
         .cursor_pointer()
+        .on_hover_in(move || hot.set(true))
+        .on_hover_out(move || hot.set(false))
         .on_press(jump)
-        .child(view().w_full().h(scale::s1()).rounded(super::pill()).bg(move || if on() { Colors::muted()() } else { super::hairline()() }))
+        .child(
+            view()
+                .w_full()
+                .h(scale::s0_5())
+                .rounded(super::pill())
+                .bg(move || if on() || hot.get() { Colors::muted()() } else { super::hairline()() })
+                // At rest a bar is shorter than its slot and thin; it grows from its right end.
+                .origin_right()
+                .scale_x(move || if hot.get() { 1_f32 } else { 0.7 })
+                .scale_y(move || if hot.get() { 2_f32 } else { 1. })
+                .transition()
+                .duration(150.)
+                .ease_out(),
+        )
 }
 
 // ============ the composer ============
