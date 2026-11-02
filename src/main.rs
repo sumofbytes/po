@@ -96,7 +96,11 @@ type Watch = (notify::RecommendedWatcher, profile::UnboundedReceiver<notify::Eve
 fn start_watcher(root: &Path) -> Option<Watch> {
     let (tx, rx) = hotpath::channel!(futures::channel::mpsc::unbounded(), label = "file events");
     let mut watcher = match notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
-        if let Ok(event) = event {
+        // Reads are no change, and whatever scans the tree (an indexer, `git status`) causes them
+        // by the hundred: a profiled run saw 100,000 in 79 minutes, each waking the watcher.
+        if let Ok(event) = event
+            && !event.kind.is_access()
+        {
             tx.unbounded_send(event).ok();
         }
     }) {
