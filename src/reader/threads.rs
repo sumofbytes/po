@@ -47,8 +47,7 @@ impl Reader {
             };
             // Moved in so the watcher lives as long as this task.
             let Some((mut watcher, mut rx)) = watch else { return };
-            // Read again only when the file changes: a batch comes every few moments in a busy
-            // tree, and reading it each time was most of what the watcher allocated.
+            // Read again only when the file changes: batches come often in a busy tree.
             let ignore_file = root.join(".gitignore");
             let mut gitignore = (ignore::gitignore::Gitignore::empty(), None);
             while let Some(first) = rx.next().await {
