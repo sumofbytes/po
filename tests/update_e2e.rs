@@ -36,7 +36,8 @@ struct Release {
 }
 
 /// A directory of a test's own, removed when it is dropped: also when the test fails, since each
-/// one holds a copy of `po` that is hundreds of megabytes in a debug build.
+/// one holds a copy of `po` that is hundreds of megabytes in a debug build. A run that is killed
+/// (Ctrl+C, out of memory) does not drop it, and leaves its copy behind.
 struct Scratch(PathBuf);
 
 impl std::ops::Deref for Scratch {
@@ -156,7 +157,7 @@ fn run_update(dir: &Path, base: &str, extra_env: &[(&str, &str)]) -> (PathBuf, O
     }
     // Another test's thread may fork while the copy above is still open for writing; until that
     // child execs it holds the file open too, and running it fails with "Text file busy". It
-    // passes in moments, so try again a while.
+    // passes in moments, so try again for up to a second, which is far more than it takes.
     let mut tries = 0;
     let out = loop {
         match cmd.output() {
