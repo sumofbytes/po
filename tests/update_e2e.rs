@@ -17,6 +17,7 @@ use std::{
     process::{Command, Output},
     sync::Arc,
     thread,
+    time::Duration,
 };
 
 const TARGET: &str = if cfg!(target_os = "linux") {
@@ -34,14 +35,37 @@ struct Release {
     sums: String,
 }
 
-fn scratch(name: &str) -> PathBuf {
+/// A directory of a test's own, removed when it is dropped: also when the test fails, since each
+/// one holds a copy of `po` that is hundreds of megabytes in a debug build.
+struct Scratch(PathBuf);
+
+impl std::ops::Deref for Scratch {
+    type Target = Path;
+    fn deref(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl AsRef<Path> for Scratch {
+    fn as_ref(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+fn scratch(name: &str) -> Scratch {
     // Unique per call: tests run in parallel and may build the same release tag.
     static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let dir = std::env::temp_dir().join(format!("po-update-e2e-{}-{n}-{name}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
-    dir
+    Scratch(dir)
 }
 
 fn run(cmd: &mut Command) -> Output {
@@ -75,7 +99,6 @@ fn make_release(tag: &'static str, corrupt_sums: bool) -> Release {
     } else {
         line
     };
-    let _ = fs::remove_dir_all(&dir);
     Release { tag, archive, sums }
 }
 
@@ -131,7 +154,19 @@ fn run_update(dir: &Path, base: &str, extra_env: &[(&str, &str)]) -> (PathBuf, O
     for (k, v) in extra_env {
         cmd.env(k, v);
     }
-    let out = cmd.output().expect("spawn po update");
+    // Another test's thread may fork while the copy above is still open for writing; until that
+    // child execs it holds the file open too, and running it fails with "Text file busy". It
+    // passes in moments, so try again a while.
+    let mut tries = 0;
+    let out = loop {
+        match cmd.output() {
+            Err(error) if error.kind() == std::io::ErrorKind::ExecutableFileBusy && tries < 100 => {
+                tries += 1;
+                thread::sleep(Duration::from_millis(10));
+            }
+            result => break result.expect("spawn po update"),
+        }
+    };
     (exe, out)
 }
 
@@ -156,7 +191,6 @@ fn updates_the_running_binary_from_the_latest_release() {
         .filter(|n| n.starts_with(".po.new"))
         .collect();
     assert!(leftovers.is_empty(), "staged files left behind: {leftovers:?}");
-    let _ = fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -167,7 +201,6 @@ fn reports_up_to_date_when_latest_is_not_newer() {
     assert!(out.status.success(), "stderr: {}", text(&out.stderr));
     assert!(text(&out.stdout).contains("up to date"), "stdout: {}", text(&out.stdout));
     assert_eq!(fs::read(&exe).unwrap(), fs::read(env!("CARGO_BIN_EXE_po")).unwrap());
-    let _ = fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -178,7 +211,6 @@ fn checksum_mismatch_fails_and_leaves_the_binary_untouched() {
     assert!(!out.status.success());
     assert!(text(&out.stderr).contains("checksum mismatch"), "stderr: {}", text(&out.stderr));
     assert_eq!(fs::read(&exe).unwrap(), fs::read(env!("CARGO_BIN_EXE_po")).unwrap());
-    let _ = fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -189,7 +221,6 @@ fn pinned_version_installs_even_when_not_newer() {
     assert!(out.status.success(), "stderr: {}", text(&out.stderr));
     let replaced = run(&mut Command::new(&exe));
     assert_eq!(text(&replaced.stdout).trim(), NEW_BINARY_OUTPUT);
-    let _ = fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -201,7 +232,6 @@ fn refuses_to_update_a_dev_build() {
     assert!(!out.status.success());
     assert!(text(&out.stderr).contains("dev build"), "stderr: {}", text(&out.stderr));
     assert_eq!(fs::read(&exe).unwrap(), fs::read(env!("CARGO_BIN_EXE_po")).unwrap());
-    let _ = fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -218,5 +248,4 @@ fn refuses_to_update_a_cargo_installed_binary() {
     assert!(!out.status.success());
     assert!(text(&out.stderr).contains("installed via cargo"), "stderr: {}", text(&out.stderr));
     assert_eq!(fs::read(&exe).unwrap(), fs::read(env!("CARGO_BIN_EXE_po")).unwrap());
-    let _ = fs::remove_dir_all(&dir);
 }
