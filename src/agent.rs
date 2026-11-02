@@ -2,7 +2,6 @@
 use std::{path::Path, sync::Arc};
 
 use anyhow::Result;
-use futures::channel::mpsc::UnboundedReceiver;
 use serde_json::Value;
 
 use crate::{
@@ -10,6 +9,7 @@ use crate::{
     attach::{self, Attachment},
     config,
     dex::{self, Queue},
+    profile::UnboundedReceiver,
 };
 
 pub enum Client {

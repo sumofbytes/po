@@ -47,6 +47,7 @@ impl Default for Snapshot {
 static SNAPSHOT: LazyLock<watch::Sender<Snapshot>> = LazyLock::new(|| watch::Sender::new(Snapshot::default()));
 
 /// Shows `snapshot`; nothing is redrawn when it is what the screen already has.
+#[hotpath::measure]
 pub fn publish(snapshot: Snapshot) {
     SNAPSHOT.send_if_modified(|now| {
         let changed = *now != snapshot;
@@ -68,6 +69,7 @@ fn kind_color(kind: FileKind) -> Box<dyn Fn() -> AdaptiveColor> {
     }
 }
 
+#[hotpath::measure]
 fn row(entry: Entry) -> View {
     let Entry { row, mark } = entry;
     let lead = if row.folder {

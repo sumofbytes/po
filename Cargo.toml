@@ -30,6 +30,14 @@ tokio = { version = "1", default-features = false, features = ["sync"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif"] }
 # The terminal: libghostty-vt's emulator, built from source with Zig 0.15.2 (see mise.toml).
 libghostty-vt = { version = "0.2.2", default-features = false }
+# Profiling, off unless built with a `hotpath` feature below; see docs/profiling.md.
+hotpath = { version = "0.30", default-features = false }
+
+[features]
+# `cargo run --features hotpath -- -f .` times the measured functions, channels and locks and
+# reports when Po quits; `hotpath-alloc` also counts each function's allocations. Never default.
+hotpath = ["hotpath/hotpath", "hotpath/threads", "hotpath/futures", "hotpath/tokio"]
+hotpath-alloc = ["hotpath", "hotpath/hotpath-alloc"]
 
 [dev-dependencies]
 # Headless runs of the NSH screens.

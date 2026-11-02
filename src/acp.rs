@@ -11,8 +11,10 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
+use futures::channel::mpsc::unbounded;
 use serde_json::{Value, json};
+
+use crate::profile::{UnboundedReceiver, UnboundedSender};
 
 #[derive(Clone, Debug)]
 pub struct PermissionOption {
@@ -116,8 +118,9 @@ const MAX_PAGES: u8 = 5;
 const MAX_SESSIONS: usize = 100;
 
 struct Shared {
-    stdin: Mutex<ChildStdin>,
-    pending: Mutex<HashMap<u64, Pending>>,
+    /// Taken by every request and reply; followed by hotpath in a profiled build.
+    stdin: hotpath::wrap::std::sync::Mutex<ChildStdin>,
+    pending: hotpath::wrap::std::sync::Mutex<HashMap<u64, Pending>>,
     next: AtomicU64,
     events: UnboundedSender<Event>,
     cwd: PathBuf,
@@ -192,6 +195,7 @@ impl Shared {
         let _ = self.events.unbounded_send(event);
     }
 
+    #[hotpath::measure(impl_type = "Shared")]
     fn handle(&self, message: Value) {
         let method = message.get("method").and_then(Value::as_str).map(String::from);
         let id = message.get("id").cloned();
@@ -367,11 +371,11 @@ impl Client {
             .with_context(|| format!("could not start `{command}`"))?;
         let stdin = child.stdin.take().context("no stdin")?;
         let stdout = child.stdout.take().context("no stdout")?;
-        let (events, receiver) = unbounded();
+        let (events, receiver) = hotpath::channel!(unbounded(), label = "acp events");
         let control = control(child.id());
         let shared = Arc::new(Shared {
-            stdin: Mutex::new(stdin),
-            pending: Mutex::new(HashMap::new()),
+            stdin: hotpath::mutex!(Mutex::new(stdin), label = "acp stdin"),
+            pending: hotpath::mutex!(Mutex::new(HashMap::new()), label = "acp pending"),
             next: AtomicU64::new(1),
             events,
             cwd: cwd.to_path_buf(),
@@ -384,9 +388,9 @@ impl Client {
         });
         let child = Arc::new(Mutex::new(child));
         let (reader, reaper) = (shared.clone(), child.clone());
-        std::thread::spawn(move || {
+        std::thread::Builder::new().name("acp-read".into()).spawn(move || {
             for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-                match serde_json::from_str::<Value>(&line) {
+                match hotpath::measure_block!("acp parse", serde_json::from_str::<Value>(&line)) {
                     Ok(message) => {
                         log::debug!("acp <- {line}");
                         reader.handle(message)
@@ -396,7 +400,7 @@ impl Client {
             }
             let status = reaper.lock().expect("child lock").wait();
             reader.emit(Event::Exited(status.map_or_else(|e| e.to_string(), |s| s.to_string())));
-        });
+        }).expect("thread");
         shared.request(
             "initialize",
             json!({

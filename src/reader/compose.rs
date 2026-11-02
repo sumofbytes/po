@@ -17,6 +17,7 @@ impl Reader {
     /// starts; one still starting, loading or waking from sleep waits; a busy one is steered
     /// (dex) or queued; a ready idle one dispatches now. The draft is cleared exactly where it
     /// was before, so a message that can't be sent yet stays where the user can edit it.
+    #[hotpath::measure(impl_type = "Reader")]
     pub(crate) fn submit(&mut self, out: Outgoing, later: bool, window: &mut Window, cx: &mut Context<Self>) -> Where {
         let thread = &self.thread;
         let starting = thread.client.is_some()
@@ -77,6 +78,7 @@ impl Reader {
 
     /// Attaches pictures to the draft, read and shrunk off the UI thread. What isn't a picture
     /// is left out.
+    #[hotpath::measure(impl_type = "Reader")]
     pub(crate) fn attach(&mut self, sources: Vec<Source>, cx: &mut Context<Self>) {
         let thread = self.thread.id;
         self.thread.attach_note = None;

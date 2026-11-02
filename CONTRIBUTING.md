@@ -17,6 +17,9 @@ toolchain plus the Wayland/X11, xkbcommon, fontconfig and Vulkan development
 packages; `.cargo/config.toml` links with `clang` and `mold` (remove it or
 override it if you don't have them).
 
+To find where time and memory go, build with `--features hotpath` (or
+`hotpath-alloc`); see [docs/profiling.md](docs/profiling.md).
+
 ## Pull requests
 
 - Target `main`. Keep diffs minimal and focused; reuse existing helpers.

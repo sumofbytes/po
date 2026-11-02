@@ -9,7 +9,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, mpsc::Sender};
 
 use anyhow::Result;
-use futures::channel::mpsc::UnboundedReceiver;
+use crate::profile::UnboundedReceiver;
 use serde_json::Value;
 
 use crate::command::{Caller, Command, Reply};
@@ -218,7 +218,8 @@ mod server {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::os::unix::{fs::PermissionsExt, net::UnixListener};
 
-    use futures::channel::mpsc::{UnboundedSender, unbounded};
+    use futures::channel::mpsc::unbounded;
+    use crate::profile::UnboundedSender;
     use serde_json::json;
 
     use super::*;
@@ -266,9 +267,9 @@ mod server {
         };
         let tokens = Tokens::default();
         let agents = Agents::default();
-        let (requests, receiver) = unbounded();
+        let (requests, receiver) = hotpath::channel!(unbounded(), label = "control requests");
         let (shared_tokens, shared_agents) = (tokens.clone(), agents.clone());
-        std::thread::spawn(move || {
+        std::thread::Builder::new().name("control-accept".into()).spawn(move || {
             let open = Arc::new(AtomicUsize::new(0));
             for stream in listener.incoming().map_while(Result::ok) {
                 // A client that connects and says nothing holds a thread for the read timeout.
@@ -277,12 +278,12 @@ mod server {
                     continue;
                 }
                 let (tokens, agents, requests, open) = (shared_tokens.clone(), shared_agents.clone(), requests.clone(), open.clone());
-                std::thread::spawn(move || {
+                std::thread::Builder::new().name("control-serve".into()).spawn(move || {
                     serve(stream, &tokens, &agents, &requests);
                     open.fetch_sub(1, Ordering::SeqCst);
-                });
+                }).expect("thread");
             }
-        });
+        }).expect("thread");
         Some((Control { tokens, agents, socket: Arc::new(SocketFile(socket)) }, receiver))
     }
 
