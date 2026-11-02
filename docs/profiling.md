@@ -75,6 +75,32 @@ quit when the turn ends. Then compare:
 at `file events` (the watcher's backlog) and `watch batch`, `po::walk`, `diff::changes` and
 `Reader::apply_changes`.
 
+## A scripted run, with nobody at the keyboard
+
+`PO_BENCH=stream:<history>:<chunks>:<ms>` (only in a `hotpath` build) fills the thread on screen
+with `<history>` messages of markdown, streams a reply of `<chunks>` chunks, one every `<ms>`
+milliseconds, through the code an agent's updates take, writes the report and quits. The window,
+the text engine and the snapshots are the real ones; only the agent is fake.
+
+`scripts/bench-stream.sh` runs it for several history sizes, in a scratch config so nothing of
+yours is read or saved, and prints one line each:
+
+```sh
+cargo build --release --features hotpath-alloc
+scripts/bench-stream.sh            # histories 2, 20 and 80
+scripts/bench-stream.sh 5 50       # your own
+```
+
+It runs on one core and waits for the machine to cool between runs (`CORES`, `COOL_C`); the NSH
+engine keeps a core busy for the whole run, and a minute of it on two cores took a laptop to 90°C.
+The window is on screen for the half minute each run takes.
+
+Read the columns this way: `frames` is how many times the window was drawn, `transcripts` how
+often the transcript was rebuilt (fewer than the frames when the engine falls behind and updates
+merge), and `engine alloc` the allocations of the NSH engine thread, which is where the cost of a
+streamed reply is. Divide it by `transcripts` for the cost of one rebuild and compare sizes: a
+rebuild that costs more with more history is rebuilding messages that did not change.
+
 ## What is instrumented
 
 | Area | Measured |

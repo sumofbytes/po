@@ -3,6 +3,8 @@ mod acp;
 mod agent;
 mod alert;
 mod attach;
+#[cfg(feature = "hotpath")]
+mod bench;
 mod command;
 mod config;
 mod control;
@@ -2220,6 +2222,8 @@ fn main() {
                 trace::mark("theme applied");
                 theme::watch(cx);
                 let reader = cx.new(|cx| Reader::new(root, pr, command, prefetch, window, cx));
+                #[cfg(feature = "hotpath")]
+                bench::start(&reader, window, cx);
                 cx.new(|_| Shell { child: reader, appearance: WindowBackgroundAppearance::Opaque })
             },
         )
