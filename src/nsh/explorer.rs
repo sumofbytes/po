@@ -69,7 +69,6 @@ fn kind_color(kind: FileKind) -> Box<dyn Fn() -> AdaptiveColor> {
     }
 }
 
-#[hotpath::measure]
 fn row(entry: Entry) -> View {
     let Entry { row, mark } = entry;
     let lead = if row.folder {

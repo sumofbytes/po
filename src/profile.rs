@@ -21,14 +21,22 @@ static GUARD: std::sync::Mutex<Option<hotpath::HotpathGuard>> = std::sync::Mutex
 
 /// Starts measuring, in the process that opens the window (a detached launch's child, not the
 /// parent that only spawns it). `HOTPATH_SHUTDOWN_MS` makes it a timed run that writes the
-/// report and quits on its own.
+/// report and quits when the time is up; the guard stays here, not in hotpath's own timer, so
+/// leaving earlier still writes the report.
 pub fn start() {
     #[cfg(feature = "hotpath")]
     {
-        let builder = hotpath::HotpathGuardBuilder::new("po").percentiles(&[50.0, 95.0, 99.0]);
-        match std::env::var("HOTPATH_SHUTDOWN_MS").ok().and_then(|ms| ms.parse().ok()) {
-            Some(ms) => builder.build_with_shutdown(std::time::Duration::from_millis(ms)),
-            None => *GUARD.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(builder.build()),
+        let guard = hotpath::HotpathGuardBuilder::new("po").percentiles(&[50.0, 95.0, 99.0]).build();
+        *GUARD.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(guard);
+        if let Some(ms) = std::env::var("HOTPATH_SHUTDOWN_MS").ok().and_then(|ms| ms.parse::<u64>().ok()).filter(|ms| *ms > 0) {
+            std::thread::Builder::new()
+                .name("profile-timer".into())
+                .spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_millis(ms));
+                    finish();
+                    std::process::exit(0);
+                })
+                .ok();
         }
         #[cfg(unix)]
         finish_on_interrupt();
@@ -52,9 +60,12 @@ fn finish_on_interrupt() {
         CAUGHT.store(true, Ordering::SeqCst);
     }
     // SAFETY: the handler only stores to an atomic, which is async-signal-safe.
-    unsafe {
-        libc::signal(libc::SIGINT, caught as *const () as libc::sighandler_t);
-        libc::signal(libc::SIGTERM, caught as *const () as libc::sighandler_t);
+    let set = unsafe {
+        libc::signal(libc::SIGINT, caught as *const () as libc::sighandler_t) != libc::SIG_ERR
+            && libc::signal(libc::SIGTERM, caught as *const () as libc::sighandler_t) != libc::SIG_ERR
+    };
+    if !set {
+        return;
     }
     std::thread::Builder::new()
         .name("profile-signal".into())

@@ -595,7 +595,7 @@ impl Client {
             if let Some(hold) = held {
                 let _ = hold.recv();
             }
-        }).expect("thread");
+        }).expect("failed to spawn thread");
         Ok((Self { shared, url }, receiver))
     }
 
