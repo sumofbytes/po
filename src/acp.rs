@@ -400,7 +400,7 @@ impl Client {
             }
             let status = reaper.lock().expect("child lock").wait();
             reader.emit(Event::Exited(status.map_or_else(|e| e.to_string(), |s| s.to_string())));
-        }).expect("thread");
+        }).expect("failed to spawn thread");
         shared.request(
             "initialize",
             json!({

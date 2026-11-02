@@ -22,7 +22,7 @@ Use `-f`. A detached Po writes the report to `~/.cache/po/po.log` with the rest 
 not to your terminal.
 
 Po writes the report when it ends: when you close the window or quit, with `PO_TRACE=exit`, or
-on Ctrl+C or `kill` (it writes the report and exits with 130). Use a release build for the
+on Ctrl+C or `kill` (it writes the report and exits with status 130, for both). Use a release build for the
 numbers: a debug build is several times slower and spends its time differently.
 
 ### Useful variables
@@ -31,7 +31,7 @@ numbers: a debug build is several times slower and spends its time differently.
 |---|---|
 | `HOTPATH_OUTPUT_PATH=report.txt` | Write the report to a file instead of stdout. |
 | `HOTPATH_OUTPUT_FORMAT=json` | `table` (default), `json`, `json-pretty` or `none`. |
-| `HOTPATH_SHUTDOWN_MS=20000` | A timed run: write the report and quit after 20 s. |
+| `HOTPATH_SHUTDOWN_MS=20000` | A timed run: write the report and quit after 20 s. Closing earlier still writes it; 0 is no timer. |
 | `HOTPATH_FOCUS=snapshot` | Only report functions whose name contains `snapshot` (`/regex/` also works). |
 | `HOTPATH_REPORT=functions-timing,channels` | Only these sections. |
 | `HOTPATH_LIMIT=0` | Show every row, not the top 15. |
@@ -84,6 +84,7 @@ at `file events` (the watcher's backlog) and `watch batch`, `po::walk`, `diff::c
 | Transcript | `chat::transcript`, `chat::agent_row`, `chat::user_row`, `chat::tool_row`, `po::preview_of`, `po::transcript` (control API) |
 | Agents | `Shared::handle` (each ACP message), `acp parse` (its JSON), `Mapper::map` and `Shared::stream_turn` (dex), `Reader::on_event` |
 | Files | `watch batch`, `Reader::{apply_changes,refresh_changes,rescan,set_files,open,refresh_tree}`, `diff::{changes,against,status,file_diff,versions,parse}`, `FileTree::{set_paths,rows}` |
+| Window state | `Reader::{settle_agent_changes,pane,explorer,views,thread_info,project_info,children_status,chat_cmd,run,submit,attach,refind,open_selected,build_project}`, `sidebar::project_group` |
 | Issues and state | `store::{load,fingerprint}`, `Store::flush`, `shared::{poll,publish,summary}`, `Reader::{workspace,request_save,run_command,publish}`, `Workspace::save` |
 | Terminal | `terminal::snapshot` (on the emulator thread) |
 | Channels | `acp events`, `dex events`, `file events`, `control requests`, `nsh commands`, `terminal input` |
@@ -103,9 +104,13 @@ at `file events` (the watcher's backlog) and `watch batch`, `po::walk`, `diff::c
   `hotpath::wrap::std::sync::mpsc` for std, and `nsh::bus::Commands` for the tokio bus.
 - Create a lock with `hotpath::mutex!(Mutex::new(..), label = "...")` and give it the type
   `hotpath::wrap::std::sync::Mutex`.
+- A channel or lock made in a constructor (a watcher, an agent, a terminal) is a new instance
+  each time: the report shows one row per instance (`acp stdin`, `acp stdin-2`, …).
 - Labels must be unique within the crate. A repeated one only fails at `cargo build`, not
   `cargo check`.
-- Measuring has a cost on each call. Don't measure functions that run per row or per character.
-  Measure what calls them.
+- Measuring has a cost on each call. Don't measure functions that run per file, per row of the
+  file tree or sidebar, or per character; measure what calls them. The transcript's rows
+  (`chat::{user,tool,agent}_row`) are measured because a transcript has few of them and a long
+  reply makes `agent_row` expensive.
 - Check both builds: `cargo clippy --all-targets` and
   `cargo clippy --all-targets --features hotpath-alloc`.

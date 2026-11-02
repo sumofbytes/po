@@ -281,9 +281,9 @@ mod server {
                 std::thread::Builder::new().name("control-serve".into()).spawn(move || {
                     serve(stream, &tokens, &agents, &requests);
                     open.fetch_sub(1, Ordering::SeqCst);
-                }).expect("thread");
+                }).expect("failed to spawn thread");
             }
-        }).expect("thread");
+        }).expect("failed to spawn thread");
         Some((Control { tokens, agents, socket: Arc::new(SocketFile(socket)) }, receiver))
     }
 

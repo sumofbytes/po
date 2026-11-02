@@ -70,7 +70,7 @@ pub fn set_project(project: &Path) {
                 std::thread::sleep(Duration::from_millis(1500));
                 poll();
             }
-        }).expect("thread");
+        }).expect("failed to spawn thread");
     });
 }
 

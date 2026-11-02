@@ -130,14 +130,14 @@ impl Prefetch {
             walk(&scan, &mut files);
             trace::mark("walk (thread)");
             files
-        }).expect("thread");
+        }).expect("failed to spawn thread");
         let (done, watch) = futures::channel::oneshot::channel();
         let target = root.clone();
         std::thread::Builder::new().name("po-watch".into()).spawn(move || {
             let watch = start_watcher(&target);
             trace::mark("watcher (thread)");
             done.send(watch).ok();
-        }).expect("thread");
+        }).expect("failed to spawn thread");
         Self { root, files, watch }
     }
 }

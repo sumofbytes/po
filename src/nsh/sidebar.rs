@@ -186,7 +186,6 @@ fn grant_badge() -> View {
 
 /// The row of a thread, its mark first, as a step in the transcript starts with its status. Its
 /// title is a step right of the name of the project above.
-#[hotpath::measure]
 fn thread_row(thread: &Thread, project: Option<&str>, close_tip: &'static str) -> View {
     let (pid, tid) = (thread.project, thread.id);
     let selected = thread.selected;
