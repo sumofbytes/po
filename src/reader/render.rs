@@ -55,18 +55,11 @@ impl Reader {
             .map(|view| {
                 let pid = view.id;
                 let collapsed = self.projects_collapsed.contains(&pid) && !searching;
-                // Active: running, finished unseen with its parent told, or an agent still alive; the one
-                // on screen too, whatever it is doing.
-                let active = |t: &Thread| t.id == view.shown || t.activity() != Activity::Idle || t.client.is_some();
-                // Most recently active first. Only the active ones show; the rest fold under "more",
-                // but for those idle for more than a day, which only a search or the history finds.
-                let mut recent: Vec<&Thread> = view
-                    .threads
-                    .iter()
-                    .copied()
-                    .filter(|t| (!t.blank || t.id == view.shown) && !self.waits_on_user(pid, t))
-                    .filter(|t| searching || active(t) || !stale(now, t.active_at))
-                    .collect();
+                // What keeps its row: the one on screen, running or asking, or something it did
+                // within the last day. The rest is searched for, or folds under "more".
+                let active = |t: &Thread| listed(now, view.shown, t);
+                // Most recently active first. Only the active ones show; the rest fold under "more".
+                let mut recent: Vec<&Thread> = view.threads.iter().copied().filter(|t| (!t.blank || t.id == view.shown) && !self.waits_on_user(pid, t)).collect();
                 recent.sort_by_key(|t| (std::cmp::Reverse(t.active_at), std::cmp::Reverse(t.id)));
                 if searching && !project_hit(view) {
                     recent.retain(|t| self.matches_query(t, &query));

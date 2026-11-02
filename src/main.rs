@@ -889,6 +889,15 @@ fn stale(now: u64, then: u64) -> bool {
     now.saturating_sub(then) > STALE_MS
 }
 
+/// A thread that keeps its row in a project's list: the one on screen, whatever it is doing, its agent
+/// running or asking, or something it did within the last day. One idle for longer only shows when
+/// it is searched for; the history and the fold find the rest.
+fn listed(now: u64, shown: u64, thread: &Thread) -> bool {
+    thread.id == shown
+        || matches!(thread.activity(), Activity::Running | Activity::Asking)
+        || (!stale(now, thread.active_at) && (thread.activity() != Activity::Idle || thread.client.is_some()))
+}
+
 /// `title` with its first letter in capitals when it opens with a plain word, as "fix the build"
 /// does. One that opens with a path, a command or an identifier (`src/main.rs`, `cargo test`,
 /// `snake_case`, `v2`) is left as typed.
@@ -2278,6 +2287,30 @@ fn preview_of(messages: &[Msg], busy: bool) -> String {
 
 #[cfg(test)]
 mod tests {
+    use crate::Thread;
+
+    #[test]
+    fn a_thread_keeps_its_sidebar_row_while_its_agent_works() {
+        let now = 1_800_000_000_000;
+        let day = 24 * 3_600_000;
+        let mut thread = Thread::blank(1);
+        thread.active_at = now;
+        // On screen: keeps its row whatever it is doing. Folded and idle: only the agent's doing
+        // keeps it there, so idle with no agent folds however fresh it is.
+        assert!(super::listed(now, 1, &thread));
+        assert!(!super::listed(now, 0, &thread));
+        thread.busy = true;
+        thread.active_at = now - 2 * day;
+        // Running keeps even an old one on the list.
+        assert!(super::listed(now, 0, &thread));
+        let mut old = Thread::blank(2);
+        old.active_at = now - day - 1;
+        // Idle past a day: search and the history find it; the fold doesn't.
+        assert!(!super::listed(now, 0, &old));
+        // The one on screen is the exception.
+        assert!(super::listed(now, 2, &old));
+    }
+
     #[test]
     fn a_thread_title_opens_with_a_capital_unless_it_is_code() {
         let cap = |t: &str| super::capitalized(t.to_string());
