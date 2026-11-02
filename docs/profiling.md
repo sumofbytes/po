@@ -96,10 +96,11 @@ engine keeps a core busy for the whole run, and a minute of it on two cores took
 The window is on screen for the half minute each run takes.
 
 Read the columns this way: `frames` is how many times the window was drawn, `transcripts` how
-often the transcript was rebuilt (fewer than the frames when the engine falls behind and updates
-merge), and `engine alloc` the allocations of the NSH engine thread, which is where the cost of a
-streamed reply is. Divide it by `transcripts` for the cost of one rebuild and compare sizes: a
-rebuild that costs more with more history is rebuilding messages that did not change.
+often the whole transcript was built, `agent_rows` how many message rows were built, and
+`engine alloc` the allocations of the NSH engine thread, which is where the cost of a streamed
+reply is. While a reply streams, the transcript should be built once and `agent_rows` should stay
+near the number of chunks: one row, the one being written, per chunk. If it grows with the
+history, messages that did not change are being built again.
 
 ## What is instrumented
 

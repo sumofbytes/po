@@ -1802,7 +1802,7 @@ fn chat_blocks(blocks: &[Block]) -> Vec<nsh::chat::Block> {
             continue;
         }
         out.push(match &blocks[n] {
-            Block::Text(text) => nsh::chat::Block::Markdown(nsh::source::Shared(text.as_str().into())),
+            Block::Text(text) => nsh::chat::Block::Markdown(text.as_str().into()),
             Block::Thought(text, open) => nsh::chat::Block::Thought { index: n, text: text.clone(), open: *open },
             Block::Tool(tool) => nsh::chat::Block::Tool(chat_tool(n, tool)),
             Block::Permission(ask) => {
