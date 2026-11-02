@@ -47,6 +47,10 @@ impl Reader {
             };
             // Moved in so the watcher lives as long as this task.
             let Some((mut watcher, mut rx)) = watch else { return };
+            // Read again only when the file changes: a batch comes every few moments in a busy
+            // tree, and reading it each time was most of what the watcher allocated.
+            let ignore_file = root.join(".gitignore");
+            let mut gitignore = (ignore::gitignore::Gitignore::empty(), None);
             while let Some(first) = rx.next().await {
                 // Let a burst of events settle, then handle them together.
                 cx.background_executor().timer(Duration::from_millis(100)).await;
@@ -59,7 +63,11 @@ impl Reader {
                 let (changed, moved, touched) = hotpath::measure_block!("watch batch", {
                     let (mut changed, mut moved) = (false, false);
                     let mut touched = HashSet::new();
-                    let (gitignore, _) = ignore::gitignore::Gitignore::new(root.join(".gitignore"));
+                    let now = stamp(&ignore_file);
+                    if gitignore.1 != now {
+                        gitignore = (ignore::gitignore::Gitignore::new(&ignore_file).0, now);
+                    }
+                    let gitignore = &gitignore.0;
                     for event in events.iter().filter(|e| !e.kind.is_access()) {
                         for path in &event.paths {
                             let Ok(rel) = path.strip_prefix(&root) else { continue };
