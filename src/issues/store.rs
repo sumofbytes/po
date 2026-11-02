@@ -64,12 +64,14 @@ pub struct Loaded {
 
 /// Reads the folder `dir`, and returns with it what the files looked like just before, so a write
 /// that lands meanwhile shows up as a change next time. Takes no lock and changes nothing.
+#[hotpath::measure]
 pub fn load(dir: &Path, fallback_prefix: &str) -> (Loaded, u64) {
     let seen = fingerprint(dir);
     (read(dir, fallback_prefix), seen)
 }
 
 /// A number that changes when a file under `dir` is added, removed, or written.
+#[hotpath::measure]
 pub fn fingerprint(dir: &Path) -> u64 {
     let mut hasher = DefaultHasher::new();
     for folder in ["", "issues", "epics"] {
@@ -137,6 +139,7 @@ impl Store {
 
     /// Writes what has changed since the last time. What can't be written stays to be tried
     /// again; the first error is returned.
+    #[hotpath::measure(impl_type = "Store")]
     pub fn flush(&mut self) -> io::Result<()> {
         let mut first = None;
         let mut note = |result: io::Result<()>| {

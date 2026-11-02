@@ -55,6 +55,7 @@ fn load_theme(name: &str, config_dir: Option<&Path>) -> Option<Value> {
 }
 
 /// Applies the user's config (`theme`, `font.*`) over the bundled defaults.
+#[hotpath::measure]
 pub fn apply(cx: &mut App) {
     let config = config::load();
     let name = std::env::var("PO_THEME")

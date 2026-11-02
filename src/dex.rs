@@ -14,10 +14,16 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow, bail};
-use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
+use futures::channel::mpsc::unbounded;
 use serde_json::{Value, json};
 
 use crate::acp::{ConfigOption, Event, PermissionOption, SessionInfo};
+use crate::profile::{UnboundedReceiver, UnboundedSender};
+
+/// The client's events, for the thread to take; followed by hotpath in a profiled build.
+fn events() -> (UnboundedSender<Event>, UnboundedReceiver<Event>) {
+    hotpath::channel!(unbounded(), label = "dex events")
+}
 
 /// How long a freshly started daemon gets to answer `/health`.
 const STARTUP: Duration = Duration::from_secs(15);
@@ -165,6 +171,7 @@ impl Shared {
         result
     }
 
+    #[hotpath::measure(impl_type = "Shared")]
     fn stream_turn(&self, prompt: &str) -> Result<()> {
         let url = self.session_url("chat")?;
         let mut body = json!({ "prompt": prompt });
@@ -307,6 +314,7 @@ struct Mapper {
 }
 
 impl Mapper {
+    #[hotpath::measure(impl_type = "Mapper")]
     fn map(&mut self, envelope: &Value, replay: bool, shared: &Shared) -> Vec<Event> {
         let data = &envelope["data"];
         let update = |value: Value| vec![Event::Update(value)];
@@ -479,7 +487,7 @@ pub struct Client {
 impl Client {
     /// Connects to the daemon at `url`, starting `command` (e.g. `dex serve`) if nothing answers.
     pub fn spawn(url: &str, command: &str, cwd: &Path, resume: bool) -> Result<(Self, UnboundedReceiver<Event>)> {
-        let (events, receiver) = unbounded();
+        let (events, receiver) = events();
         let agent = |timeout: Option<Duration>| -> ureq::Agent {
             ureq::Agent::config_builder().timeout_global(timeout).build().into()
         };
@@ -508,7 +516,7 @@ impl Client {
         let url = shared.base.clone();
         registry(|r| *r.users.entry(url.clone()).or_default() += 1);
         let (worker, command, cwd) = (shared.clone(), command.to_string(), cwd.to_path_buf());
-        std::thread::spawn(move || {
+        std::thread::Builder::new().name("dex-stream".into()).spawn(move || {
             let mut held = None;
             let result = (|| -> Result<()> {
                 let _starting = STARTUP_LOCK.lock().expect("startup lock");
@@ -587,7 +595,7 @@ impl Client {
             if let Some(hold) = held {
                 let _ = hold.recv();
             }
-        });
+        }).expect("thread");
         Ok((Self { shared, url }, receiver))
     }
 
@@ -756,7 +764,7 @@ mod tests {
 
     /// A client state with no daemon behind it, for the pure event mapping.
     fn idle() -> Shared {
-        let (events, _) = unbounded();
+        let (events, _) = events();
         Shared {
             base: String::new(),
             token: None,
@@ -869,7 +877,7 @@ mod tests {
     fn a_setting_is_taken_at_once_and_goes_with_the_next_turn() {
         let done = json!({ "seq": 0, "type": "turn_complete", "data": { "response": "ok" } });
         let (base, request) = serve_and_capture(format!("data: {done}\n\n"));
-        let (events, mut receiver) = unbounded();
+        let (events, mut receiver) = events();
         let shared = Arc::new(Shared { base, events, ..idle() });
         *shared.options.lock().unwrap() = options_from(&json!({ "model": "opus", "available_models": ["sonnet"], "permission": "trusted" }));
         let client = Client { shared: shared.clone(), url: String::new() };
@@ -895,7 +903,7 @@ mod tests {
             json!({ "seq": 4, "type": "turn_complete", "data": { "response": "done" } }),
         ];
         let body: String = frames.iter().map(|f| format!("data: {f}\n\n")).collect();
-        let (events, mut receiver) = unbounded();
+        let (events, mut receiver) = events();
         let shared = Shared { base: serve_once(format!("data: ping\n\n{body}")), events, ..idle() };
         *shared.session.lock().unwrap() = Some("s1".into());
         shared.run_turn("hi").unwrap();
@@ -911,7 +919,7 @@ mod tests {
 
     #[test]
     fn a_stream_that_ends_early_is_an_error() {
-        let (events, _receiver) = unbounded();
+        let (events, _receiver) = events();
         let frame = json!({ "seq": 0, "type": "assistant_text", "data": "Hi" });
         let shared = Shared { base: serve_once(format!("data: {frame}\n\n")), events, ..idle() };
         *shared.session.lock().unwrap() = Some("s1".into());

@@ -216,6 +216,7 @@ impl Focusable for TerminalView {
 }
 
 impl Render for TerminalView {
+    #[hotpath::measure(impl_type = "TerminalView")]
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let palette = cx.global::<Palette>();
         let (family, font_size, muted) = (palette.mono_font_family.clone(), palette.mono_font_size, palette.muted_foreground);
@@ -363,6 +364,7 @@ struct Face<'a> {
     focused: bool,
 }
 
+#[hotpath::measure]
 fn paint(frame: &Frame, selection: Selection, bounds: Bounds<Pixels>, face: Face, window: &mut Window, cx: &mut App) {
     let Face { cell: (cell_w, cell_h), family, font_size, caret, focused } = face;
     let origin = bounds.origin;

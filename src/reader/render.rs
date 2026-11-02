@@ -12,6 +12,7 @@ impl Reader {
 
     /// What the sidebar shows: the projects and threads that answer its filter, what waits on the
     /// user, and what agents have suggested.
+    #[hotpath::measure(impl_type = "Reader")]
     pub(crate) fn sidebar_snapshot(&self, cx: &App) -> nsh::sidebar::Snapshot {
         use nsh::sidebar as side;
         let query = self.side_query.trim().to_lowercase();
@@ -154,6 +155,7 @@ impl Reader {
     }
 
     /// What the conversation shows: the header, the transcript, and the composer.
+    #[hotpath::measure(impl_type = "Reader")]
     pub(crate) fn chat_snapshot(&self, lead: Vec<nsh::header::Control>, trail: Vec<nsh::header::Control>, cx: &App) -> nsh::chat::Snapshot {
         use nsh::chat as chat;
         let thread = &self.thread;
@@ -283,6 +285,7 @@ impl Reader {
     }
 
     /// Does what the user asked of on the conversation the NSH pane draws.
+    #[hotpath::measure(impl_type = "Reader")]
     pub(crate) fn chat_cmd(&mut self, cmd: nsh::chat::Cmd, window: &mut Window, cx: &mut Context<Self>) {
         use nsh::chat::{Cmd as Chat, GrantChange, Scope as ChatScope};
         match cmd {
@@ -356,6 +359,7 @@ impl Reader {
     }
 
     /// Does what the user asked of a screen drawn by NSH.
+    #[hotpath::measure(impl_type = "Reader")]
     pub(crate) fn run(&mut self, cmd: nsh::bus::Cmd, window: &mut Window, cx: &mut Context<Self>) {
         use nsh::bus::Cmd;
         if !matches!(cmd, Cmd::CloseThread(..)) && self.closing.take().is_some() {
@@ -456,6 +460,7 @@ impl Reader {
 
     /// The viewer or the diff viewer, as the project's mode says, with the file tree beside it
     /// unless that is hidden or the agent's own view is shown, which has no files to pick.
+    #[hotpath::measure(impl_type = "Reader")]
     pub(crate) fn pane(&self, cx: &mut Context<Self>) -> AnyElement {
         let tabs = self.view_tabs();
         let has_tabs = tabs.is_some();
@@ -627,6 +632,7 @@ impl Reader {
         div().size_full().child(self.diff.clone())
     }
 
+    #[hotpath::measure(impl_type = "Reader")]
     pub(crate) fn diff_snapshot(&self, lead: Vec<nsh::header::Control>, trail: Vec<nsh::header::Control>, cx: &App) -> nsh::diff::Snapshot {
         use nsh::diff::{Body, Snapshot};
         let project = &self.project;
@@ -645,6 +651,7 @@ impl Reader {
         div().size_full().child(self.source.clone())
     }
 
+    #[hotpath::measure(impl_type = "Reader")]
     pub(crate) fn source_snapshot(&self, lead: Vec<nsh::header::Control>, trail: Vec<nsh::header::Control>, cx: &App) -> nsh::source::Snapshot {
         use nsh::source::{Body, Snapshot};
         let current = self.project.current.as_deref();
@@ -682,6 +689,7 @@ impl Reader {
     }
 
     /// What the parent of children says in its header: `3 threads · 1 asking · 1 failed`.
+    #[hotpath::measure(impl_type = "Reader")]
     pub(crate) fn children_status(&self, id: u64) -> Option<String> {
         let children: Vec<&Thread> = self.threads_all().filter(|thread| thread.parent == Some(id)).collect();
         if children.is_empty() {

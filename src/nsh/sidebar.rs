@@ -84,6 +84,7 @@ pub struct Snapshot {
 static SNAPSHOT: LazyLock<watch::Sender<Snapshot>> = LazyLock::new(|| watch::Sender::new(Snapshot::default()));
 
 /// Shows `snapshot`; nothing is redrawn when it is what the screen already has.
+#[hotpath::measure]
 pub fn publish(snapshot: Snapshot) {
     SNAPSHOT.send_if_modified(|now| {
         let changed = *now != snapshot;
@@ -185,6 +186,7 @@ fn grant_badge() -> View {
 
 /// The row of a thread, its mark first, as a step in the transcript starts with its status. Its
 /// title is a step right of the name of the project above.
+#[hotpath::measure]
 fn thread_row(thread: &Thread, project: Option<&str>, close_tip: &'static str) -> View {
     let (pid, tid) = (thread.project, thread.id);
     let selected = thread.selected;
@@ -234,6 +236,7 @@ fn accent(name: &str) -> AdaptiveColor {
     AdaptiveColor { light: hsla(hue, 0.6, 0.42, 1.), dark: hsla(hue, 0.6, 0.68, 1.) }
 }
 
+#[hotpath::measure]
 fn project_group(project: &Project) -> View {
     let pid = project.id;
     let tint = accent(&project.name);

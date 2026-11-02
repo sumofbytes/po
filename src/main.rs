@@ -15,6 +15,7 @@ mod issues;
 mod mcp;
 mod nsh;
 mod pr;
+mod profile;
 mod reader;
 mod schemes;
 mod settings;
@@ -87,12 +88,13 @@ fn watch_dirs(watcher: &mut impl notify::Watcher, dir: &Path) {
     }
 }
 
-type Watch = (notify::RecommendedWatcher, futures::channel::mpsc::UnboundedReceiver<notify::Event>);
+type Watch = (notify::RecommendedWatcher, profile::UnboundedReceiver<notify::Event>);
 
 /// A watcher on every folder under `root`. Adding the watches costs a syscall per folder, which
 /// adds up to seconds on a big tree, so callers run this off the UI thread.
+#[hotpath::measure]
 fn start_watcher(root: &Path) -> Option<Watch> {
-    let (tx, rx) = futures::channel::mpsc::unbounded();
+    let (tx, rx) = hotpath::channel!(futures::channel::mpsc::unbounded(), label = "file events");
     let mut watcher = match notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
         if let Ok(event) = event {
             tx.unbounded_send(event).ok();
@@ -119,23 +121,24 @@ struct Prefetch {
 impl Prefetch {
     fn start(root: PathBuf) -> Self {
         let scan = root.clone();
-        let files = std::thread::spawn(move || {
+        let files = std::thread::Builder::new().name("po-walk".into()).spawn(move || {
             let mut files = Vec::new();
             walk(&scan, &mut files);
             trace::mark("walk (thread)");
             files
-        });
+        }).expect("thread");
         let (done, watch) = futures::channel::oneshot::channel();
         let target = root.clone();
-        std::thread::spawn(move || {
+        std::thread::Builder::new().name("po-watch".into()).spawn(move || {
             let watch = start_watcher(&target);
             trace::mark("watcher (thread)");
             done.send(watch).ok();
-        });
+        }).expect("thread");
         Self { root, files, watch }
     }
 }
 
+#[hotpath::measure]
 fn walk(root: &Path, out: &mut Vec<String>) {
     for entry in walker(root).flatten() {
         if out.len() >= MAX_FILES {
@@ -388,6 +391,7 @@ fn step_name(status: Step) -> &'static str {
 /// A thread's transcript as entries: the user's text, and the agent's text, thoughts, tool
 /// calls and plan. Permission asks show as a call that is waiting or done; approval cards are
 /// the user's to answer and are not in the transcript.
+#[hotpath::measure]
 fn transcript(thread: &Thread, full: bool) -> Vec<state::Entry> {
     let mut out = Vec::new();
     for msg in &thread.messages {
@@ -425,6 +429,7 @@ fn transcript(thread: &Thread, full: bool) -> Vec<state::Entry> {
 }
 
 /// A diff content block as `-`/`+` lines, without the lines the edit leaves alone.
+#[hotpath::measure]
 fn diff_text(item: &Value) -> String {
     const LIMIT: usize = 200;
     let old: Vec<&str> = item["oldText"].as_str().unwrap_or_default().lines().collect();
@@ -1420,6 +1425,7 @@ struct Reader {
 }
 
 impl Reader {
+    #[hotpath::measure(impl_type = "Reader")]
     fn new(
         home: PathBuf,
         pr: Option<pr::Pr>,
@@ -1858,6 +1864,7 @@ fn approval_text(agent: &config::Agent, new_agent: bool, mcp: &[config::McpServe
 }
 
 impl Render for Reader {
+    #[hotpath::measure(impl_type = "Reader")]
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.settle_agent_changes();
         // A terminal that is no longer drawn must not keep the keys: they would go to a shell nobody sees.
@@ -1869,7 +1876,10 @@ impl Render for Reader {
             self.painted = true;
             trace::mark("first render");
             if trace::exit_after_first_frame() {
-                cx.defer(|_| std::process::exit(0));
+                cx.defer(|_| {
+                    profile::finish();
+                    std::process::exit(0)
+                });
             }
         }
         let colors = cx.global::<Palette>();
@@ -2027,6 +2037,7 @@ struct Shell {
 }
 
 impl Render for Shell {
+    #[hotpath::measure(impl_type = "Shell")]
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let palette = cx.global::<Palette>();
         window.set_rem_size(palette.font_size);
@@ -2132,6 +2143,7 @@ fn main() {
             Err(err) => eprintln!("po: could not detach ({err}), running in foreground"),
         }
     }
+    profile::start();
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn,po=info"))
         .format_timestamp_millis()
         .init();
@@ -2139,6 +2151,11 @@ fn main() {
     let prefetch = Prefetch::start(pr.as_ref().map_or_else(|| root.clone(), |pr| pr.worktree.clone()));
     gpui_platform::application().run(move |cx: &mut App| {
         trace::mark("app running");
+        cx.on_app_quit(|_| {
+            profile::finish();
+            async {}
+        })
+        .detach();
         cx.bind_keys([
             KeyBinding::new("ctrl-o", ToggleTools, None),
             KeyBinding::new("ctrl-t", ToggleThoughts, None),
@@ -2205,10 +2222,13 @@ fn main() {
         .expect("window");
         cx.activate(true);
     });
+    // Where the event loop returns rather than ending the process; the app's quit already did it.
+    profile::finish();
 }
 
 /// What a thread is doing, in a line: the question it waits on, the tool it is
 /// running, or the last thing it said.
+#[hotpath::measure]
 fn preview_of(messages: &[Msg], busy: bool) -> String {
     if let Some(Msg::Agent(blocks)) = messages.last() {
         if let Some(ask) = blocks.iter().find_map(|b| match b {

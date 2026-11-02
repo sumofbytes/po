@@ -115,6 +115,7 @@ impl Reader {
 
     /// Forgets an agent's change once the layout is no longer what it left: the user moved on, and
     /// coming back to it by hand is their choice, not the agent's.
+    #[hotpath::measure(impl_type = "Reader")]
     pub(crate) fn settle_agent_changes(&mut self) {
         self.agent_panes = AgentChange::settled(self.agent_panes, self.panes());
         let mode = AgentChange::settled(self.agent_modes.get(&self.project_id).copied(), self.mode);

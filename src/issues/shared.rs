@@ -36,6 +36,7 @@ fn lock() -> MutexGuard<'static, Option<Store>> {
     STORE.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+#[hotpath::measure]
 fn publish(store: &Store) {
     let name = store.root().file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
     let view = View { root: Some(store.root().to_path_buf()), name, tracker: store.tracker.clone(), problems: store.problems.clone() };
@@ -64,18 +65,19 @@ pub fn set_project(project: &Path) {
     publish(&opened);
     *lock() = Some(opened);
     POLLER.call_once(|| {
-        std::thread::spawn(|| {
+        std::thread::Builder::new().name("issues-poll".into()).spawn(|| {
             loop {
                 std::thread::sleep(Duration::from_millis(1500));
                 poll();
             }
-        });
+        }).expect("thread");
     });
 }
 
 /// Notices files that changed underneath (git, another window) and reads them in. The checking
 /// and the reading are done without the lock; it is held only to see that nothing happened to the
 /// store meanwhile and to swap the reading in.
+#[hotpath::measure]
 fn poll() {
     let Some((dir, prefix, seen)) = lock().as_ref().map(Store::watch_state) else { return };
     if fingerprint(&dir) == seen {
@@ -168,6 +170,7 @@ pub fn nav_watch() -> watch::Receiver<u64> {
 }
 
 /// How many issues are open, and how many of those are late, for the sidebar's row.
+#[hotpath::measure]
 pub fn summary() -> (usize, usize) {
     let view = VIEW.borrow();
     (view.tracker.open_count(), view.tracker.late(today()))

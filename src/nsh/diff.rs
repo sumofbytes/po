@@ -46,6 +46,7 @@ impl Default for Snapshot {
 static SNAPSHOT: LazyLock<watch::Sender<Snapshot>> = LazyLock::new(|| watch::Sender::new(Snapshot::default()));
 
 /// Shows `snapshot`; nothing is redrawn when it is what the screen already has.
+#[hotpath::measure]
 pub fn publish(snapshot: Snapshot) {
     SNAPSHOT.send_if_modified(|now| {
         let changed = *now != snapshot;

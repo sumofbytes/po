@@ -67,6 +67,7 @@ By default `po` detaches from the terminal, like `code .`; output goes to
 `$XDG_CACHE_HOME/po/po.log` (default `~/.cache/po/po.log`). Environment
 variables: `PO_AGENT` (default agent command, same as `--agent`), `PO_THEME`
 (theme name, overrides the config), `PO_TRACE=1` (print startup timings).
+To profile a whole run, see [docs/profiling.md](docs/profiling.md).
 Detaching is Unix-only for now.
 
 ## Configuration
