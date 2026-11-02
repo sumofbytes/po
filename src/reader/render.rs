@@ -20,6 +20,7 @@ impl Reader {
         let views = self.views();
         let many = views.len() > 1;
         let (active_project, active_thread) = (self.project_id, self.thread.id);
+        let now = now_ms();
         let thread_row = |pid: u64, thread: &Thread| side::Thread {
             project: pid,
             id: thread.id,
@@ -32,7 +33,7 @@ impl Reader {
             },
             selected: (pid, thread.id) == (active_project, active_thread),
             controlled: self.grants.get(&thread.id).is_some_and(|grant| *grant != command::Grant::initial() && *grant != command::Grant::default()),
-            ago: ago(now_ms(), thread.active_at),
+            ago: ago(now, thread.active_at),
             closing: self.closing == Some((pid, thread.id)) && self.close_loses_work(thread.id),
         };
         // Filtering keeps a project whose name matches, with all its threads, and any project with a
@@ -54,16 +55,23 @@ impl Reader {
             .map(|view| {
                 let pid = view.id;
                 let collapsed = self.projects_collapsed.contains(&pid) && !searching;
-                // Most recently active first. Only the active ones show; the rest fold under "more".
-                let mut recent: Vec<&Thread> = view.threads.iter().copied().filter(|t| (!t.blank || t.id == view.shown) && !self.waits_on_user(pid, t)).collect();
+                // Active: running, finished unseen with its parent told, or an agent still alive; the one
+                // on screen too, whatever it is doing.
+                let active = |t: &Thread| t.id == view.shown || t.activity() != Activity::Idle || t.client.is_some();
+                // Most recently active first. Only the active ones show; the rest fold under "more",
+                // but for those idle for more than a day, which only a search or the history finds.
+                let mut recent: Vec<&Thread> = view
+                    .threads
+                    .iter()
+                    .copied()
+                    .filter(|t| (!t.blank || t.id == view.shown) && !self.waits_on_user(pid, t))
+                    .filter(|t| searching || active(t) || !stale(now, t.active_at))
+                    .collect();
                 recent.sort_by_key(|t| (std::cmp::Reverse(t.active_at), std::cmp::Reverse(t.id)));
                 if searching && !project_hit(view) {
                     recent.retain(|t| self.matches_query(t, &query));
                 }
                 let expanded = self.threads_expanded.contains(&pid) || searching;
-                // Active: running, finished unseen with its parent told, or an agent still alive; the one
-                // on screen too, whatever it is doing.
-                let active = |t: &Thread| t.id == view.shown || t.activity() != Activity::Idle || t.client.is_some();
                 let shown_count = recent.iter().filter(|t| active(t)).count();
                 let foldable = !searching && recent.len() > shown_count.max(1);
                 let hidden = if expanded || !foldable {

@@ -879,6 +879,16 @@ fn ago(now: u64, then: u64) -> Option<String> {
     })
 }
 
+/// How long a thread that does nothing keeps its row in the sidebar; after that, search and the
+/// history find it.
+const STALE_MS: u64 = 24 * 3_600_000;
+
+/// `then` (ms since the epoch) is more than [`STALE_MS`] before `now`. A counter from before the
+/// time was kept is older than that.
+fn stale(now: u64, then: u64) -> bool {
+    now.saturating_sub(then) > STALE_MS
+}
+
 /// `title` with its first letter in capitals when it opens with a plain word, as "fix the build"
 /// does. One that opens with a path, a command or an identifier (`src/main.rs`, `cargo test`,
 /// `snake_case`, `v2`) is left as typed.
@@ -2279,7 +2289,7 @@ mod tests {
         }
     }
 
-    use super::{Queue, Where, ago, route, run_task, task_in_progress};
+    use super::{Queue, STALE_MS, Where, ago, route, run_task, stale, task_in_progress};
 
     #[test]
     fn the_sidebar_says_how_long_ago_in_a_word() {
@@ -2294,6 +2304,17 @@ mod tests {
         // A counter from before the time was kept, and a time in the future, say nothing.
         assert_eq!(ago(now, 7), None);
         assert_eq!(ago(now, now + 1), None);
+    }
+
+    #[test]
+    fn a_thread_idle_for_more_than_a_day_is_stale() {
+        let now = 1_800_000_000_000;
+        assert!(!stale(now, now - 23 * 3_600_000));
+        assert!(!stale(now, now - STALE_MS));
+        assert!(stale(now, now - STALE_MS - 1));
+        // A counter from before the time was kept is old; a time in the future is not.
+        assert!(stale(now, 7));
+        assert!(!stale(now, now + 1));
     }
 
     #[test]
