@@ -165,6 +165,7 @@ impl Workspace {
 
     /// What was saved last, if anything. `start` is where this window was started: before there
     /// was one set for all windows, each directory kept its own, and those are picked up once.
+    #[hotpath::measure(impl_type = "Workspace")]
     pub fn load(start: &Path) -> Option<Self> {
         Self::load_from(&file(), &crate::config::data_dir().join("workspaces"), start)
     }
@@ -204,6 +205,7 @@ impl Workspace {
     /// Saves it, replacing the file in one step so that a crash can't leave half of one.
     /// Projects and threads other windows saved since this one last did (those not in `known`)
     /// are kept, and ones in `known` that are no longer open here were closed here.
+    #[hotpath::measure(impl_type = "Workspace")]
     pub fn save(&self, known: &mut Known) {
         let target = file();
         if let Err(error) = self.save_to(&target, known) {

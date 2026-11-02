@@ -5,6 +5,7 @@ use crate::*;
 impl Reader {
     /// The one way a request from outside the window changes it. Views are the caller's own; the
     /// viewer is the user's, so only the thread on screen may move it, and not while they are busy.
+    #[hotpath::measure(impl_type = "Reader")]
     pub(crate) fn run_command(&mut self, caller: command::Caller, command: command::Command, window: &mut Window, cx: &mut Context<Self>) -> command::Answer {
         let (name, writes) = (command.name(), command.writes());
         let answer = self.run_command_inner(caller, command, window, cx);
@@ -956,6 +957,7 @@ impl Reader {
 
     /// Tells every `po ctl watch` that thread `id` is now in `after`; one that has hung up is
     /// dropped.
+    #[hotpath::measure(impl_type = "Reader")]
     pub(crate) fn publish(&mut self, id: u64, after: crate::state::ThreadState) {
         if self.subscribers.is_empty() {
             return;
@@ -1053,6 +1055,7 @@ impl Reader {
     }
 
     /// One thread as the read model sees it: a snapshot of the fields an outsider gets.
+    #[hotpath::measure(impl_type = "Reader")]
     pub(crate) fn thread_info(&self, view: &View<'_>, thread: &Thread) -> state::ThreadInfo {
         let asking = thread.messages.iter().rev().find_map(|msg| {
             let Msg::Agent(blocks) = msg else { return None };
@@ -1088,6 +1091,7 @@ impl Reader {
     }
 
     /// One project as the read model sees it.
+    #[hotpath::measure(impl_type = "Reader")]
     pub(crate) fn project_info(&self, view: &View<'_>) -> state::ProjectInfo {
         state::ProjectInfo {
             id: view.id,

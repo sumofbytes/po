@@ -63,6 +63,7 @@ pub fn read_json(path: &Path) -> Option<Value> {
 }
 
 /// The user's `config.json`, or null when there is none.
+#[hotpath::measure]
 pub fn load() -> Value {
     dir().and_then(|dir| read_json(&dir.join("config.json"))).unwrap_or(Value::Null)
 }

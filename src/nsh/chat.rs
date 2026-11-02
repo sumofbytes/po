@@ -249,6 +249,7 @@ pub struct Snapshot {
 static SNAPSHOT: LazyLock<watch::Sender<Snapshot>> = LazyLock::new(|| watch::Sender::new(Snapshot::default()));
 
 /// Shows `snapshot`; nothing is redrawn when it is what the screen already has.
+#[hotpath::measure]
 pub fn publish(snapshot: Snapshot) {
     SNAPSHOT.send_if_modified(|now| {
         let changed = *now != snapshot;
@@ -544,6 +545,7 @@ fn grant_menu(grant: Grant, pending: bool) -> AnyElement {
 const COLUMN: f32 = 760.;
 
 /// A message the user sent, in a rounded column at the right: its pictures, then its text.
+#[hotpath::measure]
 fn user_row(text_: &str, pictures: &[Picture]) -> AnyElement {
     let mut bubble = view()
         .flex_col()
@@ -654,6 +656,7 @@ fn is_step(block: &Block) -> bool {
 
 /// One call of the agent's tools: its glyph and title, what it sent and what came back once it
 /// is open, and a way to the file it touched.
+#[hotpath::measure]
 fn tool_row(message: usize, at: usize, tool: &Tool) -> AnyElement {
     let settled = tool.phase == Phase::Done;
     let title = tool.title.clone();
@@ -969,6 +972,7 @@ fn block_row(message: usize, block: &Block, thought_streaming: bool) -> AnyEleme
 }
 
 /// One message of the agent's: its blocks, a run's own row standing in for the tools it hides.
+#[hotpath::measure]
 fn agent_row(message: usize, blocks: &[Block], live: bool) -> AnyElement {
     let mut column = view().flex_col().min_w_0();
     let mut skip = 0;
@@ -1000,6 +1004,7 @@ fn agent_row(message: usize, blocks: &[Block], live: bool) -> AnyElement {
 
 /// The conversation: the messages, in order, as a center column that scrolls. Its stage, and the
 /// rail beside it, are the caller's ([`stage`]), so a change of the messages leaves them be.
+#[hotpath::measure]
 fn transcript(items: &[Item], slot: ElementRef, at_end: Signal<bool>, rail: Position, busy: bool) -> AnyElement {
     // The transcript's column is the composer card's width, and its text starts where the
     // composer's does: the card's border, its padding and the field's padding in (see [`bar`]).
@@ -2096,7 +2101,7 @@ mod tests {
         assert_eq!(drain(&mut app, commands), [Bus::Chat(Cmd::Fold { message: 0, block: 0, folded: false })]);
     }
 
-    fn drain(app: &mut Headless, commands: &mut tokio::sync::mpsc::UnboundedReceiver<Bus>) -> Vec<Bus> {
+    fn drain(app: &mut Headless, commands: &mut crate::nsh::bus::Commands) -> Vec<Bus> {
         app.settle();
         std::iter::from_fn(|| commands.try_recv().ok()).collect()
     }

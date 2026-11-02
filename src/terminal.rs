@@ -9,6 +9,10 @@ use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+// What goes to the emulator, and the frame it hands the view: followed by hotpath in a profiled
+// build, the std types otherwise.
+use hotpath::wrap::std::sync::{Mutex as FrameLock, mpsc as watched};
+
 /// The least time between two frames while output is streaming in.
 const FRAME: Duration = Duration::from_millis(8);
 const SCROLLBACK: usize = 10_000;
@@ -100,8 +104,8 @@ enum Msg {
 
 /// A running shell. Dropping it stops the shell.
 pub struct Session {
-    tx: Sender<Msg>,
-    frame: Arc<Mutex<Arc<Frame>>>,
+    tx: watched::Sender<Msg>,
+    frame: Arc<FrameLock<Arc<Frame>>>,
     pty: pty::Pty,
 }
 
@@ -110,8 +114,8 @@ impl Session {
     pub fn spawn(cwd: &Path, cols: u16, rows: u16, theme: (Rgb, Rgb), wake: impl Fn() + Send + 'static) -> io::Result<Self> {
         let (cols, rows) = (cols.max(1), rows.max(1));
         let pty = pty::Pty::spawn(cwd, cols, rows)?;
-        let (tx, rx) = mpsc::channel();
-        let frame = Arc::new(Mutex::new(Arc::new(Frame::default())));
+        let (tx, rx) = hotpath::channel!(mpsc::channel(), label = "terminal input");
+        let frame = Arc::new(hotpath::mutex!(Mutex::new(Arc::new(Frame::default())), label = "terminal frame"));
 
         let reader = pty.reader()?;
         let output = tx.clone();
@@ -211,7 +215,7 @@ impl Drop for Session {
     }
 }
 
-fn emulate(rx: mpsc::Receiver<Msg>, to_shell: Sender<Vec<u8>>, backlog: Arc<AtomicUsize>, shared: Arc<Mutex<Arc<Frame>>>, (cols, rows): (u16, u16), theme: (Rgb, Rgb), wake: impl Fn()) {
+fn emulate(rx: watched::Receiver<Msg>, to_shell: Sender<Vec<u8>>, backlog: Arc<AtomicUsize>, shared: Arc<FrameLock<Arc<Frame>>>, (cols, rows): (u16, u16), theme: (Rgb, Rgb), wake: impl Fn()) {
     use libghostty_vt::key::{Action, Encoder, Event, Mods};
     use libghostty_vt::terminal::ScrollViewport;
     use libghostty_vt::{RenderState, Terminal, TerminalOptions};
@@ -328,6 +332,7 @@ struct Cache {
     colors: Option<(Rgb, Rgb)>,
 }
 
+#[hotpath::measure]
 fn snapshot<'a>(terminal: &libghostty_vt::Terminal<'a, '_>, render: &mut libghostty_vt::RenderState<'a>, cache: &mut Cache, title: String, exited: Option<i32>) -> Option<Frame> {
     use libghostty_vt::render::{CellIterator, CursorVisualStyle, RowIterator};
     use libghostty_vt::screen::CellWide;

@@ -94,6 +94,7 @@ impl FileTree {
     }
 
     /// Shows `paths`, with `selected` selected if it is among them and nothing otherwise.
+    #[hotpath::measure(impl_type = "FileTree")]
     pub fn set_paths(&mut self, paths: &[String], selected: Option<&str>) {
         self.paths = paths.to_vec();
         self.selected = selected.filter(|id| self.paths.iter().any(|p| p == id)).map(str::to_string);
@@ -142,6 +143,7 @@ impl FileTree {
     }
 
     /// The visible rows: folders before files at every level, folders open as the user left them.
+    #[hotpath::measure(impl_type = "FileTree")]
     pub fn rows(&self) -> Vec<Row> {
         let mut root = Dir::default();
         for file in &self.paths {

@@ -56,28 +56,31 @@ impl Reader {
                 }
                 // Files coming, going or being renamed change the explorer; edits alone don't,
                 // so only those re-walk the tree.
-                let (mut changed, mut moved) = (false, false);
-                let mut touched = HashSet::new();
-                let (gitignore, _) = ignore::gitignore::Gitignore::new(root.join(".gitignore"));
-                for event in events.iter().filter(|e| !e.kind.is_access()) {
-                    for path in &event.paths {
-                        let Ok(rel) = path.strip_prefix(&root) else { continue };
-                        if rel.components().any(|c| ignored(&c.as_os_str().to_string_lossy()))
-                            || gitignore.matched_path_or_any_parents(rel, path.is_dir()).is_ignore()
-                        {
-                            continue;
-                        }
-                        changed = true;
-                        moved |= !matches!(
-                            event.kind,
-                            notify::EventKind::Modify(notify::event::ModifyKind::Data(_) | notify::event::ModifyKind::Metadata(_))
-                        );
-                        touched.insert(rel.to_string_lossy().replace('\\', "/"));
-                        if path.is_dir() {
-                            watch_dirs(&mut watcher, path);
+                let (changed, moved, touched) = hotpath::measure_block!("watch batch", {
+                    let (mut changed, mut moved) = (false, false);
+                    let mut touched = HashSet::new();
+                    let (gitignore, _) = ignore::gitignore::Gitignore::new(root.join(".gitignore"));
+                    for event in events.iter().filter(|e| !e.kind.is_access()) {
+                        for path in &event.paths {
+                            let Ok(rel) = path.strip_prefix(&root) else { continue };
+                            if rel.components().any(|c| ignored(&c.as_os_str().to_string_lossy()))
+                                || gitignore.matched_path_or_any_parents(rel, path.is_dir()).is_ignore()
+                            {
+                                continue;
+                            }
+                            changed = true;
+                            moved |= !matches!(
+                                event.kind,
+                                notify::EventKind::Modify(notify::event::ModifyKind::Data(_) | notify::event::ModifyKind::Metadata(_))
+                            );
+                            touched.insert(rel.to_string_lossy().replace('\\', "/"));
+                            if path.is_dir() {
+                                watch_dirs(&mut watcher, path);
+                            }
                         }
                     }
-                }
+                    (changed, moved, touched)
+                });
                 if !changed {
                     continue;
                 }
@@ -120,6 +123,7 @@ impl Reader {
 
     /// Starts `key`'s agent in the thread on screen, with a fresh conversation, or with the
     /// agent's session list to resume from when `resume`.
+    #[hotpath::measure(impl_type = "Reader")]
     pub(crate) fn connect(&mut self, key: &str, resume: bool, window: &mut Window, cx: &mut Context<Self>) {
         self.thread.generation += 1;
         self.thread.failed = false;
@@ -622,6 +626,7 @@ impl Reader {
     /// Brings back the projects and threads the last window started here left. The project on
     /// screen is the one `po` was started on; the others wait in the background and the
     /// threads sleep until shown. True if the project on screen got its threads back.
+    #[hotpath::measure(impl_type = "Reader")]
     pub(crate) fn restore(&mut self, saved: workspace::Workspace, cx: &mut Context<Self>) -> bool {
         let mut resumed = false;
         let mut seen = HashSet::new();
@@ -726,6 +731,7 @@ impl Reader {
     }
 
     /// Every open project with its threads, oldest first.
+    #[hotpath::measure(impl_type = "Reader")]
     pub(crate) fn views(&self) -> Vec<View<'_>> {
         let mut views = vec![View {
             id: self.project_id,
@@ -750,6 +756,7 @@ impl Reader {
     }
 
     /// What is worth keeping of the projects and threads: those with an agent session.
+    #[hotpath::measure(impl_type = "Reader")]
     pub(crate) fn workspace(&self, cx: &App) -> workspace::Workspace {
         // A PR is a throwaway checkout; it is not brought back.
         let all: Vec<&Thread> = self.threads_all().collect();
@@ -783,6 +790,7 @@ impl Reader {
 
     /// Saves the workspace once the current change has settled, so that a thread that is
     /// swapped in to handle an event isn't saved as the one on screen.
+    #[hotpath::measure(impl_type = "Reader")]
     pub(crate) fn request_save(&mut self, cx: &mut Context<Self>) {
         if self.save_pending {
             return;
@@ -985,6 +993,7 @@ impl Reader {
 
 
     /// `visible`: this thread is the one on screen, so its edits may move the viewer.
+    #[hotpath::measure(impl_type = "Reader")]
     pub(crate) fn on_event(&mut self, event: Event, visible: bool, window: &mut Window, cx: &mut Context<Self>) {
         // Most events change the last message; a tool call update may change an earlier one.
         let mut changed = self.thread.messages.len().saturating_sub(1);
