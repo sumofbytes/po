@@ -3,14 +3,13 @@
 //! to start with, the session's settings, what the agent may do through Po). [`Snapshot`] is
 //! what [`crate::Reader`] publishes; the screen draws it, and what the user does on it comes
 //! back as a [`Cmd`].
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
 
 use nsh_base::{menu, menu_item, menu_separator, text_view, Input, input};
 use nsh_core::prelude::*;
 use tokio::sync::watch;
 
 use super::header::{Control, pane_header};
-use super::source::Shared;
 use super::{Colors, body, icon, mono_size, note, scale, text_base, text_sm, text_xs, tooltip, Sizing, Smooth};
 use crate::ui::icon::IconName;
 
@@ -152,8 +151,9 @@ pub struct AskOption {
 /// One block of the agent's message. `index` is the block's place in the message, to press.
 #[derive(Clone, PartialEq, Debug)]
 pub enum Block {
-    /// The agent's text, as markdown.
-    Markdown(Shared),
+    /// The agent's text, as markdown. Compared by its text: a message that did not change must
+    /// compare equal to the one drawn, or it is drawn again with each chunk of another.
+    Markdown(Arc<str>),
     /// Its reasoning, with whether it is expanded.
     Thought { index: usize, text: String, open: bool },
     Tool(Tool),
@@ -956,7 +956,7 @@ fn approve_row(message: usize, at: usize, question: &str, lines: &[String], answ
 fn block_row(message: usize, block: &Block, thought_streaming: bool) -> AnyElement {
     match block {
         Block::Markdown(markdown) => text_view()
-            .markdown(markdown.0.to_string())
+            .markdown(markdown.to_string())
             .on_link_press(open_link)
             .selectable(true)
             .sized(text_base())
@@ -1005,7 +1005,7 @@ fn agent_row(message: usize, blocks: &[Block], live: bool) -> AnyElement {
 /// The conversation: the messages, in order, as a center column that scrolls. Its stage, and the
 /// rail beside it, are the caller's ([`stage`]), so a change of the messages leaves them be.
 #[hotpath::measure]
-fn transcript(items: &[Item], slot: ElementRef, at_end: Signal<bool>, rail: Position, busy: bool) -> AnyElement {
+fn transcript(state: Signal<Snapshot>, count: usize, slot: ElementRef, at_end: Signal<bool>, rail: Position) -> AnyElement {
     // The transcript's column is the composer card's width, and its text starts where the
     // composer's does: the card's border, its padding and the field's padding in (see [`bar`]).
     let mut rows = view().w_full().min_w_0().max_w(px(COLUMN)).flex_col().gap(scale::s6()).px(scale::composer_text_inset()).py(scale::s6());
@@ -1015,13 +1015,13 @@ fn transcript(items: &[Item], slot: ElementRef, at_end: Signal<bool>, rail: Posi
     // caller, not here: this runs again on every change of the thread, and a layout event comes
     // only when a frame changes, so state made anew here would stay empty.
     let Position { frames, origin, active, pinned, .. } = rail;
-    let count = items.len();
     let shown = count.min(MAX_BARS);
     frames.with(|sections| sections.truncate(count));
     // A thought still streaming reads as `Thinking`; every thought that something came after, or
     // that belongs to a turn already over, reads as `Thought`.
-    let last = items.iter().rposition(|item| matches!(item, Item::Agent { .. }));
-    for (message, item) in items.iter().enumerate() {
+    let last = computed(move || state.with(|s| s.items.iter().rposition(|item| matches!(item, Item::Agent { .. }))));
+    let busy = computed(move || state.with(|s| s.busy));
+    for message in 0..count {
         let locate = move |bounds: &Bounds<Points>| {
             frames.with(|sections| {
                 if sections.len() <= message {
@@ -1030,10 +1030,15 @@ fn transcript(items: &[Item], slot: ElementRef, at_end: Signal<bool>, rail: Posi
                 sections[message] = bounds.origin.y;
             });
         };
-        let row = match item {
-            Item::User { text, pictures } => user_row(text, pictures),
-            Item::Agent { blocks, .. } => agent_row(message, blocks, busy && Some(message) == last),
-        };
+        // Each row is a region of its own over a memo of its message: text streaming into the last
+        // one builds that row again and leaves the rest as they are. They were all built again on
+        // every chunk, and what that cost grew with the thread, about 3 MB for each message.
+        let item = computed(move || state.with(|s| s.items.get(message).cloned()));
+        let row = dynamic(move || match item.get() {
+            Some(Item::User { text, pictures }) => user_row(&text, &pictures),
+            Some(Item::Agent { blocks, .. }) => agent_row(message, &blocks, busy.get() && last.get() == Some(message)),
+            None => view().into_element(),
+        });
         rows = rows.child(view().on_layout(locate).child(row));
     }
     // The column re-wraps when the window is resized, and its height changes under a scroll
@@ -1940,12 +1945,13 @@ pub fn Chat() -> impl IntoElement {
     // The page above the composer is built again only when what it shows changes: a change of
     // the header or the composer (a pane taking focus, a status line) would otherwise build the
     // transcript and its rail anew, and a press begun on a bar would end on one that is gone.
-    let page = computed(move || state.with(|s| (s.items.clone(), s.blank, s.busy)));
+    let page = computed(move || state.with(|s| (s.items.is_empty(), s.blank)));
+    let count = computed(move || state.with(|s| s.items.len()));
     let top = move || {
-        let (items, blank, busy) = page.get();
+        let (empty, blank) = page.get();
         // A thread that has not started says so where the transcript will be; its composer, and
         // the choice of agent in it, are there all the same.
-        if items.is_empty() && blank {
+        if empty && blank {
             view()
                 .flex_1()
                 .min_h_0()
@@ -1957,11 +1963,10 @@ pub fn Chat() -> impl IntoElement {
                 .children([text("What is this thread about?").sized(text_base()).text_color(Colors::muted()), text("Message an agent to begin.").sized(text_sm()).text_color(Colors::muted())])
                 .into_element()
         } else {
-            transcript(&items, scrolled, at_end, rail, busy)
+            transcript(state, count.get(), scrolled, at_end, rail)
         }
     };
     let composer = move || bar(state.get(), draft, field_ref);
-    let count = computed(move || page.with(|(items, _, _)| items.len()));
     let body = view().flex_1().min_h_0().flex_col().child(stage(top, count, scrolled, rail)).child(dynamic(composer));
 
     view()
