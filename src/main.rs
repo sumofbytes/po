@@ -2087,7 +2087,18 @@ impl Render for Reader {
             // macOS draws no titlebar of its own (see `main`): this strip clears the traffic lights
             // and, like the titlebar it replaces, drags the window.
             .when(cfg!(target_os = "macos"), |this| {
-                this.child(div().h(TITLEBAR_HEIGHT).flex_none().window_control_area(WindowControlArea::Drag))
+                this.child(
+                    div().id("titlebar")
+                        .h(TITLEBAR_HEIGHT)
+                        .flex_none()
+                        .window_control_area(WindowControlArea::Drag)
+                        // A native titlebar zooms (or minimizes, per System Settings) on double click.
+                        .on_click(|event, window, _| {
+                            if event.click_count() == 2 && !window.is_fullscreen() {
+                                window.titlebar_double_click();
+                            }
+                        }),
+                )
             })
             .child(
                 div().flex_1().min_h_0().when_some(glass, |this, glass| this.p(glass.inset / 2.)).child(
