@@ -760,6 +760,7 @@ fn tool_row(message: usize, at: usize, tool: &Tool) -> AnyElement {
                     .pl(scale::s3())
                     .child(scroll().max_h(px(448.)).child(
                         text(piece.clone())
+                            .selectable(true)
                             .text_color(Colors::muted())
                             .text_size(px(mono_size()))
                             .line_height(px(mono_size() * 1.5))
@@ -923,6 +924,7 @@ fn approve_row(message: usize, at: usize, question: &str, lines: &[String], answ
                         .iter()
                         .map(|line| {
                             text(line.clone())
+                                .selectable(true)
                                 .text_color(Colors::foreground())
                                 .text_size(px(mono_size()))
                                 .line_height(px(mono_size() * 1.5))
@@ -1082,7 +1084,8 @@ fn agent_region(message: usize, blocks: Memo<Arc<Vec<Block>>>, live: Memo<bool>)
 fn transcript(state: Signal<Snapshot>, count: usize, slot: ElementRef, at_end: Signal<bool>, rail: Position) -> AnyElement {
     // The transcript's column is the composer card's width, and its text starts where the
     // composer's does: the card's border, its padding and the field's padding in (see [`bar`]).
-    let mut rows = view().w_full().min_w_0().max_w(px(COLUMN)).flex_col().gap(scale::s6()).px(scale::composer_text_inset()).py(scale::s6());
+    // One selectable view, so a drag or select-all runs across blocks and messages.
+    let mut rows = view().selectable(true).w_full().min_w_0().max_w(px(COLUMN)).flex_col().gap(scale::s6()).px(scale::composer_text_inset()).py(scale::s6());
     // Where each message sits in the column, for the position rail: every row reports the height
     // it was laid out at (window coordinates), and the column's own is taken off all of them.
     // Non-reactive on purpose: the layout pass must not renotify the render. They live in the
