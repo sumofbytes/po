@@ -1001,6 +1001,7 @@ impl MacWindow {
             display_id,
             window_min_size,
             tabbing_identifier,
+            use_display_p3,
             ..
         }: WindowParams,
         cursor_visible: Arc<AtomicBool>,
@@ -1252,9 +1253,10 @@ impl MacWindow {
                         // traffic light its zoom action: clicking maximize then maximizes
                         // the window (NSWindow `zoom:`) instead of entering native full
                         // screen, which is what a resizable titled window does by default.
-                        native_window.setCollectionBehavior_(
-                            NSWindowCollectionBehavior::NSWindowCollectionBehaviorFullScreenAuxiliary,
-                        );
+                        let _: () = msg_send![
+                            native_window,
+                            setCollectionBehavior: NSWindowCollectionBehavior::FullScreenAuxiliary
+                        ];
                     }
 
                     if let Some(tabbing_identifier) = tabbing_identifier {
