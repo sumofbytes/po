@@ -2187,6 +2187,42 @@ const TITLEBAR_HEIGHT: Pixels = px(32.0);
 /// Height of the row holding the viewer's tabs.
 const TABS_HEIGHT: gpui::Rems = rems(2.5);
 
+/// A shortcut on the platform's main modifier: Cmd on macOS, Ctrl elsewhere. gpui's
+/// `KeyBinding::new` no longer reads `secondary-` (it panics, since only `KeyBinding::load` knows
+/// the host OS), and a panic there, inside the app's launch callback, aborts Po at startup.
+macro_rules! secondary {
+    ($key:literal) => {
+        if cfg!(target_os = "macos") { concat!("cmd-", $key) } else { concat!("ctrl-", $key) }
+    };
+}
+
+/// The window's shortcuts. Built at launch, where a keystroke gpui can't parse panics and so
+/// aborts Po before its window opens; the test below builds them too.
+fn key_bindings() -> Vec<KeyBinding> {
+    vec![
+        KeyBinding::new("ctrl-o", ToggleTools, None),
+        KeyBinding::new("ctrl-t", ToggleThoughts, None),
+        KeyBinding::new(secondary!("b"), ToggleLeft, None),
+        KeyBinding::new(secondary!("shift-b"), ToggleRight, None),
+        KeyBinding::new(secondary!("1"), ShowSource, None),
+        KeyBinding::new(secondary!("2"), ShowChanges, None),
+        KeyBinding::new(secondary!("3"), ShowChat, None),
+        KeyBinding::new(secondary!("shift-s"), SwapPanes, None),
+        KeyBinding::new(secondary!("shift-f"), ToggleFocus, None),
+        KeyBinding::new(secondary!("shift-h"), ShowHistory, None),
+        KeyBinding::new(secondary!("\\"), ToggleSplit, None),
+        KeyBinding::new(secondary!("shift-m"), ToggleRendered, None),
+        KeyBinding::new(secondary!("n"), NewThread, None),
+        KeyBinding::new(secondary!("shift-o"), OpenProject, None),
+        KeyBinding::new(secondary!("p"), ShowFinder, None),
+        KeyBinding::new(secondary!(","), ShowSettings, None),
+        KeyBinding::new(secondary!("w"), CloseWindow, None),
+        KeyBinding::new(secondary!("`"), ToggleTerminal, None),
+        KeyBinding::new("escape", CloseSettings, Some("Settings")),
+        // The Input binds up/down itself and swallows them when single-line, so these name it.
+    ]
+}
+
 fn main() {
     // `po update` is a terminal command, not a window: it runs to completion and
     // exits before any GUI is set up (like `dex update`).
@@ -2278,28 +2314,7 @@ fn main() {
             async {}
         })
         .detach();
-        cx.bind_keys([
-            KeyBinding::new("ctrl-o", ToggleTools, None),
-            KeyBinding::new("ctrl-t", ToggleThoughts, None),
-            KeyBinding::new("secondary-b", ToggleLeft, None),
-            KeyBinding::new("secondary-shift-b", ToggleRight, None),
-            KeyBinding::new("secondary-1", ShowSource, None),
-            KeyBinding::new("secondary-2", ShowChanges, None),
-            KeyBinding::new("secondary-3", ShowChat, None),
-            KeyBinding::new("secondary-shift-s", SwapPanes, None),
-            KeyBinding::new("secondary-shift-f", ToggleFocus, None),
-            KeyBinding::new("secondary-shift-h", ShowHistory, None),
-            KeyBinding::new("secondary-\\", ToggleSplit, None),
-            KeyBinding::new("secondary-shift-m", ToggleRendered, None),
-            KeyBinding::new("secondary-n", NewThread, None),
-            KeyBinding::new("secondary-shift-o", OpenProject, None),
-            KeyBinding::new("secondary-p", ShowFinder, None),
-            KeyBinding::new("secondary-,", ShowSettings, None),
-            KeyBinding::new("secondary-w", CloseWindow, None),
-            KeyBinding::new("secondary-`", ToggleTerminal, None),
-            KeyBinding::new("escape", CloseSettings, Some("Settings")),
-            // The Input binds up/down itself and swallows them when single-line, so these name it.
-        ]);
+        cx.bind_keys(key_bindings());
         // Ctrl+O, T, B, N, P, W and \ are keys of readline, fzf and tmux: while the terminal has the
         // focus they go to the shell and not to the window. (Where the window's keys are Cmd's, only
         // the first two are Ctrl's.)
@@ -2389,6 +2404,13 @@ fn preview_of(messages: &[Msg], busy: bool) -> String {
 #[cfg(test)]
 mod tests {
     use crate::Thread;
+
+    /// Every shortcut parses: one gpui rejects panics at launch and Po never opens.
+    #[test]
+    fn the_window_shortcuts_all_parse() {
+        let bindings = crate::key_bindings();
+        assert!(!bindings.is_empty());
+    }
 
     #[test]
     fn a_thread_keeps_its_sidebar_row_while_its_agent_works() {
