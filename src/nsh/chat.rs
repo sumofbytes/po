@@ -321,6 +321,8 @@ pub enum Cmd {
     Resume(String),
     /// The agent's sessions are asked for.
     History,
+    /// The terminal is shown, started if the project has none yet.
+    Terminal,
     /// The agent a new thread starts with.
     PickAgent(String),
     /// A setting of the session is changed.
@@ -517,6 +519,7 @@ fn pane(title: String, snap: &Snapshot) -> View {
         right = right.child(status_icon(*tone, text));
     }
     if snap.picking.is_none() {
+        right = right.child(super::header::toggle_button(IconName::Terminal, "Show the terminal (Ctrl+`)", false, || tell(Cmd::Terminal)));
         right = right.child(super::header::toggle_button(IconName::History, "Resume an earlier session (Ctrl+Shift+H)", false, || tell(Cmd::History)));
     }
     // The Control menu, once the user has set what the thread's agent may do.

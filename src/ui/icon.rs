@@ -40,6 +40,7 @@ pub enum IconName {
     Signal,
     SquareKanban,
     Tag,
+    Terminal,
 }
 
 impl IconName {
@@ -89,6 +90,7 @@ impl IconName {
             Self::Signal => icon!("signal"),
             Self::SquareKanban => icon!("square-kanban"),
             Self::Tag => icon!("tag"),
+            Self::Terminal => icon!("terminal"),
         }
     }
 }

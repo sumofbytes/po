@@ -315,6 +315,7 @@ impl Reader {
             Chat::Open(path) => self.reveal(&path, window, cx),
             Chat::Resume(id) => self.resume_session(&id, window, cx),
             Chat::History => self.resume_thread(window, cx),
+            Chat::Terminal => self.toggle_terminal_on(window, cx),
             Chat::PickAgent(id) => self.pick_agent(id, window, cx),
             Chat::Setting { id, value } => self.choose_option(&id, &value, cx),
             Chat::ClosePicker => {
