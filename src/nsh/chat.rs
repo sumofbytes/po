@@ -202,6 +202,17 @@ pub enum Picking {
     Loading,
 }
 
+/// What the viewer shows, for the header's buttons to say which is on.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Place {
+    /// The viewer is closed, or shows something of the agent's.
+    #[default]
+    Elsewhere,
+    Files,
+    Changes,
+    Terminal,
+}
+
 #[derive(Clone, PartialEq, Debug, Default)]
 pub struct Snapshot {
     pub glass: bool,
@@ -210,6 +221,8 @@ pub struct Snapshot {
     pub trail: Vec<Control>,
     /// The status lines of the header's right, like `3 threads · 1 asking`.
     pub statuses: Vec<String>,
+    /// What the viewer shows.
+    pub place: Place,
     /// Nothing on screen yet: the agent is picked below, and the thread starts when something
     /// is sent.
     pub blank: bool,
@@ -307,6 +320,8 @@ pub enum Cmd {
     Resume(String),
     /// The agent's sessions are asked for.
     History,
+    /// The files, or the changes (true), in the viewer.
+    Show(bool),
     /// The terminal is shown, started if the project has none yet.
     Terminal,
     /// The agent a new thread starts with.
@@ -474,7 +489,7 @@ fn status_line(line: String) -> View {
     view().flex_none().px(scale::s2()).py(scale::s1()).child(text(super::sentence(&line)).sized(text_sm()).text_color(Colors::muted()).number_of_lines(1))
 }
 
-/// The pane header of the conversation: the title, the statuses, the terminal and history buttons, the Control
+/// The pane header of the conversation: the title, the statuses, the buttons for the files, the changes, the terminal and the history, the Control
 /// menu, and the window's own controls at the ends.
 fn pane(title: String, snap: &Snapshot) -> View {
     let mut right = view().flex_row().items_center().gap(scale::s1());
@@ -482,7 +497,9 @@ fn pane(title: String, snap: &Snapshot) -> View {
         right = right.child(status_line(line.clone()));
     }
     if snap.picking.is_none() {
-        right = right.child(super::header::toggle_button(IconName::Terminal, "Show the terminal (Ctrl+`)", false, || tell(Cmd::Terminal)));
+        right = right.child(super::header::toggle_button(IconName::FolderTree, "Files (Ctrl+1)", snap.place == Place::Files, || tell(Cmd::Show(false))));
+        right = right.child(super::header::toggle_button(IconName::Diff, "Changes (Ctrl+2)", snap.place == Place::Changes, || tell(Cmd::Show(true))));
+        right = right.child(super::header::toggle_button(IconName::Terminal, "Terminal (Ctrl+`)", snap.place == Place::Terminal, || tell(Cmd::Terminal)));
         right = right.child(super::header::toggle_button(IconName::History, "Resume an earlier session (Ctrl+Shift+H)", false, || tell(Cmd::History)));
     }
     // The Control menu, once the user has set what the thread's agent may do.

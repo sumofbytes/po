@@ -658,7 +658,6 @@ impl Views {
         &self.list
     }
 
-    #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.list.is_empty()
     }
@@ -720,7 +719,6 @@ impl Forms {
         &self.list
     }
 
-    #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.list.is_empty()
     }

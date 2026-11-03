@@ -1,5 +1,7 @@
-//! The row of tabs above the viewer: the files, the changes, the terminal and each view of the
-//! agent's, with a way to close it, the agent's offer to show one, and the window's controls. [`Snapshot`] is what [`crate::Reader`] publishes; the screen draws it.
+//! The row of tabs above the viewer while the terminal runs or the agent has views or forms on
+//! screen: the terminal and each view of the agent's, with a way to close it, the agent's offer to
+//! show one, and the window's controls. [`Snapshot`] is what [`crate::Reader`] publishes; the
+//! screen draws it.
 use std::sync::LazyLock;
 
 use nsh_core::prelude::*;
@@ -14,15 +16,10 @@ use crate::ui::icon::IconName;
 pub struct Tab {
     pub id: String,
     pub title: String,
-    /// Whether the tab has a close button.
-    pub closable: bool,
 }
 
 #[derive(Clone, PartialEq, Debug, Default)]
 pub struct Snapshot {
-    /// Which of the two first tabs is the one on screen when none of the rest is: the changes, or
-    /// the files.
-    pub changes: bool,
     /// The tab on screen; none is the files or the changes.
     pub shown: Option<String>,
     pub tabs: Vec<Tab>,
@@ -82,15 +79,6 @@ pub fn Tabs() -> impl IntoElement {
         .border_color(super::hairline())
         .child(dynamic(move || view().flex_row().items_center().gap(scale::s1()).child(state.with(|s| controls(&s.controls.0).collect::<Vec<_>>()))))
         .child(dynamic(move || {
-            let (changes, home) = state.with(|s| (s.changes, s.shown.is_none()));
-            view()
-                .flex_row()
-                .items_center()
-                .gap(scale::s1())
-                .child(tab_button("Files".into(), home && !changes, || send(Cmd::ShowHome(false))))
-                .child(tab_button("Changes".into(), home && changes, || send(Cmd::ShowHome(true))))
-        }))
-        .child(dynamic(move || {
             let (tabs, shown) = state.with(|s| (s.tabs.clone(), s.shown.clone()));
             view().flex_row().items_center().gap(scale::s1()).child(
                 tabs.into_iter()
@@ -100,7 +88,7 @@ pub fn Tabs() -> impl IntoElement {
                             .flex_row()
                             .items_center()
                             .child(tab_button(tab.title, shown.as_deref() == Some(&tab.id), move || send(Cmd::ShowView(open.clone()))))
-                            .child(tab.closable.then(|| super::icon_button(IconName::Close, scale::s2_5(), "Close this view", move || send(Cmd::CloseView(close.clone())))))
+                            .child(super::icon_button(IconName::Close, scale::s2_5(), "Close this view", move || send(Cmd::CloseView(close.clone()))))
                     })
                     .collect::<Vec<_>>(),
             )
@@ -138,10 +126,9 @@ mod tests {
         let mut guard = super::super::bus::lock();
         let commands = guard.as_mut().expect("the channel");
         publish(Snapshot {
-            changes: false,
             shown: Some("a".into()),
-            tabs: vec![Tab { id: "a".into(), title: "Notes".into(), closable: true }],
-            offer: Some(Tab { id: "b".into(), title: "Plan".into(), closable: true }),
+            tabs: vec![Tab { id: "a".into(), title: "Notes".into() }],
+            offer: Some(Tab { id: "b".into(), title: "Plan".into() }),
             controls: (vec![], vec![Control::Viewer(true)]),
         });
         let mut config = EngineConfig::new(nsh_platform_gpui::Root::of::<Tabs>());
@@ -152,12 +139,10 @@ mod tests {
         let mut app = Headless::start(config).expect("engine");
         app.first_render().expect("first render");
         app.settle();
-        for shown in ["Files", "Changes", "Notes", "The agent wants to show “Plan”"] {
+        for shown in ["Notes", "The agent wants to show “Plan”"] {
             assert!(app.shows(shown), "{shown} is on screen: {:?}", app.screen().texts());
         }
         for (press, cmd) in [
-            ("label:Files", Cmd::ShowHome(false)),
-            ("label:Changes", Cmd::ShowHome(true)),
             ("label:Notes", Cmd::ShowView("a".into())),
             ("label:Close this view", Cmd::CloseView("a".into())),
             ("label:The agent wants to show “Plan”", Cmd::ShowView("b".into())),
