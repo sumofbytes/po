@@ -1,14 +1,14 @@
 # Modified by Longbridge for gpui-fast publication.
 [package]
 name = "gpui-fast-wgpu"
-version = "0.1.9"
+version = "0.1.13"
 edition = "2024"
 publish = ["crates-io"]
 license = "Apache-2.0"
 repository = "https://github.com/longbridge/gpui-fast"
 homepage = "https://github.com/longbridge/gpui-fast"
 readme = "README.md"
-documentation = "https://docs.rs/gpui-fast-wgpu/0.1.9/gpui_wgpu/"
+documentation = "https://docs.rs/gpui-fast-wgpu/0.1.13/gpui_wgpu/"
 description = "gpui_wgpu: GPUI with gpui-fast rendering and layout optimizations"
 autoexamples = false
 autobenches = false
@@ -33,7 +33,7 @@ cosmic-text = "0.19.0"
 [dependencies.gpui]
 default-features = false
 package = "gpui-fast"
-version = "^0.1.9"
+version = "^0.1.13"
 path = "../gpui"
 
 [dependencies.anyhow]
@@ -43,7 +43,7 @@ version = "1.0.86"
 version = "1"
 
 [dependencies.collections]
-version = "=0.3.9"
+version = "=0.3.11"
 package = "gpui-pre-collections"
 
 [dependencies.etagere]
@@ -89,7 +89,7 @@ version = "1.10"
 
 [dependencies.gpui_util]
 package = "gpui-pre-util"
-version = "=0.3.9"
+version = "=0.3.11"
 
 [dependencies.font-kit]
 package = "zed-font-kit"
@@ -98,22 +98,22 @@ default-features = false
 optional = true
 
 [target."cfg(any(target_os = \"linux\", target_os = \"freebsd\"))".dependencies.wgpu]
-version = "29.0"
 default-features = false
-features = ["std", "parking_lot", "metal", "gles", "vulkan", "wgsl", "webgpu"]
+features = ["std", "metal", "gles", "vulkan", "wgsl", "webgpu"]
+version = "=30.0.1"
 
 [target."cfg(not(any(target_os = \"linux\", target_os = \"freebsd\")))".dependencies.wgpu]
-version = "29.0"
 default-features = true
+version = "=30.0.1"
 
 [target."cfg(target_family = \"wasm\")".dependencies.web-sys]
 version = "0.3"
 features = ["HtmlCanvasElement"]
 
 [target."cfg(target_family = \"wasm\")".dependencies.wgpu]
-version = "29.0"
 default-features = false
 features = ["webgl"]
+version = "=30.0.1"
 
 [lints.rust.unexpected_cfgs]
 level = "allow"
