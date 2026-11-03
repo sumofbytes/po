@@ -7,6 +7,7 @@ use nsh_core::prelude::*;
 use tokio::sync::watch;
 
 use super::bus::{Cmd, send};
+use super::header::{Control, controls};
 use super::{Colors, body, scale, text_sm};
 use crate::ui::icon::IconName;
 
@@ -27,6 +28,8 @@ pub struct Snapshot {
     pub tabs: Vec<Tab>,
     /// A view the agent offers to show, by its title.
     pub offer: Option<Tab>,
+    /// The window's own controls at the strip's ends, which the pane's headers then go without.
+    pub controls: (Vec<Control>, Vec<Control>),
 }
 
 static SNAPSHOT: LazyLock<watch::Sender<Snapshot>> = LazyLock::new(|| watch::Sender::new(Snapshot::default()));
@@ -77,6 +80,7 @@ pub fn Tabs() -> impl IntoElement {
         .py(scale::s1_5())
         .border_b_1()
         .border_color(super::hairline())
+        .child(dynamic(move || view().flex_row().items_center().gap(scale::s1()).child(state.with(|s| controls(&s.controls.0).collect::<Vec<_>>()))))
         .child(dynamic(move || {
             let (home, shown) = state.with(|s| (s.home.clone(), s.shown.is_none()));
             tab_button(home, shown, || send(Cmd::ShowHome))
@@ -113,6 +117,8 @@ pub fn Tabs() -> impl IntoElement {
                     .child(text(label).number_of_lines(1).text_size(text_sm()).text_color(Colors::primary_foreground()))
             })
         }))
+        .child(view().flex_1())
+        .child(dynamic(move || view().flex_row().items_center().gap(scale::s1()).child(state.with(|s| controls(&s.controls.1).collect::<Vec<_>>()))))
 }
 
 #[cfg(test)]
@@ -131,6 +137,7 @@ mod tests {
             shown: Some("a".into()),
             tabs: vec![Tab { id: "a".into(), title: "Notes".into(), closable: true }],
             offer: Some(Tab { id: "b".into(), title: "Plan".into(), closable: true }),
+            controls: (vec![], vec![Control::Viewer(true)]),
         });
         let mut config = EngineConfig::new(nsh_platform_gpui::Root::of::<Tabs>());
         config.ui_sets = vec![nsh_base::registry()];
@@ -148,6 +155,7 @@ mod tests {
             ("label:Notes", Cmd::ShowView("a".into())),
             ("label:Close this view", Cmd::CloseView("a".into())),
             ("label:The agent wants to show “Plan”", Cmd::ShowView("b".into())),
+            ("label:Viewer (Ctrl+Shift+B)", Cmd::ToggleRight),
         ] {
             app.press(press).unwrap();
             app.settle();

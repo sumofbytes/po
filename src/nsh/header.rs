@@ -52,7 +52,7 @@ fn ghost_button(name: IconName, tip: &'static str, selected: bool, filled: bool,
     if selected && filled { b.bg(Colors::selected()) } else { b.hover(|s| s.bg(Colors::hover())) }
 }
 
-fn controls(list: &[Control]) -> impl Iterator<Item = View> + '_ {
+pub(super) fn controls(list: &[Control]) -> impl Iterator<Item = View> + '_ {
     list.iter().map(|control| {
         let (name, tip, selected, cmd) = control.parts();
         ghost_button(name, tip, selected, false, move || send(cmd.clone()))

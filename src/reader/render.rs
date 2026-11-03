@@ -475,19 +475,15 @@ impl Reader {
         let showing_terminal = self.project.terminal_shown.then(|| self.project.terminal.clone()).flatten();
         let showing_agent = shown.is_some() || shown_form.is_some() || showing_terminal.is_some();
         let with_tree = !showing_agent && self.tree_visible();
-        // The window's own control goes in the leftmost header: the tree's, or the viewer's.
         // A pane too narrow for the tree beside the file takes turns: the explorer fills it until a
         // file is picked, then the file does, with a button back to the explorer.
         let stacked = !showing_agent && self.viewer_narrow.get();
         let nothing_picked = if self.mode == Mode::Diff { self.project.picked.is_none() } else { self.project.current.is_none() };
         let explorer_only = stacked && (self.browse || nothing_picked);
-        // A pane wide enough shows the explorer beside what it shows, with the lead controls in
-        // the file's header; stacked, the file's alone gets them, with a way back to the explorer
-        // tacked on.
-        // The same split of the window's controls, as descriptors, for a body NSH draws.
-        let (lead_controls, trail_controls) = self.pane_controls.borrow().clone();
-        let tree_lead = if with_tree || explorer_only { lead_controls.clone() } else { vec![] };
-        let body_controls = |lead: Vec<nsh::header::Control>| if with_tree || explorer_only { (vec![], trail_controls.clone()) } else if stacked { ([lead, vec![nsh::header::Control::Explorer]].concat(), trail_controls.clone()) } else { (lead, trail_controls.clone()) };
+        // The window's own controls are on the tabs, so they are there whatever the tab shows;
+        // a file stacked alone gets a way back to the explorer.
+        let file_lead = if stacked && !explorer_only { vec![nsh::header::Control::Explorer] } else { vec![] };
+        let body_controls = || (file_lead.clone(), vec![]);
         let body = match (shown, shown_form, self.mode) {
             _ if showing_terminal.is_some() => {
                 let background = cx.global::<Palette>().background;
@@ -495,16 +491,16 @@ impl Reader {
             }
             _ if explorer_only => {
                 let background = cx.global::<Palette>().background;
-                div().size_full().when(!has_tabs, |d| d.bg(background)).child(self.explorer(tree_lead.clone(), trail_controls.clone(), cx)).into_any_element()
+                div().size_full().when(!has_tabs, |d| d.bg(background)).child(self.explorer(vec![], vec![], cx)).into_any_element()
             }
-            (Some(view), _, _) => self.agent_view(view, body_controls(lead_controls), cx).into_any_element(),
-            (_, Some(form), _) => self.form_view(form, body_controls(lead_controls), cx).into_any_element(),
+            (Some(view), _, _) => self.agent_view(view, body_controls(), cx).into_any_element(),
+            (_, Some(form), _) => self.form_view(form, body_controls(), cx).into_any_element(),
             (None, None, Mode::Source) => {
-                let (lead, trail) = body_controls(lead_controls);
+                let (lead, trail) = body_controls();
                 self.viewer(lead, trail, cx).into_any_element()
             }
             (None, None, Mode::Diff) => {
-                let (lead, trail) = body_controls(lead_controls);
+                let (lead, trail) = body_controls();
                 self.diff_viewer(lead, trail, cx).into_any_element()
             }
         };
@@ -512,7 +508,7 @@ impl Reader {
         let body = if with_tree {
             // The viewers paint their own background; the column paints its own too, unless the
             // pane does for both, which would lay a second translucent layer under glass.
-            let column = div().size_full().when(!has_tabs, |d| d.bg(background)).child(self.explorer(tree_lead, vec![], cx));
+            let column = div().size_full().when(!has_tabs, |d| d.bg(background)).child(self.explorer(vec![], vec![], cx));
             sidebars(&self.tree_cols).id("tree").left(true, TREE_RANGE, column).center(div().size_full().child(body)).into_any_element()
         } else {
             body
@@ -597,6 +593,7 @@ impl Reader {
                 .chain(self.thread.forms.list().iter().map(|form| Tab { id: form.id.clone(), title: form.title.clone(), closable: true }))
                 .collect(),
             offer: self.thread.offered.as_ref().and_then(titled),
+            controls: self.pane_controls.borrow().clone(),
         });
         Some(div().flex_none().h(TABS_HEIGHT).child(self.tabs.clone()).into_any_element())
     }
