@@ -451,7 +451,7 @@ mod tests {
             assert!(yml.contains(&format!("target: {target}")), "{target} not in release.yml");
         }
         // The archive layout `download_verify_and_install` unpacks.
-        assert!(yml.contains(r#"name="po-${GITHUB_REF_NAME}-${{ matrix.target }}""#));
+        assert!(yml.contains(r#"name="po-${TAG}-${{ matrix.target }}""#));
         assert!(yml.contains(r#"tar -czf "$name.tar.gz" -C dist "$name""#));
     }
 
