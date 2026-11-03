@@ -1625,21 +1625,27 @@ const PIECE: usize = 512;
 /// piece being written stays small, and the pieces before it are not read again. The pieces to
 /// gather are ranges of `text`, each as the agent's text is at a byte or the same.
 fn pieces_of(text: &str) -> Vec<&str> {
+    let lines: Vec<&str> = text.split_inclusive('\n').collect();
+    // A link reference may be defined in a later piece than the one that uses it.
+    if lines.iter().any(|line| reference_definition(line)) {
+        return vec![text];
+    }
     let mut pieces = Vec::new();
     let mut from = 0;
     let mut at = 0;
-    let mut fenced = false;
-    for line in text.split_inclusive('\n') {
+    let mut fence: Option<(char, usize)> = None;
+    for (ix, line) in lines.iter().enumerate() {
         at += line.len();
         // A blank line ends a paragraph, and a fenced block line opens or shuts a fence, which a
         // piece may not sit inside (its two halves would each miss their other). The piece to
         // stand for one that ended before [`PIECE`] bytes was already pushed, so the boundary is
-        // taken once what was gathered since the piece's start passes [`PIECE`].
-        if line == "\n" && !fenced && at - from >= PIECE {
+        // taken once what was gathered since the piece's start passes [`PIECE`]. A list or a
+        // quote goes on past a blank line, so what comes after it must open a block of its own.
+        if fence.is_none() && line.trim().is_empty() && at - from >= PIECE && lines.get(ix + 1).is_some_and(|next| next.ends_with('\n') && starts_block(next)) {
             pieces.push(&text[from..at]);
             from = at;
         }
-        fenced ^= fenced_line(line);
+        fence = fence_after(fence, line);
     }
     if from < at {
         pieces.push(&text[from..]);
@@ -1647,9 +1653,39 @@ fn pieces_of(text: &str) -> Vec<&str> {
     pieces
 }
 
-/// Whether the line opens or shuts a fenced block: one that starts with `` ``` `` does.
-fn fenced_line(line: &str) -> bool {
-    line.trim_start().starts_with("```")
+/// The fence the text is inside once the line has been read: one opens with three or more
+/// backticks or tildes and shuts with at least as many of the same, and nothing else.
+fn fence_after(fence: Option<(char, usize)>, line: &str) -> Option<(char, usize)> {
+    let indent = line.len() - line.trim_start_matches(' ').len();
+    let rest = line[indent..].trim_end();
+    let mark = rest.chars().next().filter(|c| matches!(c, '`' | '~'));
+    let Some(mark) = mark.filter(|_| indent < 4) else { return fence };
+    let run = rest.chars().take_while(|c| *c == mark).count();
+    match fence {
+        Some((open, len)) if mark == open && run >= len && rest.len() == run => None,
+        Some(_) => fence,
+        None if run >= 3 => Some((mark, run)),
+        None => None,
+    }
+}
+
+/// Whether the line opens a block that stands alone, so a piece may begin with it: not an indented
+/// line, a list item, a quote or a blank one, which carry on whatever came before.
+fn starts_block(line: &str) -> bool {
+    let first = line.chars().next();
+    if first.is_none_or(|c| c.is_whitespace() || c == '>') {
+        return false;
+    }
+    let item = line.trim_start_matches(|c: char| c.is_ascii_digit());
+    let numbered = item.len() < line.len() && (item.starts_with(". ") || item.starts_with(") "));
+    let bullet = ["- ", "* ", "+ "].iter().any(|b| line.starts_with(b));
+    !(numbered || bullet)
+}
+
+/// Whether the line defines a link reference (`[name]: url`).
+fn reference_definition(line: &str) -> bool {
+    let line = line.trim_start_matches(' ');
+    line.strip_prefix('[').is_some_and(|rest| rest.find("]:").is_some_and(|end| !rest[..end].contains(']')))
 }
 
 /// Whether a run of tool calls shows as one line. A run the user hasn't clicked starts folded,
@@ -2362,13 +2398,37 @@ mod tests {
         let pieces = pieces_of(&long);
         assert!(pieces.len() > 4, "pieces: {}", pieces.len());
         assert_eq!(pieces.concat(), long);
-        assert!(pieces.iter().all(|piece| piece.len() < 2 * super::PIECE + 2 * 512), "a piece is not a small run of paragraphs, was {}", pieces.len());
+        assert!(pieces.iter().all(|piece| piece.len() < 2 * super::PIECE), "a piece is not a small run of paragraphs, longest was {}", pieces.iter().map(|p| p.len()).max().unwrap_or(0));
         // No piece sits inside a fence: every fence a piece opens, that piece also shuts.
         for piece in &pieces {
             let opens = piece.match_indices("```rust\n").count();
             let shuts = piece.lines().filter(|line| line.trim_end() == "```").count();
             assert_eq!(shuts, opens, "a piece holds a fence not its other: {:?}", piece);
         }
+    }
+
+    #[test]
+    fn pieces_keep_what_markdown_reads_across_a_blank_line_together() {
+        let filler = "A paragraph about a value and who owns it meanwhile, long enough to count.\n\n".repeat(10);
+        let kept = |block: &str| {
+            let text = format!("{filler}{block}{filler}");
+            let pieces = pieces_of(&text);
+            assert_eq!(pieces.concat(), text);
+            assert!(pieces.len() > 1, "the text was not split at all");
+            assert!(pieces.iter().any(|piece| piece.contains(block)), "a piece cut {block:?}");
+        };
+        kept("~~~\nfn a() {}\n\n\nfn b() {}\n~~~\n\n");
+        kept("````md\n```\n\nnested\n```\n````\n\n");
+        kept("1. a\n\n2. b\n\n3. c\n\n");
+        kept("> quoted\n\n> on\n\n");
+        // Blank lines of CRLF text and of spaces end a paragraph all the same.
+        let crlf = "A paragraph about a value and who owns it meanwhile.\r\n\r\n".repeat(40);
+        assert!(pieces_of(&crlf).len() > 1);
+        let spaced = "A paragraph about a value and who owns it meanwhile.\n  \n".repeat(40);
+        assert!(pieces_of(&spaced).len() > 1);
+        // A reference may be defined after the piece that uses it, so the text is not split.
+        let linked = format!("See [the book].\n\n{filler}[the book]: https://doc.rust-lang.org/book/\n");
+        assert_eq!(pieces_of(&linked), [linked.as_str()]);
     }
 
     #[test]

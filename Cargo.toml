@@ -8,8 +8,8 @@ readme = "README.md"
 repository = "https://github.com/sumofbytes/po"
 
 [dependencies]
-  gpui = { package = "gpui-fast", version = "=0.1.13", default-features = false, features = ["stacker", "font-kit", "wayland", "x11"] }
-  gpui_platform = { package = "gpui-fast-platform", version = "=0.1.13", default-features = false, features = ["font-kit", "wayland", "x11"] }
+gpui = { package = "gpui-fast", version = "=0.1.13", default-features = false, features = ["stacker", "font-kit", "wayland", "x11"] }
+gpui_platform = { package = "gpui-fast-platform", version = "=0.1.13", default-features = false, features = ["font-kit", "wayland", "x11"] }
 # NSH: screens drawn as NSH apps inside Po's window. Rust roots only, so no QuickJS or web views.
 nsh-platform-gpui = { version = "0.3.0", default-features = false }
 nsh-core = "0.3.0"

@@ -588,7 +588,7 @@ fn user_row(text_: &str, pictures: &[Picture]) -> AnyElement {
                     // A box of the picture's own shape: one from a `data:` URI has no size before it
                     // loads, so it is given one rather than left to collapse.
                     let (w, h) = picture.fit(360., 240.);
-                    image(picture.uri.to_string())
+                    image(nsh_core::element::SharedString::from(picture.uri.clone()))
                         .w(px(w))
                         .h(px(h))
                         .resize_mode(ResizeMode::Cover)
@@ -1391,7 +1391,7 @@ fn pictures_row(pictures: &[Picture]) -> AnyElement {
                             {
                                 // A box of the picture's own shape (see `user_row`).
                                 let (w, h) = picture.fit(120., 72.);
-                                image(picture.uri.to_string())
+                                image(nsh_core::element::SharedString::from(picture.uri.clone()))
                                     .rounded(Colors::radius())
                                     .border_1()
                                     .border_color(super::hairline())

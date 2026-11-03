@@ -1261,8 +1261,16 @@ fn default_mac_menu(title: &str) -> Arc<[MenuItem]> {
 }
 
 /// GPUI's name of a shortcut (`shift-cmd-n`).
+/// Each distinct keystroke is leaked once: menus are built again as state changes.
 fn leak_str(s: &str) -> &'static str {
-    Box::leak(s.to_string().into_boxed_str())
+    static SEEN: std::sync::Mutex<Vec<&'static str>> = std::sync::Mutex::new(Vec::new());
+    let mut seen = SEEN.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(known) = seen.iter().find(|k| **k == s) {
+        return known;
+    }
+    let leaked: &'static str = Box::leak(s.to_string().into_boxed_str());
+    seen.push(leaked);
+    leaked
 }
 
 fn gpui_keystroke(s: &Shortcut) -> String {
