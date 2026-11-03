@@ -1,6 +1,5 @@
-//! The row of tabs above the viewer while the terminal runs or the agent has views or forms on
-//! screen: the terminal and each view of the agent's, with a way to close it, the agent's offer to
-//! show one, and the window's controls. [`Snapshot`] is what [`crate::Reader`] publishes; the
+//! The row of tabs above the viewer while the agent has views or forms on screen: each of them,
+//! with a way to close it, the agent's offer to show one, and the window's controls. [`Snapshot`] is what [`crate::Reader`] publishes; the
 //! screen draws it.
 use std::sync::LazyLock;
 

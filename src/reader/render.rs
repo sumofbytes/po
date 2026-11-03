@@ -407,8 +407,6 @@ impl Reader {
             Cmd::Browse(browse) => self.set_browsing(browse, cx),
             Cmd::ToggleRendered => self.toggle_rendered(cx),
             Cmd::SetSplit(split) => self.set_split(split, cx),
-            Cmd::ShowView(id) if id == TERMINAL_TAB => self.toggle_terminal_on(window, cx),
-            Cmd::CloseView(id) if id == TERMINAL_TAB => self.close_terminal(window, cx),
             Cmd::ShowView(id) => self.show_agent_view(&id, cx),
             Cmd::CloseView(id) => self.close_agent_view(&id, cx),
             Cmd::TreeClick(id) => {
@@ -483,7 +481,10 @@ impl Reader {
         let body = match (shown, shown_form, self.mode) {
             _ if showing_terminal.is_some() => {
                 let background = cx.global::<Palette>().background;
-                div().size_full().bg(background).children(showing_terminal).into_any_element()
+                let (lead, trail) = body_controls(lead_controls);
+                nsh::agent::publish(nsh::agent::Snapshot { glass: cx.global::<Palette>().glass.is_some(), title: "Terminal".into(), lead, trail, body: nsh::agent::Body::Bare });
+                let header = div().flex_none().h(gpui::rems(2.75)).child(self.agent_pane.clone());
+                div().size_full().flex().flex_col().bg(background).child(header).child(div().flex_1().min_h_0().children(showing_terminal)).into_any_element()
             }
             _ if explorer_only => {
                 let background = cx.global::<Palette>().background;
@@ -567,11 +568,11 @@ impl Reader {
         div().size_full().child(self.agent_pane.clone())
     }
 
-    /// The running terminal and the agent's views as tabs, with a prompt for one it added while
-    /// the user was busy, and the window's controls at the ends. None while there are none; the
-    /// files, the changes and the terminal are picked in the conversation's header.
+    /// The agent's views as tabs, with a prompt for one it added while the user was busy, and the
+    /// window's controls at the ends. None while there are none; the files, the changes and the
+    /// terminal are picked in the conversation's header.
     pub(crate) fn view_tabs(&self) -> Option<AnyElement> {
-        if self.thread.views.is_empty() && self.thread.forms.is_empty() && self.project.terminal.is_none() {
+        if self.thread.views.is_empty() && self.thread.forms.is_empty() {
             return None;
         }
         use nsh::tabs::{Snapshot, Tab};
@@ -585,13 +586,13 @@ impl Reader {
                 .or_else(|| self.thread.forms.list().iter().find(|form| form.id == *id).map(|form| Tab { id: form.id.clone(), title: form.title.clone() }))
         };
         nsh::tabs::publish(Snapshot {
-            shown: if self.project.terminal_shown { Some(TERMINAL_TAB.to_string()) } else { self.thread.shown.clone() },
+            shown: if self.project.terminal_shown { None } else { self.thread.shown.clone() },
             tabs: self
-                .project
-                .terminal
+                .thread
+                .views
+                .list()
                 .iter()
-                .map(|_| Tab { id: TERMINAL_TAB.to_string(), title: "Terminal".into() })
-                .chain(self.thread.views.list().iter().map(|view| Tab { id: view.id.clone(), title: view.title.clone() }))
+                .map(|view| Tab { id: view.id.clone(), title: view.title.clone() })
                 .chain(self.thread.forms.list().iter().map(|form| Tab { id: form.id.clone(), title: form.title.clone() }))
                 .collect(),
             offer: self.thread.offered.as_ref().and_then(titled),

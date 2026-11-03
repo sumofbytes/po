@@ -210,7 +210,7 @@ impl Reader {
         cx.defer_in(window, move |_, window, cx| terminal.update(cx, |terminal, cx| terminal.focus(window, cx)));
     }
 
-    /// The terminal's tab was pressed: show it, which never hides it.
+    /// The terminal's button was pressed: show it, which never hides it.
     pub(crate) fn toggle_terminal_on(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.project.terminal_shown = false;
         self.toggle_terminal(window, cx);
@@ -227,14 +227,6 @@ impl Reader {
                 project.terminal_shown = false;
             }
         }
-        cx.notify();
-    }
-
-    /// The terminal's tab was closed: the shell ends with its view.
-    pub(crate) fn close_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.project.terminal = None;
-        self.project.terminal_shown = false;
-        window.focus(&self.focus, cx);
         cx.notify();
     }
 
