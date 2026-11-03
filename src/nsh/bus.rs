@@ -43,12 +43,10 @@ pub enum Cmd {
     /// Markdown shown rendered, or as its source.
     ToggleRendered,
     OpenUrl(String),
-    /// A tab of the viewer: the files (or changes), an agent's view or form, closing one.
-    ShowHome,
+    /// A tab of the viewer: the files, the changes (true), an agent's view or form, closing one.
+    ShowHome(bool),
     ShowView(String),
     CloseView(String),
-    /// The explorer's mode switch: the changes (true) or the files.
-    SetMode(bool),
     /// A row of the explorer's tree was pressed: a file to open, or a folder to flip.
     TreeClick(String),
     /// An arrow key in the explorer's tree.

@@ -7,7 +7,7 @@ use nsh_core::prelude::*;
 use tokio::sync::watch;
 
 use super::bus::{Cmd, send};
-use super::header::{Control, pane_header, toggle_button};
+use super::header::{Control, pane_header};
 use super::strip::strips_view;
 use super::{Colors, body, icon, note, scale, text_xs};
 use crate::explorer::{FileKind, Row, Step, file_kind};
@@ -146,21 +146,11 @@ pub fn Explorer() -> impl IntoElement {
         }
     };
 
-    let modes = move || {
-        let changes = state.with(|s| s.changes);
-        view()
-            .flex_row()
-            .items_center()
-            .gap(scale::s1())
-            .child(toggle_button(IconName::Folder, "Source (Ctrl+1)", !changes, || send(Cmd::SetMode(false))))
-            .child(toggle_button(IconName::Replace, "Changes (Ctrl+2)", changes, || send(Cmd::SetMode(true))))
-    };
-
     view()
         .flex_1()
         .child(dynamic(move || {
             let (changes, lead, trail, glass) = state.with(|s| (s.changes, s.lead.clone(), s.trail.clone(), s.glass));
-            pane_header(if changes { "Changes" } else { "Explorer" }, modes(), &lead, &trail, glass)
+            pane_header(if changes { "Changes" } else { "Explorer" }, view(), &lead, &trail, glass)
         }))
         .child(strips_view())
         .child(
@@ -192,7 +182,7 @@ mod tests {
     }
 
     #[test]
-    fn the_explorer_lists_rows_switches_modes_and_reports_presses() {
+    fn the_explorer_lists_rows_and_reports_presses() {
         let mut guard = super::super::bus::lock();
         let commands = guard.as_mut().expect("the channel");
         publish(Snapshot {
@@ -213,9 +203,6 @@ mod tests {
         app.press("label:main.rs").unwrap();
         app.settle();
         assert_eq!(commands.try_recv().ok(), Some(Cmd::TreeClick("src/main.rs".into())));
-        app.press("label:Changes (Ctrl+2)").unwrap();
-        app.settle();
-        assert_eq!(commands.try_recv().ok(), Some(Cmd::SetMode(true)));
 
         publish(Snapshot { changes: true, body: Body::Empty("No changes".into()), ..Snapshot::default() });
         app.wait(std::time::Duration::from_millis(100)).unwrap();

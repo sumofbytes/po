@@ -407,9 +407,10 @@ impl Reader {
             Cmd::Browse(browse) => self.set_browsing(browse, cx),
             Cmd::ToggleRendered => self.toggle_rendered(cx),
             Cmd::SetSplit(split) => self.set_split(split, cx),
-            Cmd::ShowHome => {
+            Cmd::ShowHome(changes) => {
                 self.thread.shown = None;
                 self.project.terminal_shown = false;
+                self.set_mode(if changes { Mode::Diff } else { Mode::Source }, cx);
                 window.focus(&self.focus, cx);
                 cx.notify();
             }
@@ -417,7 +418,6 @@ impl Reader {
             Cmd::CloseView(id) if id == TERMINAL_TAB => self.close_terminal(window, cx),
             Cmd::ShowView(id) => self.show_agent_view(&id, cx),
             Cmd::CloseView(id) => self.close_agent_view(&id, cx),
-            Cmd::SetMode(diff) => self.set_mode(if diff { Mode::Diff } else { Mode::Source }, cx),
             Cmd::TreeClick(id) => {
                 let tree = if self.mode == Mode::Diff { &mut self.project.changes_tree } else { &mut self.project.files_tree };
                 tree.click(&id);
@@ -571,7 +571,7 @@ impl Reader {
         div().size_full().child(self.agent_pane.clone())
     }
 
-    /// Files (or changes), the terminal and the agent's views as tabs, with a prompt for one it
+    /// Files, changes, the terminal and the agent's views as tabs, with a prompt for one it
     /// added while the user was busy. The terminal's tab is always there; pressing it starts the
     /// shell.
     pub(crate) fn view_tabs(&self) -> Option<AnyElement> {
@@ -586,7 +586,7 @@ impl Reader {
                 .or_else(|| self.thread.forms.list().iter().find(|form| form.id == *id).map(|form| Tab { id: form.id.clone(), title: form.title.clone(), closable: true }))
         };
         nsh::tabs::publish(Snapshot {
-            home: if self.mode == Mode::Diff { "Changes" } else { "Files" }.into(),
+            changes: self.mode == Mode::Diff,
             shown: if self.project.terminal_shown { Some(TERMINAL_TAB.to_string()) } else { self.thread.shown.clone() },
             tabs: std::iter::once(Tab { id: TERMINAL_TAB.to_string(), title: "Terminal".into(), closable: self.project.terminal.is_some() })
                 .chain(self.thread.views.list().iter().map(|view| Tab { id: view.id.clone(), title: view.title.clone(), closable: true }))
