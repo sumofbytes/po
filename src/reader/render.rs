@@ -574,12 +574,10 @@ impl Reader {
         div().size_full().child(self.agent_pane.clone())
     }
 
-    /// Files (or changes) and the agent's views as tabs, with a prompt for one it added while
-    /// the user was busy. None while the agent has made no views.
+    /// Files (or changes), the terminal and the agent's views as tabs, with a prompt for one it
+    /// added while the user was busy. The terminal's tab is always there; pressing it starts the
+    /// shell.
     pub(crate) fn view_tabs(&self) -> Option<AnyElement> {
-        if self.thread.views.is_empty() && self.thread.forms.is_empty() && self.project.terminal.is_none() {
-            return None;
-        }
         use nsh::tabs::{Snapshot, Tab};
         let titled = |id: &String| {
             self.thread
@@ -587,19 +585,15 @@ impl Reader {
                 .list()
                 .iter()
                 .find(|view| view.id == *id)
-                .map(|view| Tab { id: view.id.clone(), title: view.title.clone() })
-                .or_else(|| self.thread.forms.list().iter().find(|form| form.id == *id).map(|form| Tab { id: form.id.clone(), title: form.title.clone() }))
+                .map(|view| Tab { id: view.id.clone(), title: view.title.clone(), closable: true })
+                .or_else(|| self.thread.forms.list().iter().find(|form| form.id == *id).map(|form| Tab { id: form.id.clone(), title: form.title.clone(), closable: true }))
         };
         nsh::tabs::publish(Snapshot {
             home: if self.mode == Mode::Diff { "Changes" } else { "Files" }.into(),
             shown: if self.project.terminal_shown { Some(TERMINAL_TAB.to_string()) } else { self.thread.shown.clone() },
-            tabs: self
-                .project
-                .terminal
-                .iter()
-                .map(|_| Tab { id: TERMINAL_TAB.to_string(), title: "Terminal".into() })
-                .chain(self.thread.views.list().iter().map(|view| Tab { id: view.id.clone(), title: view.title.clone() }))
-                .chain(self.thread.forms.list().iter().map(|form| Tab { id: form.id.clone(), title: form.title.clone() }))
+            tabs: std::iter::once(Tab { id: TERMINAL_TAB.to_string(), title: "Terminal".into(), closable: self.project.terminal.is_some() })
+                .chain(self.thread.views.list().iter().map(|view| Tab { id: view.id.clone(), title: view.title.clone(), closable: true }))
+                .chain(self.thread.forms.list().iter().map(|form| Tab { id: form.id.clone(), title: form.title.clone(), closable: true }))
                 .collect(),
             offer: self.thread.offered.as_ref().and_then(titled),
         });

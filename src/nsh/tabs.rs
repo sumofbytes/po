@@ -14,6 +14,8 @@ use crate::ui::icon::IconName;
 pub struct Tab {
     pub id: String,
     pub title: String,
+    /// Whether the tab has a close button.
+    pub closable: bool,
 }
 
 #[derive(Clone, PartialEq, Debug, Default)]
@@ -89,7 +91,7 @@ pub fn Tabs() -> impl IntoElement {
                             .flex_row()
                             .items_center()
                             .child(tab_button(tab.title, shown.as_deref() == Some(&tab.id), move || send(Cmd::ShowView(open.clone()))))
-                            .child(super::icon_button(IconName::Close, scale::s2_5(), "Close this view", move || send(Cmd::CloseView(close.clone()))))
+                            .child(tab.closable.then(|| super::icon_button(IconName::Close, scale::s2_5(), "Close this view", move || send(Cmd::CloseView(close.clone())))))
                     })
                     .collect::<Vec<_>>(),
             )
@@ -127,8 +129,8 @@ mod tests {
         publish(Snapshot {
             home: "Files".into(),
             shown: Some("a".into()),
-            tabs: vec![Tab { id: "a".into(), title: "Notes".into() }],
-            offer: Some(Tab { id: "b".into(), title: "Plan".into() }),
+            tabs: vec![Tab { id: "a".into(), title: "Notes".into(), closable: true }],
+            offer: Some(Tab { id: "b".into(), title: "Plan".into(), closable: true }),
         });
         let mut config = EngineConfig::new(nsh_platform_gpui::Root::of::<Tabs>());
         config.ui_sets = vec![nsh_base::registry()];
