@@ -642,9 +642,10 @@ fn thought_row(message: usize, at: usize, text_: &str, open: bool, done: bool) -
             .hover(|s| s.bg(Colors::hover()))
             .on_press(move || tell(Cmd::ToggleThought { message, block: at }))
             .child(lead_slot(icon(IconName::Lightbulb, STEP_ICON, Colors::muted())))
-            .child(text(word).flex_none().sized(text_sm()).font_weight(FontWeight::MEDIUM).text_color(Colors::muted()))
+            .child(text(word).selectable(false).flex_none().sized(text_sm()).font_weight(FontWeight::MEDIUM).text_color(Colors::muted()))
             .children((!open).then(|| {
                 text(thought_gist(text_))
+                    .selectable(false)
                     .number_of_lines(1)
                     .flex_1()
                     .min_w_0()
@@ -712,6 +713,7 @@ fn tool_row(message: usize, at: usize, tool: &Tool) -> AnyElement {
                         .child(step_glyph(tool.phase))
                         .child(
                             text(title)
+                                .selectable(false)
                                 .number_of_lines(1)
                                 .flex_1()
                                 .min_w_0()
@@ -760,6 +762,7 @@ fn tool_row(message: usize, at: usize, tool: &Tool) -> AnyElement {
                     .pl(scale::s3())
                     .child(scroll().max_h(px(448.)).child(
                         text(piece.clone())
+                            .selectable(true)
                             .text_color(Colors::muted())
                             .text_size(px(mono_size()))
                             .line_height(px(mono_size() * 1.5))
@@ -803,8 +806,8 @@ fn run_row(message: usize, at: usize, count: usize, failed: usize, phase: Phase,
         .hover(|s| s.bg(Colors::hover()))
         .on_press(move || tell(Cmd::Fold { message, block: at, folded: !folded }))
         .child(step_glyph(phase))
-        .child(text(label).min_w_0().sized(text_sm()).text_color(Colors::muted()))
-        .children(aside.map(|aside| text(aside).sized(text_sm()).text_color(Colors::muted())))
+        .child(text(label).selectable(false).min_w_0().sized(text_sm()).text_color(Colors::muted()))
+        .children(aside.map(|aside| text(aside).selectable(false).sized(text_sm()).text_color(Colors::muted())))
         .child(view().flex_1())
         .child(trail_slot(icon(if folded { IconName::ChevronRight } else { IconName::ChevronDown }, STEP_ICON, Colors::muted())))
         .into_element()
@@ -853,13 +856,13 @@ fn ask_row(message: usize, at: usize, title: &str, options: &[AskOption], answer
                 .flex_row()
                 .items_start()
                 .gap(scale::s2())
-                .child(text("Permission").flex_none().sized(text_xs()).font_weight(FontWeight::MEDIUM).text_color(Colors::muted()))
+                .child(text("Permission").selectable(false).flex_none().sized(text_xs()).font_weight(FontWeight::MEDIUM).text_color(Colors::muted()))
                 .child(view().flex_1().min_w_0().child(text_view().markdown(title).sized(text_sm()).text_color(Colors::foreground()))),
         );
     match answered {
         Some(given) => {
             let said = format!("→ {given}");
-            card = card.child(text(said).sized(text_sm()).text_color(Colors::muted()));
+            card = card.child(text(said).selectable(false).sized(text_sm()).text_color(Colors::muted()));
         }
         None => {
             let mut row = view().flex_row().flex_wrap().gap(scale::s1_5());
@@ -880,7 +883,7 @@ fn ask_row(message: usize, at: usize, title: &str, options: &[AskOption], answer
                     reply.border_1().border_color(Colors::input_border()).hover(|s| s.bg(Colors::hover()))
                 };
                 row = row.child(
-                    reply.child(text(label).sized(text_sm()).text_color(move || if primary { Colors::primary_foreground()() } else { Colors::foreground()() })),
+                    reply.child(text(label).selectable(false).sized(text_sm()).text_color(move || if primary { Colors::primary_foreground()() } else { Colors::foreground()() })),
                 );
             }
             card = card.child(row);
@@ -907,7 +910,7 @@ fn approve_row(message: usize, at: usize, question: &str, lines: &[String], answ
                 .flex_row()
                 .items_start()
                 .gap(scale::s2())
-                .child(text("Approve").flex_none().sized(text_xs()).font_weight(FontWeight::MEDIUM).text_color(Colors::muted()))
+                .child(text("Approve").selectable(false).flex_none().sized(text_xs()).font_weight(FontWeight::MEDIUM).text_color(Colors::muted()))
                 .child(view().flex_1().min_w_0().child(text_view().markdown(title).sized(text_sm()).text_color(Colors::foreground()))),
         )
         .children((!lines.is_empty()).then(|| {
@@ -923,6 +926,7 @@ fn approve_row(message: usize, at: usize, question: &str, lines: &[String], answ
                         .iter()
                         .map(|line| {
                             text(line.clone())
+                                .selectable(true)
                                 .text_color(Colors::foreground())
                                 .text_size(px(mono_size()))
                                 .line_height(px(mono_size() * 1.5))
@@ -934,7 +938,7 @@ fn approve_row(message: usize, at: usize, question: &str, lines: &[String], answ
     match answered {
         Some(said) => {
             let said = format!("→ {said}");
-            card = card.child(text(said).sized(text_sm()).text_color(Colors::muted()));
+            card = card.child(text(said).selectable(false).sized(text_sm()).text_color(Colors::muted()));
         }
         None => {
             card = card.child(
@@ -952,7 +956,7 @@ fn approve_row(message: usize, at: usize, question: &str, lines: &[String], answ
                             .cursor_pointer()
                             .bg(Colors::primary())
                             .on_press(move || tell(Cmd::Approve { message, block: at, yes: true }))
-                            .child(text("Run it").sized(text_sm()).text_color(Colors::primary_foreground())),
+                            .child(text("Run it").selectable(false).sized(text_sm()).text_color(Colors::primary_foreground())),
                     )
                     .child(
                         view()
@@ -966,7 +970,7 @@ fn approve_row(message: usize, at: usize, question: &str, lines: &[String], answ
                             .border_color(Colors::input_border())
                             .hover(|s| s.bg(Colors::hover()))
                             .on_press(move || tell(Cmd::Approve { message, block: at, yes: false }))
-                            .child(text("Leave out").sized(text_sm()).text_color(Colors::foreground())),
+                            .child(text("Leave out").selectable(false).sized(text_sm()).text_color(Colors::foreground())),
                     ),
             );
         }
@@ -1054,7 +1058,7 @@ fn agent_row(message: usize, blocks: Memo<Arc<Vec<Block>>>, live: Memo<bool>) ->
         computed(move || blocks.with(|blocks| !blocks.is_empty())),
         move || agent_region(message, blocks, live),
     )
-    .otherwise(|| text("Working…").sized(text_sm()).text_color(Colors::muted()))
+    .otherwise(|| text("Working…").selectable(false).sized(text_sm()).text_color(Colors::muted()))
     .into_element()
 }
 
@@ -1082,7 +1086,8 @@ fn agent_region(message: usize, blocks: Memo<Arc<Vec<Block>>>, live: Memo<bool>)
 fn transcript(state: Signal<Snapshot>, count: usize, slot: ElementRef, at_end: Signal<bool>, rail: Position) -> AnyElement {
     // The transcript's column is the composer card's width, and its text starts where the
     // composer's does: the card's border, its padding and the field's padding in (see [`bar`]).
-    let mut rows = view().w_full().min_w_0().max_w(px(COLUMN)).flex_col().gap(scale::s6()).px(scale::composer_text_inset()).py(scale::s6());
+    // One selectable view, so a drag or select-all runs across blocks and messages.
+    let mut rows = view().selectable(true).w_full().min_w_0().max_w(px(COLUMN)).flex_col().gap(scale::s6()).px(scale::composer_text_inset()).py(scale::s6());
     // Where each message sits in the column, for the position rail: every row reports the height
     // it was laid out at (window coordinates), and the column's own is taken off all of them.
     // Non-reactive on purpose: the layout pass must not renotify the render. They live in the
