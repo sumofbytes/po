@@ -1634,6 +1634,79 @@ impl Reader {
 /// The fewest tool calls in a row that fold to one line.
 const MIN_RUN: usize = 2;
 
+/// How long a piece of the agent's text gets before the next paragraph ends it: a message that
+/// streams past this is split there, so the piece being written stays small and the pieces that
+/// came before it are not read again. A paragraph boundary is only taken outside a code fence.
+const PIECE: usize = 512;
+
+/// The pieces of the agent's text for the rows drawn: each is a run of paragraphs of [`PIECE`]
+/// bytes or more, split at a paragraph break outside a code fence. So while a reply streams, the
+/// piece being written stays small, and the pieces before it are not read again. The pieces to
+/// gather are ranges of `text`, each as the agent's text is at a byte or the same.
+fn pieces_of(text: &str) -> Vec<&str> {
+    let lines: Vec<&str> = text.split_inclusive('\n').collect();
+    // A link reference may be defined in a later piece than the one that uses it.
+    if lines.iter().any(|line| reference_definition(line)) {
+        return vec![text];
+    }
+    let mut pieces = Vec::new();
+    let mut from = 0;
+    let mut at = 0;
+    let mut fence: Option<(char, usize)> = None;
+    for (ix, line) in lines.iter().enumerate() {
+        at += line.len();
+        // A blank line ends a paragraph, and a fenced block line opens or shuts a fence, which a
+        // piece may not sit inside (its two halves would each miss their other). The piece to
+        // stand for one that ended before [`PIECE`] bytes was already pushed, so the boundary is
+        // taken once what was gathered since the piece's start passes [`PIECE`]. A list or a
+        // quote goes on past a blank line, so what comes after it must open a block of its own.
+        if fence.is_none() && line.trim().is_empty() && at - from >= PIECE && lines.get(ix + 1).is_some_and(|next| next.ends_with('\n') && starts_block(next)) {
+            pieces.push(&text[from..at]);
+            from = at;
+        }
+        fence = fence_after(fence, line);
+    }
+    if from < at {
+        pieces.push(&text[from..]);
+    }
+    pieces
+}
+
+/// The fence the text is inside once the line has been read: one opens with three or more
+/// backticks or tildes and shuts with at least as many of the same, and nothing else.
+fn fence_after(fence: Option<(char, usize)>, line: &str) -> Option<(char, usize)> {
+    let indent = line.len() - line.trim_start_matches(' ').len();
+    let rest = line[indent..].trim_end();
+    let mark = rest.chars().next().filter(|c| matches!(c, '`' | '~'));
+    let Some(mark) = mark.filter(|_| indent < 4) else { return fence };
+    let run = rest.chars().take_while(|c| *c == mark).count();
+    match fence {
+        Some((open, len)) if mark == open && run >= len && rest.len() == run => None,
+        Some(_) => fence,
+        None if run >= 3 => Some((mark, run)),
+        None => None,
+    }
+}
+
+/// Whether the line opens a block that stands alone, so a piece may begin with it: not an indented
+/// line, a list item, a quote or a blank one, which carry on whatever came before.
+fn starts_block(line: &str) -> bool {
+    let first = line.chars().next();
+    if first.is_none_or(|c| c.is_whitespace() || c == '>') {
+        return false;
+    }
+    let item = line.trim_start_matches(|c: char| c.is_ascii_digit());
+    let numbered = item.len() < line.len() && (item.starts_with(". ") || item.starts_with(") "));
+    let bullet = ["- ", "* ", "+ "].iter().any(|b| line.starts_with(b));
+    !(numbered || bullet)
+}
+
+/// Whether the line defines a link reference (`[name]: url`).
+fn reference_definition(line: &str) -> bool {
+    let line = line.trim_start_matches(' ');
+    line.strip_prefix('[').is_some_and(|rest| rest.find("]:").is_some_and(|end| !rest[..end].contains(']')))
+}
+
 /// Whether a run of tool calls shows as one line. A run the user hasn't clicked starts folded,
 /// whether its calls are still going or not.
 fn run_folded(run: &[Block]) -> bool {
@@ -1762,12 +1835,23 @@ fn file_of(uri: &str) -> Option<String> {
 /// The message of the conversation as the screen drawn by NSH shows it: the user's text with its
 /// pictures, or the agent's blocks.
 fn chat_items(messages: &[Msg]) -> Vec<nsh::chat::Item> {
+    // What the screen holds now: a message whose blocks would be built again exactly as they
+    // stand keeps them, so a frame spends its rebuild on the message a chunk went into, not on
+    // every message in the history (the engine compares each message's blocks itself, and the
+    // pieces here are a byte-for-byte match, so nothing shows twice).
+    let now = nsh::chat::shown();
     messages.iter().enumerate().map(|(ix, msg)| match msg {
         Msg::User(text, pictures) => nsh::chat::Item::User {
             text: text.clone(),
             pictures: pictures.iter().map(|a| nsh::chat::Picture { uri: a.data_uri(), size: a.size }).collect(),
         },
-        Msg::Agent(blocks) => nsh::chat::Item::Agent { index: ix, blocks: chat_blocks(blocks) },
+        Msg::Agent(blocks) => {
+            let held = match now.items.get(ix) {
+                Some(nsh::chat::Item::Agent { blocks, .. }) => &**blocks,
+                _ => &[] as &[nsh::chat::Block],
+            };
+            nsh::chat::Item::Agent { index: ix, blocks: std::sync::Arc::new(chat_blocks(blocks, held)) }
+        }
     }).collect()
 }
 
@@ -1801,7 +1885,7 @@ fn run_task(run: &[Block]) -> Option<String> {
 /// One agent message's blocks for the conversation drawn by NSH. Runs of [`MIN_RUN`] or more tool calls
 /// also carry the row that folds them; the calls stay in place either way, so the indexes their
 /// answers are told by hold.
-fn chat_blocks(blocks: &[Block]) -> Vec<nsh::chat::Block> {
+fn chat_blocks(blocks: &[Block], held: &[nsh::chat::Block]) -> Vec<nsh::chat::Block> {
     let mut out: Vec<nsh::chat::Block> = Vec::with_capacity(blocks.len());
     let mut n = 0;
     while n < blocks.len() {
@@ -1821,7 +1905,20 @@ fn chat_blocks(blocks: &[Block]) -> Vec<nsh::chat::Block> {
             continue;
         }
         out.push(match &blocks[n] {
-            Block::Text(text) => nsh::chat::Block::Markdown(text.as_str().into()),
+            Block::Text(text) => {
+                // A piece of long text is a row of its own, so the one being written is the only
+                // one the engine makes again while a reply streams (see [`pieces_of`]). A piece
+                // that could be built again exactly as it is keeps `held`'s (see `chat_items`).
+                for (stitch, piece) in pieces_of(text).into_iter().enumerate() {
+                    let piece_text = match held.get(out.len()) {
+                        Some(nsh::chat::Block::Markdown { text, .. }) if text.as_ref() == piece => text.clone(),
+                        _ => piece.into(),
+                    };
+                    out.push(nsh::chat::Block::Markdown { text: piece_text, stitch: stitch > 0 });
+                }
+                n += 1;
+                continue;
+            }
             Block::Thought(text, open) => nsh::chat::Block::Thought { index: n, text: text.clone(), open: *open },
             Block::Tool(tool) => nsh::chat::Block::Tool(chat_tool(n, tool)),
             Block::Permission(ask) => {
@@ -1955,7 +2052,7 @@ impl Render for Reader {
             .relative()
             .track_focus(&self.focus)
             .on_key_down(cx.listener(|reader, _, _, _| reader.last_input = Instant::now()))
-            .on_scroll_wheel(cx.listener(|reader, _, _, _| reader.last_input = Instant::now()))
+            .on_scroll(cx.listener(|reader, _, _, _| reader.last_input = Instant::now()))
             .on_mouse_down(gpui::MouseButton::Left, cx.listener(|reader, _, _, _| reader.last_input = Instant::now()))
             .on_action(cx.listener(|reader, _: &ShowFinder, window, cx| {
                 reader.hide_issues(window, cx);
@@ -2326,7 +2423,56 @@ mod tests {
         }
     }
 
-    use super::{Queue, STALE_MS, Where, ago, route, run_task, stale, task_in_progress};
+    use super::{Queue, STALE_MS, Where, ago, pieces_of, route, run_task, stale, task_in_progress};
+
+    #[test]
+    fn a_text_shorter_than_a_piece_is_one_piece_and_long_ones_split_at_paragraphs_only() {
+        let one = "## Title\n\nRust gives every value a single owner.\n";
+        assert_eq!(super::pieces_of(one), [one]);
+        // Paragraphs, headings, lists and a fenced block, then more prose: splits land at blank
+        // lines outside a fence, and the pieces back, joined, give back the text.
+        let mut long = String::new();
+        for part in 0..40 {
+            long.push_str("## Part\n\nA paragraph about a value and who owns it meanwhile.\n\n- A value has one owner\n- Borrows are checked\n\n");
+            if part == 10 {
+                long.push_str("```rust\nfn longest<'a>(a: &'a str, b: &'a str) -> &'a str { a }\n\n\n\nfn other() {}\n```\n\n");
+            }
+        }
+        let pieces = pieces_of(&long);
+        assert!(pieces.len() > 4, "pieces: {}", pieces.len());
+        assert_eq!(pieces.concat(), long);
+        assert!(pieces.iter().all(|piece| piece.len() < 2 * super::PIECE), "a piece is not a small run of paragraphs, longest was {}", pieces.iter().map(|p| p.len()).max().unwrap_or(0));
+        // No piece sits inside a fence: every fence a piece opens, that piece also shuts.
+        for piece in &pieces {
+            let opens = piece.match_indices("```rust\n").count();
+            let shuts = piece.lines().filter(|line| line.trim_end() == "```").count();
+            assert_eq!(shuts, opens, "a piece holds a fence not its other: {:?}", piece);
+        }
+    }
+
+    #[test]
+    fn pieces_keep_what_markdown_reads_across_a_blank_line_together() {
+        let filler = "A paragraph about a value and who owns it meanwhile, long enough to count.\n\n".repeat(10);
+        let kept = |block: &str| {
+            let text = format!("{filler}{block}{filler}");
+            let pieces = pieces_of(&text);
+            assert_eq!(pieces.concat(), text);
+            assert!(pieces.len() > 1, "the text was not split at all");
+            assert!(pieces.iter().any(|piece| piece.contains(block)), "a piece cut {block:?}");
+        };
+        kept("~~~\nfn a() {}\n\n\nfn b() {}\n~~~\n\n");
+        kept("````md\n```\n\nnested\n```\n````\n\n");
+        kept("1. a\n\n2. b\n\n3. c\n\n");
+        kept("> quoted\n\n> on\n\n");
+        // Blank lines of CRLF text and of spaces end a paragraph all the same.
+        let crlf = "A paragraph about a value and who owns it meanwhile.\r\n\r\n".repeat(40);
+        assert!(pieces_of(&crlf).len() > 1);
+        let spaced = "A paragraph about a value and who owns it meanwhile.\n  \n".repeat(40);
+        assert!(pieces_of(&spaced).len() > 1);
+        // A reference may be defined after the piece that uses it, so the text is not split.
+        let linked = format!("See [the book].\n\n{filler}[the book]: https://doc.rust-lang.org/book/\n");
+        assert_eq!(pieces_of(&linked), [linked.as_str()]);
+    }
 
     #[test]
     fn the_sidebar_says_how_long_ago_in_a_word() {

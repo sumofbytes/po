@@ -1,14 +1,14 @@
 # Modified by Longbridge for gpui-fast publication.
 [package]
 name = "gpui-fast-linux"
-version = "0.1.9"
+version = "0.1.13"
 edition = "2024"
 publish = ["crates-io"]
 license = "Apache-2.0"
 repository = "https://github.com/longbridge/gpui-fast"
 homepage = "https://github.com/longbridge/gpui-fast"
 readme = "README.md"
-documentation = "https://docs.rs/gpui-fast-linux/0.1.9/gpui_linux/"
+documentation = "https://docs.rs/gpui-fast-linux/0.1.13/gpui_linux/"
 description = "gpui_linux: GPUI with gpui-fast rendering and layout optimizations"
 autoexamples = false
 autobenches = false
@@ -46,7 +46,7 @@ version = "1.0.86"
 version = "1"
 
 [target."cfg(any(target_os = \"linux\", target_os = \"freebsd\"))".dependencies.collections]
-version = "=0.3.9"
+version = "=0.3.11"
 package = "gpui-pre-collections"
 
 [target."cfg(any(target_os = \"linux\", target_os = \"freebsd\"))".dependencies.futures]
@@ -55,23 +55,23 @@ version = "0.3.34"
 [target."cfg(any(target_os = \"linux\", target_os = \"freebsd\"))".dependencies.gpui]
 default-features = false
 package = "gpui-fast"
-version = "^0.1.9"
+version = "^0.1.13"
 path = "../gpui"
 
 [target."cfg(any(target_os = \"linux\", target_os = \"freebsd\"))".dependencies.gpui_util]
 package = "gpui-pre-util"
-version = "=0.3.9"
+version = "=0.3.11"
 
 [target."cfg(any(target_os = \"linux\", target_os = \"freebsd\"))".dependencies.gpui_wgpu]
 optional = true
 features = ["font-kit"]
 package = "gpui-fast-wgpu"
-version = "^0.1.9"
+version = "^0.1.13"
 path = "../gpui_wgpu"
 
 [target."cfg(any(target_os = \"linux\", target_os = \"freebsd\"))".dependencies.http_client]
 package = "gpui-pre-http-client"
-version = "=0.3.9"
+version = "=0.3.11"
 
 [target."cfg(any(target_os = \"linux\", target_os = \"freebsd\"))".dependencies.libc]
 version = "0.2"

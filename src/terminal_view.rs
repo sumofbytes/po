@@ -7,7 +7,7 @@ use std::rc::Rc;
 use futures::StreamExt as _;
 use gpui::{
     App, Bounds, Context, FocusHandle, Focusable, Font, FontStyle, FontWeight, Hsla, InteractiveElement as _, IntoElement, KeyDownEvent, MouseButton, ParentElement as _, Pixels, Render,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, ScrollWheelEvent, Styled as _, ClipboardItem, StrikethroughStyle, TextRun, UnderlineStyle, Window, canvas, div, fill, point, px, size,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, ScrollEvent, Styled as _, ClipboardItem, StrikethroughStyle, TextRun, UnderlineStyle, Window, canvas, div, fill, point, px, size,
 };
 
 use crate::terminal::{CursorShape, Frame, Key, KeyInput, Rgb, Session};
@@ -187,7 +187,7 @@ impl TerminalView {
         }
     }
 
-    fn wheel(&mut self, event: &ScrollWheelEvent) {
+    fn wheel(&mut self, event: &ScrollEvent) {
         let line = self.grid.get().3.max(1.0);
         let lines = match event.delta {
             gpui::ScrollDelta::Lines(delta) => delta.y * WHEEL_LINES,
@@ -242,7 +242,7 @@ impl Render for TerminalView {
             .key_context("Terminal")
             .track_focus(&self.focus)
             .on_key_down(cx.listener(|this, event, _, cx| this.key_down(event, cx)))
-            .on_scroll_wheel(cx.listener(|this, event, _, cx| {
+            .on_scroll(cx.listener(|this, event, _, cx| {
                 this.wheel(event);
                 cx.stop_propagation();
             }))
