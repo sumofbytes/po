@@ -66,10 +66,11 @@ pub struct Setting {
     pub choices: Vec<(String, String)>,
 }
 
-/// One picture attached to the draft, as a data URI so the screen needs no file access.
+/// One picture attached to the draft, as a data URI so the screen needs no file access. The URI
+/// is shared: it is asked for on every frame a picture shows, and it never changes.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Picture {
-    pub uri: String,
+    pub uri: Arc<str>,
     /// Its pixels, which give the box it is drawn in its shape.
     pub size: (u32, u32),
 }
@@ -151,9 +152,12 @@ pub struct AskOption {
 /// One block of the agent's message. `index` is the block's place in the message, to press.
 #[derive(Clone, PartialEq, Debug)]
 pub enum Block {
-    /// The agent's text, as markdown. Compared by its text: a message that did not change must
-    /// compare equal to the one drawn, or it is drawn again with each chunk of another.
-    Markdown(Arc<str>),
+    /// The agent's text, as markdown. Compared by its text: a piece that did not change must
+    /// compare equal to the one drawn, or it is drawn again with each chunk of another. `stitch`
+    /// says the piece above it is the same text, which the two rows keep the room of a paragraph
+    /// in (see [`crate::main`]'s paragraph splits of long text) instead of the room between the
+    /// blocks the agent put side by side.
+    Markdown { text: Arc<str>, stitch: bool },
     /// Its reasoning, with whether it is expanded.
     Thought { index: usize, text: String, open: bool },
     Tool(Tool),
@@ -169,11 +173,24 @@ pub enum Block {
     Approve { index: usize, question: String, lines: Vec<String>, answered: Option<String> },
 }
 
-/// One message: the user's, or the agent's column of blocks.
+/// One message: the user's, or the agent's column of blocks. The agent's blocks are shared: a
+/// message that did not change keeps what the screen holds while it streams (see `po`'s
+/// `chat_items`), and the engine's own comparisons of a message's blocks are bumps, not copies.
 #[derive(Clone, PartialEq, Debug)]
 pub enum Item {
     User { text: String, pictures: Vec<Picture> },
-    Agent { index: usize, blocks: Vec<Block> },
+    Agent { index: usize, blocks: Arc<Vec<Block>> },
+}
+
+/// Which rows a message draws, decided once per message and kept while it is one kind only.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Shown {
+    /// [`Item::User`] as [`user_row`].
+    User,
+    /// [`Item::Agent`] as [`agent_row`].
+    Agent,
+    /// Nothing: the message is not there yet.
+    Nothing,
 }
 
 /// What resuming a session shows: the sessions on offer, or why there are none.
@@ -258,6 +275,13 @@ pub fn publish(snapshot: Snapshot) {
         }
         changed
     });
+}
+
+/// The snapshot the screen holds at the moment, for whoever composes the next one: a message
+/// that would be built again exactly as it stands is reused as it stands instead (see `po`'s
+/// `chat_items`). Only [`publish`] writes, and it waits for this borrow's end.
+pub fn shown() -> tokio::sync::watch::Ref<'static, Snapshot> {
+    SNAPSHOT.borrow()
 }
 
 /// What the user did, for [`crate::Reader::run`].
@@ -564,7 +588,7 @@ fn user_row(text_: &str, pictures: &[Picture]) -> AnyElement {
                     // A box of the picture's own shape: one from a `data:` URI has no size before it
                     // loads, so it is given one rather than left to collapse.
                     let (w, h) = picture.fit(360., 240.);
-                    image(picture.uri.clone())
+                    image(picture.uri.to_string())
                         .w(px(w))
                         .h(px(h))
                         .resize_mode(ResizeMode::Cover)
@@ -953,10 +977,11 @@ fn approve_row(message: usize, at: usize, question: &str, lines: &[String], answ
 /// One block of the agent's message. What it reports is its own place in the message
 /// ([`Block`]'s `index`), not its place among the rows drawn: a folded run adds a row of its own.
 /// `thought_streaming` only matters to a thought: still coming, it reads `Thinking`, not `Thought`.
+#[hotpath::measure]
 fn block_row(message: usize, block: &Block, thought_streaming: bool) -> AnyElement {
     match block {
-        Block::Markdown(markdown) => text_view()
-            .markdown(markdown.to_string())
+        Block::Markdown { text, .. } => text_view()
+            .markdown(text.to_string())
             .on_link_press(open_link)
             .selectable(true)
             .sized(text_base())
@@ -971,15 +996,24 @@ fn block_row(message: usize, block: &Block, thought_streaming: bool) -> AnyEleme
     }
 }
 
-/// One message of the agent's: its blocks, a run's own row standing in for the tools it hides.
+/// One row of a message: the block drawn on it, the room above it, and the block's place in the
+/// message (a run's row stands in for the tools it hides, so the two differ: see [`rows_of`]).
+#[derive(Clone, Debug, PartialEq)]
+struct Row {
+    /// The block's place, to tell a thought still streaming from one that came before others.
+    at: usize,
+    /// The block's place among the rows drawn, to keep each row where it was.
+    ordinal: usize,
+    gap: Points,
+    block: Block,
+}
+
+/// A message's rows, in order: its blocks, and a folded run's row in place of the tools it hides.
 #[hotpath::measure]
-fn agent_row(message: usize, blocks: &[Block], live: bool) -> AnyElement {
-    let mut column = view().flex_col().min_w_0();
+fn rows_of(blocks: &[Block]) -> Vec<Row> {
+    let mut rows: Vec<Row> = Vec::with_capacity(blocks.len());
     let mut skip = 0;
     let mut before: Option<&Block> = None;
-    if blocks.is_empty() {
-        column = column.child(text("Working…").sized(text_sm()).text_color(Colors::muted()));
-    }
     for (at, block) in blocks.iter().enumerate() {
         if skip > 0 {
             skip -= 1;
@@ -990,16 +1024,56 @@ fn agent_row(message: usize, blocks: &[Block], live: bool) -> AnyElement {
             skip = *count;
         }
         // Steps sit close to each other; everything else, and the line between a step and text,
-        // has room.
-        let gap = match before {
-            None => Points::ZERO,
-            Some(before) if is_step(before) && is_step(block) => scale::s0_5(),
-            Some(_) => scale::s4(),
+        // has room. A stitch keeps the paragraph's own room (a piece is the same text the row
+        // above came from), which it had had as part of its text.
+        let gap = if matches!(block, Block::Markdown { stitch: true, .. }) {
+            scale::s3()
+        } else if before.is_some_and(|before| is_step(before) && is_step(block)) {
+            scale::s0_5()
+        } else if before.is_some() {
+            scale::s4()
+        } else {
+            Points::ZERO
         };
-        column = column.child(view().mt(gap).child(block_row(message, block, live && at + 1 == blocks.len())));
+        rows.push(Row { at, ordinal: rows.len(), gap, block: block.clone() });
         before = Some(block);
     }
-    column.into_element()
+    rows
+}
+
+/// One message of the agent's: a row per block, a run's own row standing in for the tools it
+/// hides. The rows are keyed regions ([`each`]): while a reply streams into the message, the row
+/// being written is the only one of them that is built again — what that used to cost was all of
+/// the message's rows, once per chunk, not just the last one.
+#[hotpath::measure]
+fn agent_row(message: usize, blocks: Memo<Arc<Vec<Block>>>, live: Memo<bool>) -> AnyElement {
+    // A message with no blocks yet is the agent waking; once it has any, its rows stay put and
+    // only the ones the blocks changed are made again (a message does not pass through empty on
+    // its way to more blocks, so this branch is made once).
+    when(
+        computed(move || blocks.with(|blocks| !blocks.is_empty())),
+        move || agent_region(message, blocks, live),
+    )
+    .otherwise(|| text("Working…").sized(text_sm()).text_color(Colors::muted()))
+    .into_element()
+}
+
+/// [`agent_row`]'s rows over the message's blocks.
+#[hotpath::measure]
+fn agent_region(message: usize, blocks: Memo<Arc<Vec<Block>>>, live: Memo<bool>) -> AnyElement {
+    let rows = computed(move || blocks.with(|blocks| rows_of(blocks)));
+    let len = computed(move || blocks.with(|blocks| blocks.len()));
+    each(rows, |row| row.ordinal, move |item, _| {
+        // A thought still streaming reads as `Thinking`; every other thought reads as `Thought`.
+        let streaming = computed(move || live.get() && item.with(|row| row.at + 1 == len.get()));
+        view()
+            .mt(move || item.with(|row| row.gap))
+            .child(dynamic(move || {
+                let row = item.get();
+                block_row(message, &row.block, streaming.get())
+            }))
+            .into_element()
+    })
 }
 
 /// The conversation: the messages, in order, as a center column that scrolls. Its stage, and the
@@ -1030,14 +1104,30 @@ fn transcript(state: Signal<Snapshot>, count: usize, slot: ElementRef, at_end: S
                 sections[message] = bounds.origin.y;
             });
         };
-        // Each row is a region of its own over a memo of its message: text streaming into the last
-        // one builds that row again and leaves the rest as they are. They were all built again on
-        // every chunk, and what that cost grew with the thread, about 3 MB for each message.
-        let item = computed(move || state.with(|s| s.items.get(message).cloned()));
-        let row = dynamic(move || match item.get() {
-            Some(Item::User { text, pictures }) => user_row(&text, &pictures),
-            Some(Item::Agent { blocks, .. }) => agent_row(message, &blocks, busy.get() && last.get() == Some(message)),
-            None => view().into_element(),
+        // Each message is a region of its own: text streaming into a message builds its rows
+        // again and leaves the other messages as they are, and the agent's rows are the ones the
+        // blocks changed (see [`agent_row`]).
+        let kind = computed(move || state.with(|s| match s.items.get(message) {
+            Some(Item::User { .. }) => Shown::User,
+            Some(Item::Agent { .. }) => Shown::Agent,
+            None => Shown::Nothing,
+        }));
+        let blocks = computed(move || state.with(|s| match s.items.get(message) {
+            Some(Item::Agent { blocks, .. }) => blocks.clone(),
+            _ => Arc::new(Vec::new()),
+        }));
+        let user = computed(move || state.with(|s| match s.items.get(message) {
+            Some(Item::User { text, pictures }) => Some((text.clone(), pictures.clone())),
+            _ => None,
+        }));
+        let live = computed(move || busy.get() && last.get() == Some(message));
+        let row = dynamic(move || match kind.get() {
+            Shown::User => match user.get() {
+                Some((text, pictures)) => user_row(&text, &pictures),
+                None => view().into_element(),
+            },
+            Shown::Agent => agent_row(message, blocks, live),
+            Shown::Nothing => view().into_element(),
         });
         rows = rows.child(view().on_layout(locate).child(row));
     }
@@ -1301,7 +1391,7 @@ fn pictures_row(pictures: &[Picture]) -> AnyElement {
                             {
                                 // A box of the picture's own shape (see `user_row`).
                                 let (w, h) = picture.fit(120., 72.);
-                                image(picture.uri.clone())
+                                image(picture.uri.to_string())
                                     .rounded(Colors::radius())
                                     .border_1()
                                     .border_color(super::hairline())
@@ -2095,7 +2185,7 @@ mod tests {
         let commands = guard.as_mut().expect("the channel");
         let run = |task: Option<&str>, failed| {
             let blocks = vec![Block::Run { index: 0, count: 4, failed, phase: Phase::Done, folded: true, task: task.map(str::to_string) }];
-            start(Snapshot { items: vec![Item::Agent { index: 0, blocks }], ..Snapshot::default() })
+            start(Snapshot { items: vec![Item::Agent { index: 0, blocks: Arc::new(blocks) }], ..Snapshot::default() })
         };
         // The row's spoken name is all it says: the task, then the calls and the failures.
         let mut app = run(Some("Fix the parser"), 1);
@@ -2122,7 +2212,7 @@ mod tests {
         blocks.push(Block::Ask { index: 4, title: "Run rm?".into(), options: vec![AskOption { at: 0, label: "Allow once".into(), primary: true }], answered: None });
         blocks.push(Block::Run { index: 5, count: 3, failed: 0, phase: Phase::Done, folded: false, task: None });
         blocks.extend((5..8).map(tool));
-        let mut app = start(Snapshot { items: vec![Item::Agent { index: 0, blocks }], ..Snapshot::default() });
+        let mut app = start(Snapshot { items: vec![Item::Agent { index: 0, blocks: Arc::new(blocks) }], ..Snapshot::default() });
         app.press("label:Allow once").unwrap();
         assert_eq!(drain(&mut app, commands), [Bus::Chat(Cmd::Answer { message: 0, block: 4, at: 0 })]);
         // Two runs say "tool calls": the first is four, the second three.
@@ -2169,10 +2259,10 @@ mod tests {
         let mut guard = crate::nsh::bus::lock();
         let _commands = guard.as_mut().expect("the channel");
         let settings = vec![Setting { id: "model".into(), name: "Model".into(), current: "b".into(), choices: vec![("a".into(), "Fast".into()), ("b".into(), "Smart".into())] }];
-        let mut app = start(Snapshot { settings: settings.clone(), items: vec![Item::Agent { index: 0, blocks: vec![] }], ..Snapshot::default() });
+        let mut app = start(Snapshot { settings: settings.clone(), items: vec![Item::Agent { index: 0, blocks: Arc::new(vec![]) }], ..Snapshot::default() });
         assert!(app.shows("Smart"), "{:?}", app.screen().texts());
         assert!(app.shows("Working…"), "{:?}", app.screen().texts());
-        publish(Snapshot { settings, busy: true, items: vec![Item::Agent { index: 0, blocks: vec![] }], ..Snapshot::default() });
+        publish(Snapshot { settings, busy: true, items: vec![Item::Agent { index: 0, blocks: Arc::new(vec![]) }], ..Snapshot::default() });
         app.wait(std::time::Duration::from_millis(100)).unwrap();
         assert!(app.shows("Smart"), "{:?}", app.screen().texts());
     }
@@ -2185,7 +2275,7 @@ mod tests {
         // The last thought of a turn going on is still coming; a finished one is in the past.
         let app = start(Snapshot {
             busy: true,
-            items: vec![Item::Agent { index: 0, blocks: vec![thought("settled"), thought("still going")] }],
+            items: vec![Item::Agent { index: 0, blocks: Arc::new(vec![thought("settled"), thought("still going")]) }],
             ..Snapshot::default()
         });
         // The finished one says Thought ahead of its gist; only the streaming one says Thinking.
@@ -2196,7 +2286,7 @@ mod tests {
         // The turn is over, so the last thought has become one too; nothing says Thinking.
         let app = start(Snapshot {
             busy: false,
-            items: vec![Item::Agent { index: 0, blocks: vec![thought("settled")] }],
+            items: vec![Item::Agent { index: 0, blocks: Arc::new(vec![thought("settled")]) }],
             ..Snapshot::default()
         });
         assert!(app.shows("Thought"), "{:?}", app.screen().texts());
@@ -2208,7 +2298,7 @@ mod tests {
         let mut guard = crate::nsh::bus::lock();
         let commands = guard.as_mut().expect("the channel");
         let settings = vec![Setting { id: "model".into(), name: "Model".into(), current: "b".into(), choices: vec![("a".into(), "Fast".into()), ("b".into(), "Smart".into())] }];
-        let mut app = start(Snapshot { settings, items: vec![Item::Agent { index: 0, blocks: vec![] }], ..Snapshot::default() });
+        let mut app = start(Snapshot { settings, items: vec![Item::Agent { index: 0, blocks: Arc::new(vec![]) }], ..Snapshot::default() });
         app.press("label:Model").unwrap();
         app.settle();
         assert!(app.shows("Fast"), "{:?}", app.screen().texts());
@@ -2247,7 +2337,7 @@ mod tests {
             agents: vec![("Claude".into(), "claude".into())],
             chosen: Some("claude".into()),
             grant: Some(Grant::initial()),
-            items: vec![Item::Agent { index: 0, blocks: vec![] }],
+            items: vec![Item::Agent { index: 0, blocks: Arc::new(vec![]) }],
             ..Snapshot::default()
         });
         assert!(app.shows("Claude"), "{:?}", app.screen().texts());
@@ -2265,7 +2355,7 @@ mod tests {
     fn the_control_menu_picks_a_level_toggles_extras_and_asks_for_a_restart_only_when_raised() {
         let mut guard = crate::nsh::bus::lock();
         let commands = guard.as_mut().expect("the channel");
-        let mut app = start(Snapshot { grant: Some(Grant::initial()), items: vec![Item::Agent { index: 0, blocks: vec![] }], ..Snapshot::default() });
+        let mut app = start(Snapshot { grant: Some(Grant::initial()), items: vec![Item::Agent { index: 0, blocks: Arc::new(vec![]) }], ..Snapshot::default() });
         app.press("label:Agent control").unwrap();
         app.settle();
         let texts = app.screen().texts().into_iter().map(String::from).collect::<Vec<_>>();
@@ -2280,7 +2370,7 @@ mod tests {
         assert!(sent.contains(&Bus::Chat(Cmd::Grant(GrantChange::Read))), "{sent:?}");
         assert!(sent.contains(&Bus::Chat(Cmd::Grant(GrantChange::Stop))), "{sent:?}");
 
-        publish(Snapshot { grant: Some(Grant::initial()), grant_pending: true, items: vec![Item::Agent { index: 0, blocks: vec![] }], ..Snapshot::default() });
+        publish(Snapshot { grant: Some(Grant::initial()), grant_pending: true, items: vec![Item::Agent { index: 0, blocks: Arc::new(vec![]) }], ..Snapshot::default() });
         app.wait(std::time::Duration::from_millis(100)).unwrap();
         app.press("label:Agent control").unwrap();
         app.settle();
@@ -2311,11 +2401,11 @@ mod tests {
     fn the_field_empties_when_the_app_clears_the_draft() {
         let mut guard = crate::nsh::bus::lock();
         let commands = guard.as_mut().expect("the channel");
-        let mut app = start(Snapshot { items: vec![Item::Agent { index: 0, blocks: vec![] }], ..Snapshot::default() });
+        let mut app = start(Snapshot { items: vec![Item::Agent { index: 0, blocks: Arc::new(vec![]) }], ..Snapshot::default() });
         app.type_text("id:chat-draft", "hello there").unwrap();
         drain(&mut app, commands);
         assert_eq!(app.screen().input_text("id:chat-draft").unwrap(), Some("hello there"));
-        publish(Snapshot { draft: String::new(), draft_reset: 1, items: vec![Item::Agent { index: 0, blocks: vec![] }], ..Snapshot::default() });
+        publish(Snapshot { draft: String::new(), draft_reset: 1, items: vec![Item::Agent { index: 0, blocks: Arc::new(vec![]) }], ..Snapshot::default() });
         app.wait(std::time::Duration::from_millis(100)).unwrap();
         assert_eq!(app.screen().input_text("id:chat-draft").unwrap().unwrap_or(""), "");
     }
