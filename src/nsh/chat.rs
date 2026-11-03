@@ -202,18 +202,6 @@ pub enum Picking {
     Loading,
 }
 
-/// What the header's status icon says.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Tone {
-    /// Ready, or asleep.
-    Idle,
-    /// Starting, or a turn going on.
-    Working,
-    /// Waiting on the user.
-    Attention,
-    Failed,
-}
-
 #[derive(Clone, PartialEq, Debug, Default)]
 pub struct Snapshot {
     pub glass: bool,
@@ -222,8 +210,6 @@ pub struct Snapshot {
     pub trail: Vec<Control>,
     /// The status lines of the header's right, like `3 threads · 1 asking`.
     pub statuses: Vec<String>,
-    /// How the thread itself is doing, drawn as an icon; `None` before it has anything to say.
-    pub state: Option<(Tone, String)>,
     /// Nothing on screen yet: the agent is picked below, and the thread starts when something
     /// is sent.
     pub blank: bool,
@@ -488,35 +474,12 @@ fn status_line(line: String) -> View {
     view().flex_none().px(scale::s2()).py(scale::s1()).child(text(super::sentence(&line)).sized(text_sm()).text_color(Colors::muted()).number_of_lines(1))
 }
 
-/// The thread's state as an icon in the header's right, its words in the tooltip. Idle shows
-/// nothing, and the shapes differ so the state doesn't rest on color alone.
-fn status_icon(tone: Tone, text: &str) -> Option<View> {
-    let (name, color): (IconName, fn() -> AdaptiveColor) = match tone {
-        Tone::Idle => return None,
-        Tone::Working => (IconName::CircleHalf, || Colors::warning()()),
-        Tone::Attention => (IconName::CircleDot, || Colors::info()()),
-        Tone::Failed => (IconName::CircleX, || Colors::danger()()),
-    };
-    Some(
-        view()
-            .role(AccessibilityRole::Image)
-            .label(text.to_string())
-            .flex_none()
-            .p(scale::s1_5())
-            .tooltip(tooltip(text.to_string()))
-            .child(icon(name, scale::s3_5(), color)),
-    )
-}
-
-/// The pane header of the conversation: the title, the statuses, the history button, the Control
+/// The pane header of the conversation: the title, the statuses, the terminal and history buttons, the Control
 /// menu, and the window's own controls at the ends.
 fn pane(title: String, snap: &Snapshot) -> View {
     let mut right = view().flex_row().items_center().gap(scale::s1());
     for line in &snap.statuses {
         right = right.child(status_line(line.clone()));
-    }
-    if let Some((tone, text)) = &snap.state {
-        right = right.child(status_icon(*tone, text));
     }
     if snap.picking.is_none() {
         right = right.child(super::header::toggle_button(IconName::Terminal, "Show the terminal (Ctrl+`)", false, || tell(Cmd::Terminal)));

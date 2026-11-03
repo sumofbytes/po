@@ -30,6 +30,7 @@ impl Reader {
                 Activity::Unread => side::Mark::Unread,
                 Activity::Running => side::Mark::Running,
                 Activity::Asking => side::Mark::Asking,
+                Activity::Failed => side::Mark::Failed,
             },
             selected: (pid, thread.id) == (active_project, active_thread),
             controlled: self.grants.get(&thread.id).is_some_and(|grant| *grant != command::Grant::initial() && *grant != command::Grant::default()),
@@ -197,18 +198,6 @@ impl Reader {
         if let Some(line) = self.children_status(thread.id) {
             statuses.push(line);
         }
-        let state = (!thread.status.is_empty()).then(|| {
-            use crate::state::ThreadState as S;
-            let tone = match crate::state::state(&thread.facts()) {
-                S::Ready | S::Asleep | S::Closed => chat::Tone::Idle,
-                S::Starting | S::Running => chat::Tone::Working,
-                S::Approval | S::Asking => chat::Tone::Attention,
-                S::Failed => chat::Tone::Failed,
-            };
-            // "ready" is set when the agent starts and nothing resets it, so a turn going on says so here.
-            let text = if tone == chat::Tone::Working && thread.status == "ready" { "working" } else { thread.status.as_str() };
-            (tone, text.to_string())
-        });
         let picking = thread.picking.then(|| match &thread.sessions {
             Some(sessions) if !thread.loading && !sessions.is_empty() => {
                 // What was closed here lately, in the order it was closed, if this agent still lists it.
@@ -240,7 +229,6 @@ impl Reader {
             lead,
             trail,
             statuses,
-            state,
             blank: thread.blank,
             busy,
             steer: thread.client.as_ref().is_some_and(|client| client.queues()),

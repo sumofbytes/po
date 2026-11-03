@@ -853,6 +853,8 @@ enum Activity {
     Running,
     /// Waiting for an answer to a permission request.
     Asking,
+    /// Its agent failed, until something is sent again.
+    Failed,
 }
 
 impl Activity {
@@ -998,6 +1000,8 @@ impl Thread {
             Activity::Asking
         } else if self.busy {
             Activity::Running
+        } else if self.failed {
+            Activity::Failed
         } else if self.unread {
             Activity::Unread
         } else {

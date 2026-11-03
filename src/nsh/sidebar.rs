@@ -19,6 +19,8 @@ pub enum Mark {
     Running,
     /// Waiting for an answer to a permission request.
     Asking,
+    /// Its agent failed.
+    Failed,
 }
 
 #[derive(Clone, PartialEq, Debug)]
@@ -144,13 +146,14 @@ fn lead(content: impl IntoElement) -> View {
 }
 
 /// A thread's state, in the lead column of its row: a dot while it runs or has
-/// news, a ! when it asks, a quiet ring when idle.
+/// news, a ! when it asks, a × when it failed, a quiet ring when idle.
 fn mark(mark: Mark) -> View {
     let size = scale::s1_5() + scale::s0_5();
     let dot = |color: fn() -> AdaptiveColor| view().w(size).h(size).rounded(super::pill()).bg(color);
     view().flex_none().items_center().justify_center().child(match mark {
         Mark::Idle => view().w(size).h(size).rounded(super::pill()).border_1().border_color(Colors::muted()).opacity(crate::theme::tokens::DIM).into_element(),
         Mark::Asking => text("!").text_size(text_base()).font_weight(FontWeight::BOLD).text_color(Colors::warning()).into_element(),
+        Mark::Failed => text("×").text_size(text_base()).font_weight(FontWeight::BOLD).text_color(Colors::danger()).into_element(),
         Mark::Running => dot(|| Colors::primary()()).into_element(),
         Mark::Unread => dot(|| Colors::added()()).into_element(),
     })
