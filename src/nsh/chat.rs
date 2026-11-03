@@ -642,9 +642,10 @@ fn thought_row(message: usize, at: usize, text_: &str, open: bool, done: bool) -
             .hover(|s| s.bg(Colors::hover()))
             .on_press(move || tell(Cmd::ToggleThought { message, block: at }))
             .child(lead_slot(icon(IconName::Lightbulb, STEP_ICON, Colors::muted())))
-            .child(text(word).flex_none().sized(text_sm()).font_weight(FontWeight::MEDIUM).text_color(Colors::muted()))
+            .child(text(word).selectable(false).flex_none().sized(text_sm()).font_weight(FontWeight::MEDIUM).text_color(Colors::muted()))
             .children((!open).then(|| {
                 text(thought_gist(text_))
+                    .selectable(false)
                     .number_of_lines(1)
                     .flex_1()
                     .min_w_0()
@@ -712,6 +713,7 @@ fn tool_row(message: usize, at: usize, tool: &Tool) -> AnyElement {
                         .child(step_glyph(tool.phase))
                         .child(
                             text(title)
+                                .selectable(false)
                                 .number_of_lines(1)
                                 .flex_1()
                                 .min_w_0()
@@ -804,8 +806,8 @@ fn run_row(message: usize, at: usize, count: usize, failed: usize, phase: Phase,
         .hover(|s| s.bg(Colors::hover()))
         .on_press(move || tell(Cmd::Fold { message, block: at, folded: !folded }))
         .child(step_glyph(phase))
-        .child(text(label).min_w_0().sized(text_sm()).text_color(Colors::muted()))
-        .children(aside.map(|aside| text(aside).sized(text_sm()).text_color(Colors::muted())))
+        .child(text(label).selectable(false).min_w_0().sized(text_sm()).text_color(Colors::muted()))
+        .children(aside.map(|aside| text(aside).selectable(false).sized(text_sm()).text_color(Colors::muted())))
         .child(view().flex_1())
         .child(trail_slot(icon(if folded { IconName::ChevronRight } else { IconName::ChevronDown }, STEP_ICON, Colors::muted())))
         .into_element()
@@ -854,13 +856,13 @@ fn ask_row(message: usize, at: usize, title: &str, options: &[AskOption], answer
                 .flex_row()
                 .items_start()
                 .gap(scale::s2())
-                .child(text("Permission").flex_none().sized(text_xs()).font_weight(FontWeight::MEDIUM).text_color(Colors::muted()))
+                .child(text("Permission").selectable(false).flex_none().sized(text_xs()).font_weight(FontWeight::MEDIUM).text_color(Colors::muted()))
                 .child(view().flex_1().min_w_0().child(text_view().markdown(title).sized(text_sm()).text_color(Colors::foreground()))),
         );
     match answered {
         Some(given) => {
             let said = format!("→ {given}");
-            card = card.child(text(said).sized(text_sm()).text_color(Colors::muted()));
+            card = card.child(text(said).selectable(false).sized(text_sm()).text_color(Colors::muted()));
         }
         None => {
             let mut row = view().flex_row().flex_wrap().gap(scale::s1_5());
@@ -881,7 +883,7 @@ fn ask_row(message: usize, at: usize, title: &str, options: &[AskOption], answer
                     reply.border_1().border_color(Colors::input_border()).hover(|s| s.bg(Colors::hover()))
                 };
                 row = row.child(
-                    reply.child(text(label).sized(text_sm()).text_color(move || if primary { Colors::primary_foreground()() } else { Colors::foreground()() })),
+                    reply.child(text(label).selectable(false).sized(text_sm()).text_color(move || if primary { Colors::primary_foreground()() } else { Colors::foreground()() })),
                 );
             }
             card = card.child(row);
@@ -908,7 +910,7 @@ fn approve_row(message: usize, at: usize, question: &str, lines: &[String], answ
                 .flex_row()
                 .items_start()
                 .gap(scale::s2())
-                .child(text("Approve").flex_none().sized(text_xs()).font_weight(FontWeight::MEDIUM).text_color(Colors::muted()))
+                .child(text("Approve").selectable(false).flex_none().sized(text_xs()).font_weight(FontWeight::MEDIUM).text_color(Colors::muted()))
                 .child(view().flex_1().min_w_0().child(text_view().markdown(title).sized(text_sm()).text_color(Colors::foreground()))),
         )
         .children((!lines.is_empty()).then(|| {
@@ -936,7 +938,7 @@ fn approve_row(message: usize, at: usize, question: &str, lines: &[String], answ
     match answered {
         Some(said) => {
             let said = format!("→ {said}");
-            card = card.child(text(said).sized(text_sm()).text_color(Colors::muted()));
+            card = card.child(text(said).selectable(false).sized(text_sm()).text_color(Colors::muted()));
         }
         None => {
             card = card.child(
@@ -954,7 +956,7 @@ fn approve_row(message: usize, at: usize, question: &str, lines: &[String], answ
                             .cursor_pointer()
                             .bg(Colors::primary())
                             .on_press(move || tell(Cmd::Approve { message, block: at, yes: true }))
-                            .child(text("Run it").sized(text_sm()).text_color(Colors::primary_foreground())),
+                            .child(text("Run it").selectable(false).sized(text_sm()).text_color(Colors::primary_foreground())),
                     )
                     .child(
                         view()
@@ -968,7 +970,7 @@ fn approve_row(message: usize, at: usize, question: &str, lines: &[String], answ
                             .border_color(Colors::input_border())
                             .hover(|s| s.bg(Colors::hover()))
                             .on_press(move || tell(Cmd::Approve { message, block: at, yes: false }))
-                            .child(text("Leave out").sized(text_sm()).text_color(Colors::foreground())),
+                            .child(text("Leave out").selectable(false).sized(text_sm()).text_color(Colors::foreground())),
                     ),
             );
         }
@@ -1056,7 +1058,7 @@ fn agent_row(message: usize, blocks: Memo<Arc<Vec<Block>>>, live: Memo<bool>) ->
         computed(move || blocks.with(|blocks| !blocks.is_empty())),
         move || agent_region(message, blocks, live),
     )
-    .otherwise(|| text("Working…").sized(text_sm()).text_color(Colors::muted()))
+    .otherwise(|| text("Working…").selectable(false).sized(text_sm()).text_color(Colors::muted()))
     .into_element()
 }
 
