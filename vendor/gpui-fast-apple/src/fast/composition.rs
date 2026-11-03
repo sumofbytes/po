@@ -10,6 +10,26 @@
 
 use std::sync::Arc;
 
+use anyhow::Result;
+use objc2_quartz_core::CAMetalLayer;
+use parking_lot::Mutex;
+
+use crate::metal_renderer::{Context, InstanceBufferPool, MetalRenderer, Renderer};
+
+/// A renderer for an overlay surface above `base`: transparent, on its own
+/// layer, sharing `base`'s device and sprite atlas.
+pub(crate) fn new_overlay_renderer(context: Context, base: &Renderer) -> Result<Renderer> {
+    new_sharing_atlas(base, context, true)
+}
+
+/// A renderer on a new `CAMetalLayer` that draws with `base`'s device and
+/// sprite atlas.
+fn new_sharing_atlas(
+    base: &MetalRenderer,
+    instance_buffer_pool: Arc<Mutex<InstanceBufferPool>>,
+    transparent: bool,
+) -> Result<MetalRenderer> {
+    let device = base.device.clone();
     let layer = CAMetalLayer::new();
     MetalRenderer::configure_layer(&layer, &device, transparent, false);
     copy_colorspace(base, &layer);

@@ -24,8 +24,8 @@ use crate::{
     TextInputConfiguration, TextInputStateChange, TextRenderingMode, TextStyle,
     TextStyleRefinement, ThermalState, TransformationMatrix, Underline, UnderlineStyle,
     WindowAppearance, WindowBackgroundAppearance, WindowBounds, WindowControls, WindowDecorations,
-    WindowOptions, WindowParams, WindowTextSystem, WindowVisibility, point, prelude::*, px, rems,
-    size, transparent_black,
+    WindowInsets, WindowOptions, WindowParams, WindowTextSystem, WindowVisibility, point,
+    prelude::*, px, rems, size, transparent_black,
 };
 
 use crate::gestures::{GestureTuning, RecognizedTouchGesture, TouchGestureRecognizer};
@@ -42,7 +42,7 @@ use itertools::Itertools;
 use objc2_core_foundation::CFRetained;
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 use objc2_core_video::CVPixelBuffer;
-use parking_lot::RwLock;
+use parking_lot::{RwLock, RwLockUpgradableReadGuard};
 use raw_window_handle::{HandleError, HasDisplayHandle, HasWindowHandle};
 use scheduler::Instant;
 use slotmap::SlotMap;
@@ -490,7 +490,12 @@ impl ArenaClearNeeded {
     }
 }
 
-pub(crate) type FocusMap = RwLock<SlotMap<FocusId, FocusRef>>;
+#[derive(Default)]
+pub(crate) struct FocusMap {
+    pub(crate) handles: SlotMap<FocusId, FocusRef>,
+    pub(crate) dropped_handles: Vec<FocusId>,
+}
+
 pub(crate) struct FocusRef {
     pub(crate) ref_count: AtomicUsize,
     pub(crate) tab_index: isize,
@@ -530,7 +535,7 @@ impl FocusId {
 /// A handle which can be used to track and manipulate the focused element in a window.
 pub struct FocusHandle {
     pub(crate) id: FocusId,
-    handles: Arc<FocusMap>,
+    handles: Arc<RwLock<FocusMap>>,
     /// The index of this element in the tab order.
     pub tab_index: isize,
     /// Whether this element can be focused by tab navigation.
@@ -544,8 +549,8 @@ impl std::fmt::Debug for FocusHandle {
 }
 
 impl FocusHandle {
-    pub(crate) fn new(handles: &Arc<FocusMap>) -> Self {
-        let id = handles.write().insert(FocusRef {
+    pub(crate) fn new(handles: &Arc<RwLock<FocusMap>>) -> Self {
+        let id = handles.write().handles.insert(FocusRef {
             ref_count: AtomicUsize::new(1),
             tab_index: 0,
             tab_stop: false,
@@ -559,9 +564,9 @@ impl FocusHandle {
         }
     }
 
-    pub(crate) fn for_id(id: FocusId, handles: &Arc<FocusMap>) -> Option<Self> {
+    pub(crate) fn for_id(id: FocusId, handles: &Arc<RwLock<FocusMap>>) -> Option<Self> {
         let lock = handles.read();
-        let focus = lock.get(id)?;
+        let focus = lock.handles.get(id)?;
         if atomic_incr_if_not_zero(&focus.ref_count) == 0 {
             return None;
         }
@@ -576,7 +581,7 @@ impl FocusHandle {
     /// Sets the tab index of the element associated with this handle.
     pub fn tab_index(mut self, index: isize) -> Self {
         self.tab_index = index;
-        if let Some(focus) = self.handles.write().get_mut(self.id) {
+        if let Some(focus) = self.handles.write().handles.get_mut(self.id) {
             focus.tab_index = index;
         }
         self
@@ -587,7 +592,7 @@ impl FocusHandle {
     /// When `false`, the element will not be included in the tab order.
     pub fn tab_stop(mut self, tab_stop: bool) -> Self {
         self.tab_stop = tab_stop;
-        if let Some(focus) = self.handles.write().get_mut(self.id) {
+        if let Some(focus) = self.handles.write().handles.get_mut(self.id) {
             focus.tab_stop = tab_stop;
         }
         self
@@ -656,12 +661,15 @@ impl Eq for FocusHandle {}
 
 impl Drop for FocusHandle {
     fn drop(&mut self) {
-        self.handles
-            .read()
-            .get(self.id)
-            .unwrap()
-            .ref_count
-            .fetch_sub(1, SeqCst);
+        let handles = self.handles.upgradable_read();
+        let focus = handles.handles.get(self.id).expect("focus handle missing");
+        let previous_count = focus.ref_count.fetch_sub(1, SeqCst);
+        assert_ne!(previous_count, 0, "over-released focus handle");
+        if previous_count == 1 {
+            RwLockUpgradableReadGuard::upgrade(handles)
+                .dropped_handles
+                .push(self.id);
+        }
     }
 }
 
@@ -669,7 +677,7 @@ impl Drop for FocusHandle {
 #[derive(Clone, Debug)]
 pub struct WeakFocusHandle {
     pub(crate) id: FocusId,
-    pub(crate) handles: Weak<FocusMap>,
+    pub(crate) handles: Weak<RwLock<FocusMap>>,
 }
 
 impl WeakFocusHandle {
@@ -1265,7 +1273,7 @@ pub struct Window {
     /// window, so that only actual changes are forwarded (reconfiguring a live
     /// input session can restart the IME connection).
     last_text_input_configuration: Option<TextInputConfiguration>,
-    focused_text_input_active: bool,
+    focused_text_input: Option<FocusId>,
     pub(crate) image_cache_stack: Vec<AnyImageCache>,
     pub(crate) rendered_frame: Frame,
     pub(crate) next_frame: Frame,
@@ -1681,6 +1689,8 @@ impl Window {
             icon,
             #[cfg_attr(not(target_os = "macos"), allow(unused_variables))]
             tabbing_identifier,
+            #[cfg_attr(not(target_os = "macos"), allow(unused_variables))]
+            use_display_p3,
         } = options;
 
         let initial_window_title = titlebar
@@ -1706,6 +1716,8 @@ impl Window {
                 icon,
                 #[cfg(target_os = "macos")]
                 tabbing_identifier,
+                #[cfg(target_os = "macos")]
+                use_display_p3,
             },
         )?;
 
@@ -2391,7 +2403,7 @@ impl Window {
             element_opacity: 1.0,
             requested_autoscroll: None,
             last_text_input_configuration: None,
-            focused_text_input_active: false,
+            focused_text_input: None,
             rendered_frame: Frame::new(DispatchTree::new(cx.keymap.clone(), cx.actions.clone())),
             next_frame: Frame::new(DispatchTree::new(cx.keymap.clone(), cx.actions.clone())),
             next_frame_callbacks,
@@ -3098,6 +3110,11 @@ impl Window {
         self.platform_window.bounds()
     }
 
+    /// Returns the regions of this window obscured by system UI and the keyboard.
+    pub fn insets(&self) -> WindowInsets {
+        self.platform_window.insets()
+    }
+
     /// Renders the current frame's scene to a texture and returns the pixel data as an RGBA image.
     /// This does not present the frame to screen - useful for visual testing where we want
     /// to capture what would be rendered without displaying it or requiring the window to be visible.
@@ -3656,7 +3673,8 @@ impl Window {
         self.last_input_modality == InputModality::Keyboard
     }
 
-    pub(crate) fn last_input_was_touch(&self) -> bool {
+    /// Returns whether the last input event came from a touch screen.
+    pub fn last_input_was_touch(&self) -> bool {
         self.last_input_modality == InputModality::Touch
     }
 
@@ -3695,6 +3713,7 @@ impl Window {
         // cached paint_range indices in reuse_paint find the handler at the
         // expected position.
         if let Some(input_handler) = self.platform_window.take_input_handler() {
+            crate::fast::retained::note_restored_input_handler(self, &input_handler);
             if let Some(slot) = self
                 .rendered_frame
                 .input_handlers
@@ -3728,7 +3747,7 @@ impl Window {
         // paint_range indices remain valid for reuse_paint on the next frame.
         // Search backwards to find the last Some entry, since reuse_paint may
         // have copied None slots from the previous frame. (Fixes #50456)
-        let focused_text_input_active = if let Some(mut input_handler) = self
+        let focused_text_input = if let Some(mut input_handler) = self
             .next_frame
             .input_handlers
             .iter_mut()
@@ -3736,16 +3755,17 @@ impl Window {
             .find_map(|h| h.take())
         {
             let accepts_text_input = input_handler.accepts_text_input(self, cx);
+            crate::fast::retained::note_installed_input_handler(self, &input_handler);
             self.platform_window.set_input_handler(input_handler);
-            accepts_text_input
+            self.focus.filter(|_| accepts_text_input)
         } else {
-            false
+            None
         };
         self.apply_text_input_configuration(cx);
-        if focused_text_input_active != self.focused_text_input_active {
-            self.focused_text_input_active = focused_text_input_active;
+        let previous = mem::replace(&mut self.focused_text_input, focused_text_input);
+        if previous.is_some() != focused_text_input.is_some() {
             self.platform_window
-                .text_input_state_changed(if focused_text_input_active {
+                .text_input_state_changed(if focused_text_input.is_some() {
                     TextInputStateChange::FocusGained
                 } else {
                     TextInputStateChange::FocusLost
@@ -5682,9 +5702,31 @@ impl Window {
 
         if focus_handle.is_focused(self) {
             let cx = self.to_async(cx);
-            self.next_frame
-                .input_handlers
-                .push(Some(PlatformInputHandler::new(cx, Box::new(input_handler))));
+            self.next_frame.input_handlers.push(Some(
+                PlatformInputHandler::new(cx, Box::new(input_handler)).with_focus(focus_handle.id),
+            ));
+        }
+    }
+
+    /// Notifies native text services that the focused component's text changed.
+    ///
+    /// Text components should call this after application-driven edits, in addition
+    /// to notifying GPUI to redraw. Unfocused or unregistered components are ignored.
+    pub fn notify_text_input_changed(&self, focus_handle: &FocusHandle) {
+        if self.focused_text_input == Some(focus_handle.id) && focus_handle.is_focused(self) {
+            self.platform_window
+                .text_input_state_changed(TextInputStateChange::ContentChanged);
+        }
+    }
+
+    /// Notifies native text services that the focused component's selection changed.
+    ///
+    /// Text components should call this after application-driven selection changes,
+    /// in addition to notifying GPUI to redraw.
+    pub fn notify_text_selection_changed(&self, focus_handle: &FocusHandle) {
+        if self.focused_text_input == Some(focus_handle.id) && focus_handle.is_focused(self) {
+            self.platform_window
+                .text_input_state_changed(TextInputStateChange::SelectionChanged);
         }
     }
 
@@ -8205,12 +8247,473 @@ mod tests {
         WindowAppearance, WindowOptions, canvas, div, hsla, point, px, size,
     };
 
+    #[gpui::test]
+    async fn test_focus_handle_release(cx: &mut TestAppContext) {
+        let (handle, survivor) = cx.update(|cx| (cx.focus_handle(), cx.focus_handle()));
+        let handle_id = handle.id;
+        let weak_handle = handle.downgrade();
+        let retained = handle.clone();
+        drop(handle);
+
+        cx.update(|_| {});
+        cx.read(|cx| {
+            let handles = cx.focus_handles.read();
+            assert_eq!(handles.handles.len(), 2);
+            assert!(handles.dropped_handles.is_empty());
+        });
+        assert_eq!(weak_handle.upgrade().as_ref(), Some(&retained));
+
+        cx.background_spawn(async move { drop(retained) }).await;
+        assert_eq!(weak_handle.upgrade(), None);
+        cx.read(|cx| {
+            assert_eq!(cx.focus_handles.read().dropped_handles, [handle_id]);
+        });
+        cx.update(|_| {});
+        cx.read(|cx| {
+            let handles = cx.focus_handles.read();
+            assert_eq!(handles.handles.keys().collect::<Vec<_>>(), [survivor.id]);
+            assert!(handles.dropped_handles.is_empty());
+        });
+
+        let replacements = cx.update(|cx| [cx.focus_handle(), cx.focus_handle()]);
+        assert_eq!(weak_handle.upgrade(), None);
+        cx.update(|cx| {
+            drop(replacements);
+            cx.defer(move |_| drop(survivor));
+        });
+        cx.read(|cx| {
+            let handles = cx.focus_handles.read();
+            assert_eq!(handles.handles.len(), 0);
+            assert!(handles.dropped_handles.is_empty());
+        });
+    }
+
+    #[gpui::test]
+    fn test_dropped_focus_handle_blurs_only_its_windows(cx: &mut TestAppContext) {
+        let windows = [
+            cx.add_window(|_, _| EmptyView),
+            cx.add_window(|_, _| EmptyView),
+            cx.add_window(|_, _| EmptyView),
+            cx.add_window(|_, _| EmptyView),
+            cx.add_window(|_, _| EmptyView),
+        ];
+        let (handle, other_handle, survivor) =
+            cx.update(|cx| (cx.focus_handle(), cx.focus_handle(), cx.focus_handle()));
+        for window in &windows[..2] {
+            window
+                .update(cx, |_, window, cx| window.focus(&handle, cx))
+                .expect("window exists");
+        }
+        windows[2]
+            .update(cx, |_, window, cx| window.focus(&other_handle, cx))
+            .expect("window exists");
+        windows[3]
+            .update(cx, |_, window, cx| window.focus(&survivor, cx))
+            .expect("window exists");
+
+        cx.update(|cx| {
+            for _ in 0..1_000 {
+                drop(cx.focus_handle());
+            }
+            drop((handle, other_handle));
+        });
+        for window in &windows[..3] {
+            window
+                .update(cx, |_, window, _| assert_eq!(window.focus, None))
+                .expect("window exists");
+        }
+        windows[3]
+            .update(cx, |_, window, cx| {
+                assert_eq!(window.focused(cx).as_ref(), Some(&survivor));
+                assert_eq!(window.focus_generation, 1);
+            })
+            .expect("window exists");
+        windows[4]
+            .update(cx, |_, window, _| {
+                assert_eq!(window.focus, None);
+                assert_eq!(window.focus_generation, 0);
+            })
+            .expect("window exists");
+    }
+
+    #[gpui::test]
+    fn test_native_close_defers_app_access(cx: &mut TestAppContext) {
+        let window = cx.add_window(|_, _| EmptyView);
+        let platform_window = cx.test_window(window.into());
+        {
+            let app = cx.app.borrow_mut();
+            platform_window.simulate_close();
+            assert!(app.windows.contains_key(window.window_id()));
+        }
+        cx.run_until_parked();
+        assert!(!cx.app.borrow().windows.contains_key(window.window_id()));
+    }
+
+    #[cfg(feature = "profiler")]
+    #[gpui::test]
+    fn test_frame_requests_and_skips_are_journaled(cx: &mut TestAppContext) {
+        use crate::FrameRequestSource;
+        use crate::profiler::journal::{
+            self, ForegroundJournalEntry, FrameSkipReason, IntervalBoundary,
+        };
+        use scheduler::Instant;
+
+        cx.app.borrow_mut().mode = crate::app::GpuiMode::Production;
+        let window = cx.add_window(|_, _| EmptyView);
+        let platform_window = cx.test_window(window.into());
+        platform_window.simulate_frame_request(RequestFrameOptions::default());
+        let (journal, _guard) = journal::install_test_foreground_journal(64, 4);
+        let mut collector = journal.collector();
+
+        for (signal_at, source) in [
+            (Some(Instant::now()), FrameRequestSource::NativeCallback),
+            (Some(Instant::now()), FrameRequestSource::LocalSchedule),
+            (None, FrameRequestSource::NativeCallback),
+        ] {
+            platform_window.simulate_frame_request(RequestFrameOptions {
+                signal_at,
+                signal_source: source,
+                require_presentation: true,
+                ..Default::default()
+            });
+            let entries = collector.collect_unseen().entries;
+            let signal_index = entries
+                .iter()
+                .position(|entry| {
+                    matches!(
+                        entry,
+                        ForegroundJournalEntry::PlatformSignal(signal)
+                            if signal.window_id == window.window_id()
+                                && signal.signal_at == signal_at
+                                && signal.source == source
+                                && signal_at.is_none_or(|at| signal.handled_at >= at)
+                    )
+                })
+                .expect("frame request metadata");
+            let skip_index = entries
+                .iter()
+                .position(|entry| {
+                    matches!(
+                        entry,
+                        ForegroundJournalEntry::Boundary(IntervalBoundary::FrameSkipped(skipped))
+                            if skipped.window_id == window.window_id()
+                                && skipped.reason == FrameSkipReason::NoRenderNeeded
+                    )
+                })
+                .expect("completed no-render boundary");
+            assert!(signal_index < skip_index);
+        }
+    }
+
+    #[cfg(feature = "profiler")]
+    #[gpui::test]
+    fn test_frame_demand_survives_throttling(cx: &mut TestAppContext) {
+        use crate::profiler::journal::{
+            self, ForegroundJournalEntry, FrameSkipReason, IntervalBoundary,
+        };
+        use scheduler::Instant;
+
+        // Test mode draws during effect flushing, bypassing platform frame throttling.
+        cx.app.borrow_mut().mode = crate::app::GpuiMode::Production;
+        let (journal, _guard) = journal::install_test_foreground_journal(256, 4);
+        let mut collector = journal.collector();
+        for (initially_dirty, schedule_callback) in [(true, false), (false, true)] {
+            // Keep the throttle closed without depending on short wall-clock deadlines.
+            let window = cx
+                .app
+                .borrow_mut()
+                .open_window(
+                    WindowOptions {
+                        inactive_frame_interval: Some(Duration::from_secs(3600)),
+                        ..Default::default()
+                    },
+                    |_, cx| cx.new(|_| EmptyView),
+                )
+                .expect("open inactive test window");
+            let platform_window = cx.test_window(window.into());
+            platform_window.simulate_active_status_change(false);
+            platform_window.simulate_frame_request(RequestFrameOptions::default());
+            let callback_ran = Rc::new(Cell::new(false));
+            let draws_before = window
+                .update(cx, |_, window, _| {
+                    let draws_before = window
+                        .frame_duration_snapshot()
+                        .draw_duration_histogram
+                        .len();
+                    if initially_dirty {
+                        window.refresh();
+                    }
+                    if schedule_callback {
+                        window.on_next_frame({
+                            let callback_ran = callback_ran.clone();
+                            move |window, _| {
+                                callback_ran.set(true);
+                                window.refresh();
+                            }
+                        });
+                    }
+                    draws_before
+                })
+                .expect("schedule throttled frame");
+            // Skips only seal retained work, so give the throttled skip some.
+            let input_at = Instant::now();
+            journal::record_input(journal::InputTiming {
+                kind: "test",
+                start: input_at,
+                end: input_at,
+                caused_invalidation: false,
+            });
+            collector.collect_unseen();
+            let wakes_before = platform_window.frame_wake_count();
+            platform_window.simulate_frame_request(RequestFrameOptions {
+                signal_at: Some(Instant::now()),
+                ..Default::default()
+            });
+            window
+                .update(cx, |_, window, _| {
+                    assert_eq!(
+                        window
+                            .frame_duration_snapshot()
+                            .draw_duration_histogram
+                            .len(),
+                        draws_before,
+                    );
+                })
+                .expect("inspect deferred frame");
+            assert!(!callback_ran.get());
+            assert!(platform_window.frame_scheduled());
+            assert!(platform_window.frame_wake_count() > wakes_before);
+            assert!(collector.collect_unseen().entries.iter().any(|entry| {
+                matches!(
+                    entry,
+                    ForegroundJournalEntry::Boundary(IntervalBoundary::FrameSkipped(skipped))
+                        if skipped.window_id == window.window_id()
+                            && skipped.reason == FrameSkipReason::InactiveFrameRateLimit
+                )
+            }));
+            platform_window.simulate_frame_request(RequestFrameOptions {
+                signal_at: Some(Instant::now()),
+                require_presentation: true,
+                ..Default::default()
+            });
+            window
+                .update(cx, |_, window, _| {
+                    assert_eq!(
+                        window
+                            .frame_duration_snapshot()
+                            .draw_duration_histogram
+                            .len(),
+                        draws_before + 1,
+                    );
+                })
+                .expect("inspect presented frame");
+            assert_eq!(callback_ran.get(), schedule_callback);
+        }
+    }
+
+    /// Visibility transitions reach observers exactly once each, with the new
+    /// state already stored on the window, and never wake the platform for a
+    /// frame: the platform requests one itself when it resumes presenting.
+    #[gpui::test]
+    fn test_window_visibility(cx: &mut TestAppContext) {
+        use crate::WindowVisibility;
+
+        let window = cx.add_window(|_, _| EmptyView);
+        let observed = Rc::new(RefCell::new(Vec::new()));
+        let _subscription = window
+            .update(cx, {
+                let observed = observed.clone();
+                move |_, window, _| {
+                    assert_eq!(window.visibility(), WindowVisibility::Visible);
+                    assert!(window.is_visible());
+                    window.observe_window_visibility(move |visibility, window, _| {
+                        assert_eq!(window.visibility(), visibility);
+                        observed.borrow_mut().push(visibility);
+                    })
+                }
+            })
+            .unwrap();
+        let test_window = cx.test_window(window.into());
+        let frame_wake_count = test_window.frame_wake_count();
+
+        test_window.simulate_visibility_change(WindowVisibility::Hidden);
+        assert_eq!(*observed.borrow(), [WindowVisibility::Hidden]);
+        window
+            .update(cx, |_, window, _| assert!(!window.is_visible()))
+            .unwrap();
+
+        // Platforms may report the same state again; observers only see changes.
+        test_window.simulate_visibility_change(WindowVisibility::Hidden);
+        assert_eq!(observed.borrow().len(), 1);
+
+        test_window.simulate_visibility_change(WindowVisibility::Visible);
+        assert_eq!(
+            *observed.borrow(),
+            [WindowVisibility::Hidden, WindowVisibility::Visible]
+        );
+        window
+            .update(cx, |_, window, _| assert!(window.is_visible()))
+            .unwrap();
+        assert_eq!(test_window.frame_wake_count(), frame_wake_count);
+    }
+
+    /// App learns display state from the platform's display notifications,
+    /// and a window from the platform's report of which display it is on.
+    #[gpui::test]
+    fn test_display_tracking(cx: &mut TestAppContext) {
+        use crate::{DisplayChanges, DisplayEvent, DisplayId, Subscription};
+
+        let sixty_hertz = Duration::from_secs(1) / 60;
+        let one_hundred_twenty_hertz = Duration::from_secs(1) / 120;
+        let one_hundred_forty_four_hertz = Duration::from_secs(1) / 144;
+
+        let display_events = Rc::new(RefCell::new(Vec::new()));
+        let _display_subscription = cx.update({
+            let display_events = display_events.clone();
+            move |cx| cx.observe_displays(move |event, _| display_events.borrow_mut().push(event))
+        });
+
+        let window = cx.add_window(|window, cx| DisplayTracker {
+            refresh_intervals: Vec::new(),
+            _subscription: cx.observe_window_display(
+                window,
+                |tracker: &mut DisplayTracker, window, cx| {
+                    tracker.refresh_intervals.push(window.refresh_interval(cx));
+                },
+            ),
+        });
+        let window_notifications = Rc::new(RefCell::new(Vec::new()));
+        let _window_subscription = window
+            .update(cx, {
+                let window_notifications = window_notifications.clone();
+                move |_, window, cx| {
+                    assert_eq!(window.refresh_interval(cx), Some(sixty_hertz));
+                    window.observe_window_display(move |window, cx| {
+                        window_notifications
+                            .borrow_mut()
+                            .push((window.display_id, window.refresh_interval(cx)));
+                    })
+                }
+            })
+            .unwrap();
+        let test_window = cx.test_window(window.into());
+
+        // The window may hear that it moved before App hears the display was
+        // connected. App learns about the display before the window's
+        // observers run, and the platform's later notification changes
+        // nothing.
+        cx.test_platform()
+            .connect_display(DisplayId(2), Some(one_hundred_twenty_hertz));
+        test_window.simulate_move_to_display(DisplayId(2));
+        assert_eq!(
+            window_notifications.take(),
+            [(Some(DisplayId(2)), Some(one_hundred_twenty_hertz))]
+        );
+        assert_eq!(display_events.take(), [DisplayEvent::Added(DisplayId(2))]);
+        cx.simulate_display_refresh_interval_change(DisplayId(2), Some(one_hundred_twenty_hertz));
+        assert!(window_notifications.borrow().is_empty());
+
+        // Platforms may report a move that isn't one.
+        test_window.simulate_move_to_display(DisplayId(2));
+        assert!(window_notifications.borrow().is_empty());
+
+        cx.simulate_display_refresh_interval_change(
+            DisplayId(2),
+            Some(one_hundred_forty_four_hertz),
+        );
+        assert_eq!(
+            window_notifications.take(),
+            [(Some(DisplayId(2)), Some(one_hundred_forty_four_hertz))]
+        );
+
+        // Changes to a display the window isn't on don't notify it.
+        cx.simulate_display_refresh_interval_change(DisplayId(1), Some(one_hundred_twenty_hertz));
+        cx.simulate_display_removed(DisplayId(1));
+        assert!(window_notifications.borrow().is_empty());
+
+        assert_eq!(
+            display_events.take(),
+            [
+                DisplayEvent::Changed {
+                    id: DisplayId(2),
+                    changes: DisplayChanges::REFRESH_INTERVAL,
+                },
+                DisplayEvent::Changed {
+                    id: DisplayId(1),
+                    changes: DisplayChanges::REFRESH_INTERVAL,
+                },
+                DisplayEvent::Removed(DisplayId(1)),
+            ]
+        );
+        window
+            .update(cx, |tracker, _, _| {
+                assert_eq!(
+                    tracker.refresh_intervals,
+                    [
+                        Some(one_hundred_twenty_hertz),
+                        Some(one_hundred_forty_four_hertz)
+                    ]
+                );
+            })
+            .unwrap();
+
+        struct DisplayTracker {
+            refresh_intervals: Vec<Option<Duration>>,
+            _subscription: Subscription,
+        }
+
+        impl Render for DisplayTracker {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                Empty
+            }
+        }
+    }
+
+    #[gpui::test]
+    fn test_fully_visible_bounds_preserve_layout_viewport(cx: &mut TestAppContext) {
+        let window = cx.add_window(|_, _| EmptyView);
+        let mut platform_window = cx.test_window(window.into());
+        platform_window.simulate_resize(size(px(400.), px(800.)));
+        window
+            .update(cx, |_, window, _| {
+                assert_eq!(
+                    window.visual_viewport_bounds(),
+                    Bounds::new(Point::default(), size(px(400.), px(800.)))
+                );
+                assert_eq!(
+                    window.fully_visible_bounds(),
+                    window.visual_viewport_bounds()
+                );
+            })
+            .unwrap();
+
+        platform_window.simulate_frame_request(RequestFrameOptions::default());
+        let wakes = platform_window.frame_wake_count();
+        let visual_bounds = Bounds::new(point(px(10.), px(40.)), size(px(380.), px(460.)));
+        platform_window.simulate_visual_viewport_change(visual_bounds);
+        assert!(platform_window.frame_wake_count() > wakes);
+        platform_window.simulate_frame_request(RequestFrameOptions::default());
+        let wakes = platform_window.frame_wake_count();
+        let insets = crate::WindowInsets {
+            safe_area: crate::Edges {
+                top: px(60.),
+                right: px(20.),
+                bottom: px(30.),
+                left: px(-10.),
+            },
+            ime: crate::Edges {
+                bottom: px(350.),
+                ..Default::default()
+            },
             ..Default::default()
         };
         platform_window.simulate_insets_change(insets.clone());
         assert!(platform_window.frame_wake_count() > wakes);
         window
-            .update(cx, |_, window, _| {
+            .update(cx, |_, window, cx| {
+                let focus = cx.focus_handle();
+                window.focus(&focus, cx);
+                assert_eq!(window.insets(), insets);
                 assert_eq!(window.viewport_size(), size(px(400.), px(800.)));
                 assert_eq!(window.visual_viewport_bounds(), visual_bounds);
                 assert_eq!(
@@ -8219,6 +8722,7 @@ mod tests {
                 );
                 window.request_virtual_keyboard();
                 window.dismiss_virtual_keyboard();
+                assert!(focus.is_focused(window));
                 assert_eq!(window.viewport_size(), size(px(400.), px(800.)));
             })
             .unwrap();
@@ -8239,6 +8743,16 @@ mod tests {
                     window.fully_visible_bounds().size,
                     size(Pixels::ZERO, Pixels::ZERO)
                 );
+            })
+            .unwrap();
+
+        // Some backends update geometry snapshots without delivering inset callbacks.
+        use crate::PlatformWindow as _;
+        platform_window.on_insets_changed(Box::new(|_| {}));
+        platform_window.simulate_insets_change(crate::WindowInsets::default());
+        window
+            .update(cx, |_, window, _| {
+                assert_eq!(window.insets(), crate::WindowInsets::default());
             })
             .unwrap();
     }
