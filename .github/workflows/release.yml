@@ -3,12 +3,23 @@ name: release
 on:
   push:
     tags: ["v*"]
+  # For when a tag can't be pushed: run this on `main` with the tag to make. The release step
+  # creates the tag on the commit that was built.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to release, vX.Y.Z (must match Cargo.toml)"
+        required: true
+        type: string
 
 permissions:
   contents: write
 
+env:
+  TAG: ${{ inputs.tag || github.ref_name }}
+
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ inputs.tag || github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -20,9 +31,9 @@ jobs:
       - uses: actions/checkout@v6
       - name: Check tag against Cargo.toml
         run: |
-          ver="${GITHUB_REF_NAME#v}"
+          ver="${TAG#v}"
           if ! printf '%s\n' "$ver" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
-            echo "error: tag '$GITHUB_REF_NAME' is not vX.Y.Z" >&2
+            echo "error: tag '$TAG' is not vX.Y.Z" >&2
             exit 1
           fi
           cur="$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)"
@@ -83,7 +94,7 @@ jobs:
       - name: Package
         shell: bash
         run: |
-          name="po-${GITHUB_REF_NAME}-${{ matrix.target }}"
+          name="po-${TAG}-${{ matrix.target }}"
           mkdir -p "dist/$name"
           if [ "$RUNNER_OS" = Windows ]; then
             cp "target/${{ matrix.target }}/release/po.exe" LICENSE LICENSE-APACHE README.md "dist/$name/"
@@ -92,7 +103,7 @@ jobs:
           fi
           cp "target/${{ matrix.target }}/release/po" LICENSE LICENSE-APACHE README.md "dist/$name/"
           if [ "$RUNNER_OS" = macOS ]; then
-            scripts/bundle-macos.sh "target/${{ matrix.target }}/release/po" "$GITHUB_REF_NAME" "dist/$name"
+            scripts/bundle-macos.sh "target/${{ matrix.target }}/release/po" "$TAG" "dist/$name"
           fi
           tar -czf "$name.tar.gz" -C dist "$name"
       - uses: actions/upload-artifact@v6
@@ -119,4 +130,9 @@ jobs:
           cd dist
           sha256sum * > SHA256SUMS
       - name: Publish release
-        run: gh release create "${GITHUB_REF_NAME}" --verify-tag --generate-notes dist/*
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
+            gh release create "${TAG}" --target "$GITHUB_SHA" --generate-notes dist/*
+          else
+            gh release create "${TAG}" --verify-tag --generate-notes dist/*
+          fi
