@@ -12,7 +12,7 @@
 [package]
 edition = "2024"
 name = "gpui-fast-wgpu"
-version = "0.1.9"
+version = "0.1.13"
 authors = ["Longbridge"]
 build = false
 include = [
@@ -32,7 +32,7 @@ autotests = false
 autobenches = false
 description = "gpui_wgpu: GPUI with gpui-fast rendering and layout optimizations"
 homepage = "https://github.com/longbridge/gpui-fast"
-documentation = "https://docs.rs/gpui-fast-wgpu/0.1.9/gpui_wgpu/"
+documentation = "https://docs.rs/gpui-fast-wgpu/0.1.13/gpui_wgpu/"
 readme = "README.md"
 license = "Apache-2.0"
 repository = "https://github.com/longbridge/gpui-fast"
@@ -62,7 +62,7 @@ version = "1.0.86"
 version = "1"
 
 [dependencies.collections]
-version = "=0.3.9"
+version = "=0.3.11"
 package = "gpui-pre-collections"
 
 [dependencies.cosmic-text]
@@ -78,12 +78,12 @@ default-features = false
 package = "zed-font-kit"
 
 [dependencies.gpui]
-version = "^0.1.9"
+version = "^0.1.13"
 default-features = false
 package = "gpui-fast"
 
 [dependencies.gpui_util]
-version = "=0.3.9"
+version = "=0.3.11"
 package = "gpui-pre-util"
 
 [dependencies.image]
@@ -144,10 +144,9 @@ default-features = false
 version = "1.10"
 
 [target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies.wgpu]
-version = "29.0"
+version = "=30.0.1"
 features = [
     "std",
-    "parking_lot",
     "metal",
     "gles",
     "vulkan",
@@ -157,7 +156,7 @@ features = [
 default-features = false
 
 [target.'cfg(not(any(target_os = "linux", target_os = "freebsd")))'.dependencies.wgpu]
-version = "29.0"
+version = "=30.0.1"
 default-features = true
 
 [target.'cfg(target_family = "wasm")'.dependencies.web-sys]
@@ -165,7 +164,7 @@ version = "0.3"
 features = ["HtmlCanvasElement"]
 
 [target.'cfg(target_family = "wasm")'.dependencies.wgpu]
-version = "29.0"
+version = "=30.0.1"
 features = ["webgl"]
 default-features = false
 

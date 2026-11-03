@@ -4,6 +4,7 @@ use crate::*;
 
 impl Reader {
     /// A project over `root`, showing `files` in its explorer until the next walk.
+    #[hotpath::measure(impl_type = "Reader")]
     pub(crate) fn build_project(root: PathBuf, pr: Option<pr::Pr>, files: Vec<String>) -> Project {
         let files_tree = FileTree::new(false);
         let changes_tree = FileTree::new(true);
@@ -37,12 +38,14 @@ impl Reader {
     }
 
     /// Rebuilds the explorer from `files`, keeping folders open and the current file selected.
+    #[hotpath::measure(impl_type = "Reader")]
     pub(crate) fn refresh_tree(&mut self) {
         self.project.files_tree.set_paths(&self.project.files, self.project.current.as_deref());
     }
 
     /// Takes a fresh list of changed files. In diff mode it picks a file if none is, and
     /// reloads the picked file's diff when `rediff` says it may have changed.
+    #[hotpath::measure(impl_type = "Reader")]
     pub(crate) fn apply_changes(&mut self, changes: Vec<Change>, rebuild: bool, rediff: bool, cx: &mut Context<Self>) {
         let listed = rebuild || self.project.changes != changes;
         self.project.changes = changes;
@@ -74,6 +77,7 @@ impl Reader {
 
     /// Lists the changed files with `git` off the UI thread, then applies them as
     /// [`Self::apply_changes`] does and picks `then`, if given.
+    #[hotpath::measure(impl_type = "Reader")]
     pub(crate) fn refresh_changes(&mut self, rebuild: bool, then: Option<String>, cx: &mut Context<Self>) {
         let (root, base) = (self.project.root.clone(), self.project.base.clone());
         self.project.listing = Some(cx.spawn(async move |this, cx| {
@@ -89,6 +93,7 @@ impl Reader {
     }
 
     /// Re-walks the workspace off the UI thread and refreshes the explorer.
+    #[hotpath::measure(impl_type = "Reader")]
     pub(crate) fn rescan(&mut self, cx: &mut Context<Self>) {
         let root = self.project.root.clone();
         self.project.scanning = Some(cx.spawn(async move |this, cx| {
@@ -108,6 +113,7 @@ impl Reader {
     }
 
     /// Adopts a fresh walk of the workspace, if it changed, in the explorer and an open finder.
+    #[hotpath::measure(impl_type = "Reader")]
     pub(crate) fn set_files(&mut self, files: Vec<String>, cx: &mut Context<Self>) {
         if self.project.files == files {
             return;
@@ -566,6 +572,7 @@ impl Reader {
     }
 
     /// Refilters the finder's matches for its query, and shows them.
+    #[hotpath::measure(impl_type = "Reader")]
     pub(crate) fn refind(&mut self) {
         self.finder_matches = match_files(&self.project.files, &self.finder_query);
         nsh::finder::publish(nsh::finder::Snapshot {
@@ -595,6 +602,7 @@ impl Reader {
         cx.notify();
     }
 
+    #[hotpath::measure(impl_type = "Reader")]
     pub(crate) fn open(&mut self, path: &str, _window: &mut Window, cx: &mut Context<Self>) {
         self.browse = false;
         let full = self.project.root.join(path);
@@ -629,6 +637,7 @@ impl Reader {
 
     /// The file tree beside the viewer, drawn by NSH from what it publishes. `lead` and `trail` are
     /// the window's own controls, when this is the leftmost or rightmost pane.
+    #[hotpath::measure(impl_type = "Reader")]
     pub(crate) fn explorer(&self, lead: Vec<nsh::header::Control>, trail: Vec<nsh::header::Control>, cx: &mut Context<Self>) -> AnyElement {
         let diff = self.mode == Mode::Diff;
         let tree = if diff { &self.project.changes_tree } else { &self.project.files_tree };
@@ -661,6 +670,7 @@ impl Reader {
     }
 
     /// Opens, or shows the diff of, the file selected in the explorer's tree, as clicking it does.
+    #[hotpath::measure(impl_type = "Reader")]
     pub(crate) fn open_selected(&mut self, by_user: bool, window: &mut Window, cx: &mut Context<Self>) {
         match self.mode {
             Mode::Source => {

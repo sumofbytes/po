@@ -12,7 +12,7 @@
 [package]
 edition = "2024"
 name = "gpui-fast-macos"
-version = "0.1.9"
+version = "0.1.13"
 authors = ["Longbridge"]
 build = false
 include = [
@@ -32,7 +32,7 @@ autotests = false
 autobenches = false
 description = "gpui_macos: GPUI with gpui-fast rendering and layout optimizations"
 homepage = "https://github.com/longbridge/gpui-fast"
-documentation = "https://docs.rs/gpui-fast-macos/0.1.9/gpui_macos/"
+documentation = "https://docs.rs/gpui-fast-macos/0.1.13/gpui_macos/"
 readme = "README.md"
 license = "Apache-2.0"
 repository = "https://github.com/longbridge/gpui-fast"
@@ -48,7 +48,6 @@ font-kit = ["gpui_apple/font-kit"]
 runtime_shaders = ["gpui_apple/runtime_shaders"]
 screen-capture = [
     "gpui/screen-capture",
-    "dep:objc2-core-graphics",
     "dep:objc2-core-media",
     "dep:objc2-screen-capture-kit",
 ]
@@ -63,7 +62,7 @@ path = "src/gpui_macos.rs"
 doctest = false
 
 [dependencies.gpui]
-version = "^0.1.9"
+version = "^0.1.13"
 default-features = false
 package = "gpui-fast"
 
@@ -80,11 +79,8 @@ version = "1.0.86"
 [target.'cfg(target_os = "macos")'.dependencies.block2]
 version = "0.6"
 
-[target.'cfg(target_os = "macos")'.dependencies.cocoa]
-version = "=0.26.0"
-
 [target.'cfg(target_os = "macos")'.dependencies.collections]
-version = "=0.3.9"
+version = "=0.3.11"
 package = "gpui-pre-collections"
 
 [target.'cfg(target_os = "macos")'.dependencies.core-foundation]
@@ -115,11 +111,11 @@ version = "0.5"
 version = "0.3.34"
 
 [target.'cfg(target_os = "macos")'.dependencies.gpui_apple]
-version = "^0.1.9"
+version = "^0.1.13"
 package = "gpui-fast-apple"
 
 [target.'cfg(target_os = "macos")'.dependencies.gpui_util]
-version = "=0.3.9"
+version = "=0.3.11"
 package = "gpui-pre-util"
 
 [target.'cfg(target_os = "macos")'.dependencies.image]
@@ -151,9 +147,6 @@ version = "0.4"
 features = ["std"]
 default-features = false
 
-[target.'cfg(target_os = "macos")'.dependencies.objc]
-version = "0.2"
-
 [target.'cfg(target_os = "macos")'.dependencies.objc2]
 version = "0.6"
 
@@ -161,31 +154,47 @@ version = "0.6"
 version = "0.3.2"
 features = [
     "NSAlert",
+    "NSAppearance",
     "NSApplication",
     "NSButton",
+    "NSCell",
+    "NSColor",
     "NSControl",
+    "NSCursor",
+    "NSDocumentController",
+    "NSDragging",
     "NSDraggingItem",
+    "NSEvent",
     "NSGraphics",
     "NSImage",
+    "NSMenu",
+    "NSMenuItem",
     "NSOpenPanel",
     "NSPanel",
     "NSPasteboard",
     "NSResponder",
+    "NSRunningApplication",
     "NSSavePanel",
     "NSScreen",
+    "NSScroller",
     "NSTrackingArea",
     "NSView",
+    "NSVisualEffectView",
     "NSWindow",
     "NSWorkspace",
     "block2",
     "objc2-core-foundation",
+    "objc2-uniform-type-identifiers",
 ]
 default-features = false
 
 [target.'cfg(target_os = "macos")'.dependencies.objc2-core-graphics]
 version = "=0.3.2"
-features = ["CGDirectDisplay"]
-optional = true
+features = [
+    "CGDirectDisplay",
+    "CGColor",
+    "objc2",
+]
 default-features = false
 
 [target.'cfg(target_os = "macos")'.dependencies.objc2-core-media]
@@ -211,6 +220,7 @@ version = "=0.3.2"
 features = [
     "NSArray",
     "NSAttributedString",
+    "NSBundle",
     "NSCoder",
     "NSData",
     "NSDate",
@@ -233,6 +243,17 @@ features = [
 ]
 default-features = false
 
+[target.'cfg(target_os = "macos")'.dependencies.objc2-quartz-core]
+version = "=0.3.2"
+features = [
+    "std",
+    "CALayer",
+    "CAMetalDisplayLink",
+    "CAMetalLayer",
+    "objc2-metal",
+]
+default-features = false
+
 [target.'cfg(target_os = "macos")'.dependencies.objc2-screen-capture-kit]
 version = "=0.3.2"
 features = [
@@ -245,6 +266,15 @@ features = [
     "std",
 ]
 optional = true
+default-features = false
+
+[target.'cfg(target_os = "macos")'.dependencies.objc2-uniform-type-identifiers]
+version = "0.3"
+features = [
+    "std",
+    "UTCoreTypes",
+    "UTType",
+]
 default-features = false
 
 [target.'cfg(target_os = "macos")'.dependencies.objc2-user-notifications]
@@ -270,7 +300,7 @@ version = "0.12.1"
 version = "0.6"
 
 [target.'cfg(target_os = "macos")'.dependencies.scheduler]
-version = "=0.3.9"
+version = "=0.3.11"
 package = "gpui-pre-scheduler"
 
 [target.'cfg(target_os = "macos")'.dependencies.semver]

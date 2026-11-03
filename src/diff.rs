@@ -33,6 +33,7 @@ fn git(root: &Path, args: &[&str]) -> Option<String> {
 
 /// Files changed against `base`, including untracked ones. Empty outside a git repository.
 /// `base` is `HEAD` for local work, or a PR's merge-base when reviewing.
+#[hotpath::measure]
 pub fn changes(root: &Path, base: &str) -> Vec<Change> {
     let mut out = if base == "HEAD" { status(root) } else { against(root, base) };
     out.sort_by_cached_key(|change| crate::explorer::order(&change.path));
@@ -40,6 +41,7 @@ pub fn changes(root: &Path, base: &str) -> Vec<Change> {
 }
 
 /// Files that differ from an arbitrary commit, plus untracked ones. Renames show as a delete and an add.
+#[hotpath::measure]
 fn against(root: &Path, base: &str) -> Vec<Change> {
     let Some(text) = git(root, &["diff", "--name-status", "-z", "--no-renames", base]) else { return vec![] };
     let mut parts = text.split('\0').filter(|part| !part.is_empty());
@@ -54,6 +56,7 @@ fn against(root: &Path, base: &str) -> Vec<Change> {
     out
 }
 
+#[hotpath::measure]
 fn status(root: &Path) -> Vec<Change> {
     let Some(text) = git(root, &["status", "--porcelain=v1", "-z", "-uall"]) else { return vec![] };
     let mut parts = text.split('\0').filter(|part| !part.is_empty());
@@ -76,6 +79,7 @@ fn status(root: &Path) -> Vec<Change> {
 }
 
 /// The diff of `change` against `base`, as rows.
+#[hotpath::measure]
 pub fn file_diff(root: &Path, base: &str, change: &Change) -> Vec<Row> {
     let text = if change.status == 'U' {
         git(root, &["diff", "--no-index", "--no-color", "--", "/dev/null", &change.path])
@@ -87,6 +91,7 @@ pub fn file_diff(root: &Path, base: &str, change: &Change) -> Vec<Row> {
 
 /// The old and the new version of `change` as text: nothing for the side that doesn't exist (an
 /// added file has no old one, a deleted file no new one).
+#[hotpath::measure]
 pub fn versions(root: &Path, base: &str, change: &Change) -> (Option<String>, Option<String>) {
     let old = if matches!(change.status, 'A' | 'U') {
         None
@@ -104,6 +109,7 @@ pub fn versions(root: &Path, base: &str, change: &Change) -> (Option<String>, Op
     (old, new)
 }
 
+#[hotpath::measure]
 fn parse(text: &str) -> Vec<Row> {
     let mut rows = Vec::new();
     let mut inside = false;

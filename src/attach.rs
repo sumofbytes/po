@@ -36,6 +36,9 @@ pub struct Attachment {
     pub size: (u32, u32),
     /// Where dex is told to find it, once saved.
     saved: OnceLock<PathBuf>,
+    /// Its data URI, made once: a frame that shows the picture asks for it again (its own bytes
+    /// never change, so neither does the URI).
+    uri: OnceLock<Arc<str>>,
 }
 
 impl Attachment {
@@ -45,7 +48,7 @@ impl Attachment {
         let size = size
             .or_else(|| ImageReader::new(Cursor::new(&bytes)).with_guessed_format().ok().and_then(|reader| reader.into_dimensions().ok()))
             .unwrap_or((MAX_SIDE, MAX_SIDE));
-        Self { image: Arc::new(gpui::Image { format, bytes, id }), size, saved: OnceLock::new() }
+        Self { image: Arc::new(gpui::Image { format, bytes, id }), size, saved: OnceLock::new(), uri: OnceLock::new() }
     }
 
     /// Takes the bytes of an image file or clipboard image, shrinking it if an agent would refuse it.
@@ -81,9 +84,14 @@ impl Attachment {
         json!({ "type": "image", "mimeType": self.image.format.mime_type(), "data": STANDARD.encode(&self.image.bytes) })
     }
 
-    /// The picture as a `data:` URI, so a screen drawn without file access can show it.
-    pub fn data_uri(&self) -> String {
-        format!("data:{};base64,{}", self.image.format.mime_type(), STANDARD.encode(&self.image.bytes))
+    /// The picture as a `data:` URI, so a screen drawn without file access can show it. A frame
+    /// shows the same picture again and again, so the URI is encoded once.
+    pub fn data_uri(&self) -> Arc<str> {
+        self.uri
+            .get_or_init(|| {
+                format!("data:{};base64,{}", self.image.format.mime_type(), STANDARD.encode(&self.image.bytes)).into()
+            })
+            .clone()
     }
 
     /// Writes the picture where an agent that can't be sent one can open it.

@@ -4,7 +4,7 @@ use crate::*;
 
 impl Reader {
     /// Answers what agents ask of this window through its control socket.
-    pub(crate) fn serve_control(mut requests: futures::channel::mpsc::UnboundedReceiver<control::Request>, window: &Window, cx: &mut Context<Self>) {
+    pub(crate) fn serve_control(mut requests: profile::UnboundedReceiver<control::Request>, window: &Window, cx: &mut Context<Self>) {
         let handle = window.window_handle();
         cx.spawn(async move |this, cx| {
             while let Some(request) = requests.next().await {

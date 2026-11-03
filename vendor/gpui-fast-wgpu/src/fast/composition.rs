@@ -41,6 +41,7 @@ impl WgpuRenderer {
             context,
             surface,
             config,
+            false,
             self.compositor_gpu,
             self.atlas.clone(),
         )?;

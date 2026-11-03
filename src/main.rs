@@ -3,6 +3,8 @@ mod acp;
 mod agent;
 mod alert;
 mod attach;
+#[cfg(feature = "hotpath")]
+mod bench;
 mod command;
 mod config;
 mod control;
@@ -15,6 +17,7 @@ mod issues;
 mod mcp;
 mod nsh;
 mod pr;
+mod profile;
 mod reader;
 mod schemes;
 mod settings;
@@ -87,14 +90,19 @@ fn watch_dirs(watcher: &mut impl notify::Watcher, dir: &Path) {
     }
 }
 
-type Watch = (notify::RecommendedWatcher, futures::channel::mpsc::UnboundedReceiver<notify::Event>);
+type Watch = (notify::RecommendedWatcher, profile::UnboundedReceiver<notify::Event>);
 
 /// A watcher on every folder under `root`. Adding the watches costs a syscall per folder, which
 /// adds up to seconds on a big tree, so callers run this off the UI thread.
+#[hotpath::measure]
 fn start_watcher(root: &Path) -> Option<Watch> {
-    let (tx, rx) = futures::channel::mpsc::unbounded();
+    let (tx, rx) = hotpath::channel!(futures::channel::mpsc::unbounded(), label = "file events");
     let mut watcher = match notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
-        if let Ok(event) = event {
+        // Reads are no change, and whatever scans the tree (an indexer, `git status`) causes them
+        // by the hundred; each would wake the watcher for nothing.
+        if let Ok(event) = event
+            && !event.kind.is_access()
+        {
             tx.unbounded_send(event).ok();
         }
     }) {
@@ -119,23 +127,24 @@ struct Prefetch {
 impl Prefetch {
     fn start(root: PathBuf) -> Self {
         let scan = root.clone();
-        let files = std::thread::spawn(move || {
+        let files = std::thread::Builder::new().name("po-walk".into()).spawn(move || {
             let mut files = Vec::new();
             walk(&scan, &mut files);
             trace::mark("walk (thread)");
             files
-        });
+        }).expect("failed to spawn thread");
         let (done, watch) = futures::channel::oneshot::channel();
         let target = root.clone();
-        std::thread::spawn(move || {
+        std::thread::Builder::new().name("po-watch".into()).spawn(move || {
             let watch = start_watcher(&target);
             trace::mark("watcher (thread)");
             done.send(watch).ok();
-        });
+        }).expect("failed to spawn thread");
         Self { root, files, watch }
     }
 }
 
+#[hotpath::measure]
 fn walk(root: &Path, out: &mut Vec<String>) {
     for entry in walker(root).flatten() {
         if out.len() >= MAX_FILES {
@@ -388,6 +397,7 @@ fn step_name(status: Step) -> &'static str {
 /// A thread's transcript as entries: the user's text, and the agent's text, thoughts, tool
 /// calls and plan. Permission asks show as a call that is waiting or done; approval cards are
 /// the user's to answer and are not in the transcript.
+#[hotpath::measure]
 fn transcript(thread: &Thread, full: bool) -> Vec<state::Entry> {
     let mut out = Vec::new();
     for msg in &thread.messages {
@@ -425,6 +435,7 @@ fn transcript(thread: &Thread, full: bool) -> Vec<state::Entry> {
 }
 
 /// A diff content block as `-`/`+` lines, without the lines the edit leaves alone.
+#[hotpath::measure]
 fn diff_text(item: &Value) -> String {
     const LIMIT: usize = 200;
     let old: Vec<&str> = item["oldText"].as_str().unwrap_or_default().lines().collect();
@@ -868,6 +879,25 @@ fn ago(now: u64, then: u64) -> Option<String> {
         20160..=86399 => format!("{}w", minutes / 10080),
         _ => format!("{}mo", minutes / 43200),
     })
+}
+
+/// How long a thread that does nothing keeps its row in the sidebar; after that, search and the
+/// history find it.
+const STALE_MS: u64 = 24 * 3_600_000;
+
+/// `then` (ms since the epoch) is more than [`STALE_MS`] before `now`. A counter from before the
+/// time was kept is older than that.
+fn stale(now: u64, then: u64) -> bool {
+    now.saturating_sub(then) > STALE_MS
+}
+
+/// A thread that keeps its row in a project's list: the one on screen, whatever it is doing, its agent
+/// running or asking, or something it did within the last day. One idle for longer only shows when
+/// it is searched for; the history and the fold find the rest.
+fn listed(now: u64, shown: u64, thread: &Thread) -> bool {
+    thread.id == shown
+        || matches!(thread.activity(), Activity::Running | Activity::Asking)
+        || (!stale(now, thread.active_at) && (thread.activity() != Activity::Idle || thread.client.is_some()))
 }
 
 /// `title` with its first letter in capitals when it opens with a plain word, as "fix the build"
@@ -1420,6 +1450,7 @@ struct Reader {
 }
 
 impl Reader {
+    #[hotpath::measure(impl_type = "Reader")]
     fn new(
         home: PathBuf,
         pr: Option<pr::Pr>,
@@ -1603,6 +1634,79 @@ impl Reader {
 /// The fewest tool calls in a row that fold to one line.
 const MIN_RUN: usize = 2;
 
+/// How long a piece of the agent's text gets before the next paragraph ends it: a message that
+/// streams past this is split there, so the piece being written stays small and the pieces that
+/// came before it are not read again. A paragraph boundary is only taken outside a code fence.
+const PIECE: usize = 512;
+
+/// The pieces of the agent's text for the rows drawn: each is a run of paragraphs of [`PIECE`]
+/// bytes or more, split at a paragraph break outside a code fence. So while a reply streams, the
+/// piece being written stays small, and the pieces before it are not read again. The pieces to
+/// gather are ranges of `text`, each as the agent's text is at a byte or the same.
+fn pieces_of(text: &str) -> Vec<&str> {
+    let lines: Vec<&str> = text.split_inclusive('\n').collect();
+    // A link reference may be defined in a later piece than the one that uses it.
+    if lines.iter().any(|line| reference_definition(line)) {
+        return vec![text];
+    }
+    let mut pieces = Vec::new();
+    let mut from = 0;
+    let mut at = 0;
+    let mut fence: Option<(char, usize)> = None;
+    for (ix, line) in lines.iter().enumerate() {
+        at += line.len();
+        // A blank line ends a paragraph, and a fenced block line opens or shuts a fence, which a
+        // piece may not sit inside (its two halves would each miss their other). The piece to
+        // stand for one that ended before [`PIECE`] bytes was already pushed, so the boundary is
+        // taken once what was gathered since the piece's start passes [`PIECE`]. A list or a
+        // quote goes on past a blank line, so what comes after it must open a block of its own.
+        if fence.is_none() && line.trim().is_empty() && at - from >= PIECE && lines.get(ix + 1).is_some_and(|next| next.ends_with('\n') && starts_block(next)) {
+            pieces.push(&text[from..at]);
+            from = at;
+        }
+        fence = fence_after(fence, line);
+    }
+    if from < at {
+        pieces.push(&text[from..]);
+    }
+    pieces
+}
+
+/// The fence the text is inside once the line has been read: one opens with three or more
+/// backticks or tildes and shuts with at least as many of the same, and nothing else.
+fn fence_after(fence: Option<(char, usize)>, line: &str) -> Option<(char, usize)> {
+    let indent = line.len() - line.trim_start_matches(' ').len();
+    let rest = line[indent..].trim_end();
+    let mark = rest.chars().next().filter(|c| matches!(c, '`' | '~'));
+    let Some(mark) = mark.filter(|_| indent < 4) else { return fence };
+    let run = rest.chars().take_while(|c| *c == mark).count();
+    match fence {
+        Some((open, len)) if mark == open && run >= len && rest.len() == run => None,
+        Some(_) => fence,
+        None if run >= 3 => Some((mark, run)),
+        None => None,
+    }
+}
+
+/// Whether the line opens a block that stands alone, so a piece may begin with it: not an indented
+/// line, a list item, a quote or a blank one, which carry on whatever came before.
+fn starts_block(line: &str) -> bool {
+    let first = line.chars().next();
+    if first.is_none_or(|c| c.is_whitespace() || c == '>') {
+        return false;
+    }
+    let item = line.trim_start_matches(|c: char| c.is_ascii_digit());
+    let numbered = item.len() < line.len() && (item.starts_with(". ") || item.starts_with(") "));
+    let bullet = ["- ", "* ", "+ "].iter().any(|b| line.starts_with(b));
+    !(numbered || bullet)
+}
+
+/// Whether the line defines a link reference (`[name]: url`).
+fn reference_definition(line: &str) -> bool {
+    let line = line.trim_start_matches(' ');
+    line.strip_prefix('[').is_some_and(|rest| rest.find("]:").is_some_and(|end| !rest[..end].contains(']')))
+}
+
 /// Whether a run of tool calls shows as one line. A run the user hasn't clicked starts folded,
 /// whether its calls are still going or not.
 fn run_folded(run: &[Block]) -> bool {
@@ -1731,12 +1835,23 @@ fn file_of(uri: &str) -> Option<String> {
 /// The message of the conversation as the screen drawn by NSH shows it: the user's text with its
 /// pictures, or the agent's blocks.
 fn chat_items(messages: &[Msg]) -> Vec<nsh::chat::Item> {
+    // What the screen holds now: a message whose blocks would be built again exactly as they
+    // stand keeps them, so a frame spends its rebuild on the message a chunk went into, not on
+    // every message in the history (the engine compares each message's blocks itself, and the
+    // pieces here are a byte-for-byte match, so nothing shows twice).
+    let now = nsh::chat::shown();
     messages.iter().enumerate().map(|(ix, msg)| match msg {
         Msg::User(text, pictures) => nsh::chat::Item::User {
             text: text.clone(),
             pictures: pictures.iter().map(|a| nsh::chat::Picture { uri: a.data_uri(), size: a.size }).collect(),
         },
-        Msg::Agent(blocks) => nsh::chat::Item::Agent { index: ix, blocks: chat_blocks(blocks) },
+        Msg::Agent(blocks) => {
+            let held = match now.items.get(ix) {
+                Some(nsh::chat::Item::Agent { blocks, .. }) => &**blocks,
+                _ => &[] as &[nsh::chat::Block],
+            };
+            nsh::chat::Item::Agent { index: ix, blocks: std::sync::Arc::new(chat_blocks(blocks, held)) }
+        }
     }).collect()
 }
 
@@ -1770,7 +1885,7 @@ fn run_task(run: &[Block]) -> Option<String> {
 /// One agent message's blocks for the conversation drawn by NSH. Runs of [`MIN_RUN`] or more tool calls
 /// also carry the row that folds them; the calls stay in place either way, so the indexes their
 /// answers are told by hold.
-fn chat_blocks(blocks: &[Block]) -> Vec<nsh::chat::Block> {
+fn chat_blocks(blocks: &[Block], held: &[nsh::chat::Block]) -> Vec<nsh::chat::Block> {
     let mut out: Vec<nsh::chat::Block> = Vec::with_capacity(blocks.len());
     let mut n = 0;
     while n < blocks.len() {
@@ -1790,7 +1905,20 @@ fn chat_blocks(blocks: &[Block]) -> Vec<nsh::chat::Block> {
             continue;
         }
         out.push(match &blocks[n] {
-            Block::Text(text) => nsh::chat::Block::Markdown(nsh::source::Shared(text.as_str().into())),
+            Block::Text(text) => {
+                // A piece of long text is a row of its own, so the one being written is the only
+                // one the engine makes again while a reply streams (see [`pieces_of`]). A piece
+                // that could be built again exactly as it is keeps `held`'s (see `chat_items`).
+                for (stitch, piece) in pieces_of(text).into_iter().enumerate() {
+                    let piece_text = match held.get(out.len()) {
+                        Some(nsh::chat::Block::Markdown { text, .. }) if text.as_ref() == piece => text.clone(),
+                        _ => piece.into(),
+                    };
+                    out.push(nsh::chat::Block::Markdown { text: piece_text, stitch: stitch > 0 });
+                }
+                n += 1;
+                continue;
+            }
             Block::Thought(text, open) => nsh::chat::Block::Thought { index: n, text: text.clone(), open: *open },
             Block::Tool(tool) => nsh::chat::Block::Tool(chat_tool(n, tool)),
             Block::Permission(ask) => {
@@ -1858,6 +1986,7 @@ fn approval_text(agent: &config::Agent, new_agent: bool, mcp: &[config::McpServe
 }
 
 impl Render for Reader {
+    #[hotpath::measure(impl_type = "Reader")]
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.settle_agent_changes();
         // A terminal that is no longer drawn must not keep the keys: they would go to a shell nobody sees.
@@ -1869,7 +1998,10 @@ impl Render for Reader {
             self.painted = true;
             trace::mark("first render");
             if trace::exit_after_first_frame() {
-                cx.defer(|_| std::process::exit(0));
+                cx.defer(|_| {
+                    profile::finish();
+                    std::process::exit(0)
+                });
             }
         }
         let colors = cx.global::<Palette>();
@@ -1920,7 +2052,7 @@ impl Render for Reader {
             .relative()
             .track_focus(&self.focus)
             .on_key_down(cx.listener(|reader, _, _, _| reader.last_input = Instant::now()))
-            .on_scroll_wheel(cx.listener(|reader, _, _, _| reader.last_input = Instant::now()))
+            .on_scroll(cx.listener(|reader, _, _, _| reader.last_input = Instant::now()))
             .on_mouse_down(gpui::MouseButton::Left, cx.listener(|reader, _, _, _| reader.last_input = Instant::now()))
             .on_action(cx.listener(|reader, _: &ShowFinder, window, cx| {
                 reader.hide_issues(window, cx);
@@ -2027,6 +2159,7 @@ struct Shell {
 }
 
 impl Render for Shell {
+    #[hotpath::measure(impl_type = "Shell")]
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let palette = cx.global::<Palette>();
         window.set_rem_size(palette.font_size);
@@ -2132,6 +2265,7 @@ fn main() {
             Err(err) => eprintln!("po: could not detach ({err}), running in foreground"),
         }
     }
+    profile::start();
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn,po=info"))
         .format_timestamp_millis()
         .init();
@@ -2139,6 +2273,11 @@ fn main() {
     let prefetch = Prefetch::start(pr.as_ref().map_or_else(|| root.clone(), |pr| pr.worktree.clone()));
     gpui_platform::application().run(move |cx: &mut App| {
         trace::mark("app running");
+        cx.on_app_quit(|_| {
+            profile::finish();
+            async {}
+        })
+        .detach();
         cx.bind_keys([
             KeyBinding::new("ctrl-o", ToggleTools, None),
             KeyBinding::new("ctrl-t", ToggleThoughts, None),
@@ -2199,16 +2338,21 @@ fn main() {
                 trace::mark("theme applied");
                 theme::watch(cx);
                 let reader = cx.new(|cx| Reader::new(root, pr, command, prefetch, window, cx));
+                #[cfg(feature = "hotpath")]
+                bench::start(&reader, window, cx);
                 cx.new(|_| Shell { child: reader, appearance: WindowBackgroundAppearance::Opaque })
             },
         )
         .expect("window");
         cx.activate(true);
     });
+    // Where the event loop returns rather than ending the process; the app's quit already did it.
+    profile::finish();
 }
 
 /// What a thread is doing, in a line: the question it waits on, the tool it is
 /// running, or the last thing it said.
+#[hotpath::measure]
 fn preview_of(messages: &[Msg], busy: bool) -> String {
     if let Some(Msg::Agent(blocks)) = messages.last() {
         if let Some(ask) = blocks.iter().find_map(|b| match b {
@@ -2244,6 +2388,30 @@ fn preview_of(messages: &[Msg], busy: bool) -> String {
 
 #[cfg(test)]
 mod tests {
+    use crate::Thread;
+
+    #[test]
+    fn a_thread_keeps_its_sidebar_row_while_its_agent_works() {
+        let now = 1_800_000_000_000;
+        let day = 24 * 3_600_000;
+        let mut thread = Thread::blank(1);
+        thread.active_at = now;
+        // On screen: keeps its row whatever it is doing. Folded and idle: only the agent's doing
+        // keeps it there, so idle with no agent folds however fresh it is.
+        assert!(super::listed(now, 1, &thread));
+        assert!(!super::listed(now, 0, &thread));
+        thread.busy = true;
+        thread.active_at = now - 2 * day;
+        // Running keeps even an old one on the list.
+        assert!(super::listed(now, 0, &thread));
+        let mut old = Thread::blank(2);
+        old.active_at = now - day - 1;
+        // Idle past a day: search and the history find it; the fold doesn't.
+        assert!(!super::listed(now, 0, &old));
+        // The one on screen is the exception.
+        assert!(super::listed(now, 2, &old));
+    }
+
     #[test]
     fn a_thread_title_opens_with_a_capital_unless_it_is_code() {
         let cap = |t: &str| super::capitalized(t.to_string());
@@ -2255,7 +2423,56 @@ mod tests {
         }
     }
 
-    use super::{Queue, Where, ago, route, run_task, task_in_progress};
+    use super::{Queue, STALE_MS, Where, ago, pieces_of, route, run_task, stale, task_in_progress};
+
+    #[test]
+    fn a_text_shorter_than_a_piece_is_one_piece_and_long_ones_split_at_paragraphs_only() {
+        let one = "## Title\n\nRust gives every value a single owner.\n";
+        assert_eq!(super::pieces_of(one), [one]);
+        // Paragraphs, headings, lists and a fenced block, then more prose: splits land at blank
+        // lines outside a fence, and the pieces back, joined, give back the text.
+        let mut long = String::new();
+        for part in 0..40 {
+            long.push_str("## Part\n\nA paragraph about a value and who owns it meanwhile.\n\n- A value has one owner\n- Borrows are checked\n\n");
+            if part == 10 {
+                long.push_str("```rust\nfn longest<'a>(a: &'a str, b: &'a str) -> &'a str { a }\n\n\n\nfn other() {}\n```\n\n");
+            }
+        }
+        let pieces = pieces_of(&long);
+        assert!(pieces.len() > 4, "pieces: {}", pieces.len());
+        assert_eq!(pieces.concat(), long);
+        assert!(pieces.iter().all(|piece| piece.len() < 2 * super::PIECE), "a piece is not a small run of paragraphs, longest was {}", pieces.iter().map(|p| p.len()).max().unwrap_or(0));
+        // No piece sits inside a fence: every fence a piece opens, that piece also shuts.
+        for piece in &pieces {
+            let opens = piece.match_indices("```rust\n").count();
+            let shuts = piece.lines().filter(|line| line.trim_end() == "```").count();
+            assert_eq!(shuts, opens, "a piece holds a fence not its other: {:?}", piece);
+        }
+    }
+
+    #[test]
+    fn pieces_keep_what_markdown_reads_across_a_blank_line_together() {
+        let filler = "A paragraph about a value and who owns it meanwhile, long enough to count.\n\n".repeat(10);
+        let kept = |block: &str| {
+            let text = format!("{filler}{block}{filler}");
+            let pieces = pieces_of(&text);
+            assert_eq!(pieces.concat(), text);
+            assert!(pieces.len() > 1, "the text was not split at all");
+            assert!(pieces.iter().any(|piece| piece.contains(block)), "a piece cut {block:?}");
+        };
+        kept("~~~\nfn a() {}\n\n\nfn b() {}\n~~~\n\n");
+        kept("````md\n```\n\nnested\n```\n````\n\n");
+        kept("1. a\n\n2. b\n\n3. c\n\n");
+        kept("> quoted\n\n> on\n\n");
+        // Blank lines of CRLF text and of spaces end a paragraph all the same.
+        let crlf = "A paragraph about a value and who owns it meanwhile.\r\n\r\n".repeat(40);
+        assert!(pieces_of(&crlf).len() > 1);
+        let spaced = "A paragraph about a value and who owns it meanwhile.\n  \n".repeat(40);
+        assert!(pieces_of(&spaced).len() > 1);
+        // A reference may be defined after the piece that uses it, so the text is not split.
+        let linked = format!("See [the book].\n\n{filler}[the book]: https://doc.rust-lang.org/book/\n");
+        assert_eq!(pieces_of(&linked), [linked.as_str()]);
+    }
 
     #[test]
     fn the_sidebar_says_how_long_ago_in_a_word() {
@@ -2270,6 +2487,17 @@ mod tests {
         // A counter from before the time was kept, and a time in the future, say nothing.
         assert_eq!(ago(now, 7), None);
         assert_eq!(ago(now, now + 1), None);
+    }
+
+    #[test]
+    fn a_thread_idle_for_more_than_a_day_is_stale() {
+        let now = 1_800_000_000_000;
+        assert!(!stale(now, now - 23 * 3_600_000));
+        assert!(!stale(now, now - STALE_MS));
+        assert!(stale(now, now - STALE_MS - 1));
+        // A counter from before the time was kept is old; a time in the future is not.
+        assert!(stale(now, 7));
+        assert!(!stale(now, now + 1));
     }
 
     #[test]

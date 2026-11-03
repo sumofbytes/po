@@ -164,6 +164,7 @@ fn bind(
     flags
         .slice(..)
         .get_mapped_range_mut()
+        .expect("mapped at creation")
         .copy_from_slice(bytemuck::cast_slice(values));
     flags.unmap();
     device.create_bind_group(&wgpu::BindGroupDescriptor {

@@ -12,6 +12,7 @@ impl Reader {
 
     /// What the sidebar shows: the projects and threads that answer its filter, what waits on the
     /// user, and what agents have suggested.
+    #[hotpath::measure(impl_type = "Reader")]
     pub(crate) fn sidebar_snapshot(&self, cx: &App) -> nsh::sidebar::Snapshot {
         use nsh::sidebar as side;
         let query = self.side_query.trim().to_lowercase();
@@ -19,6 +20,7 @@ impl Reader {
         let views = self.views();
         let many = views.len() > 1;
         let (active_project, active_thread) = (self.project_id, self.thread.id);
+        let now = now_ms();
         let thread_row = |pid: u64, thread: &Thread| side::Thread {
             project: pid,
             id: thread.id,
@@ -31,7 +33,7 @@ impl Reader {
             },
             selected: (pid, thread.id) == (active_project, active_thread),
             controlled: self.grants.get(&thread.id).is_some_and(|grant| *grant != command::Grant::initial() && *grant != command::Grant::default()),
-            ago: ago(now_ms(), thread.active_at),
+            ago: ago(now, thread.active_at),
             closing: self.closing == Some((pid, thread.id)) && self.close_loses_work(thread.id),
         };
         // Filtering keeps a project whose name matches, with all its threads, and any project with a
@@ -53,6 +55,9 @@ impl Reader {
             .map(|view| {
                 let pid = view.id;
                 let collapsed = self.projects_collapsed.contains(&pid) && !searching;
+                // What keeps its row: the one on screen, running or asking, or something it did
+                // within the last day. The rest is searched for, or folds under "more".
+                let active = |t: &Thread| listed(now, view.shown, t);
                 // Most recently active first. Only the active ones show; the rest fold under "more".
                 let mut recent: Vec<&Thread> = view.threads.iter().copied().filter(|t| (!t.blank || t.id == view.shown) && !self.waits_on_user(pid, t)).collect();
                 recent.sort_by_key(|t| (std::cmp::Reverse(t.active_at), std::cmp::Reverse(t.id)));
@@ -60,9 +65,6 @@ impl Reader {
                     recent.retain(|t| self.matches_query(t, &query));
                 }
                 let expanded = self.threads_expanded.contains(&pid) || searching;
-                // Active: running, finished unseen with its parent told, or an agent still alive; the one
-                // on screen too, whatever it is doing.
-                let active = |t: &Thread| t.id == view.shown || t.activity() != Activity::Idle || t.client.is_some();
                 let shown_count = recent.iter().filter(|t| active(t)).count();
                 let foldable = !searching && recent.len() > shown_count.max(1);
                 let hidden = if expanded || !foldable {
@@ -154,6 +156,7 @@ impl Reader {
     }
 
     /// What the conversation shows: the header, the transcript, and the composer.
+    #[hotpath::measure(impl_type = "Reader")]
     pub(crate) fn chat_snapshot(&self, lead: Vec<nsh::header::Control>, trail: Vec<nsh::header::Control>, cx: &App) -> nsh::chat::Snapshot {
         use nsh::chat as chat;
         let thread = &self.thread;
@@ -283,6 +286,7 @@ impl Reader {
     }
 
     /// Does what the user asked of on the conversation the NSH pane draws.
+    #[hotpath::measure(impl_type = "Reader")]
     pub(crate) fn chat_cmd(&mut self, cmd: nsh::chat::Cmd, window: &mut Window, cx: &mut Context<Self>) {
         use nsh::chat::{Cmd as Chat, GrantChange, Scope as ChatScope};
         match cmd {
@@ -356,6 +360,7 @@ impl Reader {
     }
 
     /// Does what the user asked of a screen drawn by NSH.
+    #[hotpath::measure(impl_type = "Reader")]
     pub(crate) fn run(&mut self, cmd: nsh::bus::Cmd, window: &mut Window, cx: &mut Context<Self>) {
         use nsh::bus::Cmd;
         if !matches!(cmd, Cmd::CloseThread(..)) && self.closing.take().is_some() {
@@ -456,6 +461,7 @@ impl Reader {
 
     /// The viewer or the diff viewer, as the project's mode says, with the file tree beside it
     /// unless that is hidden or the agent's own view is shown, which has no files to pick.
+    #[hotpath::measure(impl_type = "Reader")]
     pub(crate) fn pane(&self, cx: &mut Context<Self>) -> AnyElement {
         let tabs = self.view_tabs();
         let has_tabs = tabs.is_some();
@@ -627,6 +633,7 @@ impl Reader {
         div().size_full().child(self.diff.clone())
     }
 
+    #[hotpath::measure(impl_type = "Reader")]
     pub(crate) fn diff_snapshot(&self, lead: Vec<nsh::header::Control>, trail: Vec<nsh::header::Control>, cx: &App) -> nsh::diff::Snapshot {
         use nsh::diff::{Body, Snapshot};
         let project = &self.project;
@@ -645,6 +652,7 @@ impl Reader {
         div().size_full().child(self.source.clone())
     }
 
+    #[hotpath::measure(impl_type = "Reader")]
     pub(crate) fn source_snapshot(&self, lead: Vec<nsh::header::Control>, trail: Vec<nsh::header::Control>, cx: &App) -> nsh::source::Snapshot {
         use nsh::source::{Body, Snapshot};
         let current = self.project.current.as_deref();
@@ -682,6 +690,7 @@ impl Reader {
     }
 
     /// What the parent of children says in its header: `3 threads · 1 asking · 1 failed`.
+    #[hotpath::measure(impl_type = "Reader")]
     pub(crate) fn children_status(&self, id: u64) -> Option<String> {
         let children: Vec<&Thread> = self.threads_all().filter(|thread| thread.parent == Some(id)).collect();
         if children.is_empty() {

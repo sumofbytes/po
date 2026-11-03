@@ -5,6 +5,11 @@ use std::sync::{LazyLock, Mutex};
 
 use tokio::sync::mpsc;
 
+#[cfg(feature = "hotpath")]
+use hotpath::wrap::tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
+#[cfg(not(feature = "hotpath"))]
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
+
 use super::chat::Cmd as ChatCmd;
 
 /// Something the user did on a screen.
@@ -72,10 +77,13 @@ pub enum Cmd {
 }
 
 /// The sending end, and the receiving end until the one listener takes it.
-type Channel = (mpsc::UnboundedSender<Cmd>, Mutex<Option<mpsc::UnboundedReceiver<Cmd>>>);
+type Channel = (UnboundedSender<Cmd>, Mutex<Option<Commands>>);
+
+/// The receiving end: hotpath's wrapper of it in a profiled build.
+pub type Commands = UnboundedReceiver<Cmd>;
 
 static CHANNEL: LazyLock<Channel> = LazyLock::new(|| {
-    let (sender, receiver) = mpsc::unbounded_channel();
+    let (sender, receiver) = hotpath::channel!(mpsc::unbounded_channel(), label = "nsh commands");
     (sender, Mutex::new(Some(receiver)))
 });
 
@@ -85,14 +93,14 @@ pub fn send(cmd: Cmd) {
 }
 
 /// The commands, for the one that runs them.
-pub fn commands() -> Option<mpsc::UnboundedReceiver<Cmd>> {
+pub fn commands() -> Option<Commands> {
     CHANNEL.1.lock().ok()?.take()
 }
 
 /// Held by a test of a screen for as long as it runs: the screens share this one channel, so they
 /// take turns. Starts with nothing waiting in it.
 #[cfg(test)]
-pub fn lock() -> std::sync::MutexGuard<'static, Option<mpsc::UnboundedReceiver<Cmd>>> {
+pub fn lock() -> std::sync::MutexGuard<'static, Option<Commands>> {
     let mut commands = CHANNEL.1.lock().unwrap_or_else(|e| e.into_inner());
     while commands.as_mut().is_some_and(|c| c.try_recv().is_ok()) {}
     commands
