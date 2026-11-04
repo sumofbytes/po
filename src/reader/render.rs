@@ -229,17 +229,7 @@ impl Reader {
             lead,
             trail,
             statuses,
-            place: if !self.side_open {
-                chat::Place::Elsewhere
-            } else if self.project.terminal_shown {
-                chat::Place::Terminal
-            } else if self.thread.shown.is_some() {
-                chat::Place::Elsewhere
-            } else if self.mode == Mode::Diff {
-                chat::Place::Changes
-            } else {
-                chat::Place::Files
-            },
+            place: self.place(),
             blank: thread.blank,
             busy,
             steer: thread.client.as_ref().is_some_and(|client| client.queues()),
@@ -404,6 +394,8 @@ impl Reader {
             Cmd::ToggleLeft => self.toggle_left(cx),
             Cmd::ToggleRight => self.toggle_right(cx),
             Cmd::ToggleFocus => self.toggle_focus(cx),
+            Cmd::Show(changes) => self.show_viewer(if changes { Mode::Diff } else { Mode::Source }, cx),
+            Cmd::Terminal => self.toggle_terminal_on(window, cx),
             Cmd::Browse(browse) => self.set_browsing(browse, cx),
             Cmd::ToggleRendered => self.toggle_rendered(cx),
             Cmd::SetSplit(split) => self.set_split(split, cx),

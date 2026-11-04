@@ -2019,7 +2019,15 @@ impl Render for Reader {
         let focus = side_open && !agent_open;
         use nsh::header::Control;
         let controls = |lead: Vec<Control>, trail: Vec<Control>| *self.pane_controls.borrow_mut() = (lead, trail);
-        let trail_all = vec![Control::Focus(focus), Control::Viewer(side_open)];
+        let viewer = |on: bool| if swapped { Control::ViewerLeft(on) } else { Control::Viewer(on) };
+        let trail_all = vec![Control::Focus(focus), viewer(side_open)];
+        // The conversation's header has the buttons for the files, the changes and the terminal;
+        // with the conversation hidden the viewer's carry them.
+        let trail_focus = {
+            use nsh::chat::Place;
+            let place = self.place();
+            [vec![Control::Files(place == Place::Files), Control::Changes(place == Place::Changes), Control::Terminal(place == Place::Terminal)], trail_all.clone()].concat()
+        };
         // The viewer pane is only built where it shows: a pane nobody sees would publish over the
         // one that is.
         let hidden = || div().size_full().into_any_element();
@@ -2027,8 +2035,8 @@ impl Render for Reader {
             (self.issues.clone().into_any_element(), hidden())
         } else if !side_open {
             // Only the conversation shows, and the viewer's button waits on the side it opens.
-            let chat_lead = vec![Control::Sidebar(left_open), Control::Viewer(side_open)];
-            let chat_trail = vec![Control::Viewer(side_open)];
+            let chat_lead = vec![Control::Sidebar(left_open), viewer(side_open)];
+            let chat_trail = vec![viewer(side_open)];
             let mut chat = |lead: Vec<Control>, trail: Vec<Control>| floating(self.chat_pane(lead, trail, cx), cx);
             if swapped {
                 (chat(chat_lead, vec![]), hidden())
@@ -2036,7 +2044,7 @@ impl Render for Reader {
                 (chat(vec![Control::Sidebar(left_open)], chat_trail), hidden())
             }
         } else if focus {
-            controls(vec![Control::Sidebar(left_open)], trail_all);
+            controls(vec![Control::Sidebar(left_open)], trail_focus);
             (self.pane(cx), hidden())
         } else if swapped {
             controls(vec![Control::Sidebar(left_open)], trail_all);

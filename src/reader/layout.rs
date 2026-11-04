@@ -186,6 +186,20 @@ impl Reader {
         self.open_viewer_wide(cx);
     }
 
+    /// What the viewer shows, for the buttons that pick it.
+    pub(crate) fn place(&self) -> nsh::chat::Place {
+        use nsh::chat::Place;
+        if !self.side_open || (self.thread.shown.is_some() && !self.project.terminal_shown) {
+            Place::Elsewhere
+        } else if self.project.terminal_shown {
+            Place::Terminal
+        } else if self.mode == Mode::Diff {
+            Place::Changes
+        } else {
+            Place::Files
+        }
+    }
+
     /// The terminal in the viewer, started if the project has none yet, or back to the files if it
     /// is what the viewer shows.
     pub(crate) fn toggle_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {

@@ -38,6 +38,9 @@ pub enum Cmd {
     ToggleLeft,
     ToggleRight,
     ToggleFocus,
+    /// The files, or the changes (true), in the viewer; or the terminal.
+    Show(bool),
+    Terminal,
     /// A narrow viewer pane shows the explorer (true) or the file.
     Browse(bool),
     /// Markdown shown rendered, or as its source.

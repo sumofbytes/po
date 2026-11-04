@@ -11,8 +11,15 @@ use crate::ui::icon::IconName;
 pub enum Control {
     /// Shows or hides the sidebar; selected while it shows.
     Sidebar(bool),
-    /// Shows or hides the viewer.
+    /// Shows or hides the viewer, which is on the right.
     Viewer(bool),
+    /// The same, with the viewer on the left of the conversation.
+    ViewerLeft(bool),
+    /// The files, the changes and the terminal, selected while the viewer shows them: where the
+    /// conversation's header, which has these buttons, is hidden.
+    Files(bool),
+    Changes(bool),
+    Terminal(bool),
     /// Gives the viewer the room by hiding the conversation (or gives it back).
     Focus(bool),
     /// Back to the explorer, in a pane too narrow for it beside the file.
@@ -24,6 +31,10 @@ impl Control {
         match self {
             Control::Sidebar(on) => (IconName::PanelLeft, "Sidebar (Ctrl+B)", on, Cmd::ToggleLeft),
             Control::Viewer(on) => (IconName::PanelRight, "Viewer (Ctrl+Shift+B)", on, Cmd::ToggleRight),
+            Control::ViewerLeft(on) => (IconName::PanelLeft, "Viewer (Ctrl+Shift+B)", on, Cmd::ToggleRight),
+            Control::Files(on) => (IconName::FolderTree, "Files (Ctrl+1)", on, Cmd::Show(false)),
+            Control::Changes(on) => (IconName::Diff, "Changes (Ctrl+2)", on, Cmd::Show(true)),
+            Control::Terminal(on) => (IconName::Terminal, "Terminal (Ctrl+`)", on, Cmd::Terminal),
             Control::Focus(true) => (IconName::Minimize, "Show the conversation (Ctrl+Shift+F)", false, Cmd::ToggleFocus),
             Control::Focus(false) => (IconName::Maximize, "Focus the viewer (Ctrl+Shift+F)", false, Cmd::ToggleFocus),
             Control::Explorer => (IconName::FolderTree, "Back to the explorer", false, Cmd::Browse(true)),
