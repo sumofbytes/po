@@ -1079,7 +1079,7 @@ fn transcript(state: Signal<Snapshot>, count: usize, slot: ElementRef, at_end: S
     // Non-reactive on purpose: the layout pass must not renotify the render. They live in the
     // caller, not here: this runs again on every change of the thread, and a layout event comes
     // only when a frame changes, so state made anew here would stay empty.
-    let Position { frames, origin, active, pinned, .. } = rail;
+    let Position { frames, origin, active, pinned, heights: (_, content), .. } = rail;
     let shown = count.min(MAX_BARS);
     frames.with(|sections| sections.truncate(count));
     // A thought still streaming reads as `Thinking`; every thought that something came after, or
@@ -1128,6 +1128,7 @@ fn transcript(state: Signal<Snapshot>, count: usize, slot: ElementRef, at_end: S
     let size = stored((0., 0.));
     let resized = move |bounds: &Bounds<Points>| {
         origin.replace(bounds.origin.y);
+        content.set(bounds.size.height.0);
         let now = (bounds.size.width.0, bounds.size.height.0);
         if size.replace(now) != now && at_end.get_untracked() {
             let slot = slot;
@@ -1176,7 +1177,7 @@ fn transcript(state: Signal<Snapshot>, count: usize, slot: ElementRef, at_end: S
 /// a bar, as they are; the rail is built again only when the bars change, with the count or the
 /// stage's width.
 fn stage(page: impl Fn() -> AnyElement + 'static, count: Memo<usize>, slot: ElementRef, position: Position) -> AnyElement {
-    let width = position.width;
+    let (width, (height, _), overflows) = (position.width, position.heights, position.overflows);
     view()
         .flex_1()
         .min_h_0()
@@ -1184,13 +1185,16 @@ fn stage(page: impl Fn() -> AnyElement + 'static, count: Memo<usize>, slot: Elem
         .flex()
         .justify_center()
         .overflow_hidden()
-        .on_layout(move |bounds: &Bounds<Points>| width.set(bounds.size.width.0))
+        .on_layout(move |bounds: &Bounds<Points>| {
+            width.set(bounds.size.width.0);
+            height.set(bounds.size.height.0);
+        })
         .child(dynamic(page))
         .child(dynamic(move || {
             // The rail is for a stage with room beside the column; in a narrower one it would
-            // sit on the text, so it is not drawn.
+            // sit on the text, so it is not drawn. Nor is it when the page fits the stage.
             let (count, stage) = (count.get(), width.get());
-            (count >= 2 && stage >= COLUMN + 2. * (rail_gutter().0 + rail_inset().0)).then(|| rail(count, stage, slot, position))
+            (count >= 2 && overflows.get() && stage >= COLUMN + 2. * (rail_gutter().0 + rail_inset().0)).then(|| rail(count, stage, slot, position))
         }))
         .into_element()
 }
@@ -1256,11 +1260,17 @@ struct Position {
     hover: Signal<Option<usize>>,
     /// The stage's width, which says where the column's edge is and whether the rail has room.
     width: Signal<f32>,
+    /// Whether the column is taller than the stage: a page that fits has nothing to scroll to.
+    overflows: Memo<bool>,
+    /// The stage's height and the column's, which `overflows` compares.
+    heights: (Signal<f32>, Signal<f32>),
 }
 
 impl Position {
     fn new() -> Self {
-        Self { frames: stored(Vec::new()), origin: stored(Points(0.)), active: signal(0), hover: signal(None), pinned: stored(None), width: signal(0.) }
+        let heights = (signal(0.), signal(0.));
+        let overflows = computed(move || heights.1.get() > heights.0.get() + 0.5);
+        Self { frames: stored(Vec::new()), origin: stored(Points(0.)), active: signal(0), hover: signal(None), pinned: stored(None), width: signal(0.), overflows, heights }
     }
 }
 
