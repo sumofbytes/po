@@ -115,6 +115,35 @@ pub struct Session {
     pub closed: bool,
 }
 
+/// What a tool call does, for the line a folded stretch of work says about itself.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Kind {
+    Read,
+    Search,
+    Edit,
+    Command,
+    Fetch,
+    Other,
+}
+
+impl Kind {
+    /// The order the line counts them in.
+    const ALL: [Kind; 6] = [Kind::Read, Kind::Search, Kind::Edit, Kind::Command, Kind::Fetch, Kind::Other];
+
+    /// `3 reads`, `1 search`: the count and what it counts.
+    fn counted(self, n: usize) -> String {
+        let (one, many) = match self {
+            Kind::Read => ("read", "reads"),
+            Kind::Search => ("search", "searches"),
+            Kind::Edit => ("edit", "edits"),
+            Kind::Command => ("command", "commands"),
+            Kind::Fetch => ("fetch", "fetches"),
+            Kind::Other => ("other", "other"),
+        };
+        format!("{n} {}", if n == 1 { one } else { many })
+    }
+}
+
 /// A tool call of the agent's.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Tool {
@@ -161,10 +190,13 @@ pub enum Block {
     /// Its reasoning, with whether it is expanded.
     Thought { index: usize, text: String, open: bool },
     Tool(Tool),
-    /// A run of tool calls folded to one line: how many calls it keeps, how many of them failed, how they went, and
-    /// where it sits in the message.
-    /// `task` is the plan entry it worked towards, which the row says in place of the count.
-    Run { index: usize, count: usize, failed: usize, phase: Phase, folded: bool, task: Option<String> },
+    /// A stretch of the agent's work (its tool calls and thoughts between two pieces of text) folded to one line:
+    /// how many blocks it keeps, how many of them are tool calls, how many of those failed, how it went, and where
+    /// it sits in the message.
+    /// `task` is the plan entry it worked towards, which the row says in place of `Worked`; `took` is how long it
+    /// took once it is over, `latest` the call it is at, `kinds` how many calls of each kind it made, and `edits` the
+    /// files its edits touched.
+    Run { index: usize, count: usize, calls: usize, failed: usize, phase: Phase, folded: bool, task: Option<String>, took: Option<std::time::Duration>, latest: Option<String>, kinds: Vec<(Kind, usize)>, edits: Vec<String> },
     Plan(Vec<Entry>),
     /// A permission request, with the ways it may be answered; answered, it says what went.
     Ask { index: usize, title: String, options: Vec<AskOption>, answered: Option<String> },
@@ -497,10 +529,13 @@ fn pane(title: String, snap: &Snapshot) -> View {
         right = right.child(status_line(line.clone()));
     }
     if snap.picking.is_none() {
-        right = right.child(super::header::toggle_button(IconName::FolderTree, "Files (Ctrl+1)", snap.place == Place::Files, || tell(Cmd::Show(false))));
-        right = right.child(super::header::toggle_button(IconName::Diff, "Changes (Ctrl+2)", snap.place == Place::Changes, || tell(Cmd::Show(true))));
-        right = right.child(super::header::toggle_button(IconName::Terminal, "Terminal (Ctrl+`)", snap.place == Place::Terminal, || tell(Cmd::Terminal)));
-        right = right.child(super::header::toggle_button(IconName::History, "Resume an earlier session (Ctrl+Shift+H)", false, || tell(Cmd::History)));
+        // The four Places share one pill, so they read as a single switcher.
+        let mut places = view().flex_none().flex_row().items_center().gap(scale::s0_5()).p(scale::s0_5()).rounded(super::pill()).bg(Colors::hover());
+        places = places.child(super::header::place_button(IconName::FolderTree, "Files (Ctrl+1)", snap.place == Place::Files, || tell(Cmd::Show(false))));
+        places = places.child(super::header::place_button(IconName::Diff, "Changes (Ctrl+2)", snap.place == Place::Changes, || tell(Cmd::Show(true))));
+        places = places.child(super::header::place_button(IconName::Terminal, "Terminal (Ctrl+`)", snap.place == Place::Terminal, || tell(Cmd::Terminal)));
+        places = places.child(super::header::place_button(IconName::History, "Resume an earlier session (Ctrl+Shift+H)", false, || tell(Cmd::History)));
+        right = right.child(places);
     }
     // The Control menu, once the user has set what the thread's agent may do.
     if let Some(grant) = snap.grant.filter(|grant| *grant != Grant::initial()) {
@@ -759,16 +794,42 @@ fn tool_row(message: usize, at: usize, tool: &Tool) -> AnyElement {
     card.into_element()
 }
 
-/// A run of tool calls, folded to one row: what is in it and how it went; a press on the row
-/// folds or unfolds it.
-fn run_row(message: usize, at: usize, count: usize, failed: usize, phase: Phase, folded: bool, task: Option<&str>) -> AnyElement {
-    let calls = format!("{count} tool calls");
-    // The task the calls work towards, when the plan names one; the count then follows it.
-    let label = task.map_or_else(|| calls.clone(), str::to_string);
-    // A failure the run got past is a quiet count after the label, not a failed run.
+/// A span of time in a word or two: `42s`, `1m 12s`, `2h 5m`. A span under a second reads `1s`.
+fn span(took: std::time::Duration) -> String {
+    let secs = took.as_secs().max(1);
+    match secs {
+        0..=59 => format!("{secs}s"),
+        60..=3599 => format!("{}m {}s", secs / 60, secs % 60),
+        _ => format!("{}h {}m", secs / 3600, secs % 3600 / 60),
+    }
+}
+
+/// A stretch of the agent's work, folded to one row: what is in it and how it went; a press on
+/// the row folds or unfolds it.
+#[allow(clippy::too_many_arguments)]
+fn run_row(message: usize, at: usize, thoughts: usize, calls: usize, failed: usize, phase: Phase, folded: bool, task: Option<&str>, took: Option<std::time::Duration>, latest: Option<&str>, kinds: &[(Kind, usize)], edits: &[String]) -> AnyElement {
+    // The task the work is towards, when the plan names one; else the work itself: the call it
+    // is at while it goes, how long it took once it is done.
+    let label = task.map_or_else(
+        || match (phase, latest, took.map(span)) {
+            (Phase::Working, Some(latest), _) => format!("Working · {latest}"),
+            (Phase::Working, None, _) => "Working…".to_string(),
+            (_, _, Some(span)) => format!("Worked for {span}"),
+            _ => "Worked".to_string(),
+        },
+        str::to_string,
+    );
+    // What the stretch holds, then a failure it got past: a quiet count after the label, not a failed run.
     let mut aside: Vec<String> = Vec::new();
-    if task.is_some() {
-        aside.push(calls);
+    if kinds.is_empty() {
+        if calls > 0 {
+            aside.push(format!("{calls} tool {}", if calls == 1 { "call" } else { "calls" }));
+        }
+    } else {
+        aside.extend(Kind::ALL.iter().filter_map(|kind| kinds.iter().find(|(k, _)| k == kind).map(|(kind, n)| kind.counted(*n))));
+    }
+    if thoughts > 0 {
+        aside.push(format!("{thoughts} {}", if thoughts == 1 { "thought" } else { "thoughts" }));
     }
     if failed > 0 && phase != Phase::Failed {
         aside.push(format!("{failed} failed"));
@@ -776,7 +837,7 @@ fn run_row(message: usize, at: usize, count: usize, failed: usize, phase: Phase,
     let aside = (!aside.is_empty()).then(|| format!("· {}", aside.join(" · ")));
     // What is read out is all the row says.
     let spoken = aside.as_ref().map_or_else(|| label.clone(), |aside| format!("{label} {aside}"));
-    view()
+    let row = view()
         .role(AccessibilityRole::Button)
         .label(spoken)
         .flex_row()
@@ -791,12 +852,54 @@ fn run_row(message: usize, at: usize, count: usize, failed: usize, phase: Phase,
         .hover(|s| s.bg(Colors::hover()))
         .on_press(move || tell(Cmd::Fold { message, block: at, folded: !folded }))
         .child(step_glyph(phase))
-        .child(text(label).selectable(false).min_w_0().sized(text_sm()).text_color(Colors::muted()))
-        .children(aside.map(|aside| text(aside).selectable(false).sized(text_sm()).text_color(Colors::muted())))
+        // A long label (a command, a task) gives way with an ellipsis; the counts after it stay whole.
+        .child(text(label).selectable(false).number_of_lines(1).flex_shrink(1.).min_w_0().sized(text_sm()).text_color(Colors::muted()))
+        .children(aside.map(|aside| text(aside).selectable(false).flex_none().number_of_lines(1).sized(text_sm()).text_color(Colors::muted())))
         .child(view().flex_1())
-        .child(trail_slot(icon(if folded { IconName::ChevronRight } else { IconName::ChevronDown }, STEP_ICON, Colors::muted())))
+        .child(trail_slot(icon(if folded { IconName::ChevronRight } else { IconName::ChevronDown }, STEP_ICON, Colors::muted())));
+    if edits.is_empty() {
+        return row.into_element();
+    }
+    // The files it changed stay in sight, folded or not: they are what the user came for.
+    let shown = edits.iter().take(MAX_CHIPS).map(|path| {
+        let name = path.rsplit('/').next().unwrap_or(path).to_string();
+        let path = path.clone();
+        view()
+            .role(AccessibilityRole::Button)
+            .label(format!("Open {name}"))
+            .flex_row()
+            .items_center()
+            .gap(scale::s1_5())
+            .px(scale::s2())
+            .py(scale::s0_5())
+            .rounded(Colors::radius())
+            .cursor_pointer()
+            .smooth()
+            .bg(Colors::hover())
+            .on_press(move || tell(Cmd::Open(path.clone())))
+            .child(icon(IconName::FileText, STEP_ICON, Colors::muted()))
+            .child(text(name).selectable(false).number_of_lines(1).sized(text_sm()).text_color(Colors::foreground()))
+    });
+    let more = edits.len().saturating_sub(MAX_CHIPS);
+    view()
+        .flex_col()
+        .child(row)
+        .child(
+            view()
+                .flex_row()
+                .flex_wrap()
+                .items_center()
+                .gap(scale::s1_5())
+                .pl(scale::s4() + scale::s2())
+                .pb(scale::s1())
+                .children(shown)
+                .children((more > 0).then(|| text(format!("+{more} more")).selectable(false).sized(text_sm()).text_color(Colors::muted()))),
+        )
         .into_element()
 }
+
+/// How many of a stretch's edited files get a chip of their own.
+const MAX_CHIPS: usize = 4;
 
 /// The plan: each entry with its phase; the ones done, quietly.
 fn plan_rows(entries: &[Entry]) -> AnyElement {
@@ -979,7 +1082,7 @@ fn block_row(message: usize, block: &Block, thought_streaming: bool) -> AnyEleme
             .into_element(),
         Block::Thought { index, text: thought, open } => thought_row(message, *index, thought, *open, !thought_streaming),
         Block::Tool(tool) => tool_row(message, tool.index, tool),
-        Block::Run { index, count, failed, phase, folded, task } => run_row(message, *index, *count, *failed, *phase, *folded, task.as_deref()),
+        Block::Run { index, count, calls, failed, phase, folded, task, took, latest, kinds, edits } => run_row(message, *index, *count - *calls, *calls, *failed, *phase, *folded, task.as_deref(), *took, latest.as_deref(), kinds, edits),
         Block::Plan(entries) => plan_rows(entries),
         Block::Ask { index, title, options, answered } => ask_row(message, *index, title, options, answered),
         Block::Approve { index, question, lines, answered } => approve_row(message, *index, question, lines, answered),
@@ -1010,7 +1113,7 @@ fn rows_of(blocks: &[Block]) -> Vec<Row> {
             continue;
         }
         if let Block::Run { count, folded: true, .. } = block {
-            // The tools the run hides; its own row takes their place.
+            // The steps the run hides; its own row takes their place.
             skip = *count;
         }
         // Steps sit close to each other; everything else, and the line between a step and text,
@@ -1079,7 +1182,7 @@ fn transcript(state: Signal<Snapshot>, count: usize, slot: ElementRef, at_end: S
     // Non-reactive on purpose: the layout pass must not renotify the render. They live in the
     // caller, not here: this runs again on every change of the thread, and a layout event comes
     // only when a frame changes, so state made anew here would stay empty.
-    let Position { frames, origin, active, pinned, .. } = rail;
+    let Position { frames, origin, active, pinned, column_height: content, .. } = rail;
     let shown = count.min(MAX_BARS);
     frames.with(|sections| sections.truncate(count));
     // A thought still streaming reads as `Thinking`; every thought that something came after, or
@@ -1128,6 +1231,7 @@ fn transcript(state: Signal<Snapshot>, count: usize, slot: ElementRef, at_end: S
     let size = stored((0., 0.));
     let resized = move |bounds: &Bounds<Points>| {
         origin.replace(bounds.origin.y);
+        content.set(bounds.size.height.0);
         let now = (bounds.size.width.0, bounds.size.height.0);
         if size.replace(now) != now && at_end.get_untracked() {
             let slot = slot;
@@ -1176,7 +1280,7 @@ fn transcript(state: Signal<Snapshot>, count: usize, slot: ElementRef, at_end: S
 /// a bar, as they are; the rail is built again only when the bars change, with the count or the
 /// stage's width.
 fn stage(page: impl Fn() -> AnyElement + 'static, count: Memo<usize>, slot: ElementRef, position: Position) -> AnyElement {
-    let width = position.width;
+    let (width, height, overflows) = (position.width, position.stage_height, position.overflows);
     view()
         .flex_1()
         .min_h_0()
@@ -1184,13 +1288,16 @@ fn stage(page: impl Fn() -> AnyElement + 'static, count: Memo<usize>, slot: Elem
         .flex()
         .justify_center()
         .overflow_hidden()
-        .on_layout(move |bounds: &Bounds<Points>| width.set(bounds.size.width.0))
+        .on_layout(move |bounds: &Bounds<Points>| {
+            width.set(bounds.size.width.0);
+            height.set(bounds.size.height.0);
+        })
         .child(dynamic(page))
         .child(dynamic(move || {
             // The rail is for a stage with room beside the column; in a narrower one it would
-            // sit on the text, so it is not drawn.
+            // sit on the text, so it is not drawn. Nor is it when the page fits the stage.
             let (count, stage) = (count.get(), width.get());
-            (count >= 2 && stage >= COLUMN + 2. * (rail_gutter().0 + rail_inset().0)).then(|| rail(count, stage, slot, position))
+            (count >= 2 && overflows.get() && stage >= COLUMN + 2. * (rail_gutter().0 + rail_inset().0)).then(|| rail(count, stage, slot, position))
         }))
         .into_element()
 }
@@ -1256,11 +1363,20 @@ struct Position {
     hover: Signal<Option<usize>>,
     /// The stage's width, which says where the column's edge is and whether the rail has room.
     width: Signal<f32>,
+    /// Whether the column is taller than the stage: a page that fits has nothing to scroll to.
+    overflows: Memo<bool>,
+    /// The stage's height, which `overflows` compares with the column's.
+    stage_height: Signal<f32>,
+    /// The column's height: the rows with their padding, all of what the scroll view holds.
+    column_height: Signal<f32>,
 }
 
 impl Position {
     fn new() -> Self {
-        Self { frames: stored(Vec::new()), origin: stored(Points(0.)), active: signal(0), hover: signal(None), pinned: stored(None), width: signal(0.) }
+        let (stage_height, column_height) = (signal(0.), signal(0.));
+        // Half a point of slack, for the rounding of the two layouts.
+        let overflows = computed(move || column_height.get() > stage_height.get() + 0.5);
+        Self { frames: stored(Vec::new()), origin: stored(Points(0.)), active: signal(0), hover: signal(None), pinned: stored(None), width: signal(0.), overflows, stage_height, column_height }
     }
 }
 
@@ -2182,7 +2298,7 @@ mod tests {
         let mut guard = crate::nsh::bus::lock();
         let commands = guard.as_mut().expect("the channel");
         let run = |task: Option<&str>, failed| {
-            let blocks = vec![Block::Run { index: 0, count: 4, failed, phase: Phase::Done, folded: true, task: task.map(str::to_string) }];
+            let blocks = vec![Block::Run { index: 0, count: 4, calls: 4, failed, phase: Phase::Done, folded: true, task: task.map(str::to_string), took: None, latest: None, kinds: vec![], edits: vec![] }];
             start(Snapshot { items: vec![Item::Agent { index: 0, blocks: Arc::new(blocks) }], ..Snapshot::default() })
         };
         // The row's spoken name is all it says: the task, then the calls and the failures.
@@ -2190,8 +2306,34 @@ mod tests {
         app.press("label:Fix the parser · 4 tool calls · 1 failed").unwrap();
         assert_eq!(drain(&mut app, commands), [Bus::Chat(Cmd::Fold { message: 0, block: 0, folded: false })]);
         let mut app = run(None, 0);
-        app.press("label:4 tool calls").unwrap();
+        app.press("label:Worked · 4 tool calls").unwrap();
         assert_eq!(drain(&mut app, commands), [Bus::Chat(Cmd::Fold { message: 0, block: 0, folded: false })]);
+    }
+
+    #[test]
+    fn a_run_counts_its_calls_by_kind_and_chips_the_files_it_edited() {
+        let mut guard = crate::nsh::bus::lock();
+        let commands = guard.as_mut().expect("the channel");
+        let blocks = vec![Block::Run {
+            index: 0, count: 6, calls: 6, failed: 0, phase: Phase::Done, folded: true, task: None, took: None, latest: None,
+            kinds: vec![(Kind::Edit, 1), (Kind::Read, 3), (Kind::Search, 2)],
+            edits: vec!["src/nsh/chat.rs".into()],
+        }];
+        let mut app = start(Snapshot { items: vec![Item::Agent { index: 0, blocks: Arc::new(blocks) }], ..Snapshot::default() });
+        // Counted in the fixed order, whatever order they came in.
+        app.press("label:Worked · 3 reads · 2 searches · 1 edit").unwrap();
+        assert_eq!(drain(&mut app, commands), [Bus::Chat(Cmd::Fold { message: 0, block: 0, folded: false })]);
+        app.press("label:Open chat.rs").unwrap();
+        assert_eq!(drain(&mut app, commands), [Bus::Chat(Cmd::Open("src/nsh/chat.rs".into()))]);
+    }
+
+    #[test]
+    fn a_span_reads_in_seconds_minutes_and_hours() {
+        use std::time::Duration;
+        assert_eq!(span(Duration::from_millis(300)), "1s");
+        assert_eq!(span(Duration::from_secs(42)), "42s");
+        assert_eq!(span(Duration::from_secs(72)), "1m 12s");
+        assert_eq!(span(Duration::from_secs(7500)), "2h 5m");
     }
 
     fn drain(app: &mut Headless, commands: &mut crate::nsh::bus::Commands) -> Vec<Bus> {
@@ -2205,16 +2347,16 @@ mod tests {
         let commands = guard.as_mut().expect("the channel");
         // Four calls in one run (the run's row stands before them), then a permission request at
         // the message's block 4, then a second run of three calls at 5..8.
-        let mut blocks = vec![Block::Run { index: 0, count: 4, failed: 0, phase: Phase::Done, folded: false, task: None }];
+        let mut blocks = vec![Block::Run { index: 0, count: 4, calls: 4, failed: 0, phase: Phase::Done, folded: false, task: None, took: None, latest: None, kinds: vec![], edits: vec![] }];
         blocks.extend((0..4).map(tool));
         blocks.push(Block::Ask { index: 4, title: "Run rm?".into(), options: vec![AskOption { at: 0, label: "Allow once".into(), primary: true }], answered: None });
-        blocks.push(Block::Run { index: 5, count: 3, failed: 0, phase: Phase::Done, folded: false, task: None });
+        blocks.push(Block::Run { index: 5, count: 3, calls: 3, failed: 0, phase: Phase::Done, folded: false, task: None, took: None, latest: None, kinds: vec![], edits: vec![] });
         blocks.extend((5..8).map(tool));
         let mut app = start(Snapshot { items: vec![Item::Agent { index: 0, blocks: Arc::new(blocks) }], ..Snapshot::default() });
         app.press("label:Allow once").unwrap();
         assert_eq!(drain(&mut app, commands), [Bus::Chat(Cmd::Answer { message: 0, block: 4, at: 0 })]);
         // Two runs say "tool calls": the first is four, the second three.
-        app.press("label:3 tool calls").unwrap();
+        app.press("label:Worked · 3 tool calls").unwrap();
         assert_eq!(drain(&mut app, commands), [Bus::Chat(Cmd::Fold { message: 0, block: 5, folded: true })]);
     }
 
