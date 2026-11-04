@@ -349,9 +349,23 @@ pub fn Sidebar() -> impl IntoElement {
         }
     });
 
-    // A slow breath for the dot of a running thread: one value for the whole sidebar.
+    // A slow breath for the dot of a running thread: one value for the whole sidebar. It plays only
+    // while a thread runs (an endless animation keeps the window redrawing), and not at all when
+    // the user asked for less motion.
     let pulse = animated_value(1.);
-    pulse.keyframes([Keyframe::new(1.), Keyframe::new(0.3)], KeyframeTiming::new(1400.).easing(Easing::EaseInOut).infinite().direction(PlaybackDirection::Alternate));
+    let breath = Animation::keyframes(&pulse, [Keyframe::new(1.), Keyframe::new(0.3)], KeyframeTiming::new(1400.).easing(Easing::EaseInOut).infinite().direction(PlaybackDirection::Alternate));
+    // A memo, so a snapshot that changes nothing about it doesn't restart the breath.
+    let running = computed(move || {
+        state.with(|s| s.projects.iter().flat_map(|p| &p.threads).chain(s.waiting.iter().map(|w| &w.thread)).any(|t| t.mark == Mark::Running))
+    });
+    effect(move || {
+        if running.get() && !reduce_motion() {
+            breath.start();
+        } else {
+            breath.stop();
+            pulse.set(1.);
+        }
+    });
 
     let query = signal(String::new());
     let focused = signal(false);
