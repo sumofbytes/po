@@ -60,7 +60,8 @@ fn row(label: &'static str, hint: &'static str, control: impl IntoElement) -> Vi
 fn switch(on: Signal<bool>, label: &'static str) -> View {
     let state = move || format!("{label}, {}", if on.get() { "on" } else { "off" });
     // The knob slides across rather than jumping to the other end: the track's inner width less
-    // its own.
+    // its own, from the same steps as the track, since each is snapped to whole pixels on its own.
+    let travel = scale::s8() - scale::s0_5() * 2. - scale::s4();
     let knob = view()
         .w(scale::s4())
         .h(scale::s4())
@@ -68,9 +69,9 @@ fn switch(on: Signal<bool>, label: &'static str) -> View {
         .rounded(super::pill())
         .bg(Colors::popover())
         .style_when(move || on.get(), |s| s.bg(Colors::primary_foreground()))
-        .translate_x(move || if on.get() { scale::s3() } else { Points(0.) })
+        .translate_x(move || if on.get() { travel } else { Points(0.) })
         .transition()
-        .duration(220.)
+        .duration(super::MOTION_MS)
         .ease_out();
     let track = super::smooth(view())
         .role(AccessibilityRole::Switch)

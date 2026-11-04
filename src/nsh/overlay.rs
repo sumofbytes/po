@@ -82,8 +82,9 @@ impl Overlay {
     }
 }
 
-/// The window opening: quick and settling softly, as the screens' own motion does. It is short of
-/// their 220ms since it stands between a key and the screen it opens; closing is at once.
+/// The window opening: a quick start that settles softly, like the screens' own motion, though
+/// gpui's curve and shorter than their [`super::MOTION_MS`], since it stands between a key and
+/// the screen it opens. Closing is at once.
 fn opening() -> Animation {
     Animation::new(Duration::from_millis(150)).with_easing(gpui::ease_out_quint())
 }
