@@ -191,6 +191,11 @@ struct ToolBlock {
     id: String,
     title: String,
     status: Step,
+    /// What the agent calls it (`read`, `edit`, `execute`…), when it says.
+    kind: String,
+    /// When the call began, and when it settled (done or failed); a stretch of work says how long it took by these.
+    started: Instant,
+    ended: Option<Instant>,
     open: bool,
     /// On the first call of a run of [`MIN_RUN`] or more: whether the run is folded to one line. `None`
     /// leaves it to `run_folded`'s default, until the user clicks the run's header.
@@ -791,10 +796,15 @@ impl Thread {
             }
             Some("tool_call") => {
                 let task = task_in_progress(&self.messages);
+                let status = step(update["status"].as_str().unwrap_or("pending"));
+                let now = Instant::now();
                 self.blocks().push(Block::Tool(ToolBlock {
                     id: update["toolCallId"].as_str().unwrap_or_default().to_string(),
                     title: update["title"].as_str().unwrap_or("Tool").to_string(),
-                    status: step(update["status"].as_str().unwrap_or("pending")),
+                    status,
+                    kind: update["kind"].as_str().unwrap_or_default().to_string(),
+                    started: now,
+                    ended: matches!(status, Step::Done | Step::Failed).then_some(now),
                     open: false,
                     fold: None,
                     task,
@@ -815,8 +825,16 @@ impl Thread {
                         if let Some(title) = update["title"].as_str() {
                             tool.title = title.to_string();
                         }
+                        if let Some(kind) = update["kind"].as_str() {
+                            tool.kind = kind.to_string();
+                        }
                         if let Some(status) = update["status"].as_str() {
                             tool.status = step(status);
+                            if matches!(tool.status, Step::Done | Step::Failed) {
+                                tool.ended.get_or_insert_with(Instant::now);
+                            } else {
+                                tool.ended = None;
+                            }
                         }
                         if !update["rawInput"].is_null() {
                             tool.arguments = pretty(&update["rawInput"]);
@@ -1712,10 +1730,30 @@ fn reference_definition(line: &str) -> bool {
     line.strip_prefix('[').is_some_and(|rest| rest.find("]:").is_some_and(|end| !rest[..end].contains(']')))
 }
 
-/// Whether a run of tool calls shows as one line. A run the user hasn't clicked starts folded,
+/// A step of the agent's work, as against what it says to the user or asks of them: a tool call
+/// or a thought. Steps between two other blocks fold to one line.
+fn is_step(block: &Block) -> bool {
+    matches!(block, Block::Tool(_) | Block::Thought(..))
+}
+
+/// How many steps run on from `at`, and whether the run is one that folds: [`MIN_RUN`] or more
+/// of them, a tool call among them (that is where the fold is kept).
+fn step_run(blocks: &[Block], at: usize) -> (usize, bool) {
+    let len = blocks[at..].iter().take_while(|b| is_step(b)).count();
+    let foldable = len >= MIN_RUN && blocks[at..at + len].iter().any(|b| matches!(b, Block::Tool(_)));
+    (len, foldable)
+}
+
+/// The tool call of the run that starts at `at` which keeps whether the run is folded.
+fn fold_keeper(blocks: &mut [Block], at: usize) -> Option<&mut ToolBlock> {
+    let len = blocks.get(at..)?.iter().take_while(|b| is_step(b)).count();
+    blocks[at..at + len].iter_mut().find_map(|b| if let Block::Tool(tool) = b { Some(tool) } else { None })
+}
+
+/// Whether a run of steps shows as one line. A run the user hasn't clicked starts folded,
 /// whether its calls are still going or not.
 fn run_folded(run: &[Block]) -> bool {
-    let Some(Block::Tool(first)) = run.first() else { return false };
+    let Some(first) = run.iter().find_map(|b| if let Block::Tool(tool) = b { Some(tool) } else { None }) else { return false };
     first.fold.unwrap_or(run_outcome(run).0 != Step::Failed)
 }
 
@@ -1734,17 +1772,17 @@ fn run_outcome(run: &[Block]) -> (Step, usize) {
     (step, failed)
 }
 
-/// Where each run of tool calls shown folded starts in `blocks`.
+/// Where each run of steps shown folded starts in `blocks`.
 fn folded_runs(blocks: &[Block]) -> Vec<usize> {
     let mut starts = vec![];
     let mut n = 0;
     while n < blocks.len() {
-        if !matches!(blocks[n], Block::Tool(_)) {
+        if !is_step(&blocks[n]) {
             n += 1;
             continue;
         }
-        let len = blocks[n..].iter().take_while(|b| matches!(b, Block::Tool(_))).count();
-        if len >= MIN_RUN && run_folded(&blocks[n..n + len]) {
+        let (len, foldable) = step_run(blocks, n);
+        if foldable && run_folded(&blocks[n..n + len]) {
             starts.push(n);
         }
         n += len;
@@ -1879,6 +1917,64 @@ fn task_in_progress(messages: &[Msg]) -> Option<String> {
     entries.iter().find(|(_, step)| *step == Step::Working).map(|(text, _)| text.clone())
 }
 
+/// How long a finished run of steps took: from its first call's start to its last one's end. Nothing
+/// while a call is still going.
+fn run_took(run: &[Block]) -> Option<Duration> {
+    let tools: Vec<&ToolBlock> = run.iter().filter_map(|b| if let Block::Tool(t) = b { Some(t) } else { None }).collect();
+    let start = tools.iter().map(|t| t.started).min()?;
+    let end = tools.iter().map(|t| t.ended).collect::<Option<Vec<_>>>()?.into_iter().max()?;
+    Some(end.saturating_duration_since(start))
+}
+
+/// What a call does: by the kind the agent gave it, or by the first word of its title when it gave
+/// none (or only `other`).
+fn tool_kind(tool: &ToolBlock) -> nsh::chat::Kind {
+    use nsh::chat::Kind;
+    match tool.kind.as_str() {
+        "read" => return Kind::Read,
+        "search" => return Kind::Search,
+        "edit" | "delete" | "move" => return Kind::Edit,
+        "execute" => return Kind::Command,
+        "fetch" => return Kind::Fetch,
+        _ => {}
+    }
+    match tool.title.split_whitespace().next().unwrap_or_default().to_lowercase().as_str() {
+        "read" | "cat" | "view" | "open" => Kind::Read,
+        "grep" | "glob" | "find" | "search" | "list" | "ls" | "rg" => Kind::Search,
+        "edit" | "write" | "patch" | "apply_patch" | "multiedit" | "delete" | "move" => Kind::Edit,
+        "bash" | "shell" | "run" | "execute" | "sh" => Kind::Command,
+        "fetch" | "webfetch" | "websearch" => Kind::Fetch,
+        _ => Kind::Other,
+    }
+}
+
+/// How many calls of each kind a run made, and the files its edits touched, once each.
+fn run_kinds(run: &[Block]) -> (Vec<(nsh::chat::Kind, usize)>, Vec<String>) {
+    let mut kinds: Vec<(nsh::chat::Kind, usize)> = vec![];
+    let mut edits: Vec<String> = vec![];
+    for tool in run.iter().filter_map(|b| if let Block::Tool(t) = b { Some(t) } else { None }) {
+        let kind = tool_kind(tool);
+        match kinds.iter_mut().find(|(k, _)| *k == kind) {
+            Some((_, n)) => *n += 1,
+            None => kinds.push((kind, 1)),
+        }
+        if kind == nsh::chat::Kind::Edit
+            && let Some(path) = &tool.path
+            && !edits.contains(path)
+        {
+            edits.push(path.clone());
+        }
+    }
+    (kinds, edits)
+}
+
+/// What a run of steps is at: the call going now, else the last one made.
+fn run_latest(run: &[Block]) -> Option<String> {
+    let mut tools = run.iter().filter_map(|b| if let Block::Tool(t) = b { Some(t) } else { None });
+    let all: Vec<&ToolBlock> = tools.by_ref().collect();
+    all.iter().rev().find(|t| matches!(t.status, Step::Waiting | Step::Working)).or(all.last()).map(|t| t.title.clone())
+}
+
 /// The plan task a run of calls worked towards: the one task its calls name, none when they name
 /// no task or span several.
 fn run_task(run: &[Block]) -> Option<String> {
@@ -1887,24 +1983,29 @@ fn run_task(run: &[Block]) -> Option<String> {
     tasks.all(|task| task == first).then(|| first.to_string())
 }
 
-/// One agent message's blocks for the conversation drawn by NSH. Runs of [`MIN_RUN`] or more tool calls
-/// also carry the row that folds them; the calls stay in place either way, so the indexes their
-/// answers are told by hold.
+/// One agent message's blocks for the conversation drawn by NSH. Runs of [`MIN_RUN`] or more steps
+/// (tool calls and thoughts) that hold a call also carry the row that folds them; the steps stay in place
+/// either way, so the indexes their answers are told by hold.
 fn chat_blocks(blocks: &[Block], held: &[nsh::chat::Block]) -> Vec<nsh::chat::Block> {
     let mut out: Vec<nsh::chat::Block> = Vec::with_capacity(blocks.len());
     let mut n = 0;
     while n < blocks.len() {
-        let run = n > 0 && matches!(&blocks[n - 1], Block::Tool(_));
-        let len = if matches!(blocks[n], Block::Tool(_)) && !run { blocks[n..].iter().take_while(|b| matches!(b, Block::Tool(_))).count() } else { 0 };
-        if len >= MIN_RUN {
+        // A step in the middle of a run too short to fold is not the start of another.
+        let inside = n > 0 && is_step(&blocks[n - 1]);
+        let (len, foldable) = if is_step(&blocks[n]) && !inside { step_run(blocks, n) } else { (0, false) };
+        if foldable {
             let run = &blocks[n..n + len];
             let (phase, failed) = run_outcome(run);
             let task = run_task(run);
-            out.push(nsh::chat::Block::Run { index: n, count: len, failed, phase: chat_phase(phase), folded: run_folded(run), task });
+            let calls = run.iter().filter(|b| matches!(b, Block::Tool(_))).count();
+            let (kinds, edits) = run_kinds(run);
+            out.push(nsh::chat::Block::Run { index: n, count: len, calls, failed, phase: chat_phase(phase), folded: run_folded(run), task, took: run_took(run), latest: run_latest(run), kinds, edits });
             for (k, block) in run.iter().enumerate() {
-                if let Block::Tool(tool) = block {
-                    out.push(nsh::chat::Block::Tool(chat_tool(n + k, tool)));
-                }
+                out.push(match block {
+                    Block::Tool(tool) => nsh::chat::Block::Tool(chat_tool(n + k, tool)),
+                    Block::Thought(text, open) => nsh::chat::Block::Thought { index: n + k, text: text.clone(), open: *open },
+                    _ => continue,
+                });
             }
             n += len;
             continue;
@@ -2771,7 +2872,7 @@ mod tests {
     }
 
     fn tool_for(task: Option<&str>) -> Block {
-        Block::Tool(ToolBlock { id: String::new(), title: "call".into(), status: Step::Done, open: false, fold: None, task: task.map(str::to_string), arguments: String::new(), result: String::new(), path: None })
+        Block::Tool(ToolBlock { id: String::new(), title: "call".into(), status: Step::Done, kind: String::new(), started: std::time::Instant::now(), ended: None, open: false, fold: None, task: task.map(str::to_string), arguments: String::new(), result: String::new(), path: None })
     }
 
     #[test]
@@ -2792,7 +2893,7 @@ mod tests {
     }
 
     fn tool(title: &str, status: Step) -> Block {
-        Block::Tool(ToolBlock { id: String::new(), title: title.into(), status, open: false, fold: None, task: None, arguments: String::new(), result: String::new(), path: None })
+        Block::Tool(ToolBlock { id: String::new(), title: title.into(), status, kind: String::new(), started: std::time::Instant::now(), ended: None, open: false, fold: None, task: None, arguments: String::new(), result: String::new(), path: None })
     }
 
     #[test]
@@ -2836,6 +2937,41 @@ mod tests {
             tool("c", Step::Done),
         ];
         assert_eq!(folded_runs(&blocks), vec![2]);
+    }
+
+    #[test]
+    fn thoughts_between_calls_fold_into_the_run_and_text_ends_it() {
+        let thought = || Block::Thought("hm".into(), false);
+        let blocks = vec![thought(), tool("a", Step::Done), thought(), tool("b", Step::Done), Block::Text("x".into()), thought(), thought(), thought()];
+        assert_eq!(folded_runs(&blocks), vec![0]);
+        let out = super::chat_blocks(&blocks, &[]);
+        assert!(matches!(out[0], crate::nsh::chat::Block::Run { index: 0, count: 4, calls: 2, .. }));
+        assert_eq!(out.iter().filter(|b| matches!(b, crate::nsh::chat::Block::Run { .. })).count(), 1);
+        // Thoughts alone have no call to keep the fold, so they stay as they are.
+        assert_eq!(out.iter().filter(|b| matches!(b, crate::nsh::chat::Block::Thought { .. })).count(), 5);
+    }
+
+    #[test]
+    fn calls_are_counted_by_the_kind_the_agent_gave_or_their_title() {
+        use crate::nsh::chat::Kind;
+        let call = |title: &str, kind: &str, path: Option<&str>| {
+            let Block::Tool(mut t) = tool(title, Step::Done) else { unreachable!() };
+            t.kind = kind.into();
+            t.path = path.map(str::to_string);
+            Block::Tool(t)
+        };
+        let run = vec![
+            call("Read a.rs", "read", Some("a.rs")),
+            call("grep foo", "other", None),
+            call("bash ls", "", None),
+            call("Edit b.rs", "edit", Some("b.rs")),
+            call("Edit b.rs again", "edit", Some("b.rs")),
+            call("mystery", "", None),
+        ];
+        let (kinds, edits) = super::run_kinds(&run);
+        assert_eq!(kinds, vec![(Kind::Read, 1), (Kind::Search, 1), (Kind::Command, 1), (Kind::Edit, 2), (Kind::Other, 1)]);
+        // A file read (it has a path too) is no edit, and one edited twice is chipped once.
+        assert_eq!(edits, vec!["b.rs".to_string()]);
     }
 
     #[test]

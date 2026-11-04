@@ -281,10 +281,10 @@ impl Reader {
         cx.notify();
     }
 
-    /// Folds or unfolds the run of tool calls that starts at `block`.
+    /// Folds or unfolds the run of steps that starts at `block`.
     pub(crate) fn fold_run(&mut self, msg: usize, block: usize, folded: bool, cx: &mut Context<Self>) {
         let Some(Msg::Agent(blocks)) = self.thread.messages.get_mut(msg) else { return };
-        let Some(Block::Tool(tool)) = blocks.get_mut(block) else { return };
+        let Some(tool) = fold_keeper(blocks, block) else { return };
         tool.fold = Some(folded);
         self.thread.relist(msg);
         cx.notify();
@@ -305,7 +305,7 @@ impl Reader {
         for (ix, msg) in self.thread.messages.iter_mut().enumerate() {
             let Msg::Agent(blocks) = msg else { continue };
             for start in folded_runs(blocks) {
-                let Some(Block::Tool(tool)) = blocks.get_mut(start) else { continue };
+                let Some(tool) = fold_keeper(blocks, start) else { continue };
                 tool.fold = Some(false);
                 from.get_or_insert(ix);
             }
