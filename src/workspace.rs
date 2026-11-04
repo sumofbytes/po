@@ -152,7 +152,7 @@ impl Workspace {
             })
             .collect();
         Some(Self { projects, // Files saved before the views were merged only said which layout the window was in.
-            viewer_open: value["viewer_open"].as_bool().unwrap_or(value["layout"].as_str() == Some("files")),
+            viewer_open: value["viewer_open"].as_bool().unwrap_or(value["layout"].as_str() != Some("agents")),
             swapped: value["swapped"].as_bool().unwrap_or(false),
             agent_open: value["agent_open"].as_bool().unwrap_or(true),
             agent: text(&value["agent"]),
@@ -333,7 +333,7 @@ mod tests {
         let old_files = Workspace::from_json(&json!({ "layout": "files", "projects": [] })).expect("parses");
         assert!(old_files.viewer_open);
         let neither = Workspace::from_json(&json!({ "projects": [] })).expect("parses");
-        assert!(!neither.viewer_open);
+        assert!(neither.viewer_open);
     }
 
     #[test]

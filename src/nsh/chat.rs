@@ -1079,7 +1079,7 @@ fn transcript(state: Signal<Snapshot>, count: usize, slot: ElementRef, at_end: S
     // Non-reactive on purpose: the layout pass must not renotify the render. They live in the
     // caller, not here: this runs again on every change of the thread, and a layout event comes
     // only when a frame changes, so state made anew here would stay empty.
-    let Position { frames, origin, active, pinned, heights: (_, content), .. } = rail;
+    let Position { frames, origin, active, pinned, column_height: content, .. } = rail;
     let shown = count.min(MAX_BARS);
     frames.with(|sections| sections.truncate(count));
     // A thought still streaming reads as `Thinking`; every thought that something came after, or
@@ -1177,7 +1177,7 @@ fn transcript(state: Signal<Snapshot>, count: usize, slot: ElementRef, at_end: S
 /// a bar, as they are; the rail is built again only when the bars change, with the count or the
 /// stage's width.
 fn stage(page: impl Fn() -> AnyElement + 'static, count: Memo<usize>, slot: ElementRef, position: Position) -> AnyElement {
-    let (width, (height, _), overflows) = (position.width, position.heights, position.overflows);
+    let (width, height, overflows) = (position.width, position.stage_height, position.overflows);
     view()
         .flex_1()
         .min_h_0()
@@ -1262,15 +1262,18 @@ struct Position {
     width: Signal<f32>,
     /// Whether the column is taller than the stage: a page that fits has nothing to scroll to.
     overflows: Memo<bool>,
-    /// The stage's height and the column's, which `overflows` compares.
-    heights: (Signal<f32>, Signal<f32>),
+    /// The stage's height, which `overflows` compares with the column's.
+    stage_height: Signal<f32>,
+    /// The column's height: the rows with their padding, all of what the scroll view holds.
+    column_height: Signal<f32>,
 }
 
 impl Position {
     fn new() -> Self {
-        let heights = (signal(0.), signal(0.));
-        let overflows = computed(move || heights.1.get() > heights.0.get() + 0.5);
-        Self { frames: stored(Vec::new()), origin: stored(Points(0.)), active: signal(0), hover: signal(None), pinned: stored(None), width: signal(0.), overflows, heights }
+        let (stage_height, column_height) = (signal(0.), signal(0.));
+        // Half a point of slack, for the rounding of the two layouts.
+        let overflows = computed(move || column_height.get() > stage_height.get() + 0.5);
+        Self { frames: stored(Vec::new()), origin: stored(Points(0.)), active: signal(0), hover: signal(None), pinned: stored(None), width: signal(0.), overflows, stage_height, column_height }
     }
 }
 

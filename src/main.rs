@@ -2202,9 +2202,10 @@ impl Render for Shell {
             .bg(palette.window)
             .text_color(palette.foreground)
             // Without a native frame the window's edges would otherwise have no line. macOS still
-            // draws the sides and bottom; only its transparent titlebar leaves the top bare.
-            .when(cfg!(target_os = "macos"), |this| this.border_t_1())
-            .when(!cfg!(target_os = "macos"), |this| this.border_1())
+            // draws the sides and bottom; only its transparent titlebar leaves the top bare. Windows
+            // keeps its own frame, and a maximized or fullscreen window has no edge to mark.
+            .when(cfg!(target_os = "macos") && !window.is_fullscreen(), |this| this.border_t_1())
+            .when(cfg!(target_os = "linux") && !window.is_fullscreen() && !window.is_maximized(), |this| this.border_1())
             .border_color(palette.border)
             .child(self.child.clone())
     }
