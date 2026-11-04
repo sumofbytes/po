@@ -1599,7 +1599,7 @@ impl Reader {
             tree_cols,
             viewer_narrow: Rc::default(),
             browse: true,
-            side_open: true,
+            side_open: false,
             swapped: config::viewer_left(&settings).unwrap_or(false),
             agent_open: true,
             choices: config::load_choices(),
