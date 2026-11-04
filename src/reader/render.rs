@@ -59,9 +59,9 @@ impl Reader {
                 // What keeps its row: the one on screen, running or asking, or something it did
                 // within the last day. The rest is searched for, or folds under "more".
                 let active = |t: &Thread| listed(now, view.shown, t);
-                // Most recently active first. Only the active ones show; the rest fold under "more".
+                // Most recently used by the user first, not by the agent, so rows hold still while threads run. Only the active ones show; the rest fold under "more".
                 let mut recent: Vec<&Thread> = view.threads.iter().copied().filter(|t| (!t.blank || t.id == view.shown) && !self.waits_on_user(pid, t)).collect();
-                recent.sort_by_key(|t| (std::cmp::Reverse(t.active_at), std::cmp::Reverse(t.id)));
+                recent.sort_by_key(|t| (std::cmp::Reverse(t.used_at), std::cmp::Reverse(t.id)));
                 if searching && !project_hit(view) {
                     recent.retain(|t| self.matches_query(t, &query));
                 }

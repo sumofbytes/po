@@ -626,6 +626,7 @@ impl Reader {
         thread.saved_title = Some(saved.title).filter(|title| !title.is_empty());
         thread.blank = false;
         thread.active_at = saved.active_at;
+        thread.used_at = saved.active_at;
         thread.status = "asleep".into();
         thread
     }

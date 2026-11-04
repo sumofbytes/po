@@ -245,6 +245,7 @@ impl Reader {
         self.thread.last_error = None;
         self.thread.touched = Instant::now();
         self.thread.active_at = now_ms();
+        self.thread.used_at = self.thread.active_at;
         // The message that was last stops being so: it loses its bottom padding and folds its
         // finished runs of tool calls, so it is laid out again too.
         let was_last = self.thread.messages.len().saturating_sub(1);
