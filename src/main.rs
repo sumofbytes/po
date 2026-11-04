@@ -2201,6 +2201,11 @@ impl Render for Shell {
             .font_family(palette.font_family.clone())
             .bg(palette.window)
             .text_color(palette.foreground)
+            // Without a native frame the window's edges would otherwise have no line. macOS still
+            // draws the sides and bottom; only its transparent titlebar leaves the top bare.
+            .when(cfg!(target_os = "macos"), |this| this.border_t_1())
+            .when(!cfg!(target_os = "macos"), |this| this.border_1())
+            .border_color(palette.border)
             .child(self.child.clone())
     }
 }
