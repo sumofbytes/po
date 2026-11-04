@@ -473,10 +473,13 @@ impl Reader {
         let body = match (shown, shown_form, self.mode) {
             _ if showing_terminal.is_some() => {
                 let background = cx.global::<Palette>().background;
-                let (lead, trail) = body_controls(lead_controls);
-                nsh::agent::publish(nsh::agent::Snapshot { glass: cx.global::<Palette>().glass.is_some(), title: "Terminal".into(), lead, trail, body: nsh::agent::Body::Bare });
-                let header = div().flex_none().h(gpui::rems(2.75)).child(self.agent_pane.clone());
-                div().size_full().flex().flex_col().bg(background).child(header).child(div().flex_1().min_h_0().children(showing_terminal)).into_any_element()
+                // The tabs, when there are any, are its header; otherwise it has one of its own.
+                let header = (!has_tabs).then(|| {
+                    let (lead, trail) = body_controls(lead_controls);
+                    nsh::agent::publish(nsh::agent::Snapshot { glass: cx.global::<Palette>().glass.is_some(), title: "Terminal".into(), lead, trail, body: nsh::agent::Body::Bare });
+                    div().flex_none().h(HEADER_HEIGHT).child(self.agent_pane.clone())
+                });
+                div().size_full().flex().flex_col().bg(background).children(header).child(div().flex_1().min_h_0().children(showing_terminal)).into_any_element()
             }
             _ if explorer_only => {
                 let background = cx.global::<Palette>().background;

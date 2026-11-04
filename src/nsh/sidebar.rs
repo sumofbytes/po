@@ -551,6 +551,27 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_thread_is_marked_with_a_cross() {
+        let mut guard = super::super::bus::lock();
+        let _commands = guard.as_mut().expect("the channel");
+        let project = |mark| Project {
+            id: 1,
+            name: "po".into(),
+            active: true,
+            collapsed: false,
+            closable: true,
+            threads: vec![thread(1, 10, "Port the sidebar", mark, true)],
+            fold: None,
+        };
+        publish(Snapshot { projects: vec![project(Mark::Failed)], ..Snapshot::default() });
+        let mut app = start();
+        assert!(app.shows("×"), "{:?}", app.screen().texts());
+        publish(Snapshot { projects: vec![project(Mark::Idle)], ..Snapshot::default() });
+        app.wait(std::time::Duration::from_millis(100)).unwrap();
+        assert!(!app.shows("×"), "{:?}", app.screen().texts());
+    }
+
+    #[test]
     fn the_sidebar_draws_its_snapshot_and_reports_what_is_pressed() {
         let mut guard = super::super::bus::lock();
         let commands = guard.as_mut().expect("the channel");

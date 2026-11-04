@@ -59,8 +59,6 @@ use gpui::{
 
 gpui::actions!(po, [ToggleTools, ToggleThoughts, ToggleLeft, ToggleRight, ShowSource, ShowChanges, ShowChat, SwapPanes, ShowHistory, ToggleSplit, ToggleRendered, NewThread, OpenProject, ShowFinder, ToggleFocus, ShowSettings, CloseSettings, CloseWindow, ToggleTerminal]);
 
-/// The id the viewer's tabs know the terminal by.
-
 const SKIP: [&str; 5] = ["target", "node_modules", "dist", "build", "__pycache__"];
 const MAX_FILES: usize = 5000;
 
@@ -2208,6 +2206,8 @@ const TITLEBAR_HEIGHT: Pixels = px(32.0);
 
 /// Height of the row holding the viewer's tabs.
 const TABS_HEIGHT: gpui::Rems = rems(2.5);
+/// The height of a pane's header, as [`nsh::header_height`] says it.
+const HEADER_HEIGHT: gpui::Rems = rems(2.75);
 
 /// A shortcut on the platform's main modifier: Cmd on macOS, Ctrl elsewhere. gpui's
 /// `KeyBinding::new` no longer reads `secondary-` (it panics, since only `KeyBinding::load` knows

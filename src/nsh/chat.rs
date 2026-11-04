@@ -2225,6 +2225,21 @@ mod tests {
     }
 
     #[test]
+    fn the_header_buttons_pick_the_files_the_changes_and_the_terminal() {
+        let mut guard = crate::nsh::bus::lock();
+        let commands = guard.as_mut().expect("the channel");
+        let mut app = start(Snapshot { place: Place::Changes, ..Snapshot::default() });
+        for (button, cmd) in [("label:Files (Ctrl+1)", Cmd::Show(false)), ("label:Changes (Ctrl+2)", Cmd::Show(true)), ("label:Terminal (Ctrl+`)", Cmd::Terminal)] {
+            app.press(button).unwrap();
+            assert_eq!(drain(&mut app, commands), [Bus::Chat(cmd)], "{button}");
+        }
+        // Not while the picker of earlier sessions is open.
+        publish(Snapshot { picking: Some(Picking::Sessions(vec![])), ..Snapshot::default() });
+        app.wait(std::time::Duration::from_millis(100)).unwrap();
+        assert!(app.press("label:Files (Ctrl+1)").is_err());
+    }
+
+    #[test]
     fn the_picker_names_what_was_closed_lately_and_resumes_it_by_its_session() {
         let mut guard = crate::nsh::bus::lock();
         let commands = guard.as_mut().expect("the channel");
