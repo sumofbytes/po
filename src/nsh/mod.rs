@@ -423,9 +423,10 @@ pub fn tooltip(label: impl IntoReactive<SharedString>) -> Text {
         .py(Points(4.))
 }
 
-/// A row's control that only shows while the pointer is on the row.
+/// A row's control that only shows while the pointer is on the row, fading in and out on the
+/// curve of [`smooth`] (its colours still do too).
 pub fn on_hover(control: View) -> View {
-    control.opacity(0.).group_hover(|s| s.opacity(1.))
+    control.transition().duration(220.).ease_out().opacity(0.).group_hover(|s| s.opacity(1.))
 }
 
 /// A small ghost button with an icon.

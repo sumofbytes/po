@@ -2,9 +2,10 @@
 //! as tall as the screen says it needs (as far as the app's window has room). The screen is only
 //! started while it is open, and dropping it stops its engine.
 use std::sync::LazyLock;
+use std::time::Duration;
 
 use gpui::{
-    Context, Entity, EventEmitter, Focusable as _, InteractiveElement as _, IntoElement, ParentElement as _, Render,
+    Animation, AnimationExt as _, Context, Entity, EventEmitter, Focusable as _, InteractiveElement as _, IntoElement, ParentElement as _, Render,
     StatefulInteractiveElement as _, Styled as _, Subscription, Task, Window, div, prelude::FluentBuilder as _, px,
 };
 use nsh_platform_gpui::{AppView, Root};
@@ -81,6 +82,12 @@ impl Overlay {
     }
 }
 
+/// The window opening: quick and settling softly, as the screens' own motion does. It is short of
+/// their 220ms since it stands between a key and the screen it opens; closing is at once.
+fn opening() -> Animation {
+    Animation::new(Duration::from_millis(150)).with_easing(gpui::ease_out_quint())
+}
+
 impl Render for Overlay {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.global::<Palette>();
@@ -122,8 +129,11 @@ impl Render for Overlay {
                     .shadow_2xl()
                     .bg(popover)
                     .overflow_hidden()
-                    .children(self.view.as_ref().map(|(view, _)| view.clone())),
+                    .children(self.view.as_ref().map(|(view, _)| view.clone()))
+                    // It settles into place from a little above as it fades in.
+                    .with_animation("overlay-settle", opening(), |card, t| card.mt(px(-6. * (1. - t)))),
             )
+            .with_animation("overlay-open", opening(), |backdrop, t| backdrop.opacity(t))
             .into_any_element()
     }
 }
