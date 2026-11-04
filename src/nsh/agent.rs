@@ -10,7 +10,7 @@ use tokio::sync::watch;
 use super::bus::{Cmd, send};
 use super::header::{Control, pane_header, status};
 use super::source::Shared;
-use super::{Colors, body, field_height, note, scale, text_base, text_sm};
+use super::{Colors, body, field_height, note, scale, text_base, text_sm, Smooth};
 use serde_json::{Map, Value};
 
 /// One field of the form on screen.
@@ -129,6 +129,7 @@ fn field_row(at: usize, field: &Field, drafts: Signal<Vec<String>>) -> View {
                     .py(scale::s1())
                     .rounded(Colors::radius())
                     .cursor_pointer()
+                    .smooth()
                     .hover(|s| s.bg(Colors::hover()))
                     .style_when(picked, |s| s.bg(Colors::selected()))
                     .on_press(move || drafts.update(|values| values[at] = selected.clone()))

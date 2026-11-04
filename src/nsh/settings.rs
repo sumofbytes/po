@@ -6,7 +6,7 @@ use nsh_core::prelude::*;
 
 use super::bus::{Cmd, send};
 use super::overlay::{self, Height};
-use super::{Colors, body, button, caption, field, field_height, scale, text_xs};
+use super::{Colors, body, button, caption, field, field_height, scale, text_xs, Smooth};
 use crate::schemes;
 use crate::settings::{AgentForm, Form};
 
@@ -59,13 +59,20 @@ fn row(label: &'static str, hint: &'static str, control: impl IntoElement) -> Vi
 /// An on / off switch, which says which in its label.
 fn switch(on: Signal<bool>, label: &'static str) -> View {
     let state = move || format!("{label}, {}", if on.get() { "on" } else { "off" });
-    let knob = super::smooth(view())
+    // The knob slides across rather than jumping to the other end: the track's inner width less
+    // its own, from the same steps as the track, since each is snapped to whole pixels on its own.
+    let travel = scale::s8() - scale::s0_5() * 2. - scale::s4();
+    let knob = view()
         .w(scale::s4())
         .h(scale::s4())
         .flex_none()
         .rounded(super::pill())
         .bg(Colors::popover())
-        .style_when(move || on.get(), |s| s.bg(Colors::primary_foreground()));
+        .style_when(move || on.get(), |s| s.bg(Colors::primary_foreground()))
+        .translate_x(move || if on.get() { travel } else { Points(0.) })
+        .transition()
+        .duration(super::MOTION_MS)
+        .ease_out();
     let track = super::smooth(view())
         .role(AccessibilityRole::Switch)
         .label(state)
@@ -78,7 +85,7 @@ fn switch(on: Signal<bool>, label: &'static str) -> View {
         .rounded(super::pill())
         .cursor_pointer()
         .bg(Colors::input_border())
-        .style_when(move || on.get(), |s| s.bg(Colors::primary()).justify_end())
+        .style_when(move || on.get(), |s| s.bg(Colors::primary()))
         .on_press(move || on.update(|on| *on = !*on))
         .child(knob);
     view().flex_row().justify_end().child(track)
@@ -95,6 +102,7 @@ fn choice(first: Signal<bool>, labels: (&'static str, &'static str)) -> View {
             .rounded(super::pill())
             .cursor_pointer()
             .style_when(move || first.get() == value, |s| s.bg(Colors::selected()))
+            .smooth()
             .hover(|s| s.bg(Colors::hover()))
             .on_press(move || first.set(value))
             .child(body(name))
@@ -252,6 +260,7 @@ pub fn Settings() -> impl IntoElement {
                                             .py(scale::s1())
                                             .rounded(Colors::radius())
                                             .cursor_pointer()
+                                            .smooth()
                                             .hover(|s| s.bg(Colors::hover()))
                                             .on_press(move || theme.set(name.to_string()))
                                             .child(body(name))

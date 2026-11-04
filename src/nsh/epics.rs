@@ -3,7 +3,7 @@
 use nsh_core::prelude::*;
 
 use super::issues::{State, Page, boxed, chip, delete_button, due_hint, issue_row, legend, line_input, text_area};
-use super::{Colors, caption, icon, icon_button, note, scale};
+use super::{Colors, caption, icon, icon_button, note, scale, Smooth};
 use crate::issues::shared;
 use crate::issues::{EpicStatus, Progress};
 use crate::date::{Date, due_label, parse_due, today};
@@ -114,6 +114,7 @@ pub fn epics_page(state: State) -> View {
                                 .px(scale::s2_5())
                                 .rounded(Colors::radius())
                                 .cursor_pointer()
+                                .smooth()
                                 .hover(|s| s.bg(Colors::hover()))
                                 .on_press(move || state.open_epic(&id))
                                 .child(icon(IconName::Layers, scale::s3(), Colors::muted()))

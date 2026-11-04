@@ -713,6 +713,7 @@ fn tool_row(message: usize, at: usize, tool: &Tool) -> AnyElement {
                         .py(scale::s0_5())
                         .rounded(Colors::radius())
                         .cursor_pointer()
+                        .smooth()
                         .hover(|s| s.bg(Colors::hover()))
                         .on_press(move || tell(Cmd::Open(path.clone())))
                         .child(icon(IconName::FileText, STEP_ICON, Colors::muted()))
@@ -725,6 +726,7 @@ fn tool_row(message: usize, at: usize, tool: &Tool) -> AnyElement {
                         .py(scale::s0_5())
                         .rounded(Colors::radius())
                         .cursor_pointer()
+                        .smooth()
                         .hover(|s| s.bg(Colors::hover()))
                         .on_press(move || tell(Cmd::ToggleTool { message, block: at }))
                         .child(trail_slot(icon(if tool.open { IconName::ChevronDown } else { IconName::ChevronRight }, STEP_ICON, Colors::muted()))),
@@ -951,6 +953,7 @@ fn approve_row(message: usize, at: usize, question: &str, lines: &[String], answ
                             .cursor_pointer()
                             .border_1()
                             .border_color(Colors::input_border())
+                            .smooth()
                             .hover(|s| s.bg(Colors::hover()))
                             .on_press(move || tell(Cmd::Approve { message, block: at, yes: false }))
                             .child(text("Leave out").selectable(false).sized(text_sm()).text_color(Colors::foreground())),
@@ -1402,6 +1405,7 @@ fn pictures_row(pictures: &[Picture]) -> AnyElement {
                                 .border_1()
                                 .border_color(super::hairline())
                                 .cursor_pointer()
+                                .smooth()
                                 .hover(|s| s.bg(Colors::hover()))
                                 .on_press(move || tell(Cmd::Detach(at)))
                                 .child(icon(IconName::Close, scale::s2_5(), Colors::muted())),
@@ -1458,6 +1462,7 @@ fn queue_row(queued: Queued) -> AnyElement {
                 .p(scale::s0_5())
                 .rounded(super::pill())
                 .cursor_pointer()
+                .smooth()
                 .hover(|s| s.bg(Colors::hover()))
                 .on_press(move || tell(Cmd::Recall(queued.at)))
                 .child(icon(IconName::Pencil, scale::s2_5(), Colors::muted())),
@@ -1483,6 +1488,7 @@ fn note_row(note: &str) -> AnyElement {
                 .p(scale::s0_5())
                 .rounded(super::pill())
                 .cursor_pointer()
+                .smooth()
                 .hover(|s| s.bg(Colors::hover()))
                 .on_press(|| tell(Cmd::DismissNote))
                 .child(icon(IconName::Close, scale::s2_5(), Colors::muted())),
@@ -1559,6 +1565,7 @@ fn picker(picking: &Picking) -> AnyElement {
                         .py(scale::s1_5())
                         .rounded(Colors::radius())
                         .cursor_pointer()
+                        .smooth()
                         .hover(|s| s.bg(Colors::hover()))
                         .on_press(move || tell(Cmd::Resume(id.clone())))
                         .child(text(label).flex_1().min_w_0().number_of_lines(1).sized(text_sm()).text_color(Colors::foreground()))
@@ -1593,6 +1600,7 @@ fn picker(picking: &Picking) -> AnyElement {
                         .p(scale::s0_5())
                         .rounded(super::pill())
                         .cursor_pointer()
+                        .smooth()
                         .hover(|s| s.bg(Colors::hover()))
                         .on_press(|| tell(Cmd::ClosePicker))
                         .child(icon(IconName::Close, scale::s2_5(), Colors::muted())),
@@ -1649,6 +1657,7 @@ fn setup(snap: &Snapshot) -> AnyElement {
                 .border_color(Colors::input_border())
                 .cursor_pointer()
                 .style_when(move || isolate, |s| s.bg(Colors::hover()).border_color(Colors::primary()))
+                .smooth()
                 .hover(|s| s.bg(Colors::hover()))
                 .tooltip(tooltip(tip))
                 .on_press(move || tell(Cmd::Isolate(!isolate)))
@@ -1733,6 +1742,7 @@ fn steer_button(steer: bool, draft: Signal<String>, has_pictures: bool) -> AnyEl
         .border_color(Colors::input_border())
         .cursor_pointer()
         .style_when(move || typed.get().trim().is_empty() && !has_pictures, |s| s.opacity(crate::theme::tokens::DISABLED))
+        .smooth()
         .hover(|s| s.bg(Colors::hover()))
         .tooltip(tooltip(tip))
         .on_press(move || {

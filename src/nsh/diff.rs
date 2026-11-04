@@ -10,7 +10,7 @@ use tokio::sync::watch;
 use super::bus::{Cmd, send};
 use super::header::{Control, pane_header};
 use super::source::Shared;
-use super::{Colors, note, scale, small, text_xs};
+use super::{Colors, note, scale, small, text_xs, Smooth};
 
 #[derive(Clone, PartialEq, Debug)]
 pub enum Body {
@@ -72,6 +72,7 @@ fn layout_button(label: &'static str, split: bool, current: Signal<Snapshot>) ->
         .rounded(Colors::radius())
         .cursor_pointer()
         .tooltip(super::tooltip("Toggle inline/split (Ctrl+\\)"))
+        .smooth()
         .hover(|s| s.bg(Colors::hover()))
         .style_when(selected, |s| s.bg(Colors::selected()))
         .on_press(move || send(Cmd::SetSplit(split)))
