@@ -806,6 +806,7 @@ fn span(took: std::time::Duration) -> String {
 
 /// A stretch of the agent's work, folded to one row: what is in it and how it went; a press on
 /// the row folds or unfolds it.
+#[allow(clippy::too_many_arguments)]
 fn run_row(message: usize, at: usize, thoughts: usize, calls: usize, failed: usize, phase: Phase, folded: bool, task: Option<&str>, took: Option<std::time::Duration>, latest: Option<&str>, kinds: &[(Kind, usize)], edits: &[String]) -> AnyElement {
     // The task the work is towards, when the plan names one; else the work itself: the call it
     // is at while it goes, how long it took once it is done.
