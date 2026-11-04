@@ -391,6 +391,10 @@ impl Reader {
             Cmd::ToggleIssues => self.toggle_issues(window, cx),
             Cmd::CloseIssues => self.hide_issues(window, cx),
             Cmd::WorkOnIssue(number) => self.work_on_issue(number, window, cx),
+            Cmd::DismissStatus => {
+                self.worktree_status = None;
+                cx.notify();
+            }
             Cmd::ToggleLeft => self.toggle_left(cx),
             Cmd::ToggleRight => self.toggle_right(cx),
             Cmd::ToggleFocus => self.toggle_focus(cx),

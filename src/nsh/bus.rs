@@ -34,6 +34,8 @@ pub enum Cmd {
     CloseIssues,
     /// Start a thread in a worktree on an issue.
     WorkOnIssue(u64),
+    /// The line under the Projects header is put away.
+    DismissStatus,
     /// The window's own controls, which sit in the headers of the panes at its edges.
     ToggleLeft,
     ToggleRight,

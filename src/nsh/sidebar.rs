@@ -483,7 +483,15 @@ pub fn Sidebar() -> impl IntoElement {
                 ))
                 .child(dynamic(move || {
                     state.with(|s| s.status.clone()).map(|status| {
-                        view().px(space::gutter() + space::inset()).py(scale::s1()).max_h(leading(text_base()) * 4.).child(quiet(status))
+                        view()
+                            .flex_row()
+                            .items_start()
+                            .gap(scale::s1())
+                            .pl(space::gutter() + space::inset())
+                            .pr(space::gutter())
+                            .py(scale::s1())
+                            .child(view().flex_1().max_h(leading(text_base()) * 4.).child(quiet(status)))
+                            .child(icon_button(IconName::Close, scale::s3(), "Dismiss", || send(Cmd::DismissStatus)))
                     })
                 }))
                 .child(dynamic(move || state.with(|s| s.suggestions.clone()).iter().map(suggestion).collect::<Vec<_>>()))
@@ -590,6 +598,7 @@ mod tests {
                 Project { id: 2, name: "other".into(), active: false, collapsed: true, closable: true, threads: vec![], fold: None },
             ],
             suggestions: vec![Suggestion { id: 7, text: "“Fix the build” wants to open /tmp/x".into(), yes: "Open" }],
+            status: Some("Merged into main".into()),
             issues_open: false,
             issues: (2, 0),
             ..Snapshot::default()
@@ -622,6 +631,9 @@ mod tests {
         assert_eq!(next(&mut app), [Cmd::ToggleIssues]);
         app.press("label:Add a project: open a folder (Ctrl+Shift+O)").unwrap();
         assert_eq!(next(&mut app), [Cmd::AddProject]);
+        assert!(app.shows("Merged into main"), "{:?}", app.screen().texts());
+        app.press("label:Dismiss").unwrap();
+        assert_eq!(next(&mut app), [Cmd::DismissStatus]);
         app.hover("text:Old idea").unwrap();
         app.press("id:agent-thread-11 >> label:Close thread").unwrap();
         assert_eq!(next(&mut app), [Cmd::CloseThread(1, 11)]);
