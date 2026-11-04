@@ -50,6 +50,16 @@ pub fn toggle_button(name: IconName, tip: &'static str, selected: bool, on_press
 /// [`toggle_button`], with the fill of its selected state optional: the window's own controls say
 /// they are on in their icon alone, as a fill that stays on the bar is noise there.
 fn ghost_button(name: IconName, tip: &'static str, selected: bool, filled: bool, on_press: impl Fn() + 'static) -> View {
+    icon_button(name, tip, selected, filled, scale::s3_5(), Colors::muted(), on_press)
+}
+
+/// A ghost icon button with the sidebar rows' icon size (`s4`) in full strength: the
+/// conversation's own controls, where the four Places stand out beside the statuses.
+pub fn place_button(name: IconName, tip: &'static str, selected: bool, on_press: impl Fn() + 'static) -> View {
+    icon_button(name, tip, selected, true, scale::s4(), Colors::foreground(), on_press)
+}
+
+fn icon_button(name: IconName, tip: &'static str, selected: bool, filled: bool, size: Points, tint: impl Fn() -> AdaptiveColor + Copy + 'static, on_press: impl Fn() + 'static) -> View {
     let b = super::smooth(view())
         .role(AccessibilityRole::Button)
         .label(tip)
@@ -59,7 +69,7 @@ fn ghost_button(name: IconName, tip: &'static str, selected: bool, filled: bool,
         .cursor_pointer()
         .tooltip(tooltip(tip))
         .on_press(on_press)
-        .child(icon(name, scale::s3_5(), move || if selected { Colors::foreground()() } else { Colors::muted()() }));
+        .child(icon(name, size, move || if selected { Colors::foreground()() } else { tint() }));
     if selected && filled { b.bg(Colors::selected()) } else { b.hover(|s| s.bg(Colors::hover())) }
 }
 
