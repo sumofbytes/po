@@ -19,6 +19,8 @@ pub enum Mark {
     Running,
     /// Waiting for an answer to a permission request.
     Asking,
+    /// Its agent failed.
+    Failed,
 }
 
 #[derive(Clone, PartialEq, Debug)]
@@ -144,13 +146,14 @@ fn lead(content: impl IntoElement) -> View {
 }
 
 /// A thread's state, in the lead column of its row: a dot while it runs or has
-/// news, a ! when it asks, a quiet ring when idle.
+/// news, a ! when it asks, a × when it failed, a quiet ring when idle.
 fn mark(mark: Mark) -> View {
     let size = scale::s1_5() + scale::s0_5();
     let dot = |color: fn() -> AdaptiveColor| view().w(size).h(size).rounded(super::pill()).bg(color);
     view().flex_none().items_center().justify_center().child(match mark {
         Mark::Idle => view().w(size).h(size).rounded(super::pill()).border_1().border_color(Colors::muted()).opacity(crate::theme::tokens::DIM).into_element(),
         Mark::Asking => text("!").text_size(text_base()).font_weight(FontWeight::BOLD).text_color(Colors::warning()).into_element(),
+        Mark::Failed => text("×").text_size(text_base()).font_weight(FontWeight::BOLD).text_color(Colors::danger()).into_element(),
         Mark::Running => dot(|| Colors::primary()()).into_element(),
         Mark::Unread => dot(|| Colors::added()()).into_element(),
     })
@@ -480,7 +483,15 @@ pub fn Sidebar() -> impl IntoElement {
                 ))
                 .child(dynamic(move || {
                     state.with(|s| s.status.clone()).map(|status| {
-                        view().px(space::gutter() + space::inset()).py(scale::s1()).max_h(leading(text_base()) * 4.).child(quiet(status))
+                        view()
+                            .flex_row()
+                            .items_start()
+                            .gap(scale::s1())
+                            .pl(space::gutter() + space::inset())
+                            .pr(space::gutter())
+                            .py(scale::s1())
+                            .child(view().flex_1().max_h(leading(text_base()) * 4.).child(quiet(status)))
+                            .child(icon_button(IconName::Close, scale::s3(), "Dismiss", || send(Cmd::DismissStatus)))
                     })
                 }))
                 .child(dynamic(move || state.with(|s| s.suggestions.clone()).iter().map(suggestion).collect::<Vec<_>>()))
@@ -548,6 +559,27 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_thread_is_marked_with_a_cross() {
+        let mut guard = super::super::bus::lock();
+        let _commands = guard.as_mut().expect("the channel");
+        let project = |mark| Project {
+            id: 1,
+            name: "po".into(),
+            active: true,
+            collapsed: false,
+            closable: true,
+            threads: vec![thread(1, 10, "Port the sidebar", mark, true)],
+            fold: None,
+        };
+        publish(Snapshot { projects: vec![project(Mark::Failed)], ..Snapshot::default() });
+        let mut app = start();
+        assert!(app.shows("×"), "{:?}", app.screen().texts());
+        publish(Snapshot { projects: vec![project(Mark::Idle)], ..Snapshot::default() });
+        app.wait(std::time::Duration::from_millis(100)).unwrap();
+        assert!(!app.shows("×"), "{:?}", app.screen().texts());
+    }
+
+    #[test]
     fn the_sidebar_draws_its_snapshot_and_reports_what_is_pressed() {
         let mut guard = super::super::bus::lock();
         let commands = guard.as_mut().expect("the channel");
@@ -566,6 +598,7 @@ mod tests {
                 Project { id: 2, name: "other".into(), active: false, collapsed: true, closable: true, threads: vec![], fold: None },
             ],
             suggestions: vec![Suggestion { id: 7, text: "“Fix the build” wants to open /tmp/x".into(), yes: "Open" }],
+            status: Some("Merged into main".into()),
             issues_open: false,
             issues: (2, 0),
             ..Snapshot::default()
@@ -598,6 +631,9 @@ mod tests {
         assert_eq!(next(&mut app), [Cmd::ToggleIssues]);
         app.press("label:Add a project: open a folder (Ctrl+Shift+O)").unwrap();
         assert_eq!(next(&mut app), [Cmd::AddProject]);
+        assert!(app.shows("Merged into main"), "{:?}", app.screen().texts());
+        app.press("label:Dismiss").unwrap();
+        assert_eq!(next(&mut app), [Cmd::DismissStatus]);
         app.hover("text:Old idea").unwrap();
         app.press("id:agent-thread-11 >> label:Close thread").unwrap();
         assert_eq!(next(&mut app), [Cmd::CloseThread(1, 11)]);

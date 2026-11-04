@@ -202,16 +202,15 @@ pub enum Picking {
     Loading,
 }
 
-/// What the header's status icon says.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Tone {
-    /// Ready, or asleep.
-    Idle,
-    /// Starting, or a turn going on.
-    Working,
-    /// Waiting on the user.
-    Attention,
-    Failed,
+/// What the viewer shows, for the header's buttons to say which is on.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Place {
+    /// The viewer is closed, or shows something of the agent's.
+    #[default]
+    Elsewhere,
+    Files,
+    Changes,
+    Terminal,
 }
 
 #[derive(Clone, PartialEq, Debug, Default)]
@@ -222,8 +221,8 @@ pub struct Snapshot {
     pub trail: Vec<Control>,
     /// The status lines of the header's right, like `3 threads · 1 asking`.
     pub statuses: Vec<String>,
-    /// How the thread itself is doing, drawn as an icon; `None` before it has anything to say.
-    pub state: Option<(Tone, String)>,
+    /// What the viewer shows.
+    pub place: Place,
     /// Nothing on screen yet: the agent is picked below, and the thread starts when something
     /// is sent.
     pub blank: bool,
@@ -321,6 +320,10 @@ pub enum Cmd {
     Resume(String),
     /// The agent's sessions are asked for.
     History,
+    /// The files, or the changes (true), in the viewer.
+    Show(bool),
+    /// The terminal is shown, started if the project has none yet.
+    Terminal,
     /// The agent a new thread starts with.
     PickAgent(String),
     /// A setting of the session is changed.
@@ -486,37 +489,17 @@ fn status_line(line: String) -> View {
     view().flex_none().px(scale::s2()).py(scale::s1()).child(text(super::sentence(&line)).sized(text_sm()).text_color(Colors::muted()).number_of_lines(1))
 }
 
-/// The thread's state as an icon in the header's right, its words in the tooltip. Idle shows
-/// nothing, and the shapes differ so the state doesn't rest on color alone.
-fn status_icon(tone: Tone, text: &str) -> Option<View> {
-    let (name, color): (IconName, fn() -> AdaptiveColor) = match tone {
-        Tone::Idle => return None,
-        Tone::Working => (IconName::CircleHalf, || Colors::warning()()),
-        Tone::Attention => (IconName::CircleDot, || Colors::info()()),
-        Tone::Failed => (IconName::CircleX, || Colors::danger()()),
-    };
-    Some(
-        view()
-            .role(AccessibilityRole::Image)
-            .label(text.to_string())
-            .flex_none()
-            .p(scale::s1_5())
-            .tooltip(tooltip(text.to_string()))
-            .child(icon(name, scale::s3_5(), color)),
-    )
-}
-
-/// The pane header of the conversation: the title, the statuses, the history button, the Control
+/// The pane header of the conversation: the title, the statuses, the buttons for the files, the changes, the terminal and the history, the Control
 /// menu, and the window's own controls at the ends.
 fn pane(title: String, snap: &Snapshot) -> View {
     let mut right = view().flex_row().items_center().gap(scale::s1());
     for line in &snap.statuses {
         right = right.child(status_line(line.clone()));
     }
-    if let Some((tone, text)) = &snap.state {
-        right = right.child(status_icon(*tone, text));
-    }
     if snap.picking.is_none() {
+        right = right.child(super::header::toggle_button(IconName::FolderTree, "Files (Ctrl+1)", snap.place == Place::Files, || tell(Cmd::Show(false))));
+        right = right.child(super::header::toggle_button(IconName::Diff, "Changes (Ctrl+2)", snap.place == Place::Changes, || tell(Cmd::Show(true))));
+        right = right.child(super::header::toggle_button(IconName::Terminal, "Terminal (Ctrl+`)", snap.place == Place::Terminal, || tell(Cmd::Terminal)));
         right = right.child(super::header::toggle_button(IconName::History, "Resume an earlier session (Ctrl+Shift+H)", false, || tell(Cmd::History)));
     }
     // The Control menu, once the user has set what the thread's agent may do.
@@ -2239,6 +2222,21 @@ mod tests {
         assert_eq!(drain(&mut app, commands), [Bus::Chat(Cmd::ClosePicker)]);
         app.press("label:Dismiss").unwrap();
         assert_eq!(drain(&mut app, commands), [Bus::Chat(Cmd::DismissNote)]);
+    }
+
+    #[test]
+    fn the_header_buttons_pick_the_files_the_changes_and_the_terminal() {
+        let mut guard = crate::nsh::bus::lock();
+        let commands = guard.as_mut().expect("the channel");
+        let mut app = start(Snapshot { place: Place::Changes, ..Snapshot::default() });
+        for (button, cmd) in [("label:Files (Ctrl+1)", Cmd::Show(false)), ("label:Changes (Ctrl+2)", Cmd::Show(true)), ("label:Terminal (Ctrl+`)", Cmd::Terminal)] {
+            app.press(button).unwrap();
+            assert_eq!(drain(&mut app, commands), [Bus::Chat(cmd)], "{button}");
+        }
+        // Not while the picker of earlier sessions is open.
+        publish(Snapshot { picking: Some(Picking::Sessions(vec![])), ..Snapshot::default() });
+        app.wait(std::time::Duration::from_millis(100)).unwrap();
+        assert!(app.press("label:Files (Ctrl+1)").is_err());
     }
 
     #[test]
