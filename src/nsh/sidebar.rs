@@ -19,6 +19,8 @@ pub enum Mark {
     Running,
     /// Waiting for an answer to a permission request.
     Asking,
+    /// Its agent failed.
+    Failed,
 }
 
 #[derive(Clone, PartialEq, Debug)]
@@ -144,14 +146,17 @@ fn lead(content: impl IntoElement) -> View {
 }
 
 /// A thread's state, in the lead column of its row: a dot while it runs or has
-/// news, a ! when it asks, a quiet ring when idle.
-fn mark(mark: Mark) -> View {
+/// news, a ! when it asks, a × when it failed, a quiet ring when idle. The dot of a running
+/// thread breathes with `pulse`, which every row shares so they beat together and a rebuilt
+/// row doesn't restart it.
+fn mark(mark: Mark, pulse: AnimatedValue) -> View {
     let size = scale::s1_5() + scale::s0_5();
     let dot = |color: fn() -> AdaptiveColor| view().w(size).h(size).rounded(super::pill()).bg(color);
     view().flex_none().items_center().justify_center().child(match mark {
         Mark::Idle => view().w(size).h(size).rounded(super::pill()).border_1().border_color(Colors::muted()).opacity(crate::theme::tokens::DIM).into_element(),
         Mark::Asking => text("!").text_size(text_base()).font_weight(FontWeight::BOLD).text_color(Colors::warning()).into_element(),
-        Mark::Running => dot(|| Colors::primary()()).into_element(),
+        Mark::Failed => text("×").text_size(text_base()).font_weight(FontWeight::BOLD).text_color(Colors::danger()).into_element(),
+        Mark::Running => dot(|| Colors::primary()()).bind_opacity(&pulse).into_element(),
         Mark::Unread => dot(|| Colors::added()()).into_element(),
     })
 }
@@ -186,7 +191,7 @@ fn grant_badge() -> View {
 
 /// The row of a thread, its mark first, as a step in the transcript starts with its status. Its
 /// title is a step right of the name of the project above.
-fn thread_row(thread: &Thread, project: Option<&str>, close_tip: &'static str) -> View {
+fn thread_row(thread: &Thread, project: Option<&str>, close_tip: &'static str, pulse: AnimatedValue) -> View {
     let (pid, tid) = (thread.project, thread.id);
     let selected = thread.selected;
     let label = text(thread.label.clone())
@@ -206,7 +211,7 @@ fn thread_row(thread: &Thread, project: Option<&str>, close_tip: &'static str) -
             .child(quiet(project.to_string()).number_of_lines(1).flex_shrink(1.)),
         None => view().flex_1().flex_row().child(label.flex_1()),
     };
-    let row = side_row(Some(lead(mark(thread.mark))))
+    let row = side_row(Some(lead(mark(thread.mark, pulse))))
         .pr(space::inset())
         .h(space::tree())
         .test_id(&format!("agent-thread-{tid}"))
@@ -236,7 +241,7 @@ fn accent(name: &str) -> AdaptiveColor {
 }
 
 #[hotpath::measure]
-fn project_group(project: &Project) -> View {
+fn project_group(project: &Project, pulse: AnimatedValue) -> View {
     let pid = project.id;
     let tint = accent(&project.name);
     // With one of its threads selected, the highlight says where we are; the name steps back.
@@ -279,7 +284,7 @@ fn project_group(project: &Project) -> View {
             project
                 .threads
                 .iter()
-                .map(|thread| thread_row(thread, None, "Close thread"))
+                .map(|thread| thread_row(thread, None, "Close thread", pulse))
                 .collect::<Vec<_>>(),
         )
         .child(fold)
@@ -341,6 +346,24 @@ pub fn Sidebar() -> impl IntoElement {
         while snapshot.changed().await.is_ok() {
             let now = snapshot.borrow_and_update().clone();
             state.set(now);
+        }
+    });
+
+    // A slow breath for the dot of a running thread: one value for the whole sidebar. It plays only
+    // while a thread runs (an endless animation keeps the window redrawing), and not at all when
+    // the user asked for less motion.
+    let pulse = animated_value(1.);
+    let breath = Animation::keyframes(&pulse, [Keyframe::new(1.), Keyframe::new(0.3)], KeyframeTiming::new(1400.).easing(Easing::EaseInOut).infinite().direction(PlaybackDirection::Alternate));
+    // A memo, so a snapshot that changes nothing about it doesn't restart the breath.
+    let running = computed(move || {
+        state.with(|s| s.projects.iter().flat_map(|p| &p.threads).chain(s.waiting.iter().map(|w| &w.thread)).any(|t| t.mark == Mark::Running))
+    });
+    effect(move || {
+        if running.get() && !reduce_motion() {
+            breath.start();
+        } else {
+            breath.stop();
+            pulse.set(1.);
         }
     });
 
@@ -423,7 +446,7 @@ pub fn Sidebar() -> impl IntoElement {
                             .px(space::gutter())
                             .pt(space::list_top())
                             .pb(space::list_bottom())
-                            .child(waiting.iter().map(|item| thread_row(&item.thread, Some(&item.project), "Close thread")).collect::<Vec<_>>()),
+                            .child(waiting.iter().map(|item| thread_row(&item.thread, Some(&item.project), "Close thread", pulse)).collect::<Vec<_>>()),
                     ),
                 )
         })
@@ -438,7 +461,7 @@ pub fn Sidebar() -> impl IntoElement {
                 .px(space::gutter())
                 .pt(space::list_top())
                 .pb(space::list_bottom())
-                .child(projects.iter().map(project_group).collect::<Vec<_>>())
+                .child(projects.iter().map(|project| project_group(project, pulse)).collect::<Vec<_>>())
                 .child(empty.then(|| side_row(None).h(space::more()).child(quiet("No matches")))),
         )
     };
@@ -480,7 +503,15 @@ pub fn Sidebar() -> impl IntoElement {
                 ))
                 .child(dynamic(move || {
                     state.with(|s| s.status.clone()).map(|status| {
-                        view().px(space::gutter() + space::inset()).py(scale::s1()).max_h(leading(text_base()) * 4.).child(quiet(status))
+                        view()
+                            .flex_row()
+                            .items_start()
+                            .gap(scale::s1())
+                            .pl(space::gutter() + space::inset())
+                            .pr(space::gutter())
+                            .py(scale::s1())
+                            .child(view().flex_1().max_h(leading(text_base()) * 4.).child(quiet(status)))
+                            .child(icon_button(IconName::Close, scale::s3(), "Dismiss", || send(Cmd::DismissStatus)))
                     })
                 }))
                 .child(dynamic(move || state.with(|s| s.suggestions.clone()).iter().map(suggestion).collect::<Vec<_>>()))
@@ -548,6 +579,27 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_thread_is_marked_with_a_cross() {
+        let mut guard = super::super::bus::lock();
+        let _commands = guard.as_mut().expect("the channel");
+        let project = |mark| Project {
+            id: 1,
+            name: "po".into(),
+            active: true,
+            collapsed: false,
+            closable: true,
+            threads: vec![thread(1, 10, "Port the sidebar", mark, true)],
+            fold: None,
+        };
+        publish(Snapshot { projects: vec![project(Mark::Failed)], ..Snapshot::default() });
+        let mut app = start();
+        assert!(app.shows("×"), "{:?}", app.screen().texts());
+        publish(Snapshot { projects: vec![project(Mark::Idle)], ..Snapshot::default() });
+        app.wait(std::time::Duration::from_millis(100)).unwrap();
+        assert!(!app.shows("×"), "{:?}", app.screen().texts());
+    }
+
+    #[test]
     fn the_sidebar_draws_its_snapshot_and_reports_what_is_pressed() {
         let mut guard = super::super::bus::lock();
         let commands = guard.as_mut().expect("the channel");
@@ -566,6 +618,7 @@ mod tests {
                 Project { id: 2, name: "other".into(), active: false, collapsed: true, closable: true, threads: vec![], fold: None },
             ],
             suggestions: vec![Suggestion { id: 7, text: "“Fix the build” wants to open /tmp/x".into(), yes: "Open" }],
+            status: Some("Merged into main".into()),
             issues_open: false,
             issues: (2, 0),
             ..Snapshot::default()
@@ -598,6 +651,9 @@ mod tests {
         assert_eq!(next(&mut app), [Cmd::ToggleIssues]);
         app.press("label:Add a project: open a folder (Ctrl+Shift+O)").unwrap();
         assert_eq!(next(&mut app), [Cmd::AddProject]);
+        assert!(app.shows("Merged into main"), "{:?}", app.screen().texts());
+        app.press("label:Dismiss").unwrap();
+        assert_eq!(next(&mut app), [Cmd::DismissStatus]);
         app.hover("text:Old idea").unwrap();
         app.press("id:agent-thread-11 >> label:Close thread").unwrap();
         assert_eq!(next(&mut app), [Cmd::CloseThread(1, 11)]);

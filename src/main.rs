@@ -59,9 +59,6 @@ use gpui::{
 
 gpui::actions!(po, [ToggleTools, ToggleThoughts, ToggleLeft, ToggleRight, ShowSource, ShowChanges, ShowChat, SwapPanes, ShowHistory, ToggleSplit, ToggleRendered, NewThread, OpenProject, ShowFinder, ToggleFocus, ShowSettings, CloseSettings, CloseWindow, ToggleTerminal]);
 
-/// The id the viewer's tabs know the terminal by.
-const TERMINAL_TAB: &str = "po:terminal";
-
 const SKIP: [&str; 5] = ["target", "node_modules", "dist", "build", "__pycache__"];
 const MAX_FILES: usize = 5000;
 
@@ -657,6 +654,9 @@ struct Thread {
     /// When the thread last did anything, in milliseconds since the Unix epoch. Unlike
     /// `touched` it is saved, so the thread list keeps its order across restarts.
     active_at: u64,
+    /// When the user last sent this thread a message (or it was made), in milliseconds since the
+    /// Unix epoch. The sidebar orders by it, so a running thread doesn't jump about as it works.
+    used_at: u64,
     /// A first message waiting for the agent to be ready, already shown in the thread.
     pending: Option<Outgoing>,
     /// Start the thread in a git worktree of its own. Only asked before it has started.
@@ -853,6 +853,8 @@ enum Activity {
     Running,
     /// Waiting for an answer to a permission request.
     Asking,
+    /// Its agent failed, until something is sent again.
+    Failed,
 }
 
 impl Activity {
@@ -954,6 +956,7 @@ impl Thread {
             saved_title: None,
             touched: Instant::now(),
             active_at: now_ms(),
+            used_at: now_ms(),
             pending: None,
             isolate: false,
             blank: true,
@@ -998,6 +1001,8 @@ impl Thread {
             Activity::Asking
         } else if self.busy {
             Activity::Running
+        } else if self.failed {
+            Activity::Failed
         } else if self.unread {
             Activity::Unread
         } else {
@@ -2016,7 +2021,15 @@ impl Render for Reader {
         let focus = side_open && !agent_open;
         use nsh::header::Control;
         let controls = |lead: Vec<Control>, trail: Vec<Control>| *self.pane_controls.borrow_mut() = (lead, trail);
-        let trail_all = vec![Control::Focus(focus), Control::Viewer(side_open)];
+        let viewer = |on: bool| if swapped { Control::ViewerLeft(on) } else { Control::Viewer(on) };
+        let trail_all = vec![Control::Focus(focus), viewer(side_open)];
+        // The conversation's header has the buttons for the files, the changes and the terminal;
+        // with the conversation hidden the viewer's carry them.
+        let trail_focus = {
+            use nsh::chat::Place;
+            let place = self.place();
+            [vec![Control::Files(place == Place::Files), Control::Changes(place == Place::Changes), Control::Terminal(place == Place::Terminal)], trail_all.clone()].concat()
+        };
         // The viewer pane is only built where it shows: a pane nobody sees would publish over the
         // one that is.
         let hidden = || div().size_full().into_any_element();
@@ -2024,8 +2037,8 @@ impl Render for Reader {
             (self.issues.clone().into_any_element(), hidden())
         } else if !side_open {
             // Only the conversation shows, and the viewer's button waits on the side it opens.
-            let chat_lead = vec![Control::Sidebar(left_open), Control::Viewer(side_open)];
-            let chat_trail = vec![Control::Viewer(side_open)];
+            let chat_lead = vec![Control::Sidebar(left_open), viewer(side_open)];
+            let chat_trail = vec![viewer(side_open)];
             let mut chat = |lead: Vec<Control>, trail: Vec<Control>| floating(self.chat_pane(lead, trail, cx), cx);
             if swapped {
                 (chat(chat_lead, vec![]), hidden())
@@ -2033,7 +2046,7 @@ impl Render for Reader {
                 (chat(vec![Control::Sidebar(left_open)], chat_trail), hidden())
             }
         } else if focus {
-            controls(vec![Control::Sidebar(left_open)], trail_all);
+            controls(vec![Control::Sidebar(left_open)], trail_focus);
             (self.pane(cx), hidden())
         } else if swapped {
             controls(vec![Control::Sidebar(left_open)], trail_all);
@@ -2197,6 +2210,8 @@ const TITLEBAR_HEIGHT: Pixels = px(32.0);
 
 /// Height of the row holding the viewer's tabs.
 const TABS_HEIGHT: gpui::Rems = rems(2.5);
+/// The height of a pane's header, as [`nsh::header_height`] says it.
+const HEADER_HEIGHT: gpui::Rems = rems(2.75);
 
 /// A shortcut on the platform's main modifier: Cmd on macOS, Ctrl elsewhere. gpui's
 /// `KeyBinding::new` no longer reads `secondary-` (it panics, since only `KeyBinding::load` knows

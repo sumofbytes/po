@@ -268,8 +268,12 @@ pub fn mono_size() -> f32 {
     nsh_base::theme().number("mono-size").unwrap_or(13.)
 }
 
-/// Changes of colour on `v` ease out over 220ms: the one motion curve of the screens, a quick start
-/// that settles softly, so nothing snaps from one state to the next.
+/// How long the screens' changes take, on their one curve: an ease out, a quick start that settles
+/// softly.
+pub const MOTION_MS: f32 = 220.;
+
+/// Changes of colour on `v` ease out over [`MOTION_MS`]: the one motion curve of the screens, so
+/// nothing snaps from one state to the next.
 pub fn smooth(v: View) -> View {
     v.smooth()
 }
@@ -281,7 +285,7 @@ pub trait Smooth {
 
 impl Smooth for View {
     fn smooth(self) -> Self {
-        self.transition_colors().duration(220.).ease_out()
+        self.transition_colors().duration(MOTION_MS).ease_out()
     }
 }
 
@@ -423,9 +427,10 @@ pub fn tooltip(label: impl IntoReactive<SharedString>) -> Text {
         .py(Points(4.))
 }
 
-/// A row's control that only shows while the pointer is on the row.
+/// A row's control that only shows while the pointer is on the row, fading in and out on the
+/// curve of [`smooth`] (its colours still do too).
 pub fn on_hover(control: View) -> View {
-    control.opacity(0.).group_hover(|s| s.opacity(1.))
+    control.transition().duration(MOTION_MS).ease_out().opacity(0.).group_hover(|s| s.opacity(1.))
 }
 
 /// A small ghost button with an icon.
@@ -438,7 +443,7 @@ pub fn icon_button(name: IconName, size: Points, label: &'static str, on_press: 
         .rounded(Colors::radius())
         .cursor_pointer()
         .transition_colors()
-        .duration(220.)
+        .duration(MOTION_MS)
         .ease_out()
         .hover(|s| s.bg(Colors::hover()))
         .tooltip(tooltip(label))
@@ -457,7 +462,7 @@ pub fn button(label: &'static str, primary: bool, on_press: impl Fn() + 'static)
         .rounded(pill())
         .cursor_pointer()
         .transition_colors()
-        .duration(220.)
+        .duration(MOTION_MS)
         .ease_out()
         .on_press(on_press)
         .child(text(label).text_size(text_sm()).text_color(move || if primary { Colors::primary_foreground()() } else { Colors::foreground()() }));
@@ -498,7 +503,7 @@ pub fn field_with(id: &str, value: Signal<String>, placeholder: &'static str, on
         .border_color(Colors::input_border())
         .bg(Colors::input_background())
         .transition_colors()
-        .duration(220.)
+        .duration(MOTION_MS)
         .ease_out()
         .child(input)
 }

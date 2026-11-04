@@ -443,6 +443,7 @@ pub fn icon_chip(name: IconName, tint: AdaptiveColor, label: impl Into<String>, 
         .border_1()
         .border_color(super::hairline())
         .cursor_pointer()
+        .smooth()
         .hover(|s| s.bg(Colors::hover()))
         .style_when(move || on(), |s| s.bg(Colors::selected()))
         .on_press(on_press)
@@ -928,7 +929,7 @@ fn property(label: &'static str, body: Vec<View>) -> View {
 fn issue_body(state: State, number: u64) -> AnyElement {
     let key = state.read(|data| data.tracker.key(number));
     let sections = move || {
-        let Some(issue) = state.read(|data| data.tracker.issue(number).cloned()) else { return view() };
+        let Some(issue) = state.data.with(|data| data.tracker.issue(number).cloned()) else { return view() };
         let status = issue.status;
         let priority = issue.priority;
         let statuses: Vec<View> = Status::ALL.iter().map(|s| { let s = *s; icon_chip(status_icon(s), status_tint(s), s.name(), move || status == s, move || state.set_status(number, s)) }).collect();
@@ -939,7 +940,7 @@ fn issue_body(state: State, number: u64) -> AnyElement {
                 icon_chip(IconName::Signal, priority_tint(p), p.name(), move || priority == p, move || { shared::change(|t, now| t.update(number, now, |i| i.priority = p)); })
             })
             .collect();
-        let (labels, epics, milestones, links, subs) = state.read(|data| {
+        let (labels, epics, milestones, links, subs) = state.data.with(|data| {
             let labels: Vec<View> = data
                 .tracker
                 .config
@@ -991,6 +992,7 @@ fn issue_body(state: State, number: u64) -> AnyElement {
                         .px(scale::s2())
                         .rounded(Colors::radius())
                         .cursor_pointer()
+                        .smooth()
                         .hover(|st| st.bg(Colors::hover()))
                         .on_press(move || state.open_issue(n))
                         .child(icon(status_icon(s), scale::s3(), move || status_tint(s)))

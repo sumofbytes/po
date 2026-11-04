@@ -10,7 +10,7 @@ use tokio::sync::watch;
 use super::bus::{Cmd, send};
 use super::header::{Control, pane_header, status};
 use super::source::Shared;
-use super::{Colors, body, field_height, note, scale, text_base, text_sm};
+use super::{Colors, body, field_height, note, scale, text_base, text_sm, Smooth};
 use serde_json::{Map, Value};
 
 /// One field of the form on screen.
@@ -29,6 +29,8 @@ pub struct Field {
 /// form change, which is what a replaced form means.
 #[derive(Clone, PartialEq, Debug)]
 pub enum Body {
+    /// Only the header: the terminal, which the app draws below it.
+    Bare,
     Markdown(Shared),
     Form { id: String, fields: Vec<Field>, submit: String, answered: bool, doc: Option<Shared> },
 }
@@ -127,6 +129,7 @@ fn field_row(at: usize, field: &Field, drafts: Signal<Vec<String>>) -> View {
                     .py(scale::s1())
                     .rounded(Colors::radius())
                     .cursor_pointer()
+                    .smooth()
                     .hover(|s| s.bg(Colors::hover()))
                     .style_when(picked, |s| s.bg(Colors::selected()))
                     .on_press(move || drafts.update(|values| values[at] = selected.clone()))
@@ -192,12 +195,17 @@ pub fn Agent() -> impl IntoElement {
     };
 
     let header = move || {
-        let (title, lead, trail, glass, form) = state.with(|s| (s.title.clone(), s.lead.clone(), s.trail.clone(), s.glass, matches!(s.body, Body::Form { .. })));
-        let note = if form { "a form from the agent" } else { "from the agent" };
+        let (title, lead, trail, glass, form, bare) = state.with(|s| (s.title.clone(), s.lead.clone(), s.trail.clone(), s.glass, matches!(s.body, Body::Form { .. }), s.body == Body::Bare));
+        let note = match (form, bare) {
+            (_, true) => "",
+            (true, _) => "a form from the agent",
+            _ => "from the agent",
+        };
         pane_header(title, status(note), &lead, &trail, glass)
     };
 
     let body = move || match state.with(|s| s.body.clone()) {
+        Body::Bare => view().into_element(),
         Body::Markdown(shared) => scroll()
             .flex_1()
             .child(

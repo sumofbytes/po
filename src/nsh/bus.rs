@@ -34,21 +34,23 @@ pub enum Cmd {
     CloseIssues,
     /// Start a thread in a worktree on an issue.
     WorkOnIssue(u64),
+    /// The line under the Projects header is put away.
+    DismissStatus,
     /// The window's own controls, which sit in the headers of the panes at its edges.
     ToggleLeft,
     ToggleRight,
     ToggleFocus,
+    /// The files, or the changes (true), in the viewer; or the terminal.
+    Show(bool),
+    Terminal,
     /// A narrow viewer pane shows the explorer (true) or the file.
     Browse(bool),
     /// Markdown shown rendered, or as its source.
     ToggleRendered,
     OpenUrl(String),
-    /// A tab of the viewer: the files (or changes), an agent's view or form, closing one.
-    ShowHome,
+    /// A tab of the viewer: an agent's view or form, closing one.
     ShowView(String),
     CloseView(String),
-    /// The explorer's mode switch: the changes (true) or the files.
-    SetMode(bool),
     /// A row of the explorer's tree was pressed: a file to open, or a folder to flip.
     TreeClick(String),
     /// An arrow key in the explorer's tree.

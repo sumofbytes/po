@@ -30,6 +30,7 @@ impl Reader {
                 Activity::Unread => side::Mark::Unread,
                 Activity::Running => side::Mark::Running,
                 Activity::Asking => side::Mark::Asking,
+                Activity::Failed => side::Mark::Failed,
             },
             selected: (pid, thread.id) == (active_project, active_thread),
             controlled: self.grants.get(&thread.id).is_some_and(|grant| *grant != command::Grant::initial() && *grant != command::Grant::default()),
@@ -58,9 +59,9 @@ impl Reader {
                 // What keeps its row: the one on screen, running or asking, or something it did
                 // within the last day. The rest is searched for, or folds under "more".
                 let active = |t: &Thread| listed(now, view.shown, t);
-                // Most recently active first. Only the active ones show; the rest fold under "more".
+                // Most recently used by the user first, not by the agent, so rows hold still while threads run. Only the active ones show; the rest fold under "more".
                 let mut recent: Vec<&Thread> = view.threads.iter().copied().filter(|t| (!t.blank || t.id == view.shown) && !self.waits_on_user(pid, t)).collect();
-                recent.sort_by_key(|t| (std::cmp::Reverse(t.active_at), std::cmp::Reverse(t.id)));
+                recent.sort_by_key(|t| (std::cmp::Reverse(t.used_at), std::cmp::Reverse(t.id)));
                 if searching && !project_hit(view) {
                     recent.retain(|t| self.matches_query(t, &query));
                 }
@@ -197,18 +198,6 @@ impl Reader {
         if let Some(line) = self.children_status(thread.id) {
             statuses.push(line);
         }
-        let state = (!thread.status.is_empty()).then(|| {
-            use crate::state::ThreadState as S;
-            let tone = match crate::state::state(&thread.facts()) {
-                S::Ready | S::Asleep | S::Closed => chat::Tone::Idle,
-                S::Starting | S::Running => chat::Tone::Working,
-                S::Approval | S::Asking => chat::Tone::Attention,
-                S::Failed => chat::Tone::Failed,
-            };
-            // "ready" is set when the agent starts and nothing resets it, so a turn going on says so here.
-            let text = if tone == chat::Tone::Working && thread.status == "ready" { "working" } else { thread.status.as_str() };
-            (tone, text.to_string())
-        });
         let picking = thread.picking.then(|| match &thread.sessions {
             Some(sessions) if !thread.loading && !sessions.is_empty() => {
                 // What was closed here lately, in the order it was closed, if this agent still lists it.
@@ -240,7 +229,7 @@ impl Reader {
             lead,
             trail,
             statuses,
-            state,
+            place: self.place(),
             blank: thread.blank,
             busy,
             steer: thread.client.as_ref().is_some_and(|client| client.queues()),
@@ -315,6 +304,8 @@ impl Reader {
             Chat::Open(path) => self.reveal(&path, window, cx),
             Chat::Resume(id) => self.resume_session(&id, window, cx),
             Chat::History => self.resume_thread(window, cx),
+            Chat::Show(changes) => self.show_viewer(if changes { Mode::Diff } else { Mode::Source }, cx),
+            Chat::Terminal => self.toggle_terminal_on(window, cx),
             Chat::PickAgent(id) => self.pick_agent(id, window, cx),
             Chat::Setting { id, value } => self.choose_option(&id, &value, cx),
             Chat::ClosePicker => {
@@ -400,23 +391,20 @@ impl Reader {
             Cmd::ToggleIssues => self.toggle_issues(window, cx),
             Cmd::CloseIssues => self.hide_issues(window, cx),
             Cmd::WorkOnIssue(number) => self.work_on_issue(number, window, cx),
+            Cmd::DismissStatus => {
+                self.worktree_status = None;
+                cx.notify();
+            }
             Cmd::ToggleLeft => self.toggle_left(cx),
             Cmd::ToggleRight => self.toggle_right(cx),
             Cmd::ToggleFocus => self.toggle_focus(cx),
+            Cmd::Show(changes) => self.show_viewer(if changes { Mode::Diff } else { Mode::Source }, cx),
+            Cmd::Terminal => self.toggle_terminal_on(window, cx),
             Cmd::Browse(browse) => self.set_browsing(browse, cx),
             Cmd::ToggleRendered => self.toggle_rendered(cx),
             Cmd::SetSplit(split) => self.set_split(split, cx),
-            Cmd::ShowHome => {
-                self.thread.shown = None;
-                self.project.terminal_shown = false;
-                window.focus(&self.focus, cx);
-                cx.notify();
-            }
-            Cmd::ShowView(id) if id == TERMINAL_TAB => self.toggle_terminal_on(window, cx),
-            Cmd::CloseView(id) if id == TERMINAL_TAB => self.close_terminal(window, cx),
             Cmd::ShowView(id) => self.show_agent_view(&id, cx),
             Cmd::CloseView(id) => self.close_agent_view(&id, cx),
-            Cmd::SetMode(diff) => self.set_mode(if diff { Mode::Diff } else { Mode::Source }, cx),
             Cmd::TreeClick(id) => {
                 let tree = if self.mode == Mode::Diff { &mut self.project.changes_tree } else { &mut self.project.files_tree };
                 tree.click(&id);
@@ -474,23 +462,28 @@ impl Reader {
         let showing_terminal = self.project.terminal_shown.then(|| self.project.terminal.clone()).flatten();
         let showing_agent = shown.is_some() || shown_form.is_some() || showing_terminal.is_some();
         let with_tree = !showing_agent && self.tree_visible();
-        // The window's own control goes in the leftmost header: the tree's, or the viewer's.
         // A pane too narrow for the tree beside the file takes turns: the explorer fills it until a
         // file is picked, then the file does, with a button back to the explorer.
         let stacked = !showing_agent && self.viewer_narrow.get();
         let nothing_picked = if self.mode == Mode::Diff { self.project.picked.is_none() } else { self.project.current.is_none() };
         let explorer_only = stacked && (self.browse || nothing_picked);
-        // A pane wide enough shows the explorer beside what it shows, with the lead controls in
-        // the file's header; stacked, the file's alone gets them, with a way back to the explorer
-        // tacked on.
-        // The same split of the window's controls, as descriptors, for a body NSH draws.
-        let (lead_controls, trail_controls) = self.pane_controls.borrow().clone();
+        // The window's own controls go on the tabs while there are any, and in the headers of the
+        // pane otherwise: the leftmost, the tree's or the viewer's. A pane wide enough shows the
+        // explorer beside what it shows, with the lead controls in the file's header; stacked, the
+        // file's alone gets them, with a way back to the explorer tacked on.
+        let (lead_controls, trail_controls) = if has_tabs { (vec![], vec![]) } else { self.pane_controls.borrow().clone() };
         let tree_lead = if with_tree || explorer_only { lead_controls.clone() } else { vec![] };
         let body_controls = |lead: Vec<nsh::header::Control>| if with_tree || explorer_only { (vec![], trail_controls.clone()) } else if stacked { ([lead, vec![nsh::header::Control::Explorer]].concat(), trail_controls.clone()) } else { (lead, trail_controls.clone()) };
         let body = match (shown, shown_form, self.mode) {
             _ if showing_terminal.is_some() => {
                 let background = cx.global::<Palette>().background;
-                div().size_full().bg(background).children(showing_terminal).into_any_element()
+                // The tabs, when there are any, are its header; otherwise it has one of its own.
+                let header = (!has_tabs).then(|| {
+                    let (lead, trail) = body_controls(lead_controls);
+                    nsh::agent::publish(nsh::agent::Snapshot { glass: cx.global::<Palette>().glass.is_some(), title: "Terminal".into(), lead, trail, body: nsh::agent::Body::Bare });
+                    div().flex_none().h(HEADER_HEIGHT).child(self.agent_pane.clone())
+                });
+                div().size_full().flex().flex_col().bg(background).children(header).child(div().flex_1().min_h_0().children(showing_terminal)).into_any_element()
             }
             _ if explorer_only => {
                 let background = cx.global::<Palette>().background;
@@ -574,10 +567,11 @@ impl Reader {
         div().size_full().child(self.agent_pane.clone())
     }
 
-    /// Files (or changes) and the agent's views as tabs, with a prompt for one it added while
-    /// the user was busy. None while the agent has made no views.
+    /// The agent's views as tabs, with a prompt for one it added while the user was busy, and the
+    /// window's controls at the ends. None while there are none; the files, the changes and the
+    /// terminal are picked in the conversation's header.
     pub(crate) fn view_tabs(&self) -> Option<AnyElement> {
-        if self.thread.views.is_empty() && self.thread.forms.is_empty() && self.project.terminal.is_none() {
+        if self.thread.views.is_empty() && self.thread.forms.is_empty() {
             return None;
         }
         use nsh::tabs::{Snapshot, Tab};
@@ -591,17 +585,17 @@ impl Reader {
                 .or_else(|| self.thread.forms.list().iter().find(|form| form.id == *id).map(|form| Tab { id: form.id.clone(), title: form.title.clone() }))
         };
         nsh::tabs::publish(Snapshot {
-            home: if self.mode == Mode::Diff { "Changes" } else { "Files" }.into(),
-            shown: if self.project.terminal_shown { Some(TERMINAL_TAB.to_string()) } else { self.thread.shown.clone() },
+            shown: if self.project.terminal_shown { None } else { self.thread.shown.clone() },
             tabs: self
-                .project
-                .terminal
+                .thread
+                .views
+                .list()
                 .iter()
-                .map(|_| Tab { id: TERMINAL_TAB.to_string(), title: "Terminal".into() })
-                .chain(self.thread.views.list().iter().map(|view| Tab { id: view.id.clone(), title: view.title.clone() }))
+                .map(|view| Tab { id: view.id.clone(), title: view.title.clone() })
                 .chain(self.thread.forms.list().iter().map(|form| Tab { id: form.id.clone(), title: form.title.clone() }))
                 .collect(),
             offer: self.thread.offered.as_ref().and_then(titled),
+            controls: self.pane_controls.borrow().clone(),
         });
         Some(div().flex_none().h(TABS_HEIGHT).child(self.tabs.clone()).into_any_element())
     }

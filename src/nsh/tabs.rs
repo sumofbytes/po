@@ -1,12 +1,13 @@
-//! The row of tabs above the viewer while the agent has views or forms on screen: the files (or
-//! the changes) and each view of the agent's, with a way to close it, and the agent's offer to
-//! show one. [`Snapshot`] is what [`crate::Reader`] publishes; the screen draws it.
+//! The row of tabs above the viewer while the agent has views or forms on screen: each of them,
+//! with a way to close it, the agent's offer to show one, and the window's controls. [`Snapshot`] is what [`crate::Reader`] publishes; the
+//! screen draws it.
 use std::sync::LazyLock;
 
 use nsh_core::prelude::*;
 use tokio::sync::watch;
 
 use super::bus::{Cmd, send};
+use super::header::{Control, controls};
 use super::{Colors, body, scale, text_sm};
 use crate::ui::icon::IconName;
 
@@ -18,13 +19,13 @@ pub struct Tab {
 
 #[derive(Clone, PartialEq, Debug, Default)]
 pub struct Snapshot {
-    /// What the first tab is called: the files, or the changes.
-    pub home: String,
-    /// The tab on screen; none is the first.
+    /// The tab on screen; none is the files or the changes.
     pub shown: Option<String>,
     pub tabs: Vec<Tab>,
     /// A view the agent offers to show, by its title.
     pub offer: Option<Tab>,
+    /// The window's own controls at the strip's ends, which the pane's headers then go without.
+    pub controls: (Vec<Control>, Vec<Control>),
 }
 
 static SNAPSHOT: LazyLock<watch::Sender<Snapshot>> = LazyLock::new(|| watch::Sender::new(Snapshot::default()));
@@ -75,10 +76,7 @@ pub fn Tabs() -> impl IntoElement {
         .py(scale::s1_5())
         .border_b_1()
         .border_color(super::hairline())
-        .child(dynamic(move || {
-            let (home, shown) = state.with(|s| (s.home.clone(), s.shown.is_none()));
-            tab_button(home, shown, || send(Cmd::ShowHome))
-        }))
+        .child(dynamic(move || view().flex_row().items_center().gap(scale::s1()).child(state.with(|s| controls(&s.controls.0).collect::<Vec<_>>()))))
         .child(dynamic(move || {
             let (tabs, shown) = state.with(|s| (s.tabs.clone(), s.shown.clone()));
             view().flex_row().items_center().gap(scale::s1()).child(
@@ -111,6 +109,8 @@ pub fn Tabs() -> impl IntoElement {
                     .child(text(label).number_of_lines(1).text_size(text_sm()).text_color(Colors::primary_foreground()))
             })
         }))
+        .child(view().flex_1())
+        .child(dynamic(move || view().flex_row().items_center().gap(scale::s1()).child(state.with(|s| controls(&s.controls.1).collect::<Vec<_>>()))))
 }
 
 #[cfg(test)]
@@ -125,10 +125,10 @@ mod tests {
         let mut guard = super::super::bus::lock();
         let commands = guard.as_mut().expect("the channel");
         publish(Snapshot {
-            home: "Files".into(),
             shown: Some("a".into()),
             tabs: vec![Tab { id: "a".into(), title: "Notes".into() }],
             offer: Some(Tab { id: "b".into(), title: "Plan".into() }),
+            controls: (vec![], vec![Control::Viewer(true)]),
         });
         let mut config = EngineConfig::new(nsh_platform_gpui::Root::of::<Tabs>());
         config.ui_sets = vec![nsh_base::registry()];
@@ -138,14 +138,14 @@ mod tests {
         let mut app = Headless::start(config).expect("engine");
         app.first_render().expect("first render");
         app.settle();
-        for shown in ["Files", "Notes", "The agent wants to show “Plan”"] {
+        for shown in ["Notes", "The agent wants to show “Plan”"] {
             assert!(app.shows(shown), "{shown} is on screen: {:?}", app.screen().texts());
         }
         for (press, cmd) in [
-            ("label:Files", Cmd::ShowHome),
             ("label:Notes", Cmd::ShowView("a".into())),
             ("label:Close this view", Cmd::CloseView("a".into())),
             ("label:The agent wants to show “Plan”", Cmd::ShowView("b".into())),
+            ("label:Viewer (Ctrl+Shift+B)", Cmd::ToggleRight),
         ] {
             app.press(press).unwrap();
             app.settle();
