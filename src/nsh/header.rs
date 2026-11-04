@@ -23,7 +23,7 @@ impl Control {
     fn parts(self) -> (IconName, &'static str, bool, Cmd) {
         match self {
             Control::Sidebar(on) => (IconName::PanelLeft, "Sidebar (Ctrl+B)", on, Cmd::ToggleLeft),
-            Control::Viewer(on) => (IconName::FileText, "Viewer (Ctrl+Shift+B)", on, Cmd::ToggleRight),
+            Control::Viewer(on) => (IconName::PanelRight, "Viewer (Ctrl+Shift+B)", on, Cmd::ToggleRight),
             Control::Focus(true) => (IconName::Minimize, "Show the conversation (Ctrl+Shift+F)", false, Cmd::ToggleFocus),
             Control::Focus(false) => (IconName::Maximize, "Focus the viewer (Ctrl+Shift+F)", false, Cmd::ToggleFocus),
             Control::Explorer => (IconName::FolderTree, "Back to the explorer", false, Cmd::Browse(true)),
