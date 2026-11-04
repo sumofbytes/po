@@ -654,6 +654,9 @@ struct Thread {
     /// When the thread last did anything, in milliseconds since the Unix epoch. Unlike
     /// `touched` it is saved, so the thread list keeps its order across restarts.
     active_at: u64,
+    /// When the user last sent this thread a message (or it was made), in milliseconds since the
+    /// Unix epoch. The sidebar orders by it, so a running thread doesn't jump about as it works.
+    used_at: u64,
     /// A first message waiting for the agent to be ready, already shown in the thread.
     pending: Option<Outgoing>,
     /// Start the thread in a git worktree of its own. Only asked before it has started.
@@ -953,6 +956,7 @@ impl Thread {
             saved_title: None,
             touched: Instant::now(),
             active_at: now_ms(),
+            used_at: now_ms(),
             pending: None,
             isolate: false,
             blank: true,
