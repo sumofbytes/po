@@ -1,0 +1,30 @@
+name: zig-macos-probe
+# Throwaway: does Zig 0.17.1 link libghostty-vt on macOS 26 (Zig 0.15.2 does not)?
+on:
+  push:
+    branches: [ci/zig-macos26-probe]
+jobs:
+  probe:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-15, zig: 0.15.2, ghostty: a887df42c56f6de86c0fe6da9c4eeca37931e083 }
+          - { os: macos-26, zig: 0.15.2, ghostty: a887df42c56f6de86c0fe6da9c4eeca37931e083 }
+          - { os: macos-26, zig: 0.17.1, ghostty: main }
+          - { os: macos-15, zig: 0.17.1, ghostty: main }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ matrix.zig }}
+      - name: Show SDK
+        run: xcodebuild -version; xcrun --show-sdk-version; sw_vers
+      - name: Fetch Ghostty
+        run: |
+          git clone https://github.com/ghostty-org/ghostty.git ghostty
+          git -C ghostty checkout ${{ matrix.ghostty }}
+      - name: Build lib-vt
+        working-directory: ghostty
+        run: zig build -Demit-lib-vt=true -Doptimize=ReleaseFast -Dcpu=baseline -Demit-xcframework=false -Dapp-runtime=none --prefix "$PWD/../install"
+      - run: ls install/lib
