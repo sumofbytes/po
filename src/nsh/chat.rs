@@ -852,8 +852,9 @@ fn run_row(message: usize, at: usize, thoughts: usize, calls: usize, failed: usi
         .hover(|s| s.bg(Colors::hover()))
         .on_press(move || tell(Cmd::Fold { message, block: at, folded: !folded }))
         .child(step_glyph(phase))
-        .child(text(label).selectable(false).number_of_lines(1).min_w_0().sized(text_sm()).text_color(Colors::muted()))
-        .children(aside.map(|aside| text(aside).selectable(false).sized(text_sm()).text_color(Colors::muted())))
+        // A long label (a command, a task) gives way with an ellipsis; the counts after it stay whole.
+        .child(text(label).selectable(false).number_of_lines(1).flex_shrink(1.).min_w_0().sized(text_sm()).text_color(Colors::muted()))
+        .children(aside.map(|aside| text(aside).selectable(false).flex_none().number_of_lines(1).sized(text_sm()).text_color(Colors::muted())))
         .child(view().flex_1())
         .child(trail_slot(icon(if folded { IconName::ChevronRight } else { IconName::ChevronDown }, STEP_ICON, Colors::muted())));
     if edits.is_empty() {
