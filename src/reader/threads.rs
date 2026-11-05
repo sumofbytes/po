@@ -479,7 +479,16 @@ impl Reader {
         if matches!(out.origin, Origin::User) {
             self.chosen_agent = Some(key.clone());
         }
+        // Sending the draft "Work on this" wrote is what starts the issue.
+        let issue = match self.issue_draft.take() {
+            Some((tid, root, number)) if tid == self.thread.id && matches!(out.origin, Origin::User) => Some((root, number)),
+            other => {
+                self.issue_draft = other;
+                None
+            }
+        };
         if self.thread.isolate && worktree::in_repo(&self.project.root) {
+            self.issue_for_worktree = issue;
             // The draft stays until the worktree exists, so a failure loses nothing.
             let blank = (self.project_id, self.thread.id);
             self.thread.status = "creating worktree…".into();
@@ -502,6 +511,9 @@ impl Reader {
         }
         self.thread.blank = false;
         self.submit(out, later, window, cx);
+        if let Some((root, number)) = issue {
+            Self::issue_started(&root, number, None);
+        }
         self.request_save(cx);
     }
 

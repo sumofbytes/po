@@ -1506,6 +1506,9 @@ struct Reader {
     issues_open: bool,
     /// An issue "Work on this" is making a worktree for, to link its branch once it exists.
     issue_for_worktree: Option<(PathBuf, u64)>,
+    /// The blank thread (by id) whose draft "Work on this" wrote, and the issue it is for: sending
+    /// the draft starts the issue, and until then nothing has begun.
+    issue_draft: Option<(u64, PathBuf, u64)>,
     /// Progress or failure of the last attempt to open a PR.
     pr_status: Option<String>,
     opening: bool,
@@ -1693,6 +1696,7 @@ impl Reader {
             issues,
             issues_open: false,
             issue_for_worktree: None,
+            issue_draft: None,
             pr_status: None,
             opening: false,
             worktree_status: None,

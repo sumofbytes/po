@@ -397,8 +397,9 @@ impl Reader {
         mine.min_by_key(|view| view.project.worktree.is_some() || view.project.pr.is_some()).map(|view| view.id)
     }
 
-    /// Starts a thread on an issue, in a worktree of its own when the project is a repo, and moves
-    /// the issue to In Progress with the branch linked.
+    /// Opens a new thread for an issue with its prompt in the message field. Sending it starts the
+    /// thread in a worktree of its own when the project is a repo, and moves the issue to In
+    /// Progress with the branch linked.
     pub(crate) fn work_on_issue(&mut self, number: u64, window: &mut Window, cx: &mut Context<Self>) {
         // The issue is the page's, whose repo need not be the project on screen's.
         let page = issues::shared::watch().borrow().clone();
@@ -428,20 +429,12 @@ impl Reader {
         if let Some(project) = project {
             self.show_project(project, window, cx);
         }
+        // The prompt waits in the new thread's message field: nothing starts until the user
+        // sends it, and the issue is moved along then.
         self.new_blank_thread(window, cx);
         self.thread.isolate = true;
-        let root = self.project.root.clone();
-        self.issue_for_worktree = Some((root.clone(), number));
-        let out = Outgoing { text: prompt, origin: Origin::User, images: vec![] };
-        self.start_thread(out, false, window, cx);
-        // With a worktree being made, the issue waits for its branch. Without one the thread
-        // went ahead in the project itself, if it started at all.
-        if !self.finishing {
-            self.issue_for_worktree = None;
-            if !self.thread.blank {
-                Self::issue_started(&root, number, None);
-            }
-        }
+        self.update_draft(&prompt);
+        self.issue_draft = Some((self.thread.id, self.project.root.clone(), number));
         cx.notify();
     }
 
