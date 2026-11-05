@@ -1504,8 +1504,6 @@ struct Reader {
     /// The issues page, shown in place of the conversation while `issues_open`; the sidebar has a row for it.
     issues: Entity<nsh::overlay::Overlay>,
     issues_open: bool,
-    /// The project whose issues [`issues::shared`] holds, so it is only switched when this changes.
-    issues_root: std::cell::RefCell<PathBuf>,
     /// An issue "Work on this" is making a worktree for, to link its branch once it exists.
     issue_for_worktree: Option<(PathBuf, u64)>,
     /// Progress or failure of the last attempt to open a PR.
@@ -1694,7 +1692,6 @@ impl Reader {
             chat_focus: std::cell::Cell::new(0),
             issues,
             issues_open: false,
-            issues_root: Default::default(),
             issue_for_worktree: None,
             pr_status: None,
             opening: false,

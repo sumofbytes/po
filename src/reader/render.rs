@@ -123,10 +123,8 @@ impl Reader {
             status: self.worktree_status.clone(),
             searching,
             issues_open: self.issues_open,
-            issues: {
-                self.follow_issues();
-                issues::shared::summary()
-            },
+            // What the store worked out, with no disk read: a render only reads the issues.
+            issues: issues::shared::overview().borrow().counts(date::today()),
         }
     }
 

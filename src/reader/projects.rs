@@ -265,6 +265,10 @@ impl Reader {
         self.pr_status = None;
         self.worktree_status = None;
         self.confirm_discard = false;
+        // An open issues page goes where the screen went.
+        if self.issues_open {
+            self.follow_issues();
+        }
         self.focus.focus(window, cx);
         cx.notify();
     }
@@ -545,6 +549,7 @@ impl Reader {
         let mut slot = self.slots.remove(at);
         let worktree = slot.project.worktree.take();
         drop(slot);
+        self.leave_closed_issues();
         if let Some(mut wt) = worktree {
             cx.spawn(async move |this, cx| {
                 let kept = cx.background_executor().spawn(async move { wt.retire() }).await;

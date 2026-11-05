@@ -57,14 +57,25 @@ impl Reader {
         .detach();
     }
 
-    /// The sidebar's count of issues follows them, whoever changes them.
+    /// The sidebar's list of issues follows them, whoever changes them, and the shared store
+    /// follows the projects that are open, however they came or went.
     pub(crate) fn watch_issues(cx: &mut Context<Self>) {
-        let mut issue_changes = issues::shared::watch();
+        let mut issue_changes = issues::shared::overview();
         cx.spawn(async move |this, cx| {
             while issue_changes.changed().await.is_ok() {
                 if this.update(cx, |_, cx| cx.notify()).is_err() {
                     break;
                 }
+            }
+        })
+        .detach();
+        cx.spawn(async move |this, cx| {
+            loop {
+                let Ok(open) = this.update(cx, |reader, _| reader.views().iter().map(|view| view.project.root.clone()).collect::<Vec<_>>()) else {
+                    break;
+                };
+                issues::shared::track(open);
+                cx.background_executor().timer(Duration::from_secs(1)).await;
             }
         })
         .detach();
