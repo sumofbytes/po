@@ -305,9 +305,10 @@ impl Reader {
     /// to a line count as something left to open: they are unfolded, details and all.
     pub(crate) fn toggle_tools(&mut self, cx: &mut Context<Self>) {
         let mut from = None;
+        let (busy, last) = (self.thread.busy, self.thread.messages.len().saturating_sub(1));
         for (ix, msg) in self.thread.messages.iter_mut().enumerate() {
             let Msg::Agent(blocks) = msg else { continue };
-            for start in folded_runs(blocks) {
+            for start in folded_runs(blocks, busy && ix == last) {
                 let Some(tool) = fold_keeper(blocks, start) else { continue };
                 tool.fold = Some(false);
                 from.get_or_insert(ix);

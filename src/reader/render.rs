@@ -267,7 +267,7 @@ impl Reader {
             }).collect(),
             pictures: thread.attachments.iter().map(|a| chat::Picture { uri: a.data_uri(), size: a.size }).collect(),
             note: thread.attach_note.clone(),
-            items: chat_items(&thread.messages),
+            items: chat_items(&thread.messages, thread.busy),
             picking,
             draft: thread.draft.clone(),
             draft_reset: self.chat_reset.get(),

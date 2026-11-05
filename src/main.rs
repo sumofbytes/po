@@ -1855,10 +1855,18 @@ fn fold_keeper(blocks: &mut [Block], at: usize) -> Option<&mut ToolBlock> {
 }
 
 /// Whether a run of steps shows as one line. A run the user hasn't clicked starts folded,
-/// whether its calls are still going or not.
-fn run_folded(run: &[Block]) -> bool {
+/// whether its calls are still going or not, and opens only if it ended in failure: `open` says
+/// it has not ended (see [`run_open`]), so a failure the next call may get past moves no rows.
+fn run_folded(run: &[Block], open: bool) -> bool {
     let Some(first) = run.iter().find_map(|b| if let Block::Tool(tool) = b { Some(tool) } else { None }) else { return false };
-    first.fold.unwrap_or(run_outcome(run).0 != Step::Failed)
+    first.fold.unwrap_or(open || run_outcome(run).0 != Step::Failed)
+}
+
+/// Whether the run of `len` steps at `at` is still going, though no call of it may be: `live` says
+/// the agent is at work on this message, and nothing has come after the run. Between two calls
+/// the agent is thinking of the next one, which is no end of the work.
+fn run_open(blocks: &[Block], at: usize, len: usize, live: bool) -> bool {
+    live && at + len == blocks.len()
 }
 
 /// How a run of tool calls went, and how many of its calls failed. A failure the later calls got
@@ -1876,8 +1884,8 @@ fn run_outcome(run: &[Block]) -> (Step, usize) {
     (step, failed)
 }
 
-/// Where each run of steps shown folded starts in `blocks`.
-fn folded_runs(blocks: &[Block]) -> Vec<usize> {
+/// Where each run of steps shown folded starts in `blocks`; `live` as in [`run_open`].
+fn folded_runs(blocks: &[Block], live: bool) -> Vec<usize> {
     let mut starts = vec![];
     let mut n = 0;
     while n < blocks.len() {
@@ -1886,7 +1894,7 @@ fn folded_runs(blocks: &[Block]) -> Vec<usize> {
             continue;
         }
         let (len, foldable) = step_run(blocks, n);
-        if foldable && run_folded(&blocks[n..n + len]) {
+        if foldable && run_folded(&blocks[n..n + len], run_open(blocks, n, len, live)) {
             starts.push(n);
         }
         n += len;
@@ -1980,8 +1988,8 @@ fn file_of(uri: &str) -> Option<String> {
 }
 
 /// The message of the conversation as the screen drawn by NSH shows it: the user's text with its
-/// pictures, or the agent's blocks.
-fn chat_items(messages: &[Msg]) -> Vec<nsh::chat::Item> {
+/// pictures, or the agent's blocks. `busy` says the agent is at work, on the last message.
+fn chat_items(messages: &[Msg], busy: bool) -> Vec<nsh::chat::Item> {
     // What the screen holds now: a message whose blocks would be built again exactly as they
     // stand keeps them, so a frame spends its rebuild on the message a chunk went into, not on
     // every message in the history (the engine compares each message's blocks itself, and the
@@ -1997,7 +2005,7 @@ fn chat_items(messages: &[Msg]) -> Vec<nsh::chat::Item> {
                 Some(nsh::chat::Item::Agent { blocks, .. }) => &**blocks,
                 _ => &[] as &[nsh::chat::Block],
             };
-            nsh::chat::Item::Agent { index: ix, blocks: std::sync::Arc::new(chat_blocks(blocks, held)) }
+            nsh::chat::Item::Agent { index: ix, blocks: std::sync::Arc::new(chat_blocks(blocks, busy && ix + 1 == messages.len(), held)) }
         }
     }).collect()
 }
@@ -2089,8 +2097,8 @@ fn run_task(run: &[Block]) -> Option<String> {
 
 /// One agent message's blocks for the conversation drawn by NSH. Runs of [`MIN_RUN`] or more steps
 /// (tool calls and thoughts) that hold a call also carry the row that folds them; the steps stay in place
-/// either way, so the indexes their answers are told by hold.
-fn chat_blocks(blocks: &[Block], held: &[nsh::chat::Block]) -> Vec<nsh::chat::Block> {
+/// either way, so the indexes their answers are told by hold. `live` as in [`run_open`].
+fn chat_blocks(blocks: &[Block], live: bool, held: &[nsh::chat::Block]) -> Vec<nsh::chat::Block> {
     let mut out: Vec<nsh::chat::Block> = Vec::with_capacity(blocks.len());
     let mut n = 0;
     while n < blocks.len() {
@@ -2099,11 +2107,13 @@ fn chat_blocks(blocks: &[Block], held: &[nsh::chat::Block]) -> Vec<nsh::chat::Bl
         let (len, foldable) = if is_step(&blocks[n]) && !inside { step_run(blocks, n) } else { (0, false) };
         if foldable {
             let run = &blocks[n..n + len];
-            let (phase, failed) = run_outcome(run);
+            let open = run_open(blocks, n, len, live);
+            let (outcome, failed) = run_outcome(run);
+            let phase = if open { Step::Working } else { outcome };
             let task = run_task(run);
             let calls = run.iter().filter(|b| matches!(b, Block::Tool(_))).count();
             let (kinds, edits) = run_kinds(run);
-            out.push(nsh::chat::Block::Run { index: n, count: len, calls, failed, phase: chat_phase(phase), folded: run_folded(run), task, took: run_took(run), latest: run_latest(run), kinds, edits });
+            out.push(nsh::chat::Block::Run { index: n, count: len, calls, failed, phase: chat_phase(phase), folded: run_folded(run, open), task, took: run_took(run), latest: run_latest(run), kinds, edits });
             for (k, block) in run.iter().enumerate() {
                 out.push(match block {
                     Block::Tool(tool) => nsh::chat::Block::Tool(chat_tool(n + k, tool)),
@@ -3095,11 +3105,11 @@ mod tests {
     #[test]
     fn a_run_of_calls_starts_folded_even_while_it_runs_or_fails() {
         let run = vec![tool("a", Step::Done), tool("b", Step::Done), tool("c", Step::Done)];
-        assert!(run_folded(&run));
+        assert!(run_folded(&run, false));
         let failed = vec![tool("a", Step::Done), tool("b", Step::Failed), tool("c", Step::Done)];
-        assert!(run_folded(&failed));
+        assert!(run_folded(&failed, false));
         let running = vec![tool("a", Step::Done), tool("b", Step::Working), tool("c", Step::Waiting)];
-        assert!(run_folded(&running));
+        assert!(run_folded(&running, false));
     }
 
     #[test]
@@ -3117,11 +3127,11 @@ mod tests {
         let mut run = vec![tool("a", Step::Done), tool("b", Step::Done), tool("c", Step::Done)];
         let Block::Tool(first) = &mut run[0] else { unreachable!() };
         first.fold = Some(false);
-        assert!(!run_folded(&run));
+        assert!(!run_folded(&run, false));
         let mut failed = vec![tool("a", Step::Failed), tool("b", Step::Done), tool("c", Step::Done)];
         let Block::Tool(first) = &mut failed[0] else { unreachable!() };
         first.fold = Some(true);
-        assert!(run_folded(&failed));
+        assert!(run_folded(&failed, false));
     }
 
     #[test]
@@ -3132,15 +3142,15 @@ mod tests {
             tool("b", Step::Done),
             tool("c", Step::Done),
         ];
-        assert_eq!(folded_runs(&blocks), vec![2]);
+        assert_eq!(folded_runs(&blocks, false), vec![2]);
     }
 
     #[test]
     fn thoughts_between_calls_fold_into_the_run_and_text_ends_it() {
         let thought = || Block::Thought("hm".into(), false);
         let blocks = vec![thought(), tool("a", Step::Done), thought(), tool("b", Step::Done), Block::Text("x".into()), thought(), thought(), thought()];
-        assert_eq!(folded_runs(&blocks), vec![0]);
-        let out = super::chat_blocks(&blocks, &[]);
+        assert_eq!(folded_runs(&blocks, false), vec![0]);
+        let out = super::chat_blocks(&blocks, false, &[]);
         assert!(matches!(out[0], crate::nsh::chat::Block::Run { index: 0, count: 4, calls: 2, .. }));
         assert_eq!(out.iter().filter(|b| matches!(b, crate::nsh::chat::Block::Run { .. })).count(), 1);
         // Thoughts alone have no call to keep the fold, so they stay as they are.
@@ -3170,11 +3180,68 @@ mod tests {
         assert_eq!(edits, vec!["b.rs".to_string()]);
     }
 
+    /// The phase and fold of the one run in `blocks`.
+    fn run_row(blocks: &[Block], live: bool) -> (crate::nsh::chat::Phase, bool) {
+        super::chat_blocks(blocks, live, &[]).iter().find_map(|b| match b {
+            crate::nsh::chat::Block::Run { phase, folded, .. } => Some((*phase, *folded)),
+            _ => None,
+        }).expect("the blocks hold a run")
+    }
+
+    #[test]
+    fn a_run_is_still_working_between_its_calls() {
+        use crate::nsh::chat::Phase;
+        let blocks = vec![tool("a", Step::Done), tool("b", Step::Done)];
+        assert_eq!(run_row(&blocks, true).0, Phase::Working);
+        // The turn over, it is done, with no call having changed.
+        assert_eq!(run_row(&blocks, false).0, Phase::Done);
+    }
+
+    #[test]
+    fn text_after_a_run_ends_it_while_the_turn_goes_on() {
+        use crate::nsh::chat::Phase;
+        let blocks = vec![tool("a", Step::Done), tool("b", Step::Done), Block::Text("x".into())];
+        assert_eq!(run_row(&blocks, true).0, Phase::Done);
+    }
+
+    #[test]
+    fn a_failure_moves_no_rows_until_the_run_ends_in_it() {
+        use crate::nsh::chat::Phase;
+        let blocks = vec![tool("a", Step::Done), tool("b", Step::Failed)];
+        assert_eq!(run_row(&blocks, true), (Phase::Working, true));
+        assert_eq!(folded_runs(&blocks, true), vec![0]);
+        assert_eq!(run_row(&blocks, false), (Phase::Failed, false));
+        assert_eq!(folded_runs(&blocks, false), Vec::<usize>::new());
+    }
+
+    #[test]
+    fn a_click_holds_on_a_run_still_going() {
+        let mut run = vec![tool("a", Step::Done), tool("b", Step::Done)];
+        let Block::Tool(first) = &mut run[0] else { unreachable!() };
+        first.fold = Some(false);
+        assert!(!run_folded(&run, true));
+    }
+
+    #[test]
+    fn only_the_last_message_of_a_busy_thread_has_a_run_going() {
+        use crate::nsh::chat::{Item, Phase};
+        let run = || Msg::Agent(vec![tool("a", Step::Done), tool("b", Step::Done)]);
+        let phases = |busy| -> Vec<Phase> {
+            super::chat_items(&[run(), run()], busy).iter().map(|item| {
+                let Item::Agent { blocks, .. } = item else { unreachable!() };
+                let crate::nsh::chat::Block::Run { phase, .. } = blocks[0] else { unreachable!() };
+                phase
+            }).collect()
+        };
+        assert_eq!(phases(true), [Phase::Done, Phase::Working]);
+        assert_eq!(phases(false), [Phase::Done, Phase::Done]);
+    }
+
     #[test]
     fn a_run_followed_by_text_folds_in_the_latest_message() {
         let blocks = vec![tool("a", Step::Done), tool("b", Step::Done), tool("c", Step::Done), Block::Text("x".into())];
-        assert_eq!(folded_runs(&blocks), vec![0]);
-        assert_eq!(folded_runs(&blocks[..3]), vec![0]);
+        assert_eq!(folded_runs(&blocks, false), vec![0]);
+        assert_eq!(folded_runs(&blocks[..3], false), vec![0]);
     }
 
     #[test]
