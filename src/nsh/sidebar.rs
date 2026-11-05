@@ -149,7 +149,7 @@ fn lead(content: impl IntoElement) -> View {
 /// has news, an amber ringed dot when it asks, a × when it failed, a quiet ring when idle. The
 /// ring of a running thread turns with `spin`, which every row shares so they turn together and
 /// a rebuilt row doesn't restart it.
-fn mark(mark: Mark, spin: Spin) -> View {
+fn mark(mark: Mark, owner: &str, spin: Spin) -> View {
     let size = scale::s1_5() + scale::s0_5();
     let dot = |color: fn() -> AdaptiveColor| view().w(size).h(size).rounded(super::pill()).bg(color);
     view().flex_none().items_center().justify_center().child(match mark {
@@ -166,7 +166,11 @@ fn mark(mark: Mark, spin: Spin) -> View {
             .child(view().w(scale::s1() + scale::s0_5()).h(scale::s1() + scale::s0_5()).rounded(super::pill()).bg(|| Colors::warning()()))
             .into_element(),
         Mark::Failed => text("×").text_size(text_base()).font_weight(FontWeight::BOLD).text_color(Colors::danger()).into_element(),
-        Mark::Running => spinner(Points(super::snap((size + scale::s1()).0)), || Colors::primary()(), spin).into_element(),
+        Mark::Running => {
+            // The colour of the project's chevron, so the ring reads as part of its group.
+            let tint = accent(owner);
+            spinner(Points(super::snap((size + scale::s1()).0)), move || tint, spin).into_element()
+        }
         Mark::Unread => dot(|| Colors::added()()).into_element(),
     })
 }
@@ -219,7 +223,7 @@ fn grant_badge() -> View {
 
 /// The row of a thread, its mark first, as a step in the transcript starts with its status. Its
 /// title is a step right of the name of the project above.
-fn thread_row(thread: &Thread, project: Option<&str>, close_tip: &'static str, spin: Spin) -> View {
+fn thread_row(thread: &Thread, owner: &str, project: Option<&str>, close_tip: &'static str, spin: Spin) -> View {
     let (pid, tid) = (thread.project, thread.id);
     let selected = thread.selected;
     let label = text(thread.label.clone())
@@ -239,7 +243,7 @@ fn thread_row(thread: &Thread, project: Option<&str>, close_tip: &'static str, s
             .child(quiet(project.to_string()).number_of_lines(1).flex_shrink(1.)),
         None => view().flex_1().flex_row().child(label.flex_1()),
     };
-    let row = side_row(Some(lead(mark(thread.mark, spin))))
+    let row = side_row(Some(lead(mark(thread.mark, owner, spin))))
         .pr(space::inset())
         .h(space::tree())
         .test_id(&format!("agent-thread-{tid}"))
@@ -312,7 +316,7 @@ fn project_group(project: &Project, spin: Spin) -> View {
             project
                 .threads
                 .iter()
-                .map(|thread| thread_row(thread, None, "Close thread", spin))
+                .map(|thread| thread_row(thread, &project.name, None, "Close thread", spin))
                 .collect::<Vec<_>>(),
         )
         .child(fold)
@@ -448,7 +452,7 @@ pub fn Sidebar() -> impl IntoElement {
                             .px(space::gutter())
                             .pt(space::list_top())
                             .pb(space::list_bottom())
-                            .child(waiting.iter().map(|item| thread_row(&item.thread, Some(&item.project), "Close thread", spin)).collect::<Vec<_>>()),
+                            .child(waiting.iter().map(|item| thread_row(&item.thread, &item.project, Some(&item.project), "Close thread", spin)).collect::<Vec<_>>()),
                     ),
                 )
         })

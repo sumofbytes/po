@@ -416,39 +416,78 @@ pub fn icon(name: IconName, size: Points, tint: impl Fn() -> AdaptiveColor + 'st
     image(uri).w(size).h(size).tint_color(tint).flex_none()
 }
 
-/// The turn of every spinner of a screen, in degrees: one value, so they spin together and a
+/// The turn of every spinner of a screen, in steps: one value, so they turn together and a
 /// rebuilt row doesn't restart the turn.
 #[derive(Clone, Copy)]
-pub struct Spin(Signal<f32>);
+pub struct Spin(Signal<usize>);
 
 /// One turn of a spinner.
 const TURN: std::time::Duration = std::time::Duration::from_millis(1200);
 
-/// Turns while `active` holds, a step a frame. An endless loop keeps the window redrawing, so it
+/// The positions of the arc in a turn: close enough together to read as a smooth turn.
+const STEPS: usize = 36;
+
+/// The tail of the arc: this many pieces of this many degrees, each fainter than the one before.
+const TAIL_PIECES: usize = 9;
+const TAIL_PIECE: f32 = 30.;
+
+/// Turns while `active` holds, a step at a time. An endless loop keeps the window redrawing, so it
 /// runs only when something spins, and not at all when the user asked for less motion.
 pub fn spin(active: impl Fn() -> bool + 'static) -> Spin {
-    let angle = signal(0.0_f32);
+    let step = signal(0_usize);
     effect(move || {
         if active() && !reduce_motion() {
             // Ends with this run of the effect, when what is spinning changes.
             spawn(async move {
-                let start = std::time::Instant::now();
+                let mut at = 0;
                 loop {
-                    next_frame().await;
-                    angle.set((start.elapsed().as_secs_f32() / TURN.as_secs_f32()).fract() * 360.);
+                    timer(TURN / STEPS as u32).await;
+                    at = (at + 1) % STEPS;
+                    step.set(at);
                 }
             });
         } else {
-            angle.set(0.);
+            step.set(0);
         }
     });
-    Spin(angle)
+    Spin(step)
+}
+
+/// The ring of a Lucide `loader-circle` with its arc at `step` of a turn. The platform draws an
+/// image upright whatever its parent does, so the turn is in the picture: one per step, made once.
+fn arc(step: usize) -> &'static str {
+    static ARCS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    &ARCS.get_or_init(|| {
+        (0..STEPS)
+            .map(|step| {
+                let degrees = step * 360 / STEPS;
+                // A head and a tail fading behind it, in pieces of a fixed opacity: SVG has no
+                // gradient along an arc, and the tint takes only the alpha.
+                let piece = |k: usize| {
+                    let point = |from_top: f32| {
+                        let a = from_top.to_radians();
+                        (12. + 9. * a.sin(), 12. - 9. * a.cos())
+                    };
+                    let (x0, y0) = point(90. - (k + 1) as f32 * TAIL_PIECE);
+                    let (x1, y1) = point(90. - k as f32 * TAIL_PIECE);
+                    let opacity = 1. - k as f32 / TAIL_PIECES as f32 * 0.9;
+                    let cap = if k == 0 { "round" } else { "butt" };
+                    format!(r#"<path d="M{x0:.2} {y0:.2}A9 9 0 0 1 {x1:.2} {y1:.2}" stroke-linecap="{cap}" opacity="{opacity:.2}"/>"#)
+                };
+                let tail: String = (0..TAIL_PIECES).map(piece).collect();
+                let svg = format!(
+                    r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><g transform="rotate({degrees} 12 12)">{tail}</g></svg>"#
+                );
+                format!("data:image/svg+xml;base64,{}", base64::engine::general_purpose::STANDARD.encode(svg))
+            })
+            .collect()
+    })[step]
 }
 
 /// A ring with an arc turning with `spin`: a thread or a step at work.
 pub fn spinner(size: Points, tint: impl Fn() -> AdaptiveColor + 'static, spin: Spin) -> View {
-    let angle = spin.0;
-    view().w(size).h(size).flex_none().rotate(move || Radians(angle.get().to_radians())).child(icon(IconName::LoaderCircle, size, tint))
+    let step = spin.0;
+    view().w(size).h(size).flex_none().child(image(move || arc(step.get()).to_string()).w(size).h(size).tint_color(tint).flex_none())
 }
 
 /// A tooltip in Po's look: a small popover with a line of text.
