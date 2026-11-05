@@ -416,6 +416,41 @@ pub fn icon(name: IconName, size: Points, tint: impl Fn() -> AdaptiveColor + 'st
     image(uri).w(size).h(size).tint_color(tint).flex_none()
 }
 
+/// The turn of every spinner of a screen, in degrees: one value, so they spin together and a
+/// rebuilt row doesn't restart the turn.
+#[derive(Clone, Copy)]
+pub struct Spin(Signal<f32>);
+
+/// One turn of a spinner.
+const TURN: std::time::Duration = std::time::Duration::from_millis(1200);
+
+/// Turns while `active` holds, a step a frame. An endless loop keeps the window redrawing, so it
+/// runs only when something spins, and not at all when the user asked for less motion.
+pub fn spin(active: impl Fn() -> bool + 'static) -> Spin {
+    let angle = signal(0.0_f32);
+    effect(move || {
+        if active() && !reduce_motion() {
+            // Ends with this run of the effect, when what is spinning changes.
+            spawn(async move {
+                let start = std::time::Instant::now();
+                loop {
+                    next_frame().await;
+                    angle.set((start.elapsed().as_secs_f32() / TURN.as_secs_f32()).fract() * 360.);
+                }
+            });
+        } else {
+            angle.set(0.);
+        }
+    });
+    Spin(angle)
+}
+
+/// A ring with an arc turning with `spin`: a thread or a step at work.
+pub fn spinner(size: Points, tint: impl Fn() -> AdaptiveColor + 'static, spin: Spin) -> View {
+    let angle = spin.0;
+    view().w(size).h(size).flex_none().rotate(move || Radians(angle.get().to_radians())).child(icon(IconName::LoaderCircle, size, tint))
+}
+
 /// A tooltip in Po's look: a small popover with a line of text.
 pub fn tooltip(label: impl IntoReactive<SharedString>) -> Text {
     small(label)

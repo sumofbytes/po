@@ -7,7 +7,7 @@ use nsh_core::prelude::*;
 use tokio::sync::watch;
 
 use super::bus::{Cmd, send};
-use super::{Colors, header_height, icon, leading, icon_button, on_hover, scale, small, text_base, Sizing, Smooth};
+use super::{Colors, Spin, header_height, icon, leading, icon_button, on_hover, scale, small, spin, spinner, text_base, Sizing, Smooth};
 use crate::ui::icon::IconName;
 
 /// What a thread is up to, for its mark.
@@ -145,18 +145,28 @@ fn lead(content: impl IntoElement) -> View {
     view().w(space::lead()).flex_none().flex_row().items_center().justify_start().child(content)
 }
 
-/// A thread's state, in the lead column of its row: a dot while it runs or has
-/// news, a ! when it asks, a × when it failed, a quiet ring when idle. The dot of a running
-/// thread breathes with `pulse`, which every row shares so they beat together and a rebuilt
-/// row doesn't restart it.
-fn mark(mark: Mark, pulse: AnimatedValue) -> View {
+/// A thread's state, in the lead column of its row: a turning ring while it runs, a dot when it
+/// has news, an amber ringed dot when it asks, a × when it failed, a quiet ring when idle. The
+/// ring of a running thread turns with `spin`, which every row shares so they turn together and
+/// a rebuilt row doesn't restart it.
+fn mark(mark: Mark, spin: Spin) -> View {
     let size = scale::s1_5() + scale::s0_5();
     let dot = |color: fn() -> AdaptiveColor| view().w(size).h(size).rounded(super::pill()).bg(color);
     view().flex_none().items_center().justify_center().child(match mark {
         Mark::Idle => view().w(size).h(size).rounded(super::pill()).border_1().border_color(Colors::muted()).opacity(crate::theme::tokens::DIM).into_element(),
-        Mark::Asking => text("!").text_size(text_base()).font_weight(FontWeight::BOLD).text_color(Colors::warning()).into_element(),
+        // A target: a dot in a ring, the amber the rest of the app asks with, and unlike the plain ring of an idle thread.
+        Mark::Asking => view()
+            .w(size + scale::s1())
+            .h(size + scale::s1())
+            .items_center()
+            .justify_center()
+            .rounded(super::pill())
+            .border_1()
+            .border_color(Colors::warning())
+            .child(view().w(scale::s1() + scale::s0_5()).h(scale::s1() + scale::s0_5()).rounded(super::pill()).bg(|| Colors::warning()()))
+            .into_element(),
         Mark::Failed => text("×").text_size(text_base()).font_weight(FontWeight::BOLD).text_color(Colors::danger()).into_element(),
-        Mark::Running => dot(|| Colors::primary()()).bind_opacity(&pulse).into_element(),
+        Mark::Running => spinner(Points(super::snap((size + scale::s1()).0)), || Colors::primary()(), spin).into_element(),
         Mark::Unread => dot(|| Colors::added()()).into_element(),
     })
 }
@@ -179,6 +189,24 @@ fn section(title: impl IntoReactive<SharedString>, action: Option<View>) -> View
         .child(action)
 }
 
+/// A count in a pill, at the end of a row or a section title.
+fn count_badge(count: usize, tip: &'static str, alarm: bool) -> View {
+    // Snapped to the 2px grid (18, where `s5` is 17.5), so the circle's edge falls on a pixel.
+    let size = Points(super::snap(scale::s5().0));
+    view()
+        // A circle for one digit, stretching into a pill only for more.
+        .h(size)
+        .min_w(size)
+        .flex_none()
+        .items_center()
+        .justify_center()
+        .px(Points(super::snap(scale::s1().0)))
+        .rounded(super::pill())
+        .bg(Colors::selected())
+        .tooltip(super::tooltip(tip))
+        .child(text(count.to_string()).sized(super::text_sm()).text_color(if alarm { Colors::danger()() } else { Colors::muted()() }))
+}
+
 fn grant_badge() -> View {
     view()
         .flex_none()
@@ -191,7 +219,7 @@ fn grant_badge() -> View {
 
 /// The row of a thread, its mark first, as a step in the transcript starts with its status. Its
 /// title is a step right of the name of the project above.
-fn thread_row(thread: &Thread, project: Option<&str>, close_tip: &'static str, pulse: AnimatedValue) -> View {
+fn thread_row(thread: &Thread, project: Option<&str>, close_tip: &'static str, spin: Spin) -> View {
     let (pid, tid) = (thread.project, thread.id);
     let selected = thread.selected;
     let label = text(thread.label.clone())
@@ -211,7 +239,7 @@ fn thread_row(thread: &Thread, project: Option<&str>, close_tip: &'static str, p
             .child(quiet(project.to_string()).number_of_lines(1).flex_shrink(1.)),
         None => view().flex_1().flex_row().child(label.flex_1()),
     };
-    let row = side_row(Some(lead(mark(thread.mark, pulse))))
+    let row = side_row(Some(lead(mark(thread.mark, spin))))
         .pr(space::inset())
         .h(space::tree())
         .test_id(&format!("agent-thread-{tid}"))
@@ -241,7 +269,7 @@ fn accent(name: &str) -> AdaptiveColor {
 }
 
 #[hotpath::measure]
-fn project_group(project: &Project, pulse: AnimatedValue) -> View {
+fn project_group(project: &Project, spin: Spin) -> View {
     let pid = project.id;
     let tint = accent(&project.name);
     // With one of its threads selected, the highlight says where we are; the name steps back.
@@ -284,7 +312,7 @@ fn project_group(project: &Project, pulse: AnimatedValue) -> View {
             project
                 .threads
                 .iter()
-                .map(|thread| thread_row(thread, None, "Close thread", pulse))
+                .map(|thread| thread_row(thread, None, "Close thread", spin))
                 .collect::<Vec<_>>(),
         )
         .child(fold)
@@ -349,23 +377,12 @@ pub fn Sidebar() -> impl IntoElement {
         }
     });
 
-    // A slow breath for the dot of a running thread: one value for the whole sidebar. It plays only
-    // while a thread runs (an endless animation keeps the window redrawing), and not at all when
-    // the user asked for less motion.
-    let pulse = animated_value(1.);
-    let breath = Animation::keyframes(&pulse, [Keyframe::new(1.), Keyframe::new(0.3)], KeyframeTiming::new(1400.).easing(Easing::EaseInOut).infinite().direction(PlaybackDirection::Alternate));
-    // A memo, so a snapshot that changes nothing about it doesn't restart the breath.
+    // The ring of a running thread turns: one value for the whole sidebar.
+    // A memo, so a snapshot that changes nothing about it doesn't restart the turn.
     let running = computed(move || {
         state.with(|s| s.projects.iter().flat_map(|p| &p.threads).chain(s.waiting.iter().map(|w| &w.thread)).any(|t| t.mark == Mark::Running))
     });
-    effect(move || {
-        if running.get() && !reduce_motion() {
-            breath.start();
-        } else {
-            breath.stop();
-            pulse.set(1.);
-        }
-    });
+    let spin = spin(move || running.get());
 
     let query = signal(String::new());
     let focused = signal(false);
@@ -413,22 +430,7 @@ pub fn Sidebar() -> impl IntoElement {
     let issues = move || {
         let (left, late) = state.with(|s| s.issues);
         let open = state.with(|s| s.issues_open);
-        // Snapped to the 2px grid (18, where `s5` is 17.5), so the circle's edge falls on a pixel.
-        let size = Points(super::snap(scale::s5().0));
-        let count = (left > 0).then(|| {
-            view()
-                // A circle for one digit, stretching into a pill only for more.
-                .h(size)
-                .min_w(size)
-                .flex_none()
-                .items_center()
-                .justify_center()
-                .px(Points(super::snap(scale::s1().0)))
-                .rounded(super::pill())
-                .bg(Colors::selected())
-                .tooltip(super::tooltip(if late > 0 { "Some are late" } else { "Open issues" }))
-                .child(text(left.to_string()).sized(super::text_sm()).text_color(if late > 0 { Colors::danger()() } else { Colors::muted()() }))
-        });
+        let count = (left > 0).then(|| count_badge(left, if late > 0 { "Some are late" } else { "Open issues" }, late > 0));
         action(IconName::CircleDot, "Issues", "Issues", Some(open), || send(Cmd::ToggleIssues)).child(count)
     };
 
@@ -438,7 +440,7 @@ pub fn Sidebar() -> impl IntoElement {
             let most = space::list_top() + space::list_bottom() + (space::row() + space::item_gap()) * NEEDS_YOU_ROWS;
             view()
                 .flex_none()
-                .child(section(format!("Needs you · {}", waiting.len()), None))
+                .child(section("Needs you", None).child(count_badge(waiting.len(), "Threads waiting for you", false)))
                 .child(
                     scroll().max_h(most).child(
                         view()
@@ -446,7 +448,7 @@ pub fn Sidebar() -> impl IntoElement {
                             .px(space::gutter())
                             .pt(space::list_top())
                             .pb(space::list_bottom())
-                            .child(waiting.iter().map(|item| thread_row(&item.thread, Some(&item.project), "Close thread", pulse)).collect::<Vec<_>>()),
+                            .child(waiting.iter().map(|item| thread_row(&item.thread, Some(&item.project), "Close thread", spin)).collect::<Vec<_>>()),
                     ),
                 )
         })
@@ -461,7 +463,7 @@ pub fn Sidebar() -> impl IntoElement {
                 .px(space::gutter())
                 .pt(space::list_top())
                 .pb(space::list_bottom())
-                .child(projects.iter().map(|project| project_group(project, pulse)).collect::<Vec<_>>())
+                .child(projects.iter().map(|project| project_group(project, spin)).collect::<Vec<_>>())
                 .child(empty.then(|| side_row(None).h(space::more()).child(quiet("No matches")))),
         )
     };
@@ -624,7 +626,7 @@ mod tests {
             ..Snapshot::default()
         });
         let mut app = start();
-        for shown in ["Needs you · 1", "Fix the build", "Port the sidebar", "Old idea", "3 more", "po", "Projects", "Open", "Not now", "Issues", "2"] {
+        for shown in ["Needs you", "Fix the build", "Port the sidebar", "Old idea", "3 more", "po", "Projects", "Open", "Not now", "Issues", "2"] {
             assert!(app.shows(shown), "{shown} is on screen: {:?}", app.screen().texts());
         }
         assert!(!app.shows("nsh"), "a project's branch is not in the sidebar: {:?}", app.screen().texts());
@@ -667,6 +669,6 @@ mod tests {
         // A new snapshot is drawn: with nothing waiting the section goes.
         publish(Snapshot { searching: true, ..Snapshot::default() });
         app.wait(std::time::Duration::from_millis(100)).unwrap();
-        assert!(app.shows("No matches") && !app.shows("Needs you · 1"), "{:?}", app.screen().texts());
+        assert!(app.shows("No matches") && !app.shows("Needs you"), "{:?}", app.screen().texts());
     }
 }
