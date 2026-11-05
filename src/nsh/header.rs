@@ -83,6 +83,11 @@ pub(super) fn controls(list: &[Control]) -> impl Iterator<Item = View> + '_ {
 /// `title` with `lead` before it and `right` then `trail` after, on a bar with a line under it
 /// (not on glass, where the headers' titles set the sections apart).
 pub fn pane_header(title: impl IntoReactive<SharedString>, right: impl IntoElement, lead: &[Control], trail: &[Control], glass: bool) -> View {
+    pane_header_with(body(title).number_of_lines(1).flex_shrink(1.).font_weight(FontWeight::MEDIUM), right, lead, trail, glass)
+}
+
+/// [`pane_header`], with the title made by the caller (a name that can be typed over).
+pub fn pane_header_with(title: impl IntoElement, right: impl IntoElement, lead: &[Control], trail: &[Control], glass: bool) -> View {
     let bar = view()
         .h(header_height())
         .flex_none()
@@ -98,7 +103,7 @@ pub fn pane_header(title: impl IntoReactive<SharedString>, right: impl IntoEleme
                 .gap(scale::s1())
                 .flex_shrink(1.)
                 .child(controls(lead).collect::<Vec<_>>())
-                .child(body(title).number_of_lines(1).flex_shrink(1.).font_weight(FontWeight::MEDIUM)),
+                .child(title),
         )
         .child(view().flex_row().items_center().gap(scale::s2()).child(right).child(controls(trail).collect::<Vec<_>>()));
     if glass { bar } else { bar.border_b_1().border_color(super::hairline()) }

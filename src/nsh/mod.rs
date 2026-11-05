@@ -520,6 +520,60 @@ pub fn text_input(id: &str, value: Signal<String>, placeholder: &'static str, on
         .flex_1()
 }
 
+/// The line a thread's name is typed in, in place of the name: it takes the keyboard when it
+/// appears, and `commit` is called on Enter or when it loses the keyboard. Escape is the
+/// caller's, as it leaves without committing.
+pub fn rename_input(id: &str, draft: Signal<String>, commit: impl Fn() + Clone + 'static) -> nsh_base::Input {
+    text_input(id, draft, "Name", commit.clone()).auto_focus(true).on_blur(commit).sized(text_base()).min_w(Points(0.))
+}
+
+/// A thread's name being typed: which thread, and what the line holds. Copy, so the screens'
+/// closures share it.
+#[derive(Clone, Copy)]
+pub struct Renaming {
+    pub editing: Signal<Option<(u64, u64)>>,
+    pub draft: Signal<String>,
+    /// The name it started from, so a name left as it was isn't taken as a new one.
+    pub from: Signal<String>,
+    /// The last press on a thread's name, to tell a second one soon after.
+    last: Stored<Option<(u64, u64, std::time::Instant)>>,
+}
+
+impl Renaming {
+    pub fn new() -> Self {
+        Self { editing: signal(None), draft: signal(String::new()), from: signal(String::new()), last: stored(None) }
+    }
+
+    /// Whether this press on `thread` follows another on it closely: a double press.
+    pub fn double(&self, thread: (u64, u64)) -> bool {
+        let now = std::time::Instant::now();
+        let again = self.last.get().is_some_and(|(pid, tid, at)| (pid, tid) == thread && now.duration_since(at) < std::time::Duration::from_millis(400));
+        self.last.replace(if again { None } else { Some((thread.0, thread.1, now)) });
+        again
+    }
+
+    pub fn start(&self, thread: (u64, u64), name: &str) {
+        self.draft.set(name.to_string());
+        self.from.set(name.to_string());
+        self.editing.set(Some(thread));
+    }
+
+    /// Ends the edit and asks for the new name if there is one. Ending twice (Enter, then the
+    /// line losing the keyboard as it goes) asks once.
+    pub fn commit(&self) {
+        let Some((pid, tid)) = self.editing.get_untracked() else { return };
+        self.editing.set(None);
+        let name = self.draft.get_untracked();
+        if name != self.from.get_untracked() {
+            bus::send(bus::Cmd::RenameThread(pid, tid, name));
+        }
+    }
+
+    pub fn cancel(&self) {
+        self.editing.set(None);
+    }
+}
+
 /// A line of text in a bordered box, as the settings page has them. `id` names it for tests.
 pub fn field(id: &str, value: Signal<String>, placeholder: &'static str, on_submit: impl Fn() + 'static) -> View {
     field_with(id, value, placeholder, on_submit, |input| input)

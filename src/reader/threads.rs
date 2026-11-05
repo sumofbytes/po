@@ -2,6 +2,9 @@
 
 use crate::*;
 
+/// The longest name a user can give a thread, in characters.
+const RENAME_MAX: usize = 120;
+
 impl Reader {
     /// The user's answer to a command Po asked about: remember it and start the agent, or leave it stopped.
     pub(crate) fn answer_approval(&mut self, ix: usize, n: usize, yes: bool, window: &mut Window, cx: &mut Context<Self>) {
@@ -696,6 +699,7 @@ impl Reader {
         let mut thread = self.blank_thread();
         thread.agent = Some(saved.agent);
         thread.session = Some(saved.session);
+        thread.renamed = Some(saved.title.clone()).filter(|title| saved.renamed && !title.is_empty());
         thread.saved_title = Some(saved.title).filter(|title| !title.is_empty());
         thread.blank = false;
         thread.active_at = saved.active_at;
@@ -860,7 +864,7 @@ impl Reader {
                         .filter_map(|t| {
                             let parent_session = t.parent.and_then(|parent| all.iter().find(|p| p.id == parent)).and_then(|p| p.resumes_from()).map(|(_, session)| session.to_string());
                             let (agent, session) = t.resumes_from()?;
-                            Some(workspace::ThreadState { agent: agent.to_string(), session: session.to_string(), title: t.title(), active_at: t.active_at, parent_session })
+                            Some(workspace::ThreadState { agent: agent.to_string(), session: session.to_string(), title: t.title(), active_at: t.active_at, parent_session, renamed: t.renamed.is_some() })
                         })
                         .collect(),
                 }
@@ -1013,6 +1017,26 @@ impl Reader {
             self.close_any_thread(child_project, child, window, cx);
         }
         self.close_any_thread(pid, tid, window, cx);
+    }
+
+    /// Gives thread `tid` of project `pid` the name `name`, trimmed to one line; a blank name
+    /// takes the user's name away.
+    pub(crate) fn rename_thread(&mut self, pid: u64, tid: u64, name: &str, cx: &mut Context<Self>) {
+        let name = name.split_whitespace().collect::<Vec<_>>().join(" ");
+        let name: String = name.chars().take(RENAME_MAX).collect();
+        let name = Some(name).filter(|name| !name.is_empty());
+        let thread = if pid == self.project_id {
+            std::iter::once(&mut self.thread).chain(self.parked.iter_mut()).find(|t| t.id == tid)
+        } else {
+            self.slots.iter_mut().find(|slot| slot.id == pid).and_then(|slot| std::iter::once(&mut slot.thread).chain(slot.parked.iter_mut()).find(|t| t.id == tid))
+        };
+        let Some(thread) = thread else { return };
+        if thread.renamed == name {
+            return;
+        }
+        thread.renamed = name;
+        self.request_save(cx);
+        cx.notify();
     }
 
     /// Opens a blank thread in project `pid`.

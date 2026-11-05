@@ -7,7 +7,7 @@ use nsh_core::prelude::*;
 use tokio::sync::watch;
 
 use super::bus::{Cmd, send};
-use super::{Colors, Spin, header_height, icon, leading, icon_button, on_hover, scale, small, spin, spinner, text_base, Sizing, Smooth};
+use super::{Renaming, Colors, Spin, header_height, icon, leading, icon_button, on_hover, scale, small, spin, spinner, text_base, Sizing, Smooth};
 use crate::ui::icon::IconName;
 
 /// What a thread is up to, for its mark.
@@ -28,6 +28,9 @@ pub struct Thread {
     pub project: u64,
     pub id: u64,
     pub label: String,
+    /// Its own name, which the label is when it is not shown as a step under its parent: what a
+    /// rename starts from.
+    pub name: String,
     pub mark: Mark,
     /// On screen: the only filled row.
     pub selected: bool,
@@ -219,45 +222,81 @@ fn grant_badge() -> View {
 
 /// The row of a thread, its mark first, as a step in the transcript starts with its status. Its
 /// title is a step right of the name of the project above.
-fn thread_row(thread: &Thread, project: Option<&str>, close_tip: &'static str, spin: Spin) -> View {
+fn thread_row(thread: &Thread, project: Option<&str>, close_tip: &'static str, spin: Spin, rename: Renaming) -> View {
     let (pid, tid) = (thread.project, thread.id);
     let selected = thread.selected;
-    let label = text(thread.label.clone())
-        .number_of_lines(1)
-        .flex_shrink(1.)
-        .sized(text_base())
-        .text_color(Colors::foreground())
-        .style_when(selected, |s| s.font_weight(FontWeight::MEDIUM));
-    let title = match project {
-        // The title, then the project it is in, which the row no longer sits under.
-        Some(project) => view()
-            .flex_1()
-            .flex_row()
-            .items_baseline()
-            .gap(scale::s2())
-            .child(label)
-            .child(quiet(project.to_string()).number_of_lines(1).flex_shrink(1.)),
-        None => view().flex_1().flex_row().child(label.flex_1()),
-    };
+    // What the typing of a name changes is regions of the row, not the row: the menu around it
+    // must stay while it is chosen from.
+    let editing = move || rename.editing.get() == Some((pid, tid));
+    let (text_label, project_name) = (thread.label.clone(), project.map(str::to_string));
+    let title = view().flex_1().flex_row().items_baseline().gap(scale::s2()).child(dynamic(move || {
+        if editing() {
+            // The name is typed over in place; Enter or leaving the line keeps it, Escape does not.
+            return vec![rename_line(rename).into_element()];
+        }
+        let label = text(text_label.clone())
+            .number_of_lines(1)
+            .flex_shrink(1.)
+            .sized(text_base())
+            .text_color(Colors::foreground())
+            .style_when(selected, |s| s.font_weight(FontWeight::MEDIUM));
+        match &project_name {
+            // The title, then the project it is in, which the row no longer sits under.
+            Some(project) => vec![label.into_element(), quiet(project.clone()).number_of_lines(1).flex_shrink(1.).into_element()],
+            None => vec![label.flex_1().into_element()],
+        }
+    }));
+    let (controlled, closing, ago) = (thread.controlled, thread.closing, thread.ago.clone());
     let row = side_row(Some(lead(mark(thread.mark, spin))))
         .pr(space::inset())
         .h(space::tree())
         .test_id(&format!("agent-thread-{tid}"))
-        .on_press(move || send(Cmd::OpenThread(pid, tid)))
+        .on_press({
+            let name = thread.name.clone();
+            // A second press soon after the first renames it (the first has opened it).
+            move || {
+                if rename.double((pid, tid)) {
+                    rename.start((pid, tid), &name);
+                } else if !editing() {
+                    send(Cmd::OpenThread(pid, tid));
+                }
+            }
+        })
         .child(title)
-        .child(thread.controlled.then(grant_badge))
-        .child({
+        .child(dynamic(move || {
+            if editing() {
+                return vec![];
+            }
+            let mut tail = vec![];
+            if controlled {
+                tail.push(grant_badge().into_element());
+            }
             let close = icon_button(IconName::Close, scale::s3(), close_tip, move || send(Cmd::CloseThread(pid, tid)));
             // Asked once, the button stays to be pressed again.
-            if thread.closing { close } else { on_hover(close) }
-        })
-        .child(if thread.closing {
-            Some(text("Close anyway?").flex_none().sized(super::text_xs()).text_color(Colors::warning()))
-        } else {
-            thread.ago.clone().map(|ago| text(ago).flex_none().sized(super::text_xs()).text_color(Colors::muted()))
-        });
+            tail.push(if closing { close } else { on_hover(close) }.into_element());
+            if closing {
+                tail.push(text("Close anyway?").flex_none().sized(super::text_xs()).text_color(Colors::warning()).into_element());
+            } else if let Some(ago) = ago.clone() {
+                tail.push(text(ago).flex_none().sized(super::text_xs()).text_color(Colors::muted()).into_element());
+            }
+            tail
+        }));
     // The selection takes the colour of the message bubbles; a hovered row only hints at it.
-    if selected { row.bg(Colors::hover()) } else { row.hover(|s| s.bg(Colors::hint())) }
+    let row = if selected { row.bg(Colors::hover()) } else { row.hover(|s| s.bg(Colors::hint())) };
+    // A right click offers the same rename, and the close that the row's button does.
+    let name = thread.name.clone();
+    view().child(
+        nsh_base::context_menu()
+            .popup_class(super::chat::MENU)
+            .trigger(row)
+            .child(super::chat::item("Rename".into(), None, move || rename.start((pid, tid), &name)))
+            .child(super::chat::item("Close thread".into(), None, move || send(Cmd::CloseThread(pid, tid)))),
+    )
+}
+
+/// The line a thread's name is typed in, where its name was.
+fn rename_line(rename: Renaming) -> nsh_base::Input {
+    super::rename_input("rename-thread", rename.draft, move || rename.commit())
 }
 
 /// A color of the project's own, the same each time it is open: its name picks the hue, as its
@@ -269,7 +308,7 @@ fn accent(name: &str) -> AdaptiveColor {
 }
 
 #[hotpath::measure]
-fn project_group(project: &Project, spin: Spin) -> View {
+fn project_group(project: &Project, spin: Spin, rename: Renaming) -> View {
     let pid = project.id;
     let tint = accent(&project.name);
     // With one of its threads selected, the highlight says where we are; the name steps back.
@@ -312,7 +351,7 @@ fn project_group(project: &Project, spin: Spin) -> View {
             project
                 .threads
                 .iter()
-                .map(|thread| thread_row(thread, None, "Close thread", spin))
+                .map(|thread| thread_row(thread, None, "Close thread", spin, rename))
                 .collect::<Vec<_>>(),
         )
         .child(fold)
@@ -384,6 +423,10 @@ pub fn Sidebar() -> impl IntoElement {
     });
     let spin = spin(move || running.get());
 
+    // A thread's name being typed; Escape leaves it as it was.
+    let rename = Renaming::new();
+    on_key_with("escape", KeyOptions { when: nsh_core::keymap::When::Always, repeat: false }, move |_| rename.cancel());
+
     let query = signal(String::new());
     let focused = signal(false);
     let field = element_ref();
@@ -448,7 +491,7 @@ pub fn Sidebar() -> impl IntoElement {
                             .px(space::gutter())
                             .pt(space::list_top())
                             .pb(space::list_bottom())
-                            .child(waiting.iter().map(|item| thread_row(&item.thread, Some(&item.project), "Close thread", spin)).collect::<Vec<_>>()),
+                            .child(waiting.iter().map(|item| thread_row(&item.thread, Some(&item.project), "Close thread", spin, rename)).collect::<Vec<_>>()),
                     ),
                 )
         })
@@ -463,7 +506,7 @@ pub fn Sidebar() -> impl IntoElement {
                 .px(space::gutter())
                 .pt(space::list_top())
                 .pb(space::list_bottom())
-                .child(projects.iter().map(|project| project_group(project, spin)).collect::<Vec<_>>())
+                .child(projects.iter().map(|project| project_group(project, spin, rename)).collect::<Vec<_>>())
                 .child(empty.then(|| side_row(None).h(space::more()).child(quiet("No matches")))),
         )
     };
@@ -538,7 +581,7 @@ mod tests {
     use super::*;
 
     fn thread(project: u64, id: u64, label: &str, mark: Mark, selected: bool) -> Thread {
-        Thread { project, id, label: label.into(), mark, selected, controlled: false, ago: None, closing: false }
+        Thread { project, id, label: label.into(), name: label.into(), mark, selected, controlled: false, ago: None, closing: false }
     }
 
     fn start() -> Headless {
@@ -599,6 +642,59 @@ mod tests {
         publish(Snapshot { projects: vec![project(Mark::Idle)], ..Snapshot::default() });
         app.wait(std::time::Duration::from_millis(100)).unwrap();
         assert!(!app.shows("×"), "{:?}", app.screen().texts());
+    }
+
+    #[test]
+    fn a_thread_is_renamed_from_its_menu_or_by_pressing_it_twice() {
+        let mut guard = super::super::bus::lock();
+        let commands = guard.as_mut().expect("the channel");
+        publish(Snapshot {
+            projects: vec![Project {
+                id: 1,
+                name: "po".into(),
+                active: true,
+                collapsed: false,
+                closable: false,
+                threads: vec![thread(1, 10, "Port the sidebar", Mark::Idle, true), thread(1, 11, "Old idea", Mark::Idle, false)],
+                fold: None,
+            }],
+            ..Snapshot::default()
+        });
+        let mut app = start();
+        let mut next = |app: &mut Headless| {
+            app.settle();
+            std::iter::from_fn(|| commands.try_recv().ok()).collect::<Vec<_>>()
+        };
+
+        // The menu of a right click offers it; Enter keeps what is typed (after the old name, which
+        // the line starts with).
+        app.right_click("id:agent-thread-11").unwrap();
+        app.press("text:Rename").unwrap();
+        app.settle();
+        app.type_text("id:rename-thread", "Retry bug").unwrap();
+        app.press_key("enter").unwrap();
+        assert_eq!(next(&mut app).last(), Some(&Cmd::RenameThread(1, 11, "Old ideaRetry bug".into())));
+
+        // Escape leaves the name as it was.
+        app.right_click("id:agent-thread-11").unwrap();
+        app.press("text:Rename").unwrap();
+        app.type_text("id:rename-thread", "Nope").unwrap();
+        app.press_key("escape").unwrap();
+        assert!(!next(&mut app).iter().any(|cmd| matches!(cmd, Cmd::RenameThread(..))));
+
+        // A name left as it was is no rename.
+        app.right_click("id:agent-thread-11").unwrap();
+        app.press("text:Rename").unwrap();
+        app.press_key("enter").unwrap();
+        assert!(!next(&mut app).iter().any(|cmd| matches!(cmd, Cmd::RenameThread(..))));
+
+        // The second of two quick presses opens the line instead of opening the thread again.
+        app.press("id:agent-thread-10").unwrap();
+        app.press("id:agent-thread-10").unwrap();
+        assert_eq!(next(&mut app), [Cmd::OpenThread(1, 10)]);
+        app.type_text("id:rename-thread", "Sidebar port").unwrap();
+        app.press_key("enter").unwrap();
+        assert_eq!(next(&mut app).last(), Some(&Cmd::RenameThread(1, 10, "Port the sidebarSidebar port".into())));
     }
 
     #[test]

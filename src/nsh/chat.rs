@@ -9,8 +9,8 @@ use nsh_base::{menu, menu_item, menu_separator, text_view, Input, input};
 use nsh_core::prelude::*;
 use tokio::sync::watch;
 
-use super::header::{Control, pane_header};
-use super::{Colors, Spin, body, icon, mono_size, note, scale, spin, spinner, text_base, text_sm, text_xs, tooltip, Sizing, Smooth};
+use super::header::{Control, pane_header_with};
+use super::{Renaming, Colors, Spin, body, icon, mono_size, note, scale, spin, spinner, text_base, text_sm, text_xs, tooltip, Sizing, Smooth};
 use crate::ui::icon::IconName;
 
 /// Whether a step of the agent's is waiting, going, done or failed: a tool call, the plan's
@@ -249,6 +249,8 @@ pub enum Place {
 pub struct Snapshot {
     pub glass: bool,
     pub title: String,
+    /// The project and id of the thread on screen, which its title can rename.
+    pub thread: (u64, u64),
     pub lead: Vec<Control>,
     pub trail: Vec<Control>,
     /// The status lines of the header's right, like `3 threads · 1 asking`.
@@ -443,7 +445,7 @@ fn trail_slot(content: impl IntoElement) -> View {
 }
 
 /// The popovers of the menus: the theme's own surface, with a shadow.
-const MENU: &str = "bg-popover border border-border rounded-xl shadow-2xl p-1 min-w-44";
+pub(super) const MENU: &str = "bg-popover border border-border rounded-xl shadow-2xl p-1 min-w-44";
 
 /// The Control menu: a fixed width, so the lines of its descriptions wrap to the same breaks
 /// when the popover is measured as when it is drawn, and its height holds them all.
@@ -479,7 +481,7 @@ fn menu_trigger(label: String, tip: impl Into<String>) -> View {
 
 /// A menu item's own looks, under the popover's. `on` marks the choice that is set with a check in
 /// a slot at the end, which is kept when it is off so the labels don't move.
-fn item(what: String, on: Option<bool>, on_press: impl Fn() + 'static) -> AnyElement {
+pub(super) fn item(what: String, on: Option<bool>, on_press: impl Fn() + 'static) -> AnyElement {
     let mut row = view().flex_row().items_center().gap(scale::s3()).w_full().child(text(what).flex_1().sized(text_sm()).text_color(Colors::foreground()));
     if let Some(on) = on {
         row = row.child(view().flex_none().w(scale::s3_5()).children(on.then(|| icon(IconName::Check, scale::s3_5(), Colors::foreground()))));
@@ -526,7 +528,7 @@ fn status_line(line: String) -> View {
 
 /// The pane header of the conversation: the title, the statuses, the buttons for the files, the changes, the terminal and the history, the Control
 /// menu, and the window's own controls at the ends.
-fn pane(title: String, snap: &Snapshot) -> View {
+fn pane(title: String, snap: &Snapshot, rename: Renaming) -> View {
     let mut right = view().flex_row().items_center().gap(scale::s1());
     for line in &snap.statuses {
         right = right.child(status_line(line.clone()));
@@ -544,7 +546,24 @@ fn pane(title: String, snap: &Snapshot) -> View {
     if let Some(grant) = snap.grant.filter(|grant| *grant != Grant::initial()) {
         right = right.child(grant_menu(grant, snap.grant_pending));
     }
-    pane_header(title, right, &snap.lead, &snap.trail, snap.glass)
+    // The title is the thread's name: pressing it twice, or F2, lets it be typed over.
+    let thread = snap.thread;
+    let name = if rename.editing.get() == Some(thread) {
+        super::rename_input("rename-title", rename.draft, move || rename.commit()).flex_shrink(1.).into_element()
+    } else {
+        let from = title.clone();
+        view()
+            .flex_shrink(1.)
+            .min_w(Points(0.))
+            .on_press(move || {
+                if rename.double(thread) {
+                    rename.start(thread, &from);
+                }
+            })
+            .child(body(title).number_of_lines(1).font_weight(FontWeight::MEDIUM))
+            .into_element()
+    };
+    pane_header_with(name, right, &snap.lead, &snap.trail, snap.glass)
 }
 
 /// What an agent that runs this thread may do through Po: one level of reach, picked from a
@@ -2163,9 +2182,19 @@ pub fn Chat() -> impl IntoElement {
         }
     });
 
+    // The thread's name being typed in the header; F2 starts it, Escape leaves it as it was.
+    let rename = Renaming::new();
+    on_key_with("f2", KeyOptions { when: nsh_core::keymap::When::Always, repeat: false }, move |_| {
+        let (thread, title) = state.with_untracked(|s| (s.thread, s.title.clone()));
+        if !state.with_untracked(|s| s.blank) {
+            rename.start(thread, &title);
+        }
+    });
+    on_key_with("escape", KeyOptions { when: nsh_core::keymap::When::Always, repeat: false }, move |_| rename.cancel());
+
     let header = move || {
         let (title, snap) = (state.with(|s| s.title.clone()), state.get());
-        pane(title, &snap)
+        pane(title, &snap, rename)
     };
 
     // The page above the composer is built again only when what it shows changes: a change of

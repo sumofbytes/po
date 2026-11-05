@@ -664,6 +664,8 @@ struct Thread {
     restore: Option<String>,
     /// What the thread was about before it was loaded back, since it has no messages yet.
     saved_title: Option<String>,
+    /// A name the user gave it, which stands in place of the one made from the first message.
+    renamed: Option<String>,
     /// When the thread last did anything; an idle one in the background is put to sleep.
     touched: Instant,
     /// When the thread last did anything, in milliseconds since the Unix epoch. Unlike
@@ -992,6 +994,7 @@ impl Thread {
             switch: None,
             restore: None,
             saved_title: None,
+            renamed: None,
             touched: Instant::now(),
             active_at: now_ms(),
             used_at: now_ms(),
@@ -1050,6 +1053,9 @@ impl Thread {
 
     /// The first thing asked, or a placeholder while there is none.
     fn title(&self) -> String {
+        if let Some(name) = &self.renamed {
+            return name.clone();
+        }
         let first = self.messages.iter().find_map(|msg| match msg {
             // A thread is named for what it was asked, not for what Po told it.
             Msg::User(text, _) if text.starts_with(PO_MARK) => None,
@@ -1196,7 +1202,7 @@ impl Thread {
             return None;
         }
         let (agent, session) = self.resumes_from()?;
-        Some(workspace::ThreadState { agent: agent.to_string(), session: session.to_string(), title: self.title(), active_at: self.active_at, parent_session: None })
+        Some(workspace::ThreadState { agent: agent.to_string(), session: session.to_string(), title: self.title(), active_at: self.active_at, parent_session: None, renamed: self.renamed.is_some() })
     }
 
     /// Stops the agent, keeping what has been said so it can be shown and resumed.
@@ -2756,7 +2762,7 @@ mod tests {
     #[test]
     fn a_project_remembers_the_threads_closed_in_it_newest_first_once_each_and_not_too_many() {
         let mut project = super::Reader::build_project(std::path::PathBuf::from("/x"), None, vec![]);
-        let state = |session: &str| crate::workspace::ThreadState { agent: "a".into(), session: session.into(), title: String::new(), active_at: 0, parent_session: None };
+        let state = |session: &str| crate::workspace::ThreadState { agent: "a".into(), session: session.into(), title: String::new(), active_at: 0, parent_session: None, renamed: false };
         for n in 0..15 {
             project.remember(state(&format!("s{n}")));
         }
@@ -2776,6 +2782,19 @@ mod tests {
         assert!(thread.closed_state().is_none(), "no session");
         thread.session = Some("s".into());
         assert_eq!(thread.closed_state().map(|c| c.session), Some("s".to_string()));
+    }
+
+    #[test]
+    fn a_name_the_user_gave_stands_in_place_of_the_first_message() {
+        let mut thread = started_thread();
+        assert_eq!(thread.title(), "fix it");
+        assert!(!thread.closed_state().unwrap().renamed);
+        thread.renamed = Some("the retry bug".into());
+        assert_eq!(thread.title(), "the retry bug");
+        let kept = thread.closed_state().unwrap();
+        assert_eq!((kept.title.as_str(), kept.renamed), ("the retry bug", true));
+        thread.renamed = None;
+        assert_eq!(thread.title(), "fix it", "taking the name away gives the first message back");
     }
 
     fn started_thread() -> super::Thread {
