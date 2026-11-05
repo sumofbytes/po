@@ -534,12 +534,13 @@ fn pane(title: String, snap: &Snapshot, rename: Renaming) -> View {
         right = right.child(status_line(line.clone()));
     }
     if snap.picking.is_none() {
-        // The four Places share one pill, so they read as a single switcher.
-        let mut places = view().flex_none().flex_row().items_center().gap(scale::s0_5()).p(scale::s0_5()).rounded(super::pill()).bg(Colors::hover());
-        places = places.child(super::header::place_button(IconName::FolderTree, "Files (Ctrl+1)", snap.place == Place::Files, || tell(Cmd::Show(false))));
-        places = places.child(super::header::place_button(IconName::Diff, "Changes (Ctrl+2)", snap.place == Place::Changes, || tell(Cmd::Show(true))));
-        places = places.child(super::header::place_button(IconName::Terminal, "Terminal (Ctrl+`)", snap.place == Place::Terminal, || tell(Cmd::Terminal)));
-        places = places.child(super::header::place_button(IconName::History, "Resume an earlier session (Ctrl+Shift+H)", false, || tell(Cmd::History)));
+        // The four Places sit together as the header's other controls do: quiet icons, with a fill
+        // only under the one that is open.
+        let mut places = view().flex_none().flex_row().items_center().gap(scale::s0_5());
+        places = places.child(super::header::toggle_button(IconName::FolderTree, "Files (Ctrl+1)", snap.place == Place::Files, || tell(Cmd::Show(false))));
+        places = places.child(super::header::toggle_button(IconName::Diff, "Changes (Ctrl+2)", snap.place == Place::Changes, || tell(Cmd::Show(true))));
+        places = places.child(super::header::toggle_button(IconName::Terminal, "Terminal (Ctrl+`)", snap.place == Place::Terminal, || tell(Cmd::Terminal)));
+        places = places.child(super::header::toggle_button(IconName::History, "Resume an earlier session (Ctrl+Shift+H)", false, || tell(Cmd::History)));
         right = right.child(places);
     }
     // The Control menu, once the user has set what the thread's agent may do.
@@ -1337,7 +1338,10 @@ fn rail(count: usize, stage: f32, slot: ElementRef, position: Position) -> AnyEl
     let jump = {
         let (frames, origin, pinned, slot) = (frames, origin, pinned, slot);
         move |bar: usize, rep: usize| {
+            // The last bar is the end of the page, however tall the last message is.
+            let last = bar + 1 == shown;
             let target = match frames.get().get(rep) {
+                _ if last => f32::MAX,
                 Some(at) => message_stop(at.0 - origin.get().0),
                 None => return,
             };
@@ -1346,7 +1350,11 @@ fn rail(count: usize, stage: f32, slot: ElementRef, position: Position) -> AnyEl
             pinned.replace(Some((bar, target)));
             let slot = slot;
             spawn(async move {
-                slot.scroll_to(point(px(0.), px(target)), true);
+                if last {
+                    slot.scroll_to_end(true);
+                } else {
+                    slot.scroll_to(point(px(0.), px(target)), true);
+                }
             });
         }
     };

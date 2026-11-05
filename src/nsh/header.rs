@@ -53,12 +53,6 @@ fn ghost_button(name: IconName, tip: &'static str, selected: bool, filled: bool,
     icon_button(name, tip, selected, filled, scale::s3_5(), Colors::muted(), on_press)
 }
 
-/// A ghost icon button with the sidebar rows' icon size (`s4`) in full strength: the
-/// conversation's own controls, where the four Places stand out beside the statuses.
-pub fn place_button(name: IconName, tip: &'static str, selected: bool, on_press: impl Fn() + 'static) -> View {
-    icon_button(name, tip, selected, true, scale::s4(), Colors::foreground(), on_press)
-}
-
 fn icon_button(name: IconName, tip: &'static str, selected: bool, filled: bool, size: Points, tint: impl Fn() -> AdaptiveColor + Copy + 'static, on_press: impl Fn() + 'static) -> View {
     let b = super::smooth(view())
         .role(AccessibilityRole::Button)
