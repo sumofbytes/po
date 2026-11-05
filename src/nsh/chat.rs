@@ -1318,7 +1318,10 @@ fn rail(count: usize, stage: f32, slot: ElementRef, position: Position) -> AnyEl
     let jump = {
         let (frames, origin, pinned, slot) = (frames, origin, pinned, slot);
         move |bar: usize, rep: usize| {
+            // The last bar is the end of the page, however tall the last message is.
+            let last = bar + 1 == shown;
             let target = match frames.get().get(rep) {
+                _ if last => f32::MAX,
                 Some(at) => message_stop(at.0 - origin.get().0),
                 None => return,
             };
@@ -1327,7 +1330,11 @@ fn rail(count: usize, stage: f32, slot: ElementRef, position: Position) -> AnyEl
             pinned.replace(Some((bar, target)));
             let slot = slot;
             spawn(async move {
-                slot.scroll_to(point(px(0.), px(target)), true);
+                if last {
+                    slot.scroll_to_end(true);
+                } else {
+                    slot.scroll_to(point(px(0.), px(target)), true);
+                }
             });
         }
     };
