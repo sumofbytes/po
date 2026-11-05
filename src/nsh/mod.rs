@@ -422,10 +422,10 @@ pub fn icon(name: IconName, size: Points, tint: impl Fn() -> AdaptiveColor + 'st
 pub struct Spin(Signal<usize>);
 
 /// One turn of a spinner.
-const TURN: std::time::Duration = std::time::Duration::from_millis(2400);
+const TURN: std::time::Duration = std::time::Duration::from_millis(1200);
 
-/// The positions of the arc in a turn: a slow, ticking turn that asks little of the eye.
-const STEPS: usize = 12;
+/// The positions of the arc in a turn: close enough together to read as a smooth turn.
+const STEPS: usize = 36;
 
 /// Turns while `active` holds, a step at a time. An endless loop keeps the window redrawing, so it
 /// runs only when something spins, and not at all when the user asked for less motion.
@@ -451,18 +451,25 @@ pub fn spin(active: impl Fn() -> bool + 'static) -> Spin {
 
 /// The ring of a Lucide `loader-circle` with its arc at `step` of a turn. The platform draws an
 /// image upright whatever its parent does, so the turn is in the picture: one per step, made once.
-fn arc(step: usize) -> String {
-    let degrees = step * 360 / STEPS;
-    let svg = format!(
-        r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"><circle cx="12" cy="12" r="9" opacity="0.25"/><path transform="rotate({degrees} 12 12)" d="M12 3a9 9 0 0 1 9 9"/></svg>"#
-    );
-    format!("data:image/svg+xml;base64,{}", base64::engine::general_purpose::STANDARD.encode(svg))
+fn arc(step: usize) -> &'static str {
+    static ARCS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    &ARCS.get_or_init(|| {
+        (0..STEPS)
+            .map(|step| {
+                let degrees = step * 360 / STEPS;
+                let svg = format!(
+                    r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"><circle cx="12" cy="12" r="9" opacity="0.25"/><path transform="rotate({degrees} 12 12)" d="M12 3a9 9 0 0 1 9 9"/></svg>"#
+                );
+                format!("data:image/svg+xml;base64,{}", base64::engine::general_purpose::STANDARD.encode(svg))
+            })
+            .collect()
+    })[step]
 }
 
 /// A ring with an arc turning with `spin`: a thread or a step at work.
 pub fn spinner(size: Points, tint: impl Fn() -> AdaptiveColor + 'static, spin: Spin) -> View {
     let step = spin.0;
-    view().w(size).h(size).flex_none().child(image(move || arc(step.get())).w(size).h(size).tint_color(tint).flex_none())
+    view().w(size).h(size).flex_none().child(image(move || arc(step.get()).to_string()).w(size).h(size).tint_color(tint).flex_none())
 }
 
 /// A tooltip in Po's look: a small popover with a line of text.
