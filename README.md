@@ -96,6 +96,10 @@ one replaces it, so you can change flags or the binary path. `command` is split
 on whitespace into program and arguments (no shell quoting). Choose the agent
 in the app, or pass `--agent` / `PO_AGENT`.
 
+A thread can change agent while it is idle, from the agent chip under the message field. The
+new agent gets its own session, and its first message carries the conversation so far: the text
+and the tool calls' titles, up to 100 KB, leaving out the middle of a longer one.
+
 The first time `po` is about to run a command that isn't one of the bundled ones as
 shipped, because it is new in `config.json` or changes a bundled entry, it shows the command
 and waits for you to choose **Run it**. Your answer is kept for that exact command in

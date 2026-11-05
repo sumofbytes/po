@@ -235,6 +235,7 @@ impl Reader {
             steer: thread.client.as_ref().is_some_and(|client| client.queues()),
             agents: self.agents.iter().map(|agent| (agent.name.clone(), agent.id.clone())).collect(),
             chosen: thread.agent.clone().or_else(|| self.chosen_agent.clone()),
+            switchable: thread.can_switch_agent(),
             settings: Thread::ordered(thread.options.iter().collect()).into_iter().map(|option| chat::Setting {
                 id: option.id.clone(),
                 name: option.name.clone(),
