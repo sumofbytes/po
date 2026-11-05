@@ -123,10 +123,8 @@ impl Reader {
             status: self.worktree_status.clone(),
             searching,
             issues_open: self.issues_open,
-            issues: {
-                self.follow_issues();
-                issues::shared::summary()
-            },
+            // What the store worked out, with no disk read: a render only reads the issues.
+            issues: issues::shared::overview().borrow().counts(date::today()),
         }
     }
 
@@ -394,7 +392,7 @@ impl Reader {
             Cmd::OpenSettings => self.toggle_settings(window, cx),
             Cmd::ToggleIssues => self.toggle_issues(window, cx),
             Cmd::CloseIssues => self.hide_issues(window, cx),
-            Cmd::WorkOnIssue(number) => self.work_on_issue(number, window, cx),
+            Cmd::WorkOnIssue(repo, number) => self.work_on_issue(&repo, number, window, cx),
             Cmd::DismissStatus => {
                 self.worktree_status = None;
                 cx.notify();

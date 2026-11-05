@@ -375,27 +375,41 @@ impl Reader {
         cx.notify();
     }
 
-    /// Points the shared issues at the project on screen, if it isn't already. The sidebar's
-    /// snapshot does this, so the page and the counts follow the project whatever switched it.
+    /// Puts the issues of the project on screen on the page. What renders only reads the issues,
+    /// so this is for whatever opens them or changes the project under an open page.
     pub(crate) fn follow_issues(&self) {
-        let mut shown = self.issues_root.borrow_mut();
-        if *shown != self.project.root {
-            *shown = self.project.root.clone();
-            issues::shared::set_project(&self.project.root);
+        issues::shared::set_project(&self.project.root);
+    }
+
+    /// The issues page may be showing a project closed under it; it goes to the one on screen.
+    pub(crate) fn leave_closed_issues(&self) {
+        let shown = issues::shared::watch().borrow().root.clone();
+        if self.issues_open && !self.views().iter().any(|view| Some(issues::store::primary_root(&view.project.root)) == shown) {
+            self.follow_issues();
         }
     }
 
-    /// Starts a thread on an issue, in a worktree of its own when the project is a repo, and moves
-    /// the issue to In Progress with the branch linked.
-    pub(crate) fn work_on_issue(&mut self, number: u64, window: &mut Window, cx: &mut Context<Self>) {
-        self.follow_issues();
-        let tracker = issues::shared::watch().borrow().tracker.clone();
-        if let Err(message) = issues::api::check_workable(&tracker, number) {
+    /// The project to work on the issues of the repo `root` in: the plain checkout of it if one is
+    /// open, else a worktree or PR of it.
+    fn project_of_repo(&self, root: &std::path::Path) -> Option<u64> {
+        let views = self.views();
+        let mine = views.iter().filter(|view| issues::store::primary_root(&view.project.root) == root);
+        mine.min_by_key(|view| view.project.worktree.is_some() || view.project.pr.is_some()).map(|view| view.id)
+    }
+
+    /// Opens a new thread for an issue with its prompt in the message field. Sending it starts the
+    /// thread in a worktree of its own when the project is a repo, and moves the issue to In
+    /// Progress with the branch linked.
+    pub(crate) fn work_on_issue(&mut self, repo: &std::path::Path, number: u64, window: &mut Window, cx: &mut Context<Self>) {
+        // The issue is the page's, whose repo need not be the project on screen's; the page says
+        // which, so a page that moved on meanwhile cannot make this another repo's issue.
+        let Some(page) = issues::shared::overview().borrow().repos.iter().find(|r| r.root == repo).cloned() else { return };
+        if let Err(message) = issues::api::check_workable(&page.tracker, number) {
             self.worktree_status = Some(message);
             cx.notify();
             return;
         }
-        let Some(prompt) = issues::api::work_prompt(&tracker, number) else {
+        let Some(prompt) = issues::api::work_prompt(&page.tracker, number) else {
             return;
         };
         // Another worktree is being made or merged, or there is no agent to start: nothing would
@@ -403,26 +417,31 @@ impl Reader {
         if self.finishing || self.chosen().is_none() {
             return;
         }
+        // Its thread starts in its own project, which working on it brings on screen.
+        let elsewhere = issues::store::primary_root(&self.project.root) != repo;
+        let project = if elsewhere { self.project_of_repo(repo) } else { None };
+        if elsewhere && project.is_none() {
+            self.worktree_status = Some(format!("{} is no longer open", page.name));
+            cx.notify();
+            return;
+        }
         self.hide_issues(window, cx);
+        if let Some(project) = project {
+            self.show_project(project, window, cx);
+        }
+        // The prompt waits in the new thread's message field: nothing starts until the user
+        // sends it, and the issue is moved along then.
         self.new_blank_thread(window, cx);
         self.thread.isolate = true;
-        let root = self.project.root.clone();
-        self.issue_for_worktree = Some((root.clone(), number));
-        let out = Outgoing { text: prompt, origin: Origin::User, images: vec![] };
-        self.start_thread(out, false, window, cx);
-        // With a worktree being made, the issue waits for its branch. Without one the thread
-        // went ahead in the project itself, if it started at all.
-        if !self.finishing {
-            self.issue_for_worktree = None;
-            if !self.thread.blank {
-                Self::issue_started(&root, number, None);
-            }
-        }
+        // What the user had already typed in this thread stays, above the prompt.
+        let typed = self.thread.draft.trim().to_string();
+        self.update_draft(&if typed.is_empty() { prompt } else { format!("{typed}\n\n{prompt}") });
+        self.issue_draft = Some((self.thread.id, self.project.root.clone(), number));
         cx.notify();
     }
 
-    /// `issue.show`: puts the issues page on screen where the request says. Only for the project
-    /// on screen, since the page shows that one.
+    /// `issue.show`: puts the issues page on screen where the request says. An agent only moves
+    /// what the user is looking at from the project on screen, so that is the one it shows.
     pub(crate) fn show_issues(&mut self, id: u64, args: &serde_json::Value, window: &mut Window, cx: &mut Context<Self>) -> command::Reply {
         if self.project_of(id).is_some_and(|project| project != self.project_id) {
             return Err("that project is not on screen; the issues page shows the one that is".into());

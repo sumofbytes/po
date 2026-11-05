@@ -349,7 +349,7 @@ pub fn text_sm() -> Points {
 
 /// A font size of `n` rems, in whole points: spacing sits on an even grid, but text is free to
 /// take an odd size, so an odd UI font size or rem is followed as it is.
-fn font(n: f32) -> Points {
+pub fn font(n: f32) -> Points {
     // Halves round down, as the even grid did for 10.5.
     Points((n * nsh_base::theme().number("rem").unwrap_or(14.) - 0.5).ceil().max(1.))
 }

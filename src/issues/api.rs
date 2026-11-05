@@ -397,8 +397,9 @@ pub fn show_nav(tracker: &Tracker, args: &Value) -> Result<super::shared::Nav, S
         Some("status") => Some(Group::Status),
         Some("priority") => Some(Group::Priority),
         Some("epic") => Some(Group::Epic),
+        Some("project") => Some(Group::Project),
         Some("none") => Some(Group::None),
-        Some(other) => return Err(format!("`{other}` is not a grouping; status, priority, epic or none")),
+        Some(other) => return Err(format!("`{other}` is not a grouping; status, priority, project, epic or none")),
     };
     Ok(Nav { target, filter, group })
 }

@@ -49,7 +49,8 @@ way (`src/nsh/`); their headless tests run with `cargo test`.
 
 Each project has a lightweight issue and epic tracker, kept as JSON files in the
 repo's `.po/` folder so it travels with git. Open it from **Issues** in the
-sidebar: a list, a board, issue pages and epics with milestones. Agents can read
+sidebar: one page for every open project, as a list, a board, issue pages and epics with
+milestones, each issue tagged with its project and narrowed by project chips. Agents can read
 and keep the same issues through Po's control tools. The format and the commands
 are in [`docs/issues-format.md`](docs/issues-format.md). The old todo list is
 gone; an empty tracker offers to import `todos.json`.

@@ -305,7 +305,7 @@ fn rename_line(rename: Renaming) -> nsh_base::Input {
 
 /// A color of the project's own, the same each time it is open: its name picks the hue, as its
 /// id is only a count of what was opened this run.
-fn accent(name: &str) -> AdaptiveColor {
+pub(super) fn accent(name: &str) -> AdaptiveColor {
     let hash = name.bytes().fold(2166136261u32, |h, b| (h ^ b as u32).wrapping_mul(16777619));
     let hue = (hash % 360) as f32 / 360.;
     AdaptiveColor { light: hsla(hue, 0.6, 0.42, 1.), dark: hsla(hue, 0.6, 0.68, 1.) }
@@ -477,8 +477,8 @@ pub fn Sidebar() -> impl IntoElement {
     let issues = move || {
         let (left, late) = state.with(|s| s.issues);
         let open = state.with(|s| s.issues_open);
-        let count = (left > 0).then(|| count_badge(left, if late > 0 { "Some are late" } else { "Open issues" }, late > 0));
-        action(IconName::CircleDot, "Issues", "Issues", Some(open), || send(Cmd::ToggleIssues)).child(count)
+        let count = (left > 0).then(|| count_badge(left, if late > 0 { "Some are late" } else { "Open issues in all open projects" }, late > 0));
+        action(IconName::CircleDot, "Issues", "Issues of every open project", Some(open), || send(Cmd::ToggleIssues)).child(count)
     };
 
     let waiting = move || {
