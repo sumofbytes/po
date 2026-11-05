@@ -10,7 +10,7 @@ use nsh_core::prelude::*;
 use tokio::sync::watch;
 
 use super::header::{Control, pane_header};
-use super::{Colors, body, icon, mono_size, note, scale, text_base, text_sm, text_xs, tooltip, Sizing, Smooth};
+use super::{Colors, Spin, body, icon, mono_size, note, scale, spin, spinner, text_base, text_sm, text_xs, tooltip, Sizing, Smooth};
 use crate::ui::icon::IconName;
 
 /// Whether a step of the agent's is waiting, going, done or failed: a tool call, the plan's
@@ -413,7 +413,7 @@ fn separator() -> AnyElement {
 fn step_glyph(phase: Phase) -> View {
     let name = match phase {
         Phase::Waiting => IconName::Circle,
-        Phase::Working => IconName::CircleHalf,
+        Phase::Working => return lead_slot(spinner(STEP_ICON, move || phase_tint(phase), use_context::<Spin>().expect("the chat provides the spin"))),
         Phase::Done => IconName::CircleCheck,
         Phase::Failed => IconName::CircleX,
     };
@@ -435,8 +435,9 @@ fn lead_slot(content: impl IntoElement) -> View {
     view().flex_none().w(scale::s4()).flex_row().justify_center().child(content)
 }
 
-/// A fixed slot for what ends a step, as wide as the button that opens the file of a tool call
-/// (its icon and the padding of that button), so the ends of the steps line up too.
+/// The chevron of a tool call, in a button with the padding of the one that opens its file. A row
+/// with no such button (a thought, a run) ends with its chevron alone; the call's button hangs out
+/// by that padding, so every chevron ends its row at the same place.
 fn trail_slot(content: impl IntoElement) -> View {
     view().flex_none().w(step_button_pad() + step_button_pad() + STEP_ICON).flex_row().justify_center().child(content)
 }
@@ -674,7 +675,7 @@ fn thought_row(message: usize, at: usize, text_: &str, open: bool, done: bool) -
                     .opacity(crate::theme::tokens::DIM)
             }))
             .children(open.then(|| view().flex_1().min_w_0()))
-            .child(trail_slot(icon(if open { IconName::ChevronDown } else { IconName::ChevronRight }, STEP_ICON, Colors::muted()))),
+            .child(icon(if open { IconName::ChevronDown } else { IconName::ChevronRight }, STEP_ICON, Colors::muted())),
     );
     if open {
         column = column.child(
@@ -760,6 +761,8 @@ fn tool_row(message: usize, at: usize, tool: &Tool) -> AnyElement {
                         .role(AccessibilityRole::Button)
                         .label(if tool.open { "Hide the call's details" } else { "Show the call's details" })
                         .flex_none()
+                        // The slot's padding hangs out, so the chevron ends the row where the chevrons of a run and a thought do.
+                        .mr(-step_button_pad())
                         .py(scale::s0_5())
                         .rounded(Colors::radius())
                         .cursor_pointer()
@@ -851,6 +854,8 @@ fn run_row(message: usize, at: usize, thoughts: usize, calls: usize, failed: usi
         .rounded(super::soft_radius())
         .cursor_pointer()
         .smooth()
+        // An open run keeps the tint of a hovered row, so its header marks where the steps start.
+        .style_when(!folded, |s| s.bg(Colors::hover()))
         .hover(|s| s.bg(Colors::hover()))
         .on_press(move || tell(Cmd::Fold { message, block: at, folded: !folded }))
         .child(step_glyph(phase))
@@ -858,7 +863,7 @@ fn run_row(message: usize, at: usize, thoughts: usize, calls: usize, failed: usi
         .child(text(label).selectable(false).number_of_lines(1).flex_shrink(1.).min_w_0().sized(text_sm()).text_color(Colors::muted()))
         .children(aside.map(|aside| text(aside).selectable(false).flex_none().number_of_lines(1).sized(text_sm()).text_color(Colors::muted())))
         .child(view().flex_1())
-        .child(trail_slot(icon(if folded { IconName::ChevronRight } else { IconName::ChevronDown }, STEP_ICON, Colors::muted())));
+        .child(icon(if folded { IconName::ChevronRight } else { IconName::ChevronDown }, STEP_ICON, Colors::muted()));
     if edits.is_empty() {
         return row.into_element();
     }
@@ -2095,6 +2100,9 @@ pub fn Chat() -> impl IntoElement {
             state.set(snapshot.borrow_and_update().clone());
         }
     });
+    // The ring of a step at work turns while a turn goes.
+    let busy_now = computed(move || state.with(|s| s.busy));
+    provide_context(spin(move || busy_now.get()));
 
     // What the draft field holds: the user's typing, taken over by the app's own writes (a
     // cleared draft after a send, a taken-back queue row), which the sentinel marks.
