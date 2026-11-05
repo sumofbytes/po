@@ -283,6 +283,7 @@ impl Reader {
         if !self.slots.iter().any(|slot| slot.id == id) {
             return;
         }
+        self.hide_home(window, cx);
         // Leaving a session listing unused drops it.
         if self.thread.is_listing() {
             self.close_thread(self.thread.id, window, cx);

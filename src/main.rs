@@ -1504,6 +1504,9 @@ struct Reader {
     /// The issues page, shown in place of the conversation while `issues_open`; the sidebar has a row for it.
     issues: Entity<nsh::overlay::Overlay>,
     issues_open: bool,
+    /// The Home page, where Po opens, shown in place of the conversation while `home_open`.
+    landing: Entity<nsh::overlay::Overlay>,
+    home_open: bool,
     /// An issue "Work on this" is making a worktree for, to link its branch once it exists.
     issue_for_worktree: Option<(PathBuf, u64)>,
     /// The blank thread (by id) whose draft "Work on this" wrote, and the issue it is for: sending
@@ -1608,6 +1611,7 @@ impl Reader {
         let finder_window = cx.new(|cx| nsh::overlay::Overlay::new(560., 8., nsh_platform_gpui::Root::of::<nsh::finder::Finder>, &nsh::finder::HEIGHT, cx));
         let settings_window = cx.new(|cx| nsh::overlay::Overlay::new(760., 24., nsh_platform_gpui::Root::of::<nsh::settings::Settings>, &nsh::settings::HEIGHT, cx));
         let issues = cx.new(|cx| nsh::overlay::Overlay::page(1000., nsh_platform_gpui::Root::of::<nsh::issues::Issues>, &nsh::issues::HEIGHT, cx));
+        let landing = cx.new(|cx| nsh::overlay::Overlay::page(1000., nsh_platform_gpui::Root::of::<nsh::home::Home>, &nsh::home::HEIGHT, cx));
         let sidebars = cx.new(|_| SidebarsState::new(px(280.0), px(560.0)));
         let tree_cols = cx.new(|_| SidebarsState::new(px(TREE_WIDTH), px(0.0)));
         let subscriptions = vec![
@@ -1625,6 +1629,9 @@ impl Reader {
             }),
             cx.subscribe_in(&settings_window, window, |reader, _, event: &nsh::overlay::OverlayEvent, window, cx| match event {
                 nsh::overlay::OverlayEvent::Close => reader.hide_settings(window, cx),
+            }),
+            cx.subscribe_in(&landing, window, |reader, _, event: &nsh::overlay::OverlayEvent, window, cx| match event {
+                nsh::overlay::OverlayEvent::Close => reader.hide_home(window, cx),
             }),
             cx.subscribe_in(&issues, window, |reader, _, event: &nsh::overlay::OverlayEvent, window, cx| match event {
                 nsh::overlay::OverlayEvent::Close => reader.hide_issues(window, cx),
@@ -1695,6 +1702,8 @@ impl Reader {
             chat_focus: std::cell::Cell::new(0),
             issues,
             issues_open: false,
+            landing,
+            home_open: false,
             issue_for_worktree: None,
             issue_draft: None,
             pr_status: None,
@@ -1746,9 +1755,14 @@ impl Reader {
         let resumed = workspace::Workspace::load(&reader.home).is_some_and(|saved| reader.restore(saved, cx));
         reader.known_projects = reader.workspace(cx).known();
         trace::mark("restore");
+        let landing = command.is_none();
         match command.filter(|_| !resumed) {
             Some(command) => reader.connect(&command, false, window, cx),
             None => reader.wake_thread(window, cx),
+        }
+        // Po opens on Home, unless it was started to do something: a command to run.
+        if landing {
+            reader.show_home(window, cx);
         }
         trace::mark("connect");
         reader.watch(watch, window, cx);
@@ -2249,7 +2263,9 @@ impl Render for Reader {
         // The viewer pane is only built where it shows: a pane nobody sees would publish over the
         // one that is.
         let hidden = || div().size_full().into_any_element();
-        let (middle, side) = if self.issues_open {
+        let (middle, side) = if self.home_open {
+            (self.landing.clone().into_any_element(), hidden())
+        } else if self.issues_open {
             (self.issues.clone().into_any_element(), hidden())
         } else if !side_open {
             // Only the conversation shows, and the viewer's button waits on the side it opens.
@@ -2271,7 +2287,7 @@ impl Render for Reader {
             controls(vec![], trail_all);
             (floating(self.chat_pane(vec![Control::Sidebar(left_open)], vec![], cx), cx), self.pane(cx))
         };
-        let right_open = side_open && !focus && !self.issues_open;
+        let right_open = side_open && !focus && !self.issues_open && !self.home_open;
         div()
             .size_full()
             .flex()

@@ -9,6 +9,7 @@ pub mod epics;
 pub mod explorer;
 pub mod finder;
 pub mod header;
+pub mod home;
 pub mod issues;
 pub mod overlay;
 pub mod settings;

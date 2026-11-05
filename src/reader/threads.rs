@@ -261,6 +261,7 @@ impl Reader {
     /// can be chosen first. The thread on screen keeps running in the background; if it is
     /// itself still blank it is used instead.
     pub(crate) fn new_blank_thread(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.hide_home(window, cx);
         if !self.thread.blank {
             self.add_thread();
         }

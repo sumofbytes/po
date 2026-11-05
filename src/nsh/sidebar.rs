@@ -82,11 +82,18 @@ pub struct Snapshot {
     pub status: Option<String>,
     pub searching: bool,
     pub issues_open: bool,
+    /// The Home page is on screen.
+    pub home_open: bool,
     /// How many of the project's issues are open, and how many of those are late.
     pub issues: (usize, usize),
 }
 
 static SNAPSHOT: LazyLock<watch::Sender<Snapshot>> = LazyLock::new(|| watch::Sender::new(Snapshot::default()));
+
+/// The snapshot now and after every change, for a screen that shows threads of its own.
+pub fn watch() -> watch::Receiver<Snapshot> {
+    SNAPSHOT.subscribe()
+}
 
 /// Shows `snapshot`; nothing is redrawn when it is what the screen already has.
 #[hotpath::measure]
@@ -474,6 +481,10 @@ pub fn Sidebar() -> impl IntoElement {
     };
 
     let glass = move || state.with(|s| s.glass);
+    let home = move || {
+        let open = state.with(|s| s.home_open);
+        action(IconName::House, "Home", "Home: today and your threads", Some(open), || send(Cmd::ToggleHome))
+    };
     let issues = move || {
         let (left, late) = state.with(|s| s.issues);
         let open = state.with(|s| s.issues_open);
@@ -533,6 +544,7 @@ pub fn Sidebar() -> impl IntoElement {
                 .gap(space::action_gap())
                 .px(space::gutter())
                 .pt(space::actions_top())
+                .child(dynamic(home))
                 .child(action(IconName::PlusBold, "New", "New thread (Ctrl+N)", None, || send(Cmd::NewThread)))
                 .child(dynamic(search))
                 .child(dynamic(issues)),

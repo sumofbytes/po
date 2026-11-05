@@ -355,10 +355,51 @@ impl Reader {
         cx.notify();
     }
 
+    pub(crate) fn toggle_home(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.home_open {
+            return self.hide_home(window, cx);
+        }
+        self.show_home(window, cx);
+    }
+
+    /// Puts Home in place of the conversation, or of the issues page.
+    pub(crate) fn show_home(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.home_open {
+            return;
+        }
+        self.hide_issues(window, cx);
+        self.home_open = true;
+        self.landing.update(cx, |home, cx| home.open(window, cx));
+        cx.notify();
+    }
+
+    pub(crate) fn hide_home(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.home_open {
+            return;
+        }
+        self.home_open = false;
+        self.landing.update(cx, |home, _| home.close());
+        self.focus.focus(window, cx);
+        cx.notify();
+    }
+
+    /// Shows issue `number` of the repo `repo` on the issues page, whichever repo the page was on.
+    pub(crate) fn open_issue_of(&mut self, repo: &std::path::Path, number: u64, window: &mut Window, cx: &mut Context<Self>) {
+        self.hide_home(window, cx);
+        issues::shared::set_project(repo);
+        if !self.issues_open {
+            self.issues_open = true;
+            self.issues.update(cx, |issues, cx| issues.open(window, cx));
+        }
+        issues::shared::navigate(issues::shared::Nav { target: issues::shared::Target::Issue(number), filter: None, group: None });
+        cx.notify();
+    }
+
     pub(crate) fn toggle_issues(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.issues_open {
             return self.hide_issues(window, cx);
         }
+        self.hide_home(window, cx);
         self.follow_issues();
         self.issues_open = true;
         self.issues.update(cx, |issues, cx| issues.open(window, cx));
@@ -366,6 +407,8 @@ impl Reader {
     }
 
     pub(crate) fn hide_issues(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Whatever leaves the issues for the conversation leaves Home for it too.
+        self.hide_home(window, cx);
         if !self.issues_open {
             return;
         }
