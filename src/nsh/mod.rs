@@ -427,6 +427,10 @@ const TURN: std::time::Duration = std::time::Duration::from_millis(1200);
 /// The positions of the arc in a turn: close enough together to read as a smooth turn.
 const STEPS: usize = 36;
 
+/// The tail of the arc: this many pieces of this many degrees, each fainter than the one before.
+const TAIL_PIECES: usize = 9;
+const TAIL_PIECE: f32 = 30.;
+
 /// Turns while `active` holds, a step at a time. An endless loop keeps the window redrawing, so it
 /// runs only when something spins, and not at all when the user asked for less motion.
 pub fn spin(active: impl Fn() -> bool + 'static) -> Spin {
@@ -457,8 +461,22 @@ fn arc(step: usize) -> &'static str {
         (0..STEPS)
             .map(|step| {
                 let degrees = step * 360 / STEPS;
+                // A head and a tail fading behind it, in pieces of a fixed opacity: SVG has no
+                // gradient along an arc, and the tint takes only the alpha.
+                let piece = |k: usize| {
+                    let point = |from_top: f32| {
+                        let a = from_top.to_radians();
+                        (12. + 9. * a.sin(), 12. - 9. * a.cos())
+                    };
+                    let (x0, y0) = point(90. - (k + 1) as f32 * TAIL_PIECE);
+                    let (x1, y1) = point(90. - k as f32 * TAIL_PIECE);
+                    let opacity = 1. - k as f32 / TAIL_PIECES as f32 * 0.9;
+                    let cap = if k == 0 { "round" } else { "butt" };
+                    format!(r#"<path d="M{x0:.2} {y0:.2}A9 9 0 0 1 {x1:.2} {y1:.2}" stroke-linecap="{cap}" opacity="{opacity:.2}"/>"#)
+                };
+                let tail: String = (0..TAIL_PIECES).map(piece).collect();
                 let svg = format!(
-                    r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round"><circle cx="12" cy="12" r="9" opacity="0.25"/><path transform="rotate({degrees} 12 12)" d="M12 3a9 9 0 0 1 9 9"/></svg>"#
+                    r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><g transform="rotate({degrees} 12 12)">{tail}</g></svg>"#
                 );
                 format!("data:image/svg+xml;base64,{}", base64::engine::general_purpose::STANDARD.encode(svg))
             })
