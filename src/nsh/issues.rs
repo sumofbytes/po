@@ -1,6 +1,7 @@
 //! The issues page: the repo's issues as a list or a board, one issue's details, and the epics
 //! they belong to. The data is [`crate::issues::shared`]'s; what is pressed changes it there, and
 //! the page follows. [`crate::nsh::epics`] draws the epics.
+use nsh_base::text_view;
 use nsh_core::prelude::*;
 
 use super::bus::{Cmd, send};
@@ -71,6 +72,19 @@ pub struct State {
     pub edited: Signal<Edited>,
     pub pending: Signal<u64>,
     pub add_field: ElementRef,
+    /// The title or description being typed in; the others are shown as they read.
+    pub editing: Signal<Option<Field>>,
+    /// The last press on a field shown, to tell a second one soon after.
+    last_press: Stored<Option<std::time::Instant>>,
+}
+
+/// A field of the issue and epic pages that is shown as text until it is pressed twice.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Field {
+    Title,
+    Description,
+    EpicName,
+    EpicDescription,
 }
 
 /// The fields of the page on screen that were typed in since they were last saved.
@@ -122,6 +136,8 @@ impl State {
             edited: signal(Edited::default()),
             pending: signal(0),
             add_field: element_ref(),
+            editing: signal(None),
+            last_press: stored(None),
         }
     }
 
@@ -240,11 +256,13 @@ impl State {
         self.new_label.set(String::new());
         self.new_sub.set(String::new());
         self.arm_delete.set(false);
+        self.editing.set(None);
         self.page.set(Page::Issue(number));
     }
 
     pub fn go(self, page: Page) {
         self.flush();
+        self.editing.set(None);
         self.page.set(page);
     }
 
@@ -580,6 +598,57 @@ pub fn delete_button(state: State, label: &'static str, on_press: impl Fn() + 's
                 .text_size(text_sm())
                 .text_color(move || if state.arm_delete.get() { Colors::danger()() } else { Colors::muted()() }),
         )
+}
+
+impl State {
+    /// Whether this press follows another closely: a double press.
+    fn double_press(self) -> bool {
+        let now = std::time::Instant::now();
+        let again = self.last_press.get().is_some_and(|at| now.duration_since(at) < std::time::Duration::from_millis(400));
+        self.last_press.replace(if again { None } else { Some(now) });
+        again
+    }
+}
+
+/// A field shown as `shown` until it is pressed twice, then as `input`, which takes the keyboard
+/// and gives the field back (saving what was typed) when it loses it.
+pub fn editable(state: State, field: Field, shown: impl Fn() -> View + 'static, input: impl Fn() -> AnyElement + 'static) -> AnyElement {
+    dynamic(move || {
+        if state.editing.get() == Some(field) {
+            vec![input()]
+        } else {
+            vec![shown().test_id(&format!("{field:?}-shown")).on_press(move || {
+                if state.double_press() {
+                    state.editing.set(Some(field));
+                }
+            }).into_element()]
+        }
+    })
+}
+
+/// Leaves the field being typed in, saving it.
+pub fn stop_editing(state: State) {
+    if state.editing.get_untracked().is_some() {
+        state.editing.set(None);
+        state.flush();
+    }
+}
+
+/// A markdown description, rendered; `empty` is shown in its place when there is none.
+pub fn markdown_box(text: Signal<String>, empty: &'static str) -> View {
+    let body = view().px(scale::s2_5()).py(scale::s2()).min_h(scale::lines(4.)).rounded(super::card_radius()).border_1().border_color(Colors::input_border());
+    let value = text.get();
+    if value.trim().is_empty() {
+        body.child(super::note(empty))
+    } else {
+        body.child(
+            text_view()
+                .markdown(value)
+                .on_link_press(|press: &nsh_base::TextViewLinkPressEvent| send(Cmd::OpenUrl(press.url.to_string())))
+                .text_size(super::text_base())
+                .text_color(Colors::foreground()),
+        )
+    }
 }
 
 /// Several lines of text, growing to a height, where Enter makes a new line. `on_change` hears
@@ -1473,14 +1542,40 @@ fn issue_body(state: State, number: u64) -> AnyElement {
                     .child(super::button("Work on this", true, move || send(Cmd::WorkOnIssue(number))))
                     .child(delete_button(state, "Delete issue", move || state.delete(number))),
             )
-            .child(boxed(IconName::Pencil, line_input("issue-title", state.title, "Title", move || state.flush()).on_change(move |text: &str| {
-                state.title.set(text.to_string());
-                state.touch(|edited| edited.title = true);
-            }), None))
-            .child(text_area("issue-description", state.description, "Description (markdown)", move |text| {
-                state.description.set(text.to_string());
-                state.touch(|edited| edited.description = true);
-            }))
+            .child(editable(
+                state,
+                Field::Title,
+                move || {
+                    let title = state.title.get();
+                    let empty = title.trim().is_empty();
+                    view().min_h(scale::s10()).justify_center().child(
+                        text(if empty { "Untitled (double-click to edit)".to_string() } else { title })
+                            .sized(super::font(1.25))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(move || if empty { Colors::muted()() } else { Colors::foreground()() }),
+                    )
+                },
+                move || {
+                    boxed(IconName::Pencil, line_input("issue-title", state.title, "Title", move || stop_editing(state)).auto_focus(true).on_blur(move || stop_editing(state)).on_change(move |text: &str| {
+                        state.title.set(text.to_string());
+                        state.touch(|edited| edited.title = true);
+                    }), None)
+                    .into_element()
+                },
+            ))
+            .child(editable(
+                state,
+                Field::Description,
+                move || markdown_box(state.description, "No description. Double-click to write one (markdown)."),
+                move || {
+                    text_area("issue-description", state.description, "Description (markdown)", move |text| {
+                        state.description.set(text.to_string());
+                        state.touch(|edited| edited.description = true);
+                    })
+                    .on_blur(move || stop_editing(state))
+                    .into_element()
+                },
+            ))
             .child(dynamic(sections))
             .child(property("Due", vec![view().flex_1().child(boxed(IconName::Calendar, line_input("issue-due", state.due, DUE_HINT, move || state.flush()).on_change(move |text: &str| {
                 state.due.set(text.to_string());
@@ -1595,8 +1690,13 @@ mod tests {
         app.press("role:button[In Review]").unwrap();
         app.settle();
         assert_eq!(issue(1).status, Status::InReview);
+        // Title and description read as text until pressed twice.
+        app.press("id:Title-shown").unwrap();
+        app.press("id:Title-shown").unwrap();
         app.clear("id:issue-title").unwrap();
         app.type_text("id:issue-title", "Fix the login").unwrap();
+        app.press("id:Description-shown").unwrap();
+        app.press("id:Description-shown").unwrap();
         app.type_text("id:issue-description", "Users can't sign in.").unwrap();
         app.type_text("id:issue-label", "bug").unwrap();
         app.submit("id:issue-label").unwrap();
@@ -1689,6 +1789,8 @@ mod tests {
         // Typing and leaving at once does not lose what was typed.
         app.press("id:issue-pg-1").unwrap();
         app.settle();
+        app.press("id:Title-shown").unwrap();
+        app.press("id:Title-shown").unwrap();
         app.type_text("id:issue-title", " now").unwrap();
         app.press("role:button[Back (Esc)]").unwrap();
         app.settle();
@@ -1718,6 +1820,8 @@ mod tests {
         assert!(app.screen().texts().iter().any(|t| t.to_string().contains("pg-one")), "{:?}", app.screen().texts());
 
         // Issue 1 of the other repo, pressed in the sidebar before the typing was saved.
+        app.press("id:Title-shown").unwrap();
+        app.press("id:Title-shown").unwrap();
         app.type_text("id:issue-title", " typed").unwrap();
         shared::set_project(&two.0);
         nav(1);

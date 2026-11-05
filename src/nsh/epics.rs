@@ -2,8 +2,8 @@
 //! milestones and issues. Drawn with [`crate::nsh::issues`]'s pieces and state.
 use nsh_core::prelude::*;
 
-use super::issues::{State, Page, Tools, add_box, toolbar, boxed, chip, delete_button, due_hint, issue_row, legend, line_input, project_pill, text_area};
-use super::{Colors, caption, icon, icon_button, note, scale, Smooth};
+use super::issues::{State, Page, Field, editable, markdown_box, stop_editing, Tools, add_box, toolbar, boxed, chip, delete_button, due_hint, issue_row, legend, line_input, project_pill, text_area};
+use super::{Colors, caption, icon, icon_button, note, scale, Sizing, Smooth};
 use crate::issues::shared;
 use crate::issues::{EpicStatus, Progress};
 use crate::date::{Date, due_label, parse_due, today};
@@ -34,6 +34,7 @@ impl State {
         self.milestone_name.set(String::new());
         self.milestone_due.set(String::new());
         self.arm_delete.set(false);
+        self.editing.set(None);
         self.page.set(Page::Epic(id.to_string()));
     }
 
@@ -264,14 +265,40 @@ fn epic_body(state: State, id: String) -> AnyElement {
                     .child(note(id.clone()).flex_1())
                     .child(delete_button(state, "Delete epic", move || state.delete_epic(&delete_id))),
             )
-            .child(boxed(IconName::Pencil, line_input("epic-name", state.epic_name, "Name", move || state.flush()).on_change(move |text: &str| {
-                state.epic_name.set(text.to_string());
-                state.touch(|edited| edited.epic_name = true);
-            }), None))
-            .child(text_area("epic-description", state.epic_description, "Description (markdown)", move |text| {
-                state.epic_description.set(text.to_string());
-                state.touch(|edited| edited.epic_description = true);
-            }))
+            .child(editable(
+                state,
+                Field::EpicName,
+                move || {
+                    let name = state.epic_name.get();
+                    let empty = name.trim().is_empty();
+                    view().min_h(scale::s10()).justify_center().child(
+                        text(if empty { "Unnamed (double-click to edit)".to_string() } else { name })
+                            .sized(super::font(1.25))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(move || if empty { Colors::muted()() } else { Colors::foreground()() }),
+                    )
+                },
+                move || {
+                    boxed(IconName::Pencil, line_input("epic-name", state.epic_name, "Name", move || stop_editing(state)).auto_focus(true).on_blur(move || stop_editing(state)).on_change(move |text: &str| {
+                        state.epic_name.set(text.to_string());
+                        state.touch(|edited| edited.epic_name = true);
+                    }), None)
+                    .into_element()
+                },
+            ))
+            .child(editable(
+                state,
+                Field::EpicDescription,
+                move || markdown_box(state.epic_description, "No description. Double-click to write one (markdown)."),
+                move || {
+                    text_area("epic-description", state.epic_description, "Description (markdown)", move |text| {
+                        state.epic_description.set(text.to_string());
+                        state.touch(|edited| edited.epic_description = true);
+                    })
+                    .on_blur(move || stop_editing(state))
+                    .into_element()
+                },
+            ))
             .child(view().flex_row().items_center().gap(scale::s3()).child(view().w(scale::legend_width()).flex_none().child(legend("Status"))).child(dynamic(statuses)))
             .child(
                 view().flex_row().items_center().gap(scale::s3()).child(view().w(scale::legend_width()).flex_none().child(legend("Target"))).child(
