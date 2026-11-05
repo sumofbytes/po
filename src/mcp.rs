@@ -626,7 +626,7 @@ fn tools() -> Vec<(&'static str, &'static str, &'static str, Value, Scope)> {
                     "filter_epic": string("An epic's id to list the issues of."),
                     "priority": { "type": "string", "description": "How pressing.", "enum": ["urgent", "high", "medium", "low"] },
                     "late": json!({ "type": "boolean" }),
-                    "group": { "type": "string", "description": "How to group the list.", "enum": ["status", "priority", "epic", "none"] },
+                    "group": { "type": "string", "description": "How to group the list.", "enum": ["status", "priority", "project", "epic", "none"] },
                 },
             }),
             Scope::Orchestrate,

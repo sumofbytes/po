@@ -106,12 +106,13 @@ can't be applied (an unknown key, a parent that would make a loop) changes nothi
 
 ## In the app
 
-- **Issues** in the sidebar opens the page for the project on screen: list (grouped by status,
-  priority or epic, filtered by words, label, lateness and scope), board (drag a card across, or use
+- **Issues** in the sidebar opens one page for every open project, each issue tagged with its
+  project and narrowed by project chips: list (grouped by status, priority, project or epic,
+  filtered by words, label, lateness and scope), board (drag a card across, or use
   its arrows), an issue's page (status, priority, labels, epic, milestone, due date, parent,
   sub-issues, description), and epics with milestones and progress. The add field takes
   `Fix login !high #bug @epic`. Issues are Po's only tracker: the old todo list is gone, and an
-  old list is offered once, as a bar on the list page: import it into the project you are in, or
+  old list is offered once, as a bar on the list page: import it into the project it would be added to, or
   dismiss it (`todos.json` is read, never changed, and the offer ends everywhere). Things that
   belong to no project go in whichever project is open.
 - **Work on this** (on an issue's page) starts a thread on the issue in a worktree of its own,

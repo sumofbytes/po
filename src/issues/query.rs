@@ -51,17 +51,20 @@ pub enum Group {
     Status,
     Priority,
     Epic,
+    /// The repo each issue is in; with one repo, one group.
+    Project,
     None,
 }
 
 impl Group {
-    pub const ALL: [Group; 4] = [Group::Status, Group::Priority, Group::Epic, Group::None];
+    pub const ALL: [Group; 5] = [Group::Status, Group::Priority, Group::Project, Group::Epic, Group::None];
 
     pub fn name(self) -> &'static str {
         match self {
             Group::Status => "Status",
             Group::Priority => "Priority",
             Group::Epic => "Epic",
+            Group::Project => "Project",
             Group::None => "None",
         }
     }
@@ -77,28 +80,55 @@ pub struct Section {
     pub issues: Vec<u64>,
 }
 
-/// The issues `filter` lets through, grouped, each group with the most pressing first. Empty
-/// groups are left out.
-pub fn sections(tracker: &Tracker, filter: &Filter, group: Group, today: Date) -> Vec<Section> {
-    let mut shown: Vec<&Issue> = tracker.issues().filter(|issue| filter.matches(issue, &tracker.key(issue.number), today)).collect();
-    shown.sort_by_key(|issue| (issue.status, issue.priority.rank(), std::cmp::Reverse(issue.number)));
-    let by = |title: String, key: Option<String>, keep: &dyn Fn(&Issue) -> bool| Section { title, key, issues: shown.iter().filter(|issue| keep(issue)).map(|issue| issue.number).collect() };
-    let all: Vec<Section> = match group {
-        Group::None => vec![by(String::new(), None, &|_| true)],
-        Group::Status => Status::ALL.iter().map(|s| by(s.name().into(), Some(s.slug().into()), &|issue| issue.status == *s)).collect(),
+/// A run of the list across repos under a heading: `(repo, number)` of each issue, the repo as
+/// its place in the list given.
+#[derive(Clone, PartialEq, Debug)]
+pub struct WideSection {
+    pub title: String,
+    pub key: Option<String>,
+    pub issues: Vec<(usize, u64)>,
+}
+
+/// The issues `filter` lets through from every repo in `repos` (a name and its issues), grouped,
+/// each group with the most pressing first. Empty groups are left out.
+pub fn sections_across(repos: &[(&str, &Tracker)], filter: &Filter, group: Group, today: Date) -> Vec<WideSection> {
+    let mut shown: Vec<(usize, &Issue)> = repos
+        .iter()
+        .enumerate()
+        .flat_map(|(at, (_, tracker))| tracker.issues().filter(move |issue| filter.matches(issue, &tracker.key(issue.number), today)).map(move |issue| (at, issue)))
+        .collect();
+    shown.sort_by_key(|(at, issue)| (issue.status, issue.priority.rank(), *at, std::cmp::Reverse(issue.number)));
+    let by = |title: String, key: Option<String>, keep: &dyn Fn(usize, &Issue) -> bool| WideSection { title, key, issues: shown.iter().filter(|(at, issue)| keep(*at, issue)).map(|(at, issue)| (*at, issue.number)).collect() };
+    let all: Vec<WideSection> = match group {
+        Group::None => vec![by(String::new(), None, &|_, _| true)],
+        Group::Status => Status::ALL.iter().map(|s| by(s.name().into(), Some(s.slug().into()), &|_, issue| issue.status == *s)).collect(),
         Group::Priority => {
             let mut order = Priority::ALL;
             order.sort_by_key(|p| p.rank());
-            order.iter().map(|p| by(p.name().into(), Some(p.slug().into()), &|issue| issue.priority == *p)).collect()
+            order.iter().map(|p| by(p.name().into(), Some(p.slug().into()), &|_, issue| issue.priority == *p)).collect()
         }
+        Group::Project => repos.iter().enumerate().map(|(at, (name, _))| by(name.to_string(), None, &|of, _| of == at)).collect(),
         Group::Epic => {
-            let known = |issue: &Issue| issue.epic.as_ref().is_some_and(|id| tracker.epic(id).is_some());
-            let mut sections: Vec<Section> = tracker.epics().iter().map(|e| by(e.name.clone(), Some(e.id.clone()), &|issue| issue.epic.as_ref() == Some(&e.id))).collect();
-            sections.push(by("No epic".into(), None, &|issue| !known(issue)));
+            let known = |at: usize, issue: &Issue| issue.epic.as_ref().is_some_and(|id| repos[at].1.epic(id).is_some());
+            let mut sections: Vec<WideSection> = vec![];
+            for (at, (name, tracker)) in repos.iter().enumerate() {
+                for epic in tracker.epics() {
+                    // Epics of different repos can share a name; the repo is said when there are several.
+                    let title = if repos.len() > 1 { format!("{name} · {}", epic.name) } else { epic.name.clone() };
+                    sections.push(by(title, Some(epic.id.clone()), &|of, issue| of == at && issue.epic.as_ref() == Some(&epic.id)));
+                }
+            }
+            sections.push(by("No epic".into(), None, &|at, issue| !known(at, issue)));
             sections
         }
     };
     all.into_iter().filter(|section| !section.issues.is_empty()).collect()
+}
+
+/// The issues `filter` lets through, grouped, each group with the most pressing first. Empty
+/// groups are left out.
+pub fn sections(tracker: &Tracker, filter: &Filter, group: Group, today: Date) -> Vec<Section> {
+    sections_across(&[("", tracker)], filter, group, today).into_iter().map(|section| Section { title: section.title, key: section.key, issues: section.issues.into_iter().map(|(_, number)| number).collect() }).collect()
 }
 
 /// A line typed to add an issue, taken apart.
@@ -199,6 +229,24 @@ mod tests {
         assert_eq!(titles(Group::None), [(String::new(), vec![2, 1, 3])]);
         // A section carries what it stands for.
         assert_eq!(sections(&t, &all, Group::Status, day())[1].key.as_deref(), Some("in-progress"));
+    }
+
+    #[test]
+    fn issues_of_several_repos_group_as_one_list_and_by_project() {
+        let (a, b) = (sample(), {
+            let mut t = Tracker::new(Config::new("API".into()));
+            let launch = t.create_epic("Launch", 1);
+            let x = t.create("Rate limit", 1);
+            t.update(x, 2, |i| (i.priority, i.epic) = (Priority::Urgent, Some(launch)));
+            t
+        });
+        let repos = [("po", &a), ("api", &b)];
+        let open = Filter::default();
+        let rows = |group| sections_across(&repos, &open, group, day()).iter().map(|s| (s.title.clone(), s.issues.clone())).collect::<Vec<_>>();
+        assert_eq!(rows(Group::Project), [("po".to_string(), vec![(0, 2), (0, 1)]), ("api".to_string(), vec![(1, 1)])]);
+        assert_eq!(rows(Group::Priority)[0], ("Urgent".to_string(), vec![(0, 2), (1, 1)]));
+        assert_eq!(rows(Group::Epic), [("po · Launch".to_string(), vec![(0, 1)]), ("api · Launch".to_string(), vec![(1, 1)]), ("No epic".to_string(), vec![(0, 2)])]);
+        assert_eq!(rows(Group::None), [(String::new(), vec![(0, 2), (1, 1), (0, 1)])]);
     }
 
     #[test]
