@@ -183,9 +183,17 @@ impl Reader {
         // descendants (see `control`).
         let control = self.control.clone();
         let registered = move |pid: Option<u32>| control.as_ref().map(|control| control.register(id, pid)).unwrap_or_default();
-        match Client::spawn(&agent, &self.project.root, resume, registered) {
+        // A thread being woken knows its session: the agent loads it without listing the rest.
+        let wanted = self.thread.restore.clone().filter(|_| resume && agent.daemon.is_none());
+        match Client::spawn(&agent, &self.project.root, resume, wanted.as_deref(), registered) {
             Ok((client, mut events)) => {
                 self.thread.client = Some(client);
+                if wanted.is_some() {
+                    self.thread.restore = None;
+                    self.thread.loading = true;
+                    self.thread.picking = false;
+                    self.thread.status = "loading session…".into();
+                }
                 self.thread.started_grant = Some(self.grants.get(&id).copied().unwrap_or_else(command::Grant::initial));
                 let handle = window.window_handle();
                 cx.spawn(async move |this, cx| {
@@ -659,10 +667,10 @@ impl Reader {
             return self.connect(&key, false, window, cx);
         }
         log::info!("agent: waking {key} session {session}");
-        self.connect(&key, true, window, cx);
         self.thread.restore = Some(session);
+        self.connect(&key, true, window, cx);
         // An agent waiting for approval hasn't started, and says so.
-        if self.thread.client.is_some() {
+        if self.thread.client.is_some() && self.thread.restore.is_some() {
             self.thread.status = "waking…".into();
         }
     }

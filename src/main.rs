@@ -2856,7 +2856,7 @@ mod tests {
     fn closed_with(busy: bool) -> String {
         let path = std::env::temp_dir().join(format!("po-retire-{}-{busy}", std::process::id()));
         std::fs::write(&path, "").unwrap();
-        let (client, _events) = crate::acp::Client::spawn(&format!("tee {}", path.display()), &std::env::temp_dir(), false, |_| vec![]).expect("spawns tee");
+        let (client, _events) = crate::acp::Client::spawn(&format!("tee {}", path.display()), &std::env::temp_dir(), false, None, |_| vec![]).expect("spawns tee");
         client.load("s1");
         let mut thread = super::Thread::blank(1);
         thread.busy = busy;

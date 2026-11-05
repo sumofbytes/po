@@ -128,6 +128,9 @@ struct Shared {
     agent: Mutex<String>,
     /// Start by listing sessions to resume instead of opening a new one.
     resume: bool,
+    /// With `resume`, the session to load straight away, skipping the listing: the agent scans
+    /// every session of the project to list them, which is slow when the one wanted is known.
+    wanted: Option<String>,
     listed: Mutex<Vec<SessionInfo>>,
     /// Po's own MCP server for this thread, if the window has a socket to give it.
     po_mcp: Option<Value>,
@@ -254,6 +257,12 @@ impl Shared {
                         self.emit(Event::Failed(format!("{agent} can't list and resume sessions.")));
                         return;
                     }
+                    if let Some(id) = &self.wanted {
+                        *self.session.lock().expect("session lock") = Some(id.clone());
+                        let cwd = self.cwd.to_string_lossy().to_string();
+                        self.request("session/load", json!({ "sessionId": id, "cwd": cwd, "mcpServers": self.mcp_servers() }), Pending::Load);
+                        return;
+                    }
                     self.list_sessions(None, 0);
                     return;
                 }
@@ -358,7 +367,8 @@ impl Client {
     /// With `resume`, lists the agent's sessions rather than opening a new one; `load` picks one.
     /// The child's pid is known once it is started, and `control` is then asked for the
     /// environment Po's MCP server for this thread gets; the agent itself does not.
-    pub fn spawn(command: &str, cwd: &Path, resume: bool, control: impl FnOnce(u32) -> Vec<(String, String)>) -> Result<(Self, UnboundedReceiver<Event>)> {
+    /// With `resume` and `wanted`, loads that session without listing the others.
+    pub fn spawn(command: &str, cwd: &Path, resume: bool, wanted: Option<&str>, control: impl FnOnce(u32) -> Vec<(String, String)>) -> Result<(Self, UnboundedReceiver<Event>)> {
         let mut parts = command.split_whitespace();
         let program = parts.next().context("empty agent command")?;
         let mut child = Command::new(program)
@@ -382,6 +392,7 @@ impl Client {
             session: Mutex::new(None),
             agent: Mutex::new(program.to_string()),
             resume,
+            wanted: wanted.filter(|_| resume).map(String::from),
             listed: Mutex::new(Vec::new()),
             images: AtomicBool::new(false),
             po_mcp: if control.is_empty() { None } else { crate::mcp::server(&control) },
