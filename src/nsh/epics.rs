@@ -2,7 +2,7 @@
 //! milestones and issues. Drawn with [`crate::nsh::issues`]'s pieces and state.
 use nsh_core::prelude::*;
 
-use super::issues::{State, Page, boxed, chip, delete_button, due_hint, issue_row, legend, line_input, text_area};
+use super::issues::{State, Page, Tools, add_box, toolbar, boxed, chip, delete_button, due_hint, issue_row, legend, line_input, project_pill, text_area};
 use super::{Colors, caption, icon, icon_button, note, scale, Smooth};
 use crate::issues::shared;
 use crate::issues::{EpicStatus, Progress};
@@ -12,6 +12,14 @@ use crate::ui::icon::IconName;
 const DUE_HINT: &str = "Due: fri, nov 2, 2026-12-01…";
 
 impl State {
+    /// Opens an epic of the repo `repo` on its page; Back comes back to the list of epics.
+    pub fn open_epic_in(self, repo: &std::path::Path, id: &str) {
+        self.flush();
+        shared::set_project(repo);
+        self.follow(shared::watch().borrow().clone());
+        self.open_epic(id);
+    }
+
     /// Opens an epic's page, with its fields holding what it has.
     pub fn open_epic(self, id: &str) {
         self.flush();
@@ -34,18 +42,18 @@ impl State {
     pub fn save_epic_name(self, id: &str) {
         let name = self.epic_name.get_untracked().trim().to_string();
         if !name.is_empty() {
-            shared::change(|tracker, now| tracker.update_epic(id, now, |epic| epic.name = name));
+            self.save(|tracker, now| tracker.update_epic(id, now, |epic| epic.name = name));
         }
     }
 
     pub fn save_epic_description(self, id: &str) {
         let description = self.epic_description.get_untracked();
-        shared::change(|tracker, now| tracker.update_epic(id, now, |epic| epic.description = description));
+        self.save(|tracker, now| tracker.update_epic(id, now, |epic| epic.description = description));
     }
 
     pub fn save_epic_target(self, id: &str) {
         if let Some(target) = parse_due(&self.epic_target.get_untracked(), today()) {
-            shared::change(|tracker, now| tracker.update_epic(id, now, |epic| epic.target = target));
+            self.save(|tracker, now| tracker.update_epic(id, now, |epic| epic.target = target));
         }
     }
 
@@ -65,10 +73,10 @@ impl State {
         if name.is_empty() {
             return;
         }
-        if let Some(id) = shared::change(|tracker, now| tracker.create_epic(&name, now)) {
-            self.epic_name.set(String::new());
-            self.open_epic(&id);
-        }
+        let Some(repo) = self.target() else { return };
+        let id = shared::change_repo(&repo, |tracker, now| tracker.create_epic(&name, now));
+        self.epic_name.set(String::new());
+        self.open_epic_in(&repo, &id);
     }
 }
 
@@ -93,40 +101,47 @@ fn count(progress: Progress) -> String {
 }
 
 pub fn epics_page(state: State) -> View {
-    let has_project = move || state.data.with(|data| data.root.is_some());
+    let has_project = move || state.all.with(|all| !all.repos.is_empty());
     view().flex_1().child(when(has_project, move || {
         view()
             .flex_1()
-            .child(view().px(scale::s4()).pt(scale::s3()).pb(scale::s2()).child(boxed(IconName::Plus, line_input("epic-new-name", state.epic_name, "New epic", move || state.add_epic()).auto_focus(true), None)))
+            .child(view().px(scale::s4()).pt(scale::s3()).pb(scale::s2()).child(add_box(line_input("epic-new-name", state.epic_name, "New epic", move || state.add_epic()).auto_focus(true), move || project_pill(state))))
+            .child(toolbar(state, Tools::PROJECT))
             .child(scroll().flex_shrink(1.).child(dynamic(move || {
-                let rows: Vec<View> = state.data.with(|data| {
-                    data.tracker
-                        .epics()
-                        .iter()
-                        .map(|epic| {
-                            let (id, progress) = (epic.id.clone(), data.tracker.epic_progress(&epic.id));
-                            view()
-                                .test_id(&format!("epic-{}", epic.id))
-                                .h(scale::s8())
-                                .flex_row()
-                                .items_center()
-                                .gap(scale::s2())
-                                .px(scale::s2_5())
-                                .rounded(Colors::radius())
-                                .cursor_pointer()
-                                .smooth()
-                                .hover(|s| s.bg(Colors::hover()))
-                                .on_press(move || state.open_epic(&id))
-                                .child(icon(IconName::Layers, scale::s3(), Colors::muted()))
-                                .child(text(epic.name.clone()).flex_1().number_of_lines(1).text_color(Colors::foreground()))
-                                .child(caption(epic.status.name()).flex_none())
-                                .child(view().w(scale::bar_width()).flex_none().flex_row().child(bar(progress)))
-                                .child(caption(count(progress)).flex_none().w(scale::count_width()))
-                                .child(caption(epic.target.map(|t| due_label(t, today())).unwrap_or_default()).flex_none().w(scale::due_width()))
-                        })
-                        .collect()
+                let several = state.all.with(|all| all.repos.len() > 1);
+                let (rows, empty): (Vec<View>, bool) = state.visible(|repos| {
+                    let mut rows = vec![];
+                    for repo in repos.iter().filter(|repo| !repo.tracker.epics().is_empty()) {
+                        if several {
+                            rows.push(view().px(scale::s2_5()).pt(scale::s3()).pb(scale::s1()).child(legend_text(repo.name.clone())));
+                        }
+                        for epic in repo.tracker.epics() {
+                            let (root, id, progress) = (repo.root.clone(), epic.id.clone(), repo.tracker.epic_progress(&epic.id));
+                            rows.push(
+                                view()
+                                    .test_id(&format!("epic-{}-{}", repo.name, epic.id))
+                                    .h(scale::s8())
+                                    .flex_row()
+                                    .items_center()
+                                    .gap(scale::s2())
+                                    .px(scale::s2_5())
+                                    .rounded(Colors::radius())
+                                    .cursor_pointer()
+                                    .smooth()
+                                    .hover(|s| s.bg(Colors::hover()))
+                                    .on_press(move || state.open_epic_in(&root, &id))
+                                    .child(icon(IconName::Layers, scale::s3(), Colors::muted()))
+                                    .child(text(epic.name.clone()).flex_1().number_of_lines(1).text_color(Colors::foreground()))
+                                    .child(caption(epic.status.name()).flex_none())
+                                    .child(view().w(scale::bar_width()).flex_none().flex_row().child(bar(progress)))
+                                    .child(caption(count(progress)).flex_none().w(scale::count_width()))
+                                    .child(caption(epic.target.map(|t| due_label(t, today())).unwrap_or_default()).flex_none().w(scale::due_width())),
+                            );
+                        }
+                    }
+                    let empty = rows.is_empty();
+                    (rows, empty)
                 });
-                let empty = rows.is_empty();
                 view()
                     .gap(scale::s0_5())
                     .px(scale::s3())
@@ -135,6 +150,11 @@ pub fn epics_page(state: State) -> View {
                     .child(empty.then(|| view().py(scale::s6()).items_center().child(note("No epics yet. An epic groups issues toward a goal."))))
             })))
     }).otherwise(|| view().py(scale::s6()).items_center().child(note("Open a project to see its epics."))))
+}
+
+/// A project's name over its epics.
+fn legend_text(name: String) -> Text {
+    text(name).text_size(super::text_xs()).font_weight(FontWeight::SEMIBOLD).text_color(Colors::muted())
 }
 
 pub fn epic_page(state: State, id: String) -> View {
