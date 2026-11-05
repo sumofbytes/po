@@ -115,7 +115,7 @@ pub fn sections_across(repos: &[(&str, &Tracker)], filter: &Filter, group: Group
                 for epic in tracker.epics() {
                     // Epics of different repos can share a name; the repo is said when there are several.
                     let title = if repos.len() > 1 { format!("{name} · {}", epic.name) } else { epic.name.clone() };
-                    sections.push(by(title, Some(epic.id.clone()), &|of, issue| of == at && issue.epic.as_ref() == Some(&epic.id)));
+                    sections.push(by(title, Some(if repos.len() > 1 { format!("{name}:{}", epic.id) } else { epic.id.clone() }), &|of, issue| of == at && issue.epic.as_ref() == Some(&epic.id)));
                 }
             }
             sections.push(by("No epic".into(), None, &|at, issue| !known(at, issue)));

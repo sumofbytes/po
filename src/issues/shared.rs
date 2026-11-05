@@ -93,6 +93,26 @@ fn publish_view(store: &Store) {
     });
 }
 
+/// Tells the screens what one repo now holds, if that changed: a change to one repo has no need to
+/// copy and compare all the others. A repo the overview doesn't list yet goes through
+/// [`publish_overview`].
+fn publish_repo(held: &Held, root: &Path) {
+    let Some(store) = held.stores.get(root) else { return };
+    let listed = OVERVIEW.borrow().repos.iter().any(|repo| repo.root == root);
+    if !listed {
+        return publish_overview(held);
+    }
+    OVERVIEW.send_if_modified(|now| {
+        let Some(repo) = now.repos.iter_mut().find(|repo| repo.root == root) else { return false };
+        if repo.tracker == store.tracker && repo.problems == store.problems {
+            return false;
+        }
+        repo.tracker = store.tracker.clone();
+        repo.problems = store.problems.clone();
+        true
+    });
+}
+
 /// Tells the screens what the repos followed now hold, if that changed.
 #[hotpath::measure]
 fn publish_overview(held: &Held) {
@@ -245,7 +265,7 @@ fn change_held<R, F: FnOnce(&mut Tracker, u64) -> R>(held: &mut Held, root: &Pat
     if held.shown.as_deref() == Some(root) {
         publish_view(&held.stores[root]);
     }
-    publish_overview(held);
+    publish_repo(held, root);
     Ok(out)
 }
 

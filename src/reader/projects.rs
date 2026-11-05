@@ -384,6 +384,7 @@ impl Reader {
     pub(crate) fn open_worktree(&mut self, wt: worktree::Worktree, agent: String, first: Option<(Outgoing, (u64, u64))>, window: &mut Window, cx: &mut Context<Self>) {
         log::info!("worktree: {} for {agent}", wt.spec.branch);
         if let Some((root, number)) = self.issue_for_worktree.take() {
+            self.issue_draft = None;
             Self::issue_started(&root, number, Some(wt.spec.branch.clone()));
         }
         let mut project = Self::build_project(wt.spec.path.clone(), None, vec![]);

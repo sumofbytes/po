@@ -75,7 +75,7 @@ pub struct State {
     /// The title or description being typed in; the others are shown as they read.
     pub editing: Signal<Option<Field>>,
     /// The last press on a field shown, to tell a second one soon after.
-    last_press: Stored<Option<std::time::Instant>>,
+    last_press: Stored<Option<(Field, std::time::Instant)>>,
 }
 
 /// A field of the issue and epic pages that is shown as text until it is pressed twice.
@@ -363,7 +363,7 @@ impl State {
     }
 
     pub fn set_status(self, number: u64, status: Status) {
-        shared::change(|tracker, now| tracker.update(number, now, |issue| issue.status = status));
+        self.save(|tracker, now| tracker.update(number, now, |issue| issue.status = status));
     }
 
     /// The next status along, for a click on the circle: Done wraps to Backlog; Canceled is only picked.
@@ -391,7 +391,7 @@ impl State {
         if self.page.get_untracked() == Page::Issue(number) {
             self.back();
         }
-        shared::change(|tracker, now| tracker.remove(number, now));
+        self.save(|tracker, now| tracker.remove(number, now));
     }
 
     /// Goes where an agent asked the page to go, with the filter and grouping it named.
@@ -602,10 +602,10 @@ pub fn delete_button(state: State, label: &'static str, on_press: impl Fn() + 's
 
 impl State {
     /// Whether this press follows another closely: a double press.
-    fn double_press(self) -> bool {
+    fn double_press(self, field: Field) -> bool {
         let now = std::time::Instant::now();
-        let again = self.last_press.get().is_some_and(|at| now.duration_since(at) < std::time::Duration::from_millis(400));
-        self.last_press.replace(if again { None } else { Some(now) });
+        let again = self.last_press.get().is_some_and(|(of, at)| of == field && now.duration_since(at) < std::time::Duration::from_millis(400));
+        self.last_press.replace(if again { None } else { Some((field, now)) });
         again
     }
 }
@@ -618,7 +618,7 @@ pub fn editable(state: State, field: Field, shown: impl Fn() -> View + 'static, 
             vec![input()]
         } else {
             vec![shown().test_id(&format!("{field:?}-shown")).on_press(move || {
-                if state.double_press() {
+                if state.double_press(field) {
                     state.editing.set(Some(field));
                 }
             }).into_element()]
@@ -626,11 +626,24 @@ pub fn editable(state: State, field: Field, shown: impl Fn() -> View + 'static, 
     })
 }
 
-/// Leaves the field being typed in, saving it.
+/// Leaves the field being typed in, saving it. A title or name left empty is not saved, so the
+/// field goes back to what is saved rather than showing something that isn't.
 pub fn stop_editing(state: State) {
-    if state.editing.get_untracked().is_some() {
-        state.editing.set(None);
-        state.flush();
+    let Some(field) = state.editing.get_untracked() else { return };
+    state.editing.set(None);
+    state.flush();
+    match (field, state.page.get_untracked()) {
+        (Field::Title, Page::Issue(number)) if state.title.get_untracked().trim().is_empty() => {
+            if let Some(title) = state.read(|data| data.tracker.issue(number).map(|i| i.title.clone())) {
+                state.title.set(title);
+            }
+        }
+        (Field::EpicName, Page::Epic(id)) if state.epic_name.get_untracked().trim().is_empty() => {
+            if let Some(name) = state.read(|data| data.tracker.epic(&id).map(|e| e.name.clone())) {
+                state.epic_name.set(name);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -653,7 +666,7 @@ pub fn markdown_box(text: Signal<String>, empty: &'static str) -> View {
 
 /// Several lines of text, growing to a height, where Enter makes a new line. `on_change` hears
 /// every edit and is to set `value`.
-pub fn text_area(id: &str, value: Signal<String>, placeholder: &'static str, on_change: impl Fn(&str) + 'static) -> View {
+pub fn text_area(id: &str, value: Signal<String>, placeholder: &'static str, on_change: impl Fn(&str) + 'static, on_blur: impl Fn() + 'static) -> View {
     view()
         .px(scale::s2_5())
         .py(scale::s2())
@@ -672,6 +685,8 @@ pub fn text_area(id: &str, value: Signal<String>, placeholder: &'static str, on_
                 .text_color(Colors::foreground())
                 .auto_correct(false)
                 .multiline(true)
+                .auto_focus(true)
+                .on_blur(on_blur)
                 .on_change(move |text: &str| on_change(text))
                 .flex_1()
                 .min_w(Points(0.))
@@ -1440,7 +1455,7 @@ fn issue_body(state: State, number: u64) -> AnyElement {
             .iter()
             .map(|p| {
                 let p = *p;
-                icon_chip(IconName::Signal, priority_tint(p), p.name(), move || priority == p, move || { shared::change(|t, now| t.update(number, now, |i| i.priority = p)); })
+                icon_chip(IconName::Signal, priority_tint(p), p.name(), move || priority == p, move || { state.save(|t, now| t.update(number, now, |i| i.priority = p)); })
             })
             .collect();
         let (labels, epics, milestones, links, subs) = state.data.with(|data| {
@@ -1452,17 +1467,17 @@ fn issue_body(state: State, number: u64) -> AnyElement {
                 .map(|l| {
                     let (name, on) = (l.name.clone(), issue.labels.contains(&l.name));
                     chip(format!("#{name}"), move || on, move || {
-                        shared::change(|t, now| t.update(number, now, |i| if on { i.labels.retain(|x| *x != name) } else { i.labels.push(name.clone()) }));
+                        state.save(|t, now| t.update(number, now, |i| if on { i.labels.retain(|x| *x != name) } else { i.labels.push(name.clone()) }));
                     })
                 })
                 .collect();
             let mut epics: Vec<View> = vec![{
                 let on = issue.epic.is_none();
-                chip("No epic", move || on, move || { shared::change(|t, now| t.update(number, now, |i| i.epic = None)); })
+                chip("No epic", move || on, move || { state.save(|t, now| t.update(number, now, |i| i.epic = None)); })
             }];
             epics.extend(data.tracker.epics().iter().map(|e| {
                 let (id, on) = (e.id.clone(), issue.epic.as_ref() == Some(&e.id));
-                chip(e.name.clone(), move || on, move || { shared::change(|t, now| t.update(number, now, |i| i.epic = Some(id.clone()))); })
+                chip(e.name.clone(), move || on, move || { state.save(|t, now| t.update(number, now, |i| i.epic = Some(id.clone()))); })
             }));
             let milestones: Vec<View> = issue
                 .epic
@@ -1471,11 +1486,11 @@ fn issue_body(state: State, number: u64) -> AnyElement {
                 .map(|epic| {
                     let mut out = vec![{
                         let on = issue.milestone.is_none();
-                        chip("None", move || on, move || { shared::change(|t, now| t.update(number, now, |i| i.milestone = None)); })
+                        chip("None", move || on, move || { state.save(|t, now| t.update(number, now, |i| i.milestone = None)); })
                     }];
                     out.extend(epic.milestones.iter().map(|m| {
                         let (id, on) = (m.id.clone(), issue.milestone.as_ref() == Some(&m.id));
-                        chip(m.name.clone(), move || on, move || { shared::change(|t, now| t.update(number, now, |i| i.milestone = Some(id.clone()))); })
+                        chip(m.name.clone(), move || on, move || { state.save(|t, now| t.update(number, now, |i| i.milestone = Some(id.clone()))); })
                     }));
                     out
                 })
@@ -1539,7 +1554,7 @@ fn issue_body(state: State, number: u64) -> AnyElement {
                     .gap(scale::s2())
                     .child(icon_button(IconName::ChevronLeft, scale::s3_5(), "Back (Esc)", move || state.back()))
                     .child(note(key).flex_1())
-                    .child(super::button("Work on this", true, move || send(Cmd::WorkOnIssue(number))))
+                    .child(super::button("Work on this", true, move || if let Some(repo) = state.read(|data| data.root.clone()) { send(Cmd::WorkOnIssue(repo, number)) }))
                     .child(delete_button(state, "Delete issue", move || state.delete(number))),
             )
             .child(editable(
@@ -1571,8 +1586,7 @@ fn issue_body(state: State, number: u64) -> AnyElement {
                     text_area("issue-description", state.description, "Description (markdown)", move |text| {
                         state.description.set(text.to_string());
                         state.touch(|edited| edited.description = true);
-                    })
-                    .on_blur(move || stop_editing(state))
+                    }, move || stop_editing(state))
                     .into_element()
                 },
             ))
@@ -1588,7 +1602,7 @@ fn issue_body(state: State, number: u64) -> AnyElement {
             .child(property("Add label", vec![boxed(IconName::Tag, line_input("issue-label", state.new_label, "New label", move || {
                 let name = state.new_label.get_untracked().trim().to_string();
                 if !name.is_empty() {
-                    shared::change(|t, now| {
+                    state.save(|t, now| {
                         t.define_label(&name, "");
                         t.update(number, now, |i| i.labels.push(name.clone()));
                     });
@@ -1598,7 +1612,7 @@ fn issue_body(state: State, number: u64) -> AnyElement {
             .child(property("Add sub-issue", vec![boxed(IconName::Plus, line_input("issue-sub", state.new_sub, "Title", move || {
                 let title = state.new_sub.get_untracked().trim().to_string();
                 if !title.is_empty() {
-                    shared::change(|t, now| {
+                    state.save(|t, now| {
                         let child = t.create(&title, now);
                         t.update(child, now, |i| { i.parent = Some(number); i.status = Status::Todo; });
                     });
@@ -1690,7 +1704,11 @@ mod tests {
         app.press("role:button[In Review]").unwrap();
         app.settle();
         assert_eq!(issue(1).status, Status::InReview);
-        // Title and description read as text until pressed twice.
+        // Title and description read as text until pressed twice; one press on each is not a
+        // double press of either.
+        app.press("id:Title-shown").unwrap();
+        app.press("id:Description-shown").unwrap();
+        assert!(app.press("id:issue-description").is_err() && app.press("id:issue-title").is_err());
         app.press("id:Title-shown").unwrap();
         app.press("id:Title-shown").unwrap();
         app.clear("id:issue-title").unwrap();

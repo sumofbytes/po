@@ -400,10 +400,10 @@ impl Reader {
     /// Opens a new thread for an issue with its prompt in the message field. Sending it starts the
     /// thread in a worktree of its own when the project is a repo, and moves the issue to In
     /// Progress with the branch linked.
-    pub(crate) fn work_on_issue(&mut self, number: u64, window: &mut Window, cx: &mut Context<Self>) {
-        // The issue is the page's, whose repo need not be the project on screen's.
-        let page = issues::shared::watch().borrow().clone();
-        let Some(repo) = page.root else { return };
+    pub(crate) fn work_on_issue(&mut self, repo: &std::path::Path, number: u64, window: &mut Window, cx: &mut Context<Self>) {
+        // The issue is the page's, whose repo need not be the project on screen's; the page says
+        // which, so a page that moved on meanwhile cannot make this another repo's issue.
+        let Some(page) = issues::shared::overview().borrow().repos.iter().find(|r| r.root == repo).cloned() else { return };
         if let Err(message) = issues::api::check_workable(&page.tracker, number) {
             self.worktree_status = Some(message);
             cx.notify();
@@ -419,7 +419,7 @@ impl Reader {
         }
         // Its thread starts in its own project, which working on it brings on screen.
         let elsewhere = issues::store::primary_root(&self.project.root) != repo;
-        let project = if elsewhere { self.project_of_repo(&repo) } else { None };
+        let project = if elsewhere { self.project_of_repo(repo) } else { None };
         if elsewhere && project.is_none() {
             self.worktree_status = Some(format!("{} is no longer open", page.name));
             cx.notify();
@@ -433,7 +433,9 @@ impl Reader {
         // sends it, and the issue is moved along then.
         self.new_blank_thread(window, cx);
         self.thread.isolate = true;
-        self.update_draft(&prompt);
+        // What the user had already typed in this thread stays, above the prompt.
+        let typed = self.thread.draft.trim().to_string();
+        self.update_draft(&if typed.is_empty() { prompt } else { format!("{typed}\n\n{prompt}") });
         self.issue_draft = Some((self.thread.id, self.project.root.clone(), number));
         cx.notify();
     }

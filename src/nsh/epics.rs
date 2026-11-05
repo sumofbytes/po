@@ -66,7 +66,7 @@ impl State {
         self.arm_delete.set(false);
         self.back_to.set(Page::Epics);
         self.back();
-        shared::change(|tracker, now| tracker.remove_epic(id, now));
+        self.save(|tracker, now| tracker.remove_epic(id, now));
     }
 
     fn add_epic(self) {
@@ -181,7 +181,7 @@ fn epic_body(state: State, id: String) -> AnyElement {
                         .iter()
                         .map(|s| {
                             let (s, id) = (*s, id.clone());
-                            chip(s.name(), move || now == Some(s), move || { shared::change(|t, n| t.update_epic(&id, n, |e| e.status = s)); })
+                            chip(s.name(), move || now == Some(s), move || { state.save(|t, n| t.update_epic(&id, n, |e| e.status = s)); })
                         })
                         .collect();
                     view().flex_row().flex_wrap().gap(scale::s1()).child(chips)
@@ -213,7 +213,7 @@ fn epic_body(state: State, id: String) -> AnyElement {
                                             .child(caption(count(progress)).flex_none().w(scale::count_width()))
                                             .child(caption(m.target.map(|t| due_label(t, today())).unwrap_or_default()).flex_none().w(scale::due_width()))
                                             .child(super::on_hover(icon_button(IconName::Close, scale::s3(), "Remove milestone", move || {
-                                                shared::change(|t, n| t.update_epic(&epic_id, n, |e| e.milestones.retain(|m| m.id != mid)));
+                                                state.save(|t, n| t.update_epic(&epic_id, n, |e| e.milestones.retain(|m| m.id != mid)));
                                             })))
                                     })
                                     .collect()
@@ -246,7 +246,7 @@ fn epic_body(state: State, id: String) -> AnyElement {
         if name.is_empty() {
             return;
         }
-        shared::change(|t, n| t.update_epic(&ms_id, n, |e| { e.add_milestone(&name, due); }));
+        state.save(|t, n| t.update_epic(&ms_id, n, |e| { e.add_milestone(&name, due); }));
         state.milestone_name.set(String::new());
         state.milestone_due.set(String::new());
     };
@@ -294,8 +294,7 @@ fn epic_body(state: State, id: String) -> AnyElement {
                     text_area("epic-description", state.epic_description, "Description (markdown)", move |text| {
                         state.epic_description.set(text.to_string());
                         state.touch(|edited| edited.epic_description = true);
-                    })
-                    .on_blur(move || stop_editing(state))
+                    }, move || stop_editing(state))
                     .into_element()
                 },
             ))
