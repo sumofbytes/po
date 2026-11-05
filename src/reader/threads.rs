@@ -145,8 +145,8 @@ impl Reader {
         if self.thread.switch.is_none() {
             self.thread.messages.clear();
         } else {
-            // Only a card asking about the agent goes: it is asked again below, if it has to be.
-            self.thread.messages.retain(|msg| !matches!(msg, Msg::Agent(blocks) if matches!(blocks.as_slice(), [Block::Approve { .. }])));
+            // Only a card still asking goes: it is asked again below, if it has to be.
+            self.thread.messages.retain(|msg| !matches!(msg, Msg::Agent(blocks) if matches!(blocks.as_slice(), [Block::Approve { answered: None, .. }])));
         }
         self.thread.relist(0);
         self.thread.busy = false;
@@ -411,7 +411,6 @@ impl Reader {
         thread.overrides.clear();
         thread.api_options.clear();
         thread.unanswered.clear();
-        thread.isolate = false;
         self.connect(key, false, window, cx);
         self.request_save(cx);
     }
@@ -1126,6 +1125,10 @@ impl Reader {
                     // A resumed session applies what the API asked for; with none, the waiting
                     // message goes.
                     self.apply_overrides(window, cx);
+                }
+                // An agent that replayed the first message in pieces left it whole in one.
+                if !fresh {
+                    self.thread.unfold_handoffs();
                 }
             }
             Event::Update(update) => {

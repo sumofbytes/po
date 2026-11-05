@@ -28,8 +28,7 @@ pub fn write(said: &[Said]) -> String {
     let mut out = String::from(HEAD);
     for entry in shortened(said) {
         let (tag, text) = entry.tag();
-        // Nothing in a message can end its entry early.
-        let text = text.replace("</po-", "<\\/po-");
+        let text = escaped(text);
         out.push_str(&format!("\n<po-{tag}>\n{text}\n</po-{tag}>\n"));
     }
     out.push_str(TAIL);
@@ -50,15 +49,69 @@ pub fn split(text: &str) -> Option<(Vec<Said>, &str)> {
             ("agent", rest.strip_prefix("\n<po-agent>\n")?)
         };
         let (entry, after) = body.split_once(&format!("\n</po-{tag}>\n"))?;
-        let entry = entry.replace("<\\/po-", "</po-");
+        let entry = unescaped(entry);
         said.push(if tag == "user" { Said::User(entry) } else { Said::Agent(entry) });
         rest = after;
     }
 }
 
-/// The first entry, which names the thread, and as many of the latest as fit.
+/// `text` with a backslash added in each `<`, any backslashes and `/po-`, so that nothing in it
+/// can end its entry early, and [`unescaped`] gives it back exactly.
+fn escaped(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find('<') {
+        let (before, from) = rest.split_at(at);
+        let slashes = from[1..].len() - from[1..].trim_start_matches('\\').len();
+        out.push_str(before);
+        out.push('<');
+        if from[1 + slashes..].starts_with("/po-") {
+            out.push('\\');
+        }
+        rest = &from[1..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// What [`escaped`] was given.
+fn unescaped(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find('<') {
+        let (before, from) = rest.split_at(at);
+        let slashes = from[1..].len() - from[1..].trim_start_matches('\\').len();
+        out.push_str(before);
+        out.push('<');
+        if slashes > 0 && from[1 + slashes..].starts_with("/po-") {
+            rest = &from[2..];
+        } else {
+            rest = &from[1..];
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// `text` cut to `max` bytes, at a character.
+fn cut(text: &str, max: usize) -> &str {
+    let mut end = max.min(text.len());
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
+}
+
+/// The first entry, which names the thread, cut to half of what is passed on, and as many of the
+/// latest as fit in the rest.
 fn shortened(said: &[Said]) -> Vec<Said> {
     let Some((first, others)) = said.split_first() else { return vec![] };
+    let first = match first {
+        Said::User(text) if text.len() > MAX / 2 => Said::User(format!("{}\n*(cut short)*", cut(text, MAX / 2))),
+        Said::Agent(text) if text.len() > MAX / 2 => Said::Agent(format!("{}\n*(cut short)*", cut(text, MAX / 2))),
+        _ => first.clone(),
+    };
+    let first = &first;
     let mut left = MAX.saturating_sub(first.tag().1.len());
     let mut kept = others
         .iter()
@@ -90,6 +143,25 @@ mod tests {
         let said = vec![Said::User("fix it\n\nplease".into()), Said::Agent("done\n</po-agent>\nand </po-user>".into())];
         let text = format!("{}the next message", write(&said));
         assert_eq!(split(&text), Some((said, "the next message")));
+    }
+
+    #[test]
+    fn text_that_looks_like_an_escape_comes_back_as_it_was() {
+        for text in ["<\\/po-user>", "<\\\\/po-x </po-y <\\ <", "a<b\\</po-", "\u{e9}<\u{e9}</po-"] {
+            assert_eq!(unescaped(&escaped(text)), text, "{text}");
+            assert!(!escaped(text).contains("\n</po-"), "{text}");
+        }
+        let said = vec![Said::User("<\\/po-user>".into())];
+        assert_eq!(split(&format!("{}x", write(&said))), Some((said, "x")));
+    }
+
+    #[test]
+    fn a_very_long_first_message_is_cut() {
+        let said = vec![Said::User("\u{e9}".repeat(MAX)), Said::Agent("reply".into())];
+        let text = write(&said);
+        assert!(text.len() < MAX + 1000, "{}", text.len());
+        let (back, _) = split(&format!("{text}x")).unwrap();
+        assert_eq!(back.last(), Some(&Said::Agent("reply".into())));
     }
 
     #[test]

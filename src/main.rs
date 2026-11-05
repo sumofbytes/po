@@ -323,6 +323,15 @@ enum Msg {
     Agent(Vec<Block>),
 }
 
+impl From<handoff::Said> for Msg {
+    fn from(said: handoff::Said) -> Self {
+        match said {
+            handoff::Said::User(text) => Msg::User(text, vec![]),
+            handoff::Said::Agent(text) => Msg::Agent(vec![Block::Text(text)]),
+        }
+    }
+}
+
 /// The file a tool call names: its locations, a diff, or a path in its input.
 fn touched(update: &Value) -> Option<String> {
     let input = &update["rawInput"];
@@ -769,10 +778,7 @@ impl Thread {
             Some("user_message_chunk") if self.loading || !self.busy => {
                 let text = match handoff::split(text) {
                     Some((said, message)) => {
-                        self.messages.extend(said.into_iter().map(|said| match said {
-                            handoff::Said::User(text) => Msg::User(text, vec![]),
-                            handoff::Said::Agent(text) => Msg::Agent(vec![Block::Text(text)]),
-                        }));
+                        self.messages.extend(said.into_iter().map(Msg::from));
                         message
                     }
                     None => text,
@@ -1098,6 +1104,26 @@ impl Thread {
             && self.restore.is_none()
             && self.resumes_from().is_some()
             && self.messages.iter().any(|msg| matches!(msg, Msg::User(..)))
+    }
+
+    /// Puts what an agent taking over was told back as the messages it was, in a first message
+    /// that arrived in pieces and so was not seen whole as it came.
+    fn unfold_handoffs(&mut self) {
+        let mut messages = Vec::with_capacity(self.messages.len());
+        for msg in std::mem::take(&mut self.messages) {
+            match msg {
+                Msg::User(text, pictures) => match handoff::split(&text) {
+                    Some((said, message)) => {
+                        messages.extend(said.into_iter().map(Msg::from));
+                        messages.push(Msg::User(without_context(message).to_string(), pictures));
+                    }
+                    None => messages.push(Msg::User(text, pictures)),
+                },
+                other => messages.push(other),
+            }
+        }
+        self.messages = messages;
+        self.relist(0);
     }
 
     /// What was said in it, as an agent taking over is told.
@@ -2805,6 +2831,24 @@ mod tests {
         assert_eq!(users, ["fix it", "and now?"]);
         assert_eq!(thread.messages.len(), 4, "the two messages, the note and the new message");
         assert_eq!(thread.title(), "fix it", "still named for what it was first asked");
+    }
+
+    #[test]
+    fn a_handoff_replayed_in_pieces_is_unfolded_when_the_session_is_ready() {
+        let mut said = started_thread();
+        said.messages.push(super::Msg::User("again".into(), vec![]));
+        let prompt = format!("{}and now?", super::handoff::write(&said.said()));
+        let mut thread = super::Thread::blank(1);
+        thread.blank = false;
+        thread.loading = true;
+        for piece in prompt.as_bytes().chunks(7) {
+            let piece = String::from_utf8_lossy(piece).to_string();
+            thread.update(&serde_json::json!({ "sessionUpdate": "user_message_chunk", "content": { "type": "text", "text": piece } }));
+        }
+        thread.unfold_handoffs();
+        let users: Vec<&str> = thread.messages.iter().filter_map(|msg| match msg { super::Msg::User(text, _) => Some(text.as_str()), _ => None }).collect();
+        assert_eq!(users, ["fix it", "again", "and now?"]);
+        assert_eq!(thread.title(), "fix it");
     }
 
     // A stand-in agent that copies what it is sent to a file, to see that a running thread's
