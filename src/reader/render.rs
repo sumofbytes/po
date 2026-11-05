@@ -25,6 +25,7 @@ impl Reader {
             project: pid,
             id: thread.id,
             label: self.thread_label(thread),
+            name: capitalized(thread.title()),
             mark: match thread.activity() {
                 Activity::Idle => side::Mark::Idle,
                 Activity::Unread => side::Mark::Unread,
@@ -226,6 +227,7 @@ impl Reader {
         chat::Snapshot {
             glass: cx.global::<Palette>().glass.is_some(),
             title: capitalized(thread.title()),
+            thread: (self.project_id, thread.id),
             lead,
             trail,
             statuses,
@@ -386,6 +388,7 @@ impl Reader {
             }
             Cmd::OpenThread(pid, tid) => self.open_thread(pid, tid, window, cx),
             Cmd::CloseThread(pid, tid) => self.close_asked(pid, tid, window, cx),
+            Cmd::RenameThread(pid, tid, name) => self.rename_thread(pid, tid, &name, cx),
             Cmd::AddProject => self.pick_project(window, cx),
             Cmd::NewThread => self.new_blank_thread(window, cx),
             Cmd::OpenSettings => self.toggle_settings(window, cx),
@@ -678,7 +681,7 @@ impl Reader {
 
     /// What a thread is called in the lists: a child shows under the thread that started it.
     pub(crate) fn thread_label(&self, thread: &Thread) -> String {
-        match thread.parent.and_then(|parent| self.title_of(parent)) {
+        match thread.parent.and_then(|parent| self.title_of(parent)).filter(|_| thread.renamed.is_none()) {
             Some(parent) => format!("↳ {parent}"),
             None => capitalized(thread.title()),
         }

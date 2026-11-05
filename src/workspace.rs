@@ -19,6 +19,8 @@ pub struct ThreadState {
     /// The session of the thread that started this one, which survives a restart where its id
     /// does not; the child is linked to it again when both come back in one window.
     pub parent_session: Option<String>,
+    /// `title` was typed by the user, so it stays instead of being worked out from the first message.
+    pub renamed: bool,
 }
 
 pub struct ProjectState {
@@ -100,10 +102,10 @@ impl Workspace {
                     })),
                     "active": project.active,
                     "threads": project.threads.iter().map(|t| json!({
-                        "agent": t.agent, "session": t.session, "title": t.title, "active_at": t.active_at, "parent_session": t.parent_session,
+                        "agent": t.agent, "session": t.session, "title": t.title, "active_at": t.active_at, "parent_session": t.parent_session, "renamed": t.renamed,
                     })).collect::<Vec<_>>(),
                     "closed": project.closed.iter().map(|t| json!({
-                        "agent": t.agent, "session": t.session, "title": t.title, "active_at": t.active_at,
+                        "agent": t.agent, "session": t.session, "title": t.title, "active_at": t.active_at, "renamed": t.renamed,
                     })).collect::<Vec<_>>(),
                 })
             })
@@ -130,7 +132,7 @@ impl Workspace {
                     .into_iter()
                     .flatten()
                     .filter_map(|t| {
-                        Some(ThreadState { agent: text(&t["agent"])?, session: text(&t["session"])?, title: text(&t["title"]).unwrap_or_default(), active_at: t["active_at"].as_u64().unwrap_or(0), parent_session: text(&t["parent_session"]) })
+                        Some(ThreadState { agent: text(&t["agent"])?, session: text(&t["session"])?, title: text(&t["title"]).unwrap_or_default(), active_at: t["active_at"].as_u64().unwrap_or(0), parent_session: text(&t["parent_session"]), renamed: t["renamed"].as_bool().unwrap_or(false) })
                     })
                     .collect();
                 // The file can be written by anything, so its size is not trusted either.
@@ -139,7 +141,7 @@ impl Workspace {
                     .into_iter()
                     .flatten()
                     .take(CLOSED_KEPT)
-                    .filter_map(|t| Some(ThreadState { agent: text(&t["agent"])?, session: text(&t["session"])?, title: text(&t["title"]).unwrap_or_default(), active_at: t["active_at"].as_u64().unwrap_or(0), parent_session: None }))
+                    .filter_map(|t| Some(ThreadState { agent: text(&t["agent"])?, session: text(&t["session"])?, title: text(&t["title"]).unwrap_or_default(), active_at: t["active_at"].as_u64().unwrap_or(0), parent_session: None, renamed: t["renamed"].as_bool().unwrap_or(false) }))
                     .collect();
                 Some(ProjectState {
                     root: path(&entry["root"])?,
@@ -295,10 +297,10 @@ mod tests {
                     worktree: None,
                     active: 1,
                     threads: vec![
-                        ThreadState { agent: "dex".into(), session: "s1".into(), title: "fix the retry".into(), active_at: 1_700_000_000_000, parent_session: None },
-                        ThreadState { agent: "opencode".into(), session: "s2".into(), title: "quote \"this\"".into(), active_at: 0, parent_session: Some("s1".into()) },
+                        ThreadState { agent: "dex".into(), session: "s1".into(), title: "fix the retry".into(), active_at: 1_700_000_000_000, parent_session: None, renamed: false },
+                        ThreadState { agent: "opencode".into(), session: "s2".into(), title: "quote \"this\"".into(), active_at: 0, parent_session: Some("s1".into()), renamed: true },
                     ],
-                    closed: vec![ThreadState { agent: "dex".into(), session: "s0".into(), title: "old idea".into(), active_at: 5, parent_session: None }],
+                    closed: vec![ThreadState { agent: "dex".into(), session: "s0".into(), title: "old idea".into(), active_at: 5, parent_session: None, renamed: false }],
                 },
                 ProjectState {
                     root: "/data/worktrees/po-1".into(),
@@ -361,7 +363,7 @@ mod tests {
     }
 
     fn project(root: &str, sessions: &[&str]) -> ProjectState {
-        let threads = sessions.iter().map(|s| ThreadState { agent: "a".into(), session: s.to_string(), title: String::new(), active_at: 1, parent_session: None }).collect();
+        let threads = sessions.iter().map(|s| ThreadState { agent: "a".into(), session: s.to_string(), title: String::new(), active_at: 1, parent_session: None, renamed: false }).collect();
         ProjectState { root: root.into(), review: false, worktree: None, active: 0, threads, closed: vec![] }
     }
 
