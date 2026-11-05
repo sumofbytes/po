@@ -249,6 +249,8 @@ pub mod scale {
     pub fn legend_width() -> Points { rems(5.5) }
     /// The label column of an agent's form, whose labels are the agent's own words and run longer.
     pub fn form_label_width() -> Points { rems(9.0) }
+    /// An entry field on a detail page: one width for all, so they line up.
+    pub fn field_width() -> Points { rems(22.0) }
     /// A row's progress bar, in the epics list and in an epic's milestones.
     pub fn bar_width() -> Points { rems(8.0) }
     /// A row's count column, as `3/5`.

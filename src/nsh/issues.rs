@@ -649,10 +649,11 @@ pub fn stop_editing(state: State) {
 
 /// A markdown description, rendered; `empty` is shown in its place when there is none.
 pub fn markdown_box(text: Signal<String>, empty: &'static str) -> View {
-    let body = view().px(scale::s2_5()).py(scale::s2()).min_h(scale::lines(4.)).rounded(super::card_radius()).border_1().border_color(Colors::input_border());
+    // Read as a page, not a field: no box until it is double-pressed to be edited.
+    let body = view().py(scale::s1());
     let value = text.get();
     if value.trim().is_empty() {
-        body.child(super::note(empty))
+        body.child(super::note(empty).text_color(Colors::dim(Colors::muted())))
     } else {
         body.child(
             text_view()
@@ -1444,6 +1445,17 @@ fn property(label: &'static str, body: Vec<View>) -> View {
     view().flex_row().items_start().gap(scale::s3()).child(view().w(scale::legend_width()).flex_none().pt(scale::s1()).child(legend(label))).child(view().flex_1().flex_row().flex_wrap().items_center().gap(scale::s1()).child(body))
 }
 
+/// A labelled row whose body is one boxed field: the label sits level with the middle of the box,
+/// and every such field has the same width.
+fn field_property(label: &'static str, body: View) -> View {
+    view()
+        .flex_row()
+        .items_center()
+        .gap(scale::s3())
+        .child(view().w(scale::legend_width()).flex_none().child(legend(label)))
+        .child(view().w(scale::field_width()).min_w(Points(0.)).flex_shrink(1.).child(body))
+}
+
 fn issue_body(state: State, number: u64) -> AnyElement {
     let key = state.read(|data| format!("{} · {}", data.name, data.tracker.key(number)));
     let sections = move || {
@@ -1536,24 +1548,28 @@ fn issue_body(state: State, number: u64) -> AnyElement {
             .gap(scale::s3())
             .child(property("Status", statuses))
             .child(property("Priority", priorities))
-            .child(property("Labels", labels))
+            .child((!labels.is_empty()).then(|| property("Labels", labels)))
             .child(property("Epic", epics))
             .child((!milestones.is_empty()).then(|| property("Milestone", milestones)))
             .child((!links.is_empty()).then(|| property("Links", links)))
-            .child(property("Sub-issues", vec![view().w_full().gap(scale::s0_5()).child(subs)]))
+            .child((!subs.is_empty()).then(|| property("Sub-issues", vec![view().w_full().gap(scale::s0_5()).child(subs)])))
     };
     scroll().flex_shrink(1.).child(
         view()
-            .gap(scale::s3())
-            .px(scale::s4())
-            .py(scale::s3())
+            .gap(scale::s4())
+            .px(scale::s6())
+            .py(scale::s4())
             .child(
                 view()
                     .flex_row()
                     .items_center()
                     .gap(scale::s2())
-                    .child(icon_button(IconName::ChevronLeft, scale::s3_5(), "Back (Esc)", move || state.back()))
-                    .child(note(key).flex_1())
+                    .pb(scale::s3())
+                    .border_b_1()
+                    .border_color(super::hairline())
+                    // The back arrow hangs out so the key lines up with the title below.
+                    .child(icon_button(IconName::ChevronLeft, scale::s3_5(), "Back (Esc)", move || state.back()).ml(-scale::s1()))
+                    .child(caption(key).flex_1())
                     .child(super::button("Work on this", true, move || if let Some(repo) = state.read(|data| data.root.clone()) { send(Cmd::WorkOnIssue(repo, number)) }))
                     .child(delete_button(state, "Delete issue", move || state.delete(number))),
             )
@@ -1563,10 +1579,10 @@ fn issue_body(state: State, number: u64) -> AnyElement {
                 move || {
                     let title = state.title.get();
                     let empty = title.trim().is_empty();
-                    view().min_h(scale::s10()).justify_center().child(
+                    view().py(scale::s1()).child(
                         text(if empty { "Untitled (double-click to edit)".to_string() } else { title })
                             .sized(super::font(1.25))
-                            .font_weight(FontWeight::MEDIUM)
+                            .font_weight(FontWeight::SEMIBOLD)
                             .text_color(move || if empty { Colors::muted()() } else { Colors::foreground()() }),
                     )
                 },
@@ -1578,6 +1594,37 @@ fn issue_body(state: State, number: u64) -> AnyElement {
                     .into_element()
                 },
             ))
+            .child(dynamic(sections))
+            // The fields that are typed in, apart from the pickers above; the description ends the page.
+            .child(view().h(Points(1.)).flex_none().my(scale::s1()).bg(super::hairline()))
+            .child(field_property("Due", boxed(IconName::Calendar, line_input("issue-due", state.due, DUE_HINT, move || state.flush()).on_change(move |text: &str| {
+                state.due.set(text.to_string());
+                state.touch(|edited| edited.due = true);
+            }), Some(due_hint(state.due)))))
+            .child(field_property("Sub-issue of", boxed(IconName::CornerDownRight, line_input("issue-parent", state.parent, "Key, e.g. PO-3 (empty for none)", move || state.flush()).on_change(move |text: &str| {
+                state.parent.set(text.to_string());
+                state.touch(|edited| edited.parent = true);
+            }), None)))
+            .child(field_property("Add label", boxed(IconName::Tag, line_input("issue-label", state.new_label, "New label", move || {
+                let name = state.new_label.get_untracked().trim().to_string();
+                if !name.is_empty() {
+                    state.save(|t, now| {
+                        t.define_label(&name, "");
+                        t.update(number, now, |i| i.labels.push(name.clone()));
+                    });
+                    state.new_label.set(String::new());
+                }
+            }), None)))
+            .child(field_property("Add sub-issue", boxed(IconName::Plus, line_input("issue-sub", state.new_sub, "Title", move || {
+                let title = state.new_sub.get_untracked().trim().to_string();
+                if !title.is_empty() {
+                    state.save(|t, now| {
+                        let child = t.create(&title, now);
+                        t.update(child, now, |i| { i.parent = Some(number); i.status = Status::Todo; });
+                    });
+                    state.new_sub.set(String::new());
+                }
+            }), None)))
             .child(editable(
                 state,
                 Field::Description,
@@ -1589,36 +1636,7 @@ fn issue_body(state: State, number: u64) -> AnyElement {
                     }, move || stop_editing(state))
                     .into_element()
                 },
-            ))
-            .child(dynamic(sections))
-            .child(property("Due", vec![view().flex_1().child(boxed(IconName::Calendar, line_input("issue-due", state.due, DUE_HINT, move || state.flush()).on_change(move |text: &str| {
-                state.due.set(text.to_string());
-                state.touch(|edited| edited.due = true);
-            }), Some(due_hint(state.due))))]))
-            .child(property("Sub-issue of", vec![boxed(IconName::CornerDownRight, line_input("issue-parent", state.parent, "Key, e.g. PO-3 (empty for none)", move || state.flush()).on_change(move |text: &str| {
-                state.parent.set(text.to_string());
-                state.touch(|edited| edited.parent = true);
-            }), None)]))
-            .child(property("Add label", vec![boxed(IconName::Tag, line_input("issue-label", state.new_label, "New label", move || {
-                let name = state.new_label.get_untracked().trim().to_string();
-                if !name.is_empty() {
-                    state.save(|t, now| {
-                        t.define_label(&name, "");
-                        t.update(number, now, |i| i.labels.push(name.clone()));
-                    });
-                    state.new_label.set(String::new());
-                }
-            }), None)]))
-            .child(property("Add sub-issue", vec![boxed(IconName::Plus, line_input("issue-sub", state.new_sub, "Title", move || {
-                let title = state.new_sub.get_untracked().trim().to_string();
-                if !title.is_empty() {
-                    state.save(|t, now| {
-                        let child = t.create(&title, now);
-                        t.update(child, now, |i| { i.parent = Some(number); i.status = Status::Todo; });
-                    });
-                    state.new_sub.set(String::new());
-                }
-            }), None)])),
+            )),
     )
     .into_element()
 }
