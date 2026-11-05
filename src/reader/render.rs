@@ -123,6 +123,7 @@ impl Reader {
             status: self.worktree_status.clone(),
             searching,
             issues_open: self.issues_open,
+            home_open: self.home_open,
             // What the store worked out, with no disk read: a render only reads the issues.
             issues: issues::shared::overview().borrow().counts(date::today()),
         }
@@ -391,6 +392,8 @@ impl Reader {
             Cmd::NewThread => self.new_blank_thread(window, cx),
             Cmd::OpenSettings => self.toggle_settings(window, cx),
             Cmd::ToggleIssues => self.toggle_issues(window, cx),
+            Cmd::ToggleHome => self.toggle_home(window, cx),
+            Cmd::OpenIssue(repo, number) => self.open_issue_of(&repo, number, window, cx),
             Cmd::CloseIssues => self.hide_issues(window, cx),
             Cmd::WorkOnIssue(repo, number) => self.work_on_issue(&repo, number, window, cx),
             Cmd::DismissStatus => {

@@ -34,6 +34,10 @@ pub enum Cmd {
     NewThread,
     OpenSettings,
     ToggleIssues,
+    /// The Home page, the landing page: put up or put away.
+    ToggleHome,
+    /// An issue of the repo given, on the issues page.
+    OpenIssue(std::path::PathBuf, u64),
     CloseIssues,
     /// Start a thread in a worktree on an issue of the repo given.
     WorkOnIssue(std::path::PathBuf, u64),

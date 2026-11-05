@@ -91,6 +91,35 @@ pub fn today() -> Date {
     Date((crate::now_ms() / 86_400_000) as i64)
 }
 
+/// The hour of the day where the user is, 0 to 23.
+pub fn hour() -> u32 {
+    #[cfg(unix)]
+    {
+        // SAFETY: `localtime_r` writes only into the `tm` it is given.
+        unsafe {
+            let now = libc::time(std::ptr::null_mut());
+            let mut tm: libc::tm = std::mem::zeroed();
+            if !libc::localtime_r(&now, &mut tm).is_null() {
+                return tm.tm_hour as u32;
+            }
+        }
+    }
+    ((crate::now_ms() / 3_600_000) % 24) as u32
+}
+
+impl Date {
+    /// `Tuesday, November 5`.
+    pub fn long(self) -> String {
+        let (_, month, day) = self.ymd();
+        format!("{}, {} {day}", crate::nsh::sentence(WEEKDAYS[self.weekday()]), crate::nsh::sentence(MONTHS[month as usize - 1]))
+    }
+
+    /// `Tue`.
+    pub fn short_weekday(self) -> String {
+        crate::nsh::sentence(&WEEKDAYS[self.weekday()][..3])
+    }
+}
+
 /// A month by its name or the first three letters of it.
 fn month(word: &str) -> Option<u32> {
     (word.len() >= 3).then(|| MONTHS.iter().position(|name| name.starts_with(word))).flatten().map(|ix| ix as u32 + 1)
