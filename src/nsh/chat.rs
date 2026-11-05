@@ -532,12 +532,13 @@ fn pane(title: String, snap: &Snapshot) -> View {
         right = right.child(status_line(line.clone()));
     }
     if snap.picking.is_none() {
-        // The four Places share one pill, so they read as a single switcher.
-        let mut places = view().flex_none().flex_row().items_center().gap(scale::s0_5()).p(scale::s0_5()).rounded(super::pill()).bg(Colors::hover());
-        places = places.child(super::header::place_button(IconName::FolderTree, "Files (Ctrl+1)", snap.place == Place::Files, || tell(Cmd::Show(false))));
-        places = places.child(super::header::place_button(IconName::Diff, "Changes (Ctrl+2)", snap.place == Place::Changes, || tell(Cmd::Show(true))));
-        places = places.child(super::header::place_button(IconName::Terminal, "Terminal (Ctrl+`)", snap.place == Place::Terminal, || tell(Cmd::Terminal)));
-        places = places.child(super::header::place_button(IconName::History, "Resume an earlier session (Ctrl+Shift+H)", false, || tell(Cmd::History)));
+        // The four Places sit together as the header's other controls do: quiet icons, with a fill
+        // only under the one that is open.
+        let mut places = view().flex_none().flex_row().items_center().gap(scale::s0_5());
+        places = places.child(super::header::toggle_button(IconName::FolderTree, "Files (Ctrl+1)", snap.place == Place::Files, || tell(Cmd::Show(false))));
+        places = places.child(super::header::toggle_button(IconName::Diff, "Changes (Ctrl+2)", snap.place == Place::Changes, || tell(Cmd::Show(true))));
+        places = places.child(super::header::toggle_button(IconName::Terminal, "Terminal (Ctrl+`)", snap.place == Place::Terminal, || tell(Cmd::Terminal)));
+        places = places.child(super::header::toggle_button(IconName::History, "Resume an earlier session (Ctrl+Shift+H)", false, || tell(Cmd::History)));
         right = right.child(places);
     }
     // The Control menu, once the user has set what the thread's agent may do.
