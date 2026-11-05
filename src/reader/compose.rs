@@ -231,7 +231,10 @@ impl Reader {
             (_, Origin::Po) => format!("[Po]\n\n{}", out.text),
             (None, Origin::User) => out.text.clone(),
         };
-        client.prompt(&context, &out.images)
+        match &self.thread.switch {
+            Some(switch) => client.prompt(&format!("{}{context}", switch.earlier), &out.images),
+            None => client.prompt(&context, &out.images),
+        }
     }
 
     /// Shows `prompt` as the start of a turn the agent is working on.

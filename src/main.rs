@@ -13,6 +13,7 @@ mod dex;
 mod diff;
 mod explorer;
 mod fonts;
+mod handoff;
 mod issues;
 mod mcp;
 mod nsh;
@@ -320,6 +321,15 @@ struct Queued {
 enum Msg {
     User(String, Vec<Arc<Attachment>>),
     Agent(Vec<Block>),
+}
+
+impl From<handoff::Said> for Msg {
+    fn from(said: handoff::Said) -> Self {
+        match said {
+            handoff::Said::User(text) => Msg::User(text, vec![]),
+            handoff::Said::Agent(text) => Msg::Agent(vec![Block::Text(text)]),
+        }
+    }
 }
 
 /// The file a tool call names: its locations, a diff, or a path in its input.
@@ -669,6 +679,8 @@ struct Thread {
     /// Nothing has been sent in it and no session was picked for it. Its agent runs only to
     /// offer the session's settings, so its session is never kept or resumed.
     blank: bool,
+    /// The agent it was switched from, until the new one has finished a turn.
+    switch: Option<Switch>,
     /// The settings being carried over from earlier threads, while the agent takes them one at
     /// a time: a model can change what the other settings offer. A first message waits for them.
     applying: Option<Applying>,
@@ -764,6 +776,13 @@ impl Thread {
                 _ => self.blocks().push(Block::Text(text.to_string())),
             },
             Some("user_message_chunk") if self.loading || !self.busy => {
+                let text = match handoff::split(text) {
+                    Some((said, message)) => {
+                        self.messages.extend(said.into_iter().map(Msg::from));
+                        message
+                    }
+                    None => text,
+                };
                 let text = without_context(text);
                 let picture = (update["content"]["type"] == "image").then(|| Attachment::from_block(&update["content"])).flatten().map(Arc::new);
                 match self.messages.last_mut() {
@@ -970,6 +989,7 @@ impl Thread {
             api_options: HashSet::new(),
             unread: false,
             session: None,
+            switch: None,
             restore: None,
             saved_title: None,
             touched: Instant::now(),
@@ -1064,6 +1084,75 @@ impl Thread {
         !self.blank && self.client.is_none() && self.session.is_none() && !self.picking
     }
 
+    /// The agent and session it would come back to after a restart: not those of a switch the
+    /// new agent has yet to hear of, as its session holds nothing of the thread.
+    fn resumes_from(&self) -> Option<(&str, &str)> {
+        match &self.switch {
+            Some(switch) => Some((&switch.agent, &switch.session)),
+            None => Some((self.agent.as_deref()?, self.session.as_deref()?)),
+        }
+    }
+
+    /// Whether its agent can change now: nothing is under way that the change would lose, and
+    /// its conversation is here to pass on.
+    fn can_switch_agent(&self) -> bool {
+        !self.blank
+            && !self.at_risk()
+            && self.pending.is_none()
+            && !self.loading
+            && !self.picking
+            && self.restore.is_none()
+            && self.resumes_from().is_some()
+            && self.messages.iter().any(|msg| matches!(msg, Msg::User(..)))
+    }
+
+    /// Puts what an agent taking over was told back as the messages it was, in a first message
+    /// that arrived in pieces and so was not seen whole as it came.
+    fn unfold_handoffs(&mut self) {
+        let mut messages = Vec::with_capacity(self.messages.len());
+        for msg in std::mem::take(&mut self.messages) {
+            match msg {
+                Msg::User(text, pictures) => match handoff::split(&text) {
+                    Some((said, message)) => {
+                        messages.extend(said.into_iter().map(Msg::from));
+                        messages.push(Msg::User(without_context(message).to_string(), pictures));
+                    }
+                    None => messages.push(Msg::User(text, pictures)),
+                },
+                other => messages.push(other),
+            }
+        }
+        self.messages = messages;
+        self.relist(0);
+    }
+
+    /// What was said in it, as an agent taking over is told.
+    fn said(&self) -> Vec<handoff::Said> {
+        let mut said = vec![];
+        for msg in &self.messages {
+            match msg {
+                Msg::User(text, pictures) => {
+                    let pictures = (!pictures.is_empty()).then(|| format!("({} pictures)", pictures.len()));
+                    said.push(handoff::Said::User(pictures.map_or(text.clone(), |note| format!("{text}\n{note}").trim().to_string())));
+                }
+                Msg::Agent(blocks) => {
+                    let lines: Vec<String> = blocks
+                        .iter()
+                        .filter_map(|block| match block {
+                            Block::Text(text) => Some(text.clone()),
+                            Block::Tool(tool) => Some(format!("`{}`", tool.title)),
+                            _ => None,
+                        })
+                        .collect();
+                    if !lines.is_empty() {
+                        said.push(handoff::Said::Agent(lines.join("\n\n")));
+                    }
+                }
+            }
+        }
+        said
+    }
+
     /// Whether to keep it once another thread is on screen: a blank thread, or a session listing
     /// nothing was picked from, has nothing to come back to.
     fn worth_keeping(&self) -> bool {
@@ -1106,7 +1195,8 @@ impl Thread {
         if self.blank {
             return None;
         }
-        Some(workspace::ThreadState { agent: self.agent.clone()?, session: self.session.clone()?, title: self.title(), active_at: self.active_at, parent_session: None })
+        let (agent, session) = self.resumes_from()?;
+        Some(workspace::ThreadState { agent: agent.to_string(), session: session.to_string(), title: self.title(), active_at: self.active_at, parent_session: None })
     }
 
     /// Stops the agent, keeping what has been said so it can be shown and resumed.
@@ -1148,6 +1238,14 @@ struct Waiter {
 /// What a parent hasn't heard about its children yet.
 struct Notice {
     text: String,
+}
+
+/// A thread's change of agent, until the new agent has what was said. Until then the thread comes
+/// back to the agent it left, and the new agent's first message carries `earlier`.
+struct Switch {
+    agent: String,
+    session: String,
+    earlier: String,
 }
 
 /// How far a new session has got in taking the settings last chosen for its agent.
@@ -2678,6 +2776,79 @@ mod tests {
         assert!(thread.closed_state().is_none(), "no session");
         thread.session = Some("s".into());
         assert_eq!(thread.closed_state().map(|c| c.session), Some("s".to_string()));
+    }
+
+    fn started_thread() -> super::Thread {
+        let mut thread = super::Thread::blank(1);
+        thread.blank = false;
+        thread.agent = Some("a".into());
+        thread.session = Some("s".into());
+        thread.messages.push(super::Msg::User("fix it".into(), vec![]));
+        thread.messages.push(super::Msg::Agent(vec![super::Block::Text("fixed".into())]));
+        thread
+    }
+
+    #[test]
+    fn a_thread_switches_agent_only_with_nothing_under_way_and_something_to_pass_on() {
+        assert!(started_thread().can_switch_agent());
+        assert!(!super::Thread::blank(1).can_switch_agent(), "blank: picking starts it instead");
+        let mut busy = started_thread();
+        busy.busy = true;
+        assert!(!busy.can_switch_agent());
+        let mut unloaded = started_thread();
+        unloaded.messages.clear();
+        assert!(!unloaded.can_switch_agent(), "its conversation hasn't been replayed");
+        let mut no_session = started_thread();
+        no_session.session = None;
+        assert!(!no_session.can_switch_agent());
+    }
+
+    #[test]
+    fn a_switch_the_new_agent_has_not_heard_of_comes_back_to_the_agent_it_left() {
+        let mut thread = started_thread();
+        thread.switch = Some(super::Switch { agent: "a".into(), session: "s".into(), earlier: String::new() });
+        thread.agent = Some("b".into());
+        thread.session = Some("empty".into());
+        assert_eq!(thread.closed_state().map(|c| (c.agent, c.session)), Some(("a".to_string(), "s".to_string())));
+        thread.session = None;
+        assert_eq!(thread.resumes_from(), Some(("a", "s")), "kept even if the new agent failed to start");
+        assert!(thread.can_switch_agent(), "and the user can pick again");
+        thread.switch = None;
+        assert_eq!(thread.resumes_from(), None);
+    }
+
+    #[test]
+    fn a_replayed_handoff_brings_the_earlier_messages_back() {
+        let mut said = started_thread();
+        said.messages.push(super::Msg::Agent(vec![super::Block::Text("*Switched to B.*".into())]));
+        let earlier = super::handoff::write(&said.said());
+        let mut thread = super::Thread::blank(1);
+        thread.blank = false;
+        thread.loading = true;
+        let prompt = format!("{earlier}[The user has `a.rs` open in the viewer.]\n\nand now?");
+        thread.update(&serde_json::json!({ "sessionUpdate": "user_message_chunk", "content": { "type": "text", "text": prompt } }));
+        let users: Vec<&str> = thread.messages.iter().filter_map(|msg| match msg { super::Msg::User(text, _) => Some(text.as_str()), _ => None }).collect();
+        assert_eq!(users, ["fix it", "and now?"]);
+        assert_eq!(thread.messages.len(), 4, "the two messages, the note and the new message");
+        assert_eq!(thread.title(), "fix it", "still named for what it was first asked");
+    }
+
+    #[test]
+    fn a_handoff_replayed_in_pieces_is_unfolded_when_the_session_is_ready() {
+        let mut said = started_thread();
+        said.messages.push(super::Msg::User("again".into(), vec![]));
+        let prompt = format!("{}and now?", super::handoff::write(&said.said()));
+        let mut thread = super::Thread::blank(1);
+        thread.blank = false;
+        thread.loading = true;
+        for piece in prompt.as_bytes().chunks(7) {
+            let piece = String::from_utf8_lossy(piece).to_string();
+            thread.update(&serde_json::json!({ "sessionUpdate": "user_message_chunk", "content": { "type": "text", "text": piece } }));
+        }
+        thread.unfold_handoffs();
+        let users: Vec<&str> = thread.messages.iter().filter_map(|msg| match msg { super::Msg::User(text, _) => Some(text.as_str()), _ => None }).collect();
+        assert_eq!(users, ["fix it", "again", "and now?"]);
+        assert_eq!(thread.title(), "fix it");
     }
 
     // A stand-in agent that copies what it is sent to a file, to see that a running thread's

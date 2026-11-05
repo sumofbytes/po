@@ -260,6 +260,8 @@ pub struct Snapshot {
     pub blank: bool,
     /// A turn is going: the send button turns into a stop beside it.
     pub busy: bool,
+    /// A started thread's agent can be changed now.
+    pub switchable: bool,
     /// The agent takes messages mid-turn, so a send steers rather than queues.
     pub steer: bool,
     /// The agents a new thread can be started with, `(name, id)`.
@@ -356,7 +358,7 @@ pub enum Cmd {
     Show(bool),
     /// The terminal is shown, started if the project has none yet.
     Terminal,
-    /// The agent a new thread starts with.
+    /// The agent a new thread starts with, and the one on screen switches to.
     PickAgent(String),
     /// A setting of the session is changed.
     Setting { id: String, value: String },
@@ -1737,16 +1739,17 @@ fn worktree_label(tone: impl Fn() -> AdaptiveColor + Copy + 'static) -> AnyEleme
         .into_element()
 }
 
-/// What a thread waits on before it starts: the agent to run it, and a chip that, when on, starts
-/// it in a git worktree of its own. Both sit in the row of chips under the field.
-fn setup(snap: &Snapshot) -> AnyElement {
-    let mut row = view().flex_row().flex_wrap().items_center().gap(scale::s2());
-    let name = snap
-        .chosen
+/// The name of the agent chosen for the thread, or `none`.
+fn agent_name(snap: &Snapshot, none: &str) -> String {
+    snap.chosen
         .as_ref()
         .map(|id| snap.agents.iter().find(|(_, key)| key == id).map_or(id.clone(), |(name, _)| name.clone()))
-        .unwrap_or_else(|| "Pick an agent".to_string());
-    let mut agents = menu().popup_class(MENU).trigger(menu_trigger(name, "Which agent the thread runs"));
+        .unwrap_or_else(|| none.to_string())
+}
+
+/// A menu of the agents to pick from, the one chosen marked.
+fn agent_menu(snap: &Snapshot, name: String, tip: &str) -> AnyElement {
+    let mut agents = menu().popup_class(MENU).trigger(menu_trigger(name, tip));
     let pick = snap.chosen.clone();
     for (agent_name, id) in snap.agents.clone() {
         let on = pick.as_ref() == Some(&id);
@@ -1755,7 +1758,14 @@ fn setup(snap: &Snapshot) -> AnyElement {
             tell(Cmd::PickAgent(id))
         }));
     }
-    row = row.child(agents.into_element());
+    agents.into_element()
+}
+
+/// What a thread waits on before it starts: the agent to run it, and a chip that, when on, starts
+/// it in a git worktree of its own. Both sit in the row of chips under the field.
+fn setup(snap: &Snapshot) -> AnyElement {
+    let mut row = view().flex_row().flex_wrap().items_center().gap(scale::s2());
+    row = row.child(agent_menu(snap, agent_name(snap, "Pick an agent"), "Which agent the thread runs"));
     if let Some(isolate) = snap.isolate {
         let tip = "Start the thread in a git worktree of its own";
         row = row.child(
@@ -1975,18 +1985,22 @@ fn bar(snap: Snapshot, draft: Signal<String>, field_ref: ElementRef) -> AnyEleme
     let field = draft;
     let low = draft;
     let has_pictures = !snap.pictures.is_empty();
-    // The chips under the field: before the thread starts its agent is chosen here, after it the
-    // agent is named; the settings and the Control menu follow, and the action ends the row.
+    // The chips under the field: the thread's agent, chosen here before it starts and changed here
+    // after, unless there is no other; the settings and the Control menu follow, and the action
+    // ends the row.
     let mut chips = view().flex_row().flex_wrap().items_center().gap(scale::s1()).flex_1().min_w_0();
     if snap.blank {
         chips = chips.child(setup(&snap));
     } else {
-        let name = snap
-            .chosen
-            .as_ref()
-            .map(|id| snap.agents.iter().find(|(_, key)| key == id).map_or(id.clone(), |(name, _)| name.clone()))
-            .unwrap_or_else(|| "Agent".to_string());
-        chips = chips.child(text(name).px(scale::s3()).sized(text_sm()).text_color(Colors::dim(Colors::muted())));
+        let name = agent_name(&snap, "Agent");
+        chips = chips.child(if snap.agents.len() < 2 {
+            text(name).px(scale::s3()).sized(text_sm()).text_color(Colors::dim(Colors::muted())).into_element()
+        } else if snap.switchable {
+            agent_menu(&snap, name, "Switch this thread to another agent")
+        } else {
+            // While a turn runs, or a question or a queue waits, the agent stays.
+            menu_trigger(name, "The agent can be switched once it is idle").opacity(crate::theme::tokens::DISABLED).into_element()
+        });
     }
     if !snap.settings.is_empty() {
         chips = chips.children(setting_chips(&snap.settings, snap.busy));
@@ -2482,6 +2496,31 @@ mod tests {
         app.press("label:Start the thread").unwrap();
         let sent = drain(&mut app, commands);
         assert!(sent.contains(&Bus::Chat(Cmd::Send { later: false })), "{sent:?}");
+    }
+
+    #[test]
+    fn a_started_thread_can_switch_agent_when_it_is_idle() {
+        let mut guard = crate::nsh::bus::lock();
+        let commands = guard.as_mut().expect("the channel");
+        let agents = vec![("Claude".to_string(), "claude".to_string()), ("Codex".to_string(), "codex".to_string())];
+        let snap = |switchable| Snapshot {
+            agents: agents.clone(),
+            chosen: Some("claude".into()),
+            switchable,
+            items: vec![Item::Agent { index: 0, blocks: Arc::new(vec![]) }],
+            ..Snapshot::default()
+        };
+        let mut app = start(snap(false));
+        assert!(app.shows("Claude"), "{:?}", app.screen().texts());
+        assert!(app.press("label:The agent can be switched once it is idle").is_err(), "busy: the chip does nothing");
+
+        publish(snap(true));
+        app.wait(std::time::Duration::from_millis(100)).unwrap();
+        app.press("label:Switch this thread to another agent").unwrap();
+        app.settle();
+        app.press("text:Codex").unwrap();
+        let sent = drain(&mut app, commands);
+        assert!(sent.contains(&Bus::Chat(Cmd::PickAgent("codex".into()))), "{sent:?}");
     }
 
     #[test]
