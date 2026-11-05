@@ -1760,8 +1760,9 @@ impl Reader {
             Some(command) => reader.connect(&command, false, window, cx),
             None => reader.wake_thread(window, cx),
         }
-        // Po opens on Home, unless it was started to do something: a command to run.
-        if landing {
+        // Po opens on Home, unless it was started to do something: a command to run, or a session
+        // worth returning to.
+        if landing && !resumed {
             reader.show_home(window, cx);
         }
         trace::mark("connect");

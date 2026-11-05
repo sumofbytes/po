@@ -178,12 +178,13 @@ fn metric(label: &'static str, value: usize, tint: AdaptiveColor) -> View {
         .child(caption(label))
 }
 
-fn task_row(task: Task, today: Date) -> View {
+fn task_row(task: Task, today: Date, armed: bool, press_done: impl Fn(&PathBuf, u64) + Clone + 'static) -> View {
     let (repo, number) = (task.repo.clone(), task.number);
     let late = task.late(today);
     let due = task.due.map(|due| due_label(due, today)).unwrap_or_else(|| task.status.slug().replace('-', " "));
     let (done_repo, work_repo) = (repo.clone(), repo.clone());
-    let tint = status_tint(task.status);
+    // Marking done can't be undone, so it waits for a second click, like Discard does.
+    let (tint, mark) = if armed { (Colors::warning()(), "Mark done — again to confirm") } else { (status_tint(task.status), "Mark done") };
     view()
         .group()
         .flex_row()
@@ -199,10 +200,11 @@ fn task_row(task: Task, today: Date) -> View {
         .child(
             view()
                 .role(AccessibilityRole::Button)
-                .label("Mark done")
+                .label(mark)
                 .flex_none()
                 .cursor_pointer()
-                .on_press(move || complete(&done_repo, number))
+                .style_when(armed, |s| s.border_1().border_color(Colors::warning()))
+                .on_press(move || press_done(&done_repo, number))
                 .child(icon(status_icon(task.status), scale::s4(), move || tint)),
         )
         .child(view().w(scale::s0_5()).h(scale::s5()).flex_none().rounded(super::pill()).bg(move || priority_tint(task.priority)))
@@ -288,10 +290,22 @@ pub fn Home() -> impl IntoElement {
     // Worked out once per change of either, not once per place it is read.
     let page = computed(move || overview.with(|overview| snapshot.with(|snapshot| model(overview, snapshot, today()))));
 
+    // Marking an issue done waits for a second press, since it can't be undone.
+    let done = signal(0u64);
+    let press_done = move |repo: &PathBuf, number: u64| {
+        if done.get_untracked() == number {
+            complete(repo, number);
+            done.set(0);
+        } else {
+            done.set(number);
+        }
+    };
+
     let tasks = move || {
         let model = page.get();
         let day = today();
-        let listed = model.tasks.iter().take(TASKS).cloned().map(|task| task_row(task, day)).collect::<Vec<_>>();
+        let waiting = done.get();
+        let listed = model.tasks.iter().take(TASKS).cloned().map(|task| { let armed = task.number == waiting; task_row(task, day, armed, press_done.clone()) }).collect::<Vec<_>>();
         let more = model.tasks.len().saturating_sub(TASKS);
         card("Today", IconName::Calendar)
             .child(if listed.is_empty() { Some(note("Nothing is due today. Pick something from the issues, or start a thread.")) } else { None })
@@ -438,5 +452,8 @@ mod tests {
         assert_eq!(next(&mut app), [Cmd::OpenThread(1, 10)]);
         app.press("text:New thread").unwrap();
         assert_eq!(next(&mut app), [Cmd::NewThread]);
+        // What the test lent the sidebar no test after it reads.
+        sidebar::publish(Snapshot::default());
+        assert_eq!(sidebar::watch().borrow().projects.len(), 0);
     }
 }
