@@ -251,7 +251,9 @@ pub(crate) fn poll() {
 }
 
 /// Changes the issues the page shows with `f`, which is given the time to stamp them with, saves,
-/// and tells whoever follows them. `None` when no repo is shown.
+/// and tells whoever follows them. `None` when no repo is shown. Only tests use it: the page and
+/// the API name the repo they change.
+#[cfg(test)]
 pub fn change<R>(f: impl FnOnce(&mut Tracker, u64) -> R) -> Option<R> {
     let mut guard = lock();
     let root = guard.shown.clone()?;
