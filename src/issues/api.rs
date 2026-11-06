@@ -397,21 +397,23 @@ pub fn show_nav(tracker: &Tracker, args: &Value) -> Result<super::shared::Nav, S
         Some("status") => Some(Group::Status),
         Some("priority") => Some(Group::Priority),
         Some("epic") => Some(Group::Epic),
+        Some("project") => Some(Group::Project),
         Some("none") => Some(Group::None),
-        Some(other) => return Err(format!("`{other}` is not a grouping; status, priority, epic or none")),
+        Some(other) => return Err(format!("`{other}` is not a grouping; status, priority, project, epic or none")),
     };
     Ok(Nav { target, filter, group })
 }
 
-/// The first message of a thread started on an issue.
-pub fn work_prompt(tracker: &Tracker, number: u64) -> Option<String> {
+/// The first message of a thread started on an issue of the repo at `root`.
+pub fn work_prompt(tracker: &Tracker, number: u64, root: &std::path::Path) -> Option<String> {
     let issue = tracker.issue(number)?;
     let key = tracker.key(number);
     let mut prompt = format!("Work on {key}: {}", issue.title);
     if !issue.description.trim().is_empty() {
         prompt.push_str(&format!("\n\n{}", issue.description.trim()));
     }
-    prompt.push_str(&format!("\n\nThis issue is tracked in .po/issues/{key}.json. Keep its status up to date as you go."));
+    let file = super::store::folder_of(root).join("issues").join(format!("{key}.json"));
+    prompt.push_str(&format!("\n\nThis issue is tracked outside the repo, in {}. Keep its status up to date as you go.", file.display()));
     Some(prompt)
 }
 
@@ -833,9 +835,9 @@ mod tests {
     fn a_thread_on_an_issue_starts_from_its_title_and_description() {
         let mut t = tracker();
         run_on(&mut t, Op::IssueCreate, json!({ "title": "Fix login", "description": "It breaks." })).unwrap();
-        let prompt = work_prompt(&t, 1).unwrap();
+        let prompt = work_prompt(&t, 1, std::path::Path::new("/repo")).unwrap();
         assert!(prompt.starts_with("Work on PO-1: Fix login\n\nIt breaks."), "{prompt}");
-        assert!(prompt.contains(".po/issues/PO-1.json"));
+        assert!(prompt.contains("/repo/.po/issues/PO-1.json"), "{prompt}");
         assert_eq!(work_issue(&t, &json!({ "issue": "1" })), Ok(1));
         assert!(work_issue(&t, &json!({ "issue": "PO-4" })).is_err());
         assert!(run(Op::IssueWork, &json!({}), &mut t, 1, today()).unwrap_err().contains("run by the window"));

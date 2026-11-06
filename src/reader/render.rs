@@ -25,6 +25,7 @@ impl Reader {
             project: pid,
             id: thread.id,
             label: self.thread_label(thread),
+            name: capitalized(thread.title()),
             mark: match thread.activity() {
                 Activity::Idle => side::Mark::Idle,
                 Activity::Unread => side::Mark::Unread,
@@ -122,10 +123,9 @@ impl Reader {
             status: self.worktree_status.clone(),
             searching,
             issues_open: self.issues_open,
-            issues: {
-                self.follow_issues();
-                issues::shared::summary()
-            },
+            home_open: self.home_open,
+            // What the store worked out, with no disk read: a render only reads the issues.
+            issues: issues::shared::overview().borrow().counts(date::today()),
         }
     }
 
@@ -226,6 +226,7 @@ impl Reader {
         chat::Snapshot {
             glass: cx.global::<Palette>().glass.is_some(),
             title: capitalized(thread.title()),
+            thread: (self.project_id, thread.id),
             lead,
             trail,
             statuses,
@@ -235,6 +236,7 @@ impl Reader {
             steer: thread.client.as_ref().is_some_and(|client| client.queues()),
             agents: self.agents.iter().map(|agent| (agent.name.clone(), agent.id.clone())).collect(),
             chosen: thread.agent.clone().or_else(|| self.chosen_agent.clone()),
+            switchable: thread.can_switch_agent(),
             settings: Thread::ordered(thread.options.iter().collect()).into_iter().map(|option| chat::Setting {
                 id: option.id.clone(),
                 name: option.name.clone(),
@@ -264,7 +266,7 @@ impl Reader {
             }).collect(),
             pictures: thread.attachments.iter().map(|a| chat::Picture { uri: a.data_uri(), size: a.size }).collect(),
             note: thread.attach_note.clone(),
-            items: chat_items(&thread.messages),
+            items: chat_items(&thread.messages, thread.busy),
             picking,
             draft: thread.draft.clone(),
             draft_reset: self.chat_reset.get(),
@@ -385,12 +387,15 @@ impl Reader {
             }
             Cmd::OpenThread(pid, tid) => self.open_thread(pid, tid, window, cx),
             Cmd::CloseThread(pid, tid) => self.close_asked(pid, tid, window, cx),
+            Cmd::RenameThread(pid, tid, name) => self.rename_thread(pid, tid, &name, cx),
             Cmd::AddProject => self.pick_project(window, cx),
             Cmd::NewThread => self.new_blank_thread(window, cx),
             Cmd::OpenSettings => self.toggle_settings(window, cx),
             Cmd::ToggleIssues => self.toggle_issues(window, cx),
+            Cmd::ToggleHome => self.toggle_home(window, cx),
+            Cmd::OpenIssue(repo, number) => self.open_issue_of(&repo, number, window, cx),
             Cmd::CloseIssues => self.hide_issues(window, cx),
-            Cmd::WorkOnIssue(number) => self.work_on_issue(number, window, cx),
+            Cmd::WorkOnIssue(repo, number) => self.work_on_issue(&repo, number, window, cx),
             Cmd::DismissStatus => {
                 self.worktree_status = None;
                 cx.notify();
@@ -677,7 +682,7 @@ impl Reader {
 
     /// What a thread is called in the lists: a child shows under the thread that started it.
     pub(crate) fn thread_label(&self, thread: &Thread) -> String {
-        match thread.parent.and_then(|parent| self.title_of(parent)) {
+        match thread.parent.and_then(|parent| self.title_of(parent)).filter(|_| thread.renamed.is_none()) {
             Some(parent) => format!("↳ {parent}"),
             None => capitalized(thread.title()),
         }

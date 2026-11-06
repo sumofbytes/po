@@ -9,6 +9,7 @@ pub mod epics;
 pub mod explorer;
 pub mod finder;
 pub mod header;
+pub mod home;
 pub mod issues;
 pub mod overlay;
 pub mod settings;
@@ -248,6 +249,8 @@ pub mod scale {
     pub fn legend_width() -> Points { rems(5.5) }
     /// The label column of an agent's form, whose labels are the agent's own words and run longer.
     pub fn form_label_width() -> Points { rems(9.0) }
+    /// An entry field on a detail page: one width for all, so they line up.
+    pub fn field_width() -> Points { rems(22.0) }
     /// A row's progress bar, in the epics list and in an epic's milestones.
     pub fn bar_width() -> Points { rems(8.0) }
     /// A row's count column, as `3/5`.
@@ -349,7 +352,7 @@ pub fn text_sm() -> Points {
 
 /// A font size of `n` rems, in whole points: spacing sits on an even grid, but text is free to
 /// take an odd size, so an odd UI font size or rem is followed as it is.
-fn font(n: f32) -> Points {
+pub fn font(n: f32) -> Points {
     // Halves round down, as the even grid did for 10.5.
     Points((n * nsh_base::theme().number("rem").unwrap_or(14.) - 0.5).ceil().max(1.))
 }
@@ -414,6 +417,80 @@ pub fn swatch_radius() -> Points {
 pub fn icon(name: IconName, size: Points, tint: impl Fn() -> AdaptiveColor + 'static) -> nsh_core::element::Image {
     let uri = format!("data:image/svg+xml;base64,{}", base64::engine::general_purpose::STANDARD.encode(name.svg().1));
     image(uri).w(size).h(size).tint_color(tint).flex_none()
+}
+
+/// The turn of every spinner of a screen, in steps: one value, so they turn together and a
+/// rebuilt row doesn't restart the turn.
+#[derive(Clone, Copy)]
+pub struct Spin(Signal<usize>);
+
+/// One turn of a spinner.
+const TURN: std::time::Duration = std::time::Duration::from_millis(1200);
+
+/// The positions of the arc in a turn: close enough together to read as a smooth turn.
+const STEPS: usize = 36;
+
+/// The tail of the arc: this many pieces of this many degrees, each fainter than the one before.
+const TAIL_PIECES: usize = 9;
+const TAIL_PIECE: f32 = 30.;
+
+/// Turns while `active` holds, a step at a time. An endless loop keeps the window redrawing, so it
+/// runs only when something spins, and not at all when the user asked for less motion.
+pub fn spin(active: impl Fn() -> bool + 'static) -> Spin {
+    let step = signal(0_usize);
+    effect(move || {
+        if active() && !reduce_motion() {
+            // Ends with this run of the effect, when what is spinning changes.
+            spawn(async move {
+                let mut at = 0;
+                loop {
+                    timer(TURN / STEPS as u32).await;
+                    at = (at + 1) % STEPS;
+                    step.set(at);
+                }
+            });
+        } else {
+            step.set(0);
+        }
+    });
+    Spin(step)
+}
+
+/// The ring of a Lucide `loader-circle` with its arc at `step` of a turn. The platform draws an
+/// image upright whatever its parent does, so the turn is in the picture: one per step, made once.
+fn arc(step: usize) -> &'static str {
+    static ARCS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    &ARCS.get_or_init(|| {
+        (0..STEPS)
+            .map(|step| {
+                let degrees = step * 360 / STEPS;
+                // A head and a tail fading behind it, in pieces of a fixed opacity: SVG has no
+                // gradient along an arc, and the tint takes only the alpha.
+                let piece = |k: usize| {
+                    let point = |from_top: f32| {
+                        let a = from_top.to_radians();
+                        (12. + 9. * a.sin(), 12. - 9. * a.cos())
+                    };
+                    let (x0, y0) = point(90. - (k + 1) as f32 * TAIL_PIECE);
+                    let (x1, y1) = point(90. - k as f32 * TAIL_PIECE);
+                    let opacity = 1. - k as f32 / TAIL_PIECES as f32 * 0.9;
+                    let cap = if k == 0 { "round" } else { "butt" };
+                    format!(r#"<path d="M{x0:.2} {y0:.2}A9 9 0 0 1 {x1:.2} {y1:.2}" stroke-linecap="{cap}" opacity="{opacity:.2}"/>"#)
+                };
+                let tail: String = (0..TAIL_PIECES).map(piece).collect();
+                let svg = format!(
+                    r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><g transform="rotate({degrees} 12 12)">{tail}</g></svg>"#
+                );
+                format!("data:image/svg+xml;base64,{}", base64::engine::general_purpose::STANDARD.encode(svg))
+            })
+            .collect()
+    })[step]
+}
+
+/// A ring with an arc turning with `spin`: a thread or a step at work.
+pub fn spinner(size: Points, tint: impl Fn() -> AdaptiveColor + 'static, spin: Spin) -> View {
+    let step = spin.0;
+    view().w(size).h(size).flex_none().child(image(move || arc(step.get()).to_string()).w(size).h(size).tint_color(tint).flex_none())
 }
 
 /// A tooltip in Po's look: a small popover with a line of text.
@@ -483,6 +560,60 @@ pub fn text_input(id: &str, value: Signal<String>, placeholder: &'static str, on
         .on_change(move |text: &str| value.set(text.to_string()))
         .on_submit(move |_: &str| on_submit())
         .flex_1()
+}
+
+/// The line a thread's name is typed in, in place of the name: it takes the keyboard when it
+/// appears, and `commit` is called on Enter or when it loses the keyboard. Escape is the
+/// caller's, as it leaves without committing.
+pub fn rename_input(id: &str, draft: Signal<String>, commit: impl Fn() + Clone + 'static) -> nsh_base::Input {
+    text_input(id, draft, "Name", commit.clone()).auto_focus(true).on_blur(commit).sized(text_base()).min_w(Points(0.))
+}
+
+/// A thread's name being typed: which thread, and what the line holds. Copy, so the screens'
+/// closures share it.
+#[derive(Clone, Copy)]
+pub struct Renaming {
+    pub editing: Signal<Option<(u64, u64)>>,
+    pub draft: Signal<String>,
+    /// The name it started from, so a name left as it was isn't taken as a new one.
+    pub from: Signal<String>,
+    /// The last press on a thread's name, to tell a second one soon after.
+    last: Stored<Option<(u64, u64, std::time::Instant)>>,
+}
+
+impl Renaming {
+    pub fn new() -> Self {
+        Self { editing: signal(None), draft: signal(String::new()), from: signal(String::new()), last: stored(None) }
+    }
+
+    /// Whether this press on `thread` follows another on it closely: a double press.
+    pub fn double(&self, thread: (u64, u64)) -> bool {
+        let now = std::time::Instant::now();
+        let again = self.last.get().is_some_and(|(pid, tid, at)| (pid, tid) == thread && now.duration_since(at) < std::time::Duration::from_millis(400));
+        self.last.replace(if again { None } else { Some((thread.0, thread.1, now)) });
+        again
+    }
+
+    pub fn start(&self, thread: (u64, u64), name: &str) {
+        self.draft.set(name.to_string());
+        self.from.set(name.to_string());
+        self.editing.set(Some(thread));
+    }
+
+    /// Ends the edit and asks for the new name if there is one. Ending twice (Enter, then the
+    /// line losing the keyboard as it goes) asks once.
+    pub fn commit(&self) {
+        let Some((pid, tid)) = self.editing.get_untracked() else { return };
+        self.editing.set(None);
+        let name = self.draft.get_untracked();
+        if name != self.from.get_untracked() {
+            bus::send(bus::Cmd::RenameThread(pid, tid, name));
+        }
+    }
+
+    pub fn cancel(&self) {
+        self.editing.set(None);
+    }
 }
 
 /// A line of text in a bordered box, as the settings page has them. `id` names it for tests.

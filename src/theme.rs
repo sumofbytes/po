@@ -31,8 +31,8 @@ fn themes_dir(config_dir: &Path) -> PathBuf {
 }
 
 /// The theme `name` asks for: a JSON file in `<config>/themes/`, else in the
-/// config folder itself — `.json` optional, absolute paths work — else one of
-/// the bundled colour schemes.
+/// config folder itself, else in a plugin's `themes/` folder — `.json` optional,
+/// absolute paths work — else one of the bundled colour schemes.
 fn load_theme(name: &str, config_dir: Option<&Path>) -> Option<Value> {
     let try_file = |path: &Path| -> Option<Value> {
         read_json(path).or_else(|| {
@@ -43,7 +43,9 @@ fn load_theme(name: &str, config_dir: Option<&Path>) -> Option<Value> {
         })
     };
     if let Some(dir) = config_dir {
-        for base in [themes_dir(dir), dir.to_path_buf()] {
+        let mut bases = vec![themes_dir(dir), dir.to_path_buf()];
+        bases.extend(crate::plugin::theme_dirs(dir));
+        for base in bases {
             if let Some(theme) = try_file(&base.join(name)) {
                 return Some(theme);
             }
@@ -198,10 +200,11 @@ pub fn watch(cx: &mut App) {
 
     let Some(dir) = config::dir() else { return };
     let (tx, mut rx) = futures::channel::mpsc::unbounded();
+    let watched = dir.clone();
     let mut watcher = match notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
         if let Ok(event) = event
             && !event.kind.is_access()
-            && event.paths.iter().any(|path| path.extension().is_some_and(|ext| ext == "json"))
+            && event.paths.iter().any(|path| crate::plugin::affects_theme(&watched, path))
         {
             tx.unbounded_send(()).ok();
         }
@@ -444,6 +447,34 @@ mod tests {
         assert_eq!(load_theme("solar.json", Some(dir)).unwrap(), theme);
         // A theme dropped straight into the config folder still works.
         assert_eq!(load_theme("flat", Some(dir)).unwrap(), serde_json::json!({"mode": "dark"}));
+    }
+
+    #[test]
+    fn a_plugin_can_provide_a_theme() {
+        let scratch = Scratch::new("plugin-theme");
+        scratch.write("themes/base.json", r#"{"mode":"dark"}"#);
+        scratch.write("plugins/x/plugin.json", r#"{"id":"x"}"#);
+        scratch.write("plugins/x/themes/solar.json", r#"{"mode":"light"}"#);
+        let dir = scratch.0.as_path();
+        // A plugin's theme joins the search, under the config folder's own.
+        assert_eq!(load_theme("solar", Some(dir)).unwrap(), serde_json::json!({"mode": "light"}));
+    }
+
+    #[test]
+    fn the_configs_own_theme_still_beats_a_plugins() {
+        let scratch = Scratch::new("theme-precedence");
+        scratch.write("themes/solar.json", r#"{"mode":"dark"}"#);
+        scratch.write("plugins/x/themes/solar.json", r#"{"mode":"light"}"#);
+        assert_eq!(load_theme("solar", Some(scratch.0.as_path())).unwrap()["mode"], "dark");
+    }
+
+    #[test]
+    fn a_theme_loose_in_the_config_folder_still_beats_a_plugins() {
+        let scratch = Scratch::new("loose-theme-precedence");
+        scratch.write("solar.json", r#"{"mode":"dark"}"#);
+        scratch.write("plugins/x/plugin.json", r#"{"id":"x"}"#);
+        scratch.write("plugins/x/themes/solar.json", r#"{"mode":"light"}"#);
+        assert_eq!(load_theme("solar", Some(scratch.0.as_path())).unwrap()["mode"], "dark");
     }
 
     #[test]

@@ -13,9 +13,11 @@ mod dex;
 mod diff;
 mod explorer;
 mod fonts;
+mod handoff;
 mod issues;
 mod mcp;
 mod nsh;
+mod plugin;
 mod pr;
 mod profile;
 mod reader;
@@ -320,6 +322,15 @@ struct Queued {
 enum Msg {
     User(String, Vec<Arc<Attachment>>),
     Agent(Vec<Block>),
+}
+
+impl From<handoff::Said> for Msg {
+    fn from(said: handoff::Said) -> Self {
+        match said {
+            handoff::Said::User(text) => Msg::User(text, vec![]),
+            handoff::Said::Agent(text) => Msg::Agent(vec![Block::Text(text)]),
+        }
+    }
 }
 
 /// The file a tool call names: its locations, a diff, or a path in its input.
@@ -654,6 +665,8 @@ struct Thread {
     restore: Option<String>,
     /// What the thread was about before it was loaded back, since it has no messages yet.
     saved_title: Option<String>,
+    /// A name the user gave it, which stands in place of the one made from the first message.
+    renamed: Option<String>,
     /// When the thread last did anything; an idle one in the background is put to sleep.
     touched: Instant,
     /// When the thread last did anything, in milliseconds since the Unix epoch. Unlike
@@ -669,6 +682,8 @@ struct Thread {
     /// Nothing has been sent in it and no session was picked for it. Its agent runs only to
     /// offer the session's settings, so its session is never kept or resumed.
     blank: bool,
+    /// The agent it was switched from, until the new one has finished a turn.
+    switch: Option<Switch>,
     /// The settings being carried over from earlier threads, while the agent takes them one at
     /// a time: a model can change what the other settings offer. A first message waits for them.
     applying: Option<Applying>,
@@ -764,6 +779,13 @@ impl Thread {
                 _ => self.blocks().push(Block::Text(text.to_string())),
             },
             Some("user_message_chunk") if self.loading || !self.busy => {
+                let text = match handoff::split(text) {
+                    Some((said, message)) => {
+                        self.messages.extend(said.into_iter().map(Msg::from));
+                        message
+                    }
+                    None => text,
+                };
                 let text = without_context(text);
                 let picture = (update["content"]["type"] == "image").then(|| Attachment::from_block(&update["content"])).flatten().map(Arc::new);
                 match self.messages.last_mut() {
@@ -970,8 +992,10 @@ impl Thread {
             api_options: HashSet::new(),
             unread: false,
             session: None,
+            switch: None,
             restore: None,
             saved_title: None,
+            renamed: None,
             touched: Instant::now(),
             active_at: now_ms(),
             used_at: now_ms(),
@@ -1030,6 +1054,9 @@ impl Thread {
 
     /// The first thing asked, or a placeholder while there is none.
     fn title(&self) -> String {
+        if let Some(name) = &self.renamed {
+            return name.clone();
+        }
         let first = self.messages.iter().find_map(|msg| match msg {
             // A thread is named for what it was asked, not for what Po told it.
             Msg::User(text, _) if text.starts_with(PO_MARK) => None,
@@ -1062,6 +1089,75 @@ impl Thread {
     /// It was started with a first message, but its agent stopped before opening a session.
     fn unstarted(&self) -> bool {
         !self.blank && self.client.is_none() && self.session.is_none() && !self.picking
+    }
+
+    /// The agent and session it would come back to after a restart: not those of a switch the
+    /// new agent has yet to hear of, as its session holds nothing of the thread.
+    fn resumes_from(&self) -> Option<(&str, &str)> {
+        match &self.switch {
+            Some(switch) => Some((&switch.agent, &switch.session)),
+            None => Some((self.agent.as_deref()?, self.session.as_deref()?)),
+        }
+    }
+
+    /// Whether its agent can change now: nothing is under way that the change would lose, and
+    /// its conversation is here to pass on.
+    fn can_switch_agent(&self) -> bool {
+        !self.blank
+            && !self.at_risk()
+            && self.pending.is_none()
+            && !self.loading
+            && !self.picking
+            && self.restore.is_none()
+            && self.resumes_from().is_some()
+            && self.messages.iter().any(|msg| matches!(msg, Msg::User(..)))
+    }
+
+    /// Puts what an agent taking over was told back as the messages it was, in a first message
+    /// that arrived in pieces and so was not seen whole as it came.
+    fn unfold_handoffs(&mut self) {
+        let mut messages = Vec::with_capacity(self.messages.len());
+        for msg in std::mem::take(&mut self.messages) {
+            match msg {
+                Msg::User(text, pictures) => match handoff::split(&text) {
+                    Some((said, message)) => {
+                        messages.extend(said.into_iter().map(Msg::from));
+                        messages.push(Msg::User(without_context(message).to_string(), pictures));
+                    }
+                    None => messages.push(Msg::User(text, pictures)),
+                },
+                other => messages.push(other),
+            }
+        }
+        self.messages = messages;
+        self.relist(0);
+    }
+
+    /// What was said in it, as an agent taking over is told.
+    fn said(&self) -> Vec<handoff::Said> {
+        let mut said = vec![];
+        for msg in &self.messages {
+            match msg {
+                Msg::User(text, pictures) => {
+                    let pictures = (!pictures.is_empty()).then(|| format!("({} pictures)", pictures.len()));
+                    said.push(handoff::Said::User(pictures.map_or(text.clone(), |note| format!("{text}\n{note}").trim().to_string())));
+                }
+                Msg::Agent(blocks) => {
+                    let lines: Vec<String> = blocks
+                        .iter()
+                        .filter_map(|block| match block {
+                            Block::Text(text) => Some(text.clone()),
+                            Block::Tool(tool) => Some(format!("`{}`", tool.title)),
+                            _ => None,
+                        })
+                        .collect();
+                    if !lines.is_empty() {
+                        said.push(handoff::Said::Agent(lines.join("\n\n")));
+                    }
+                }
+            }
+        }
+        said
     }
 
     /// Whether to keep it once another thread is on screen: a blank thread, or a session listing
@@ -1106,7 +1202,8 @@ impl Thread {
         if self.blank {
             return None;
         }
-        Some(workspace::ThreadState { agent: self.agent.clone()?, session: self.session.clone()?, title: self.title(), active_at: self.active_at, parent_session: None })
+        let (agent, session) = self.resumes_from()?;
+        Some(workspace::ThreadState { agent: agent.to_string(), session: session.to_string(), title: self.title(), active_at: self.active_at, parent_session: None, renamed: self.renamed.is_some() })
     }
 
     /// Stops the agent, keeping what has been said so it can be shown and resumed.
@@ -1148,6 +1245,14 @@ struct Waiter {
 /// What a parent hasn't heard about its children yet.
 struct Notice {
     text: String,
+}
+
+/// A thread's change of agent, until the new agent has what was said. Until then the thread comes
+/// back to the agent it left, and the new agent's first message carries `earlier`.
+struct Switch {
+    agent: String,
+    session: String,
+    earlier: String,
 }
 
 /// How far a new session has got in taking the settings last chosen for its agent.
@@ -1400,10 +1505,14 @@ struct Reader {
     /// The issues page, shown in place of the conversation while `issues_open`; the sidebar has a row for it.
     issues: Entity<nsh::overlay::Overlay>,
     issues_open: bool,
-    /// The project whose issues [`issues::shared`] holds, so it is only switched when this changes.
-    issues_root: std::cell::RefCell<PathBuf>,
+    /// The Home page, where Po opens, shown in place of the conversation while `home_open`.
+    landing: Entity<nsh::overlay::Overlay>,
+    home_open: bool,
     /// An issue "Work on this" is making a worktree for, to link its branch once it exists.
     issue_for_worktree: Option<(PathBuf, u64)>,
+    /// The blank thread (by id) whose draft "Work on this" wrote, and the issue it is for: sending
+    /// the draft starts the issue, and until then nothing has begun.
+    issue_draft: Option<(u64, PathBuf, u64)>,
     /// Progress or failure of the last attempt to open a PR.
     pr_status: Option<String>,
     opening: bool,
@@ -1503,6 +1612,7 @@ impl Reader {
         let finder_window = cx.new(|cx| nsh::overlay::Overlay::new(560., 8., nsh_platform_gpui::Root::of::<nsh::finder::Finder>, &nsh::finder::HEIGHT, cx));
         let settings_window = cx.new(|cx| nsh::overlay::Overlay::new(760., 24., nsh_platform_gpui::Root::of::<nsh::settings::Settings>, &nsh::settings::HEIGHT, cx));
         let issues = cx.new(|cx| nsh::overlay::Overlay::page(1000., nsh_platform_gpui::Root::of::<nsh::issues::Issues>, &nsh::issues::HEIGHT, cx));
+        let landing = cx.new(|cx| nsh::overlay::Overlay::page(1000., nsh_platform_gpui::Root::of::<nsh::home::Home>, &nsh::home::HEIGHT, cx));
         let sidebars = cx.new(|_| SidebarsState::new(px(280.0), px(560.0)));
         let tree_cols = cx.new(|_| SidebarsState::new(px(TREE_WIDTH), px(0.0)));
         let subscriptions = vec![
@@ -1521,15 +1631,18 @@ impl Reader {
             cx.subscribe_in(&settings_window, window, |reader, _, event: &nsh::overlay::OverlayEvent, window, cx| match event {
                 nsh::overlay::OverlayEvent::Close => reader.hide_settings(window, cx),
             }),
+            cx.subscribe_in(&landing, window, |reader, _, event: &nsh::overlay::OverlayEvent, window, cx| match event {
+                nsh::overlay::OverlayEvent::Close => reader.hide_home(window, cx),
+            }),
             cx.subscribe_in(&issues, window, |reader, _, event: &nsh::overlay::OverlayEvent, window, cx| match event {
                 nsh::overlay::OverlayEvent::Close => reader.hide_issues(window, cx),
             }),
         ];
-        let settings = config::load();
+        let settings = plugin::effective_config();
         let mut agents = config::agents(&settings);
         let idle_minutes = settings["idle_minutes"].as_u64().unwrap_or(15);
         if let Some(command) = command.as_ref().filter(|c| !agents.iter().any(|agent| agent.id == **c)) {
-            agents.push(config::Agent { id: command.clone(), name: "Custom".into(), command: command.clone(), daemon: None, vouched: true });
+            agents.push(config::Agent { id: command.clone(), name: "Custom".into(), command: command.clone(), daemon: None, vouched: true, plugin: None });
         }
         let project = Self::build_project(root, pr, files);
             let thread = Thread::blank(0);
@@ -1590,8 +1703,10 @@ impl Reader {
             chat_focus: std::cell::Cell::new(0),
             issues,
             issues_open: false,
-            issues_root: Default::default(),
+            landing,
+            home_open: false,
             issue_for_worktree: None,
+            issue_draft: None,
             pr_status: None,
             opening: false,
             worktree_status: None,
@@ -1641,9 +1756,15 @@ impl Reader {
         let resumed = workspace::Workspace::load(&reader.home).is_some_and(|saved| reader.restore(saved, cx));
         reader.known_projects = reader.workspace(cx).known();
         trace::mark("restore");
+        let landing = command.is_none();
         match command.filter(|_| !resumed) {
             Some(command) => reader.connect(&command, false, window, cx),
             None => reader.wake_thread(window, cx),
+        }
+        // Po opens on Home, unless it was started to do something: a command to run, or a session
+        // worth returning to.
+        if landing && !resumed {
+            reader.show_home(window, cx);
         }
         trace::mark("connect");
         reader.watch(watch, window, cx);
@@ -1751,10 +1872,18 @@ fn fold_keeper(blocks: &mut [Block], at: usize) -> Option<&mut ToolBlock> {
 }
 
 /// Whether a run of steps shows as one line. A run the user hasn't clicked starts folded,
-/// whether its calls are still going or not.
-fn run_folded(run: &[Block]) -> bool {
+/// whether its calls are still going or not, and opens only if it ended in failure: `open` says
+/// it has not ended (see [`run_open`]), so a failure the next call may get past moves no rows.
+fn run_folded(run: &[Block], open: bool) -> bool {
     let Some(first) = run.iter().find_map(|b| if let Block::Tool(tool) = b { Some(tool) } else { None }) else { return false };
-    first.fold.unwrap_or(run_outcome(run).0 != Step::Failed)
+    first.fold.unwrap_or(open || run_outcome(run).0 != Step::Failed)
+}
+
+/// Whether the run of `len` steps at `at` is still going, though no call of it may be: `live` says
+/// the agent is at work on this message, and nothing has come after the run. Between two calls
+/// the agent is thinking of the next one, which is no end of the work.
+fn run_open(blocks: &[Block], at: usize, len: usize, live: bool) -> bool {
+    live && at + len == blocks.len()
 }
 
 /// How a run of tool calls went, and how many of its calls failed. A failure the later calls got
@@ -1772,8 +1901,8 @@ fn run_outcome(run: &[Block]) -> (Step, usize) {
     (step, failed)
 }
 
-/// Where each run of steps shown folded starts in `blocks`.
-fn folded_runs(blocks: &[Block]) -> Vec<usize> {
+/// Where each run of steps shown folded starts in `blocks`; `live` as in [`run_open`].
+fn folded_runs(blocks: &[Block], live: bool) -> Vec<usize> {
     let mut starts = vec![];
     let mut n = 0;
     while n < blocks.len() {
@@ -1782,7 +1911,7 @@ fn folded_runs(blocks: &[Block]) -> Vec<usize> {
             continue;
         }
         let (len, foldable) = step_run(blocks, n);
-        if foldable && run_folded(&blocks[n..n + len]) {
+        if foldable && run_folded(&blocks[n..n + len], run_open(blocks, n, len, live)) {
             starts.push(n);
         }
         n += len;
@@ -1876,8 +2005,8 @@ fn file_of(uri: &str) -> Option<String> {
 }
 
 /// The message of the conversation as the screen drawn by NSH shows it: the user's text with its
-/// pictures, or the agent's blocks.
-fn chat_items(messages: &[Msg]) -> Vec<nsh::chat::Item> {
+/// pictures, or the agent's blocks. `busy` says the agent is at work, on the last message.
+fn chat_items(messages: &[Msg], busy: bool) -> Vec<nsh::chat::Item> {
     // What the screen holds now: a message whose blocks would be built again exactly as they
     // stand keeps them, so a frame spends its rebuild on the message a chunk went into, not on
     // every message in the history (the engine compares each message's blocks itself, and the
@@ -1893,7 +2022,7 @@ fn chat_items(messages: &[Msg]) -> Vec<nsh::chat::Item> {
                 Some(nsh::chat::Item::Agent { blocks, .. }) => &**blocks,
                 _ => &[] as &[nsh::chat::Block],
             };
-            nsh::chat::Item::Agent { index: ix, blocks: std::sync::Arc::new(chat_blocks(blocks, held)) }
+            nsh::chat::Item::Agent { index: ix, blocks: std::sync::Arc::new(chat_blocks(blocks, busy && ix + 1 == messages.len(), held)) }
         }
     }).collect()
 }
@@ -1985,8 +2114,8 @@ fn run_task(run: &[Block]) -> Option<String> {
 
 /// One agent message's blocks for the conversation drawn by NSH. Runs of [`MIN_RUN`] or more steps
 /// (tool calls and thoughts) that hold a call also carry the row that folds them; the steps stay in place
-/// either way, so the indexes their answers are told by hold.
-fn chat_blocks(blocks: &[Block], held: &[nsh::chat::Block]) -> Vec<nsh::chat::Block> {
+/// either way, so the indexes their answers are told by hold. `live` as in [`run_open`].
+fn chat_blocks(blocks: &[Block], live: bool, held: &[nsh::chat::Block]) -> Vec<nsh::chat::Block> {
     let mut out: Vec<nsh::chat::Block> = Vec::with_capacity(blocks.len());
     let mut n = 0;
     while n < blocks.len() {
@@ -1995,11 +2124,13 @@ fn chat_blocks(blocks: &[Block], held: &[nsh::chat::Block]) -> Vec<nsh::chat::Bl
         let (len, foldable) = if is_step(&blocks[n]) && !inside { step_run(blocks, n) } else { (0, false) };
         if foldable {
             let run = &blocks[n..n + len];
-            let (phase, failed) = run_outcome(run);
+            let open = run_open(blocks, n, len, live);
+            let (outcome, failed) = run_outcome(run);
+            let phase = if open { Step::Working } else { outcome };
             let task = run_task(run);
             let calls = run.iter().filter(|b| matches!(b, Block::Tool(_))).count();
             let (kinds, edits) = run_kinds(run);
-            out.push(nsh::chat::Block::Run { index: n, count: len, calls, failed, phase: chat_phase(phase), folded: run_folded(run), task, took: run_took(run), latest: run_latest(run), kinds, edits });
+            out.push(nsh::chat::Block::Run { index: n, count: len, calls, failed, phase: chat_phase(phase), folded: run_folded(run, open), task, took: run_took(run), latest: run_latest(run), kinds, edits });
             for (k, block) in run.iter().enumerate() {
                 out.push(match block {
                     Block::Tool(tool) => nsh::chat::Block::Tool(chat_tool(n + k, tool)),
@@ -2075,18 +2206,21 @@ fn chat_tool(at: usize, tool: &ToolBlock) -> nsh::chat::Tool {
 
 /// What the approval card says: the question Po asks, and the commands it would hand over.
 fn approval_text(agent: &config::Agent, new_agent: bool, mcp: &[config::McpServer]) -> (String, Vec<String>) {
+    let from = |plugin: &Option<String>| plugin.as_ref().map_or_else(String::new, |id| format!("  (plugin {id})"));
     let mut lines = Vec::new();
     if new_agent {
+        let source = from(&agent.plugin);
         lines.push(match &agent.daemon {
-            Some(url) => format!("{}  (daemon {url})", agent.command),
-            None => agent.command.clone(),
+            Some(url) => format!("{}  (daemon {url}){source}", agent.command),
+            None => format!("{}{source}", agent.command),
         });
     }
-    lines.extend(mcp.iter().map(|server| format!("{}: {}", server.name, server.line())));
+    lines.extend(mcp.iter().map(|server| format!("{}: {}{}", server.name, server.line(), from(&server.plugin))));
+    let agent_source = agent.plugin.as_ref().map_or_else(|| "your config".to_string(), |id| format!("the plugin {id}"));
     let question = match (new_agent, mcp.is_empty()) {
-        (true, true) => format!("“{}” is not one of Po's own agents: it comes from your config. Run this command?", agent.name),
-        (true, false) => format!("“{}” is not one of Po's own agents, and your config lists MCP servers for it. Run these commands?", agent.name),
-        (false, _) => "Your config lists MCP servers for the agent to start, which run as you. Hand them over?".to_string(),
+        (true, true) => format!("“{}” is not one of Po's own agents: it comes from {agent_source}. Run this command?", agent.name),
+        (true, false) => format!("“{}” is not one of Po's own agents, and your config or plugins list MCP servers for it. Run these commands?", agent.name),
+        (false, _) => "Your config or plugins list MCP servers for the agent to start, which run as you. Hand them over?".to_string(),
     };
     (question, lines)
 }
@@ -2134,7 +2268,9 @@ impl Render for Reader {
         // The viewer pane is only built where it shows: a pane nobody sees would publish over the
         // one that is.
         let hidden = || div().size_full().into_any_element();
-        let (middle, side) = if self.issues_open {
+        let (middle, side) = if self.home_open {
+            (self.landing.clone().into_any_element(), hidden())
+        } else if self.issues_open {
             (self.issues.clone().into_any_element(), hidden())
         } else if !side_open {
             // Only the conversation shows, and the viewer's button waits on the side it opens.
@@ -2156,7 +2292,7 @@ impl Render for Reader {
             controls(vec![], trail_all);
             (floating(self.chat_pane(vec![Control::Sidebar(left_open)], vec![], cx), cx), self.pane(cx))
         };
-        let right_open = side_open && !focus && !self.issues_open;
+        let right_open = side_open && !focus && !self.issues_open && !self.home_open;
         div()
             .size_full()
             .flex()
@@ -2658,7 +2794,7 @@ mod tests {
     #[test]
     fn a_project_remembers_the_threads_closed_in_it_newest_first_once_each_and_not_too_many() {
         let mut project = super::Reader::build_project(std::path::PathBuf::from("/x"), None, vec![]);
-        let state = |session: &str| crate::workspace::ThreadState { agent: "a".into(), session: session.into(), title: String::new(), active_at: 0, parent_session: None };
+        let state = |session: &str| crate::workspace::ThreadState { agent: "a".into(), session: session.into(), title: String::new(), active_at: 0, parent_session: None, renamed: false };
         for n in 0..15 {
             project.remember(state(&format!("s{n}")));
         }
@@ -2680,12 +2816,98 @@ mod tests {
         assert_eq!(thread.closed_state().map(|c| c.session), Some("s".to_string()));
     }
 
+    #[test]
+    fn a_name_the_user_gave_stands_in_place_of_the_first_message() {
+        let mut thread = started_thread();
+        assert_eq!(thread.title(), "fix it");
+        assert!(!thread.closed_state().unwrap().renamed);
+        thread.renamed = Some("the retry bug".into());
+        assert_eq!(thread.title(), "the retry bug");
+        let kept = thread.closed_state().unwrap();
+        assert_eq!((kept.title.as_str(), kept.renamed), ("the retry bug", true));
+        thread.renamed = None;
+        assert_eq!(thread.title(), "fix it", "taking the name away gives the first message back");
+    }
+
+    fn started_thread() -> super::Thread {
+        let mut thread = super::Thread::blank(1);
+        thread.blank = false;
+        thread.agent = Some("a".into());
+        thread.session = Some("s".into());
+        thread.messages.push(super::Msg::User("fix it".into(), vec![]));
+        thread.messages.push(super::Msg::Agent(vec![super::Block::Text("fixed".into())]));
+        thread
+    }
+
+    #[test]
+    fn a_thread_switches_agent_only_with_nothing_under_way_and_something_to_pass_on() {
+        assert!(started_thread().can_switch_agent());
+        assert!(!super::Thread::blank(1).can_switch_agent(), "blank: picking starts it instead");
+        let mut busy = started_thread();
+        busy.busy = true;
+        assert!(!busy.can_switch_agent());
+        let mut unloaded = started_thread();
+        unloaded.messages.clear();
+        assert!(!unloaded.can_switch_agent(), "its conversation hasn't been replayed");
+        let mut no_session = started_thread();
+        no_session.session = None;
+        assert!(!no_session.can_switch_agent());
+    }
+
+    #[test]
+    fn a_switch_the_new_agent_has_not_heard_of_comes_back_to_the_agent_it_left() {
+        let mut thread = started_thread();
+        thread.switch = Some(super::Switch { agent: "a".into(), session: "s".into(), earlier: String::new() });
+        thread.agent = Some("b".into());
+        thread.session = Some("empty".into());
+        assert_eq!(thread.closed_state().map(|c| (c.agent, c.session)), Some(("a".to_string(), "s".to_string())));
+        thread.session = None;
+        assert_eq!(thread.resumes_from(), Some(("a", "s")), "kept even if the new agent failed to start");
+        assert!(thread.can_switch_agent(), "and the user can pick again");
+        thread.switch = None;
+        assert_eq!(thread.resumes_from(), None);
+    }
+
+    #[test]
+    fn a_replayed_handoff_brings_the_earlier_messages_back() {
+        let mut said = started_thread();
+        said.messages.push(super::Msg::Agent(vec![super::Block::Text("*Switched to B.*".into())]));
+        let earlier = super::handoff::write(&said.said());
+        let mut thread = super::Thread::blank(1);
+        thread.blank = false;
+        thread.loading = true;
+        let prompt = format!("{earlier}[The user has `a.rs` open in the viewer.]\n\nand now?");
+        thread.update(&serde_json::json!({ "sessionUpdate": "user_message_chunk", "content": { "type": "text", "text": prompt } }));
+        let users: Vec<&str> = thread.messages.iter().filter_map(|msg| match msg { super::Msg::User(text, _) => Some(text.as_str()), _ => None }).collect();
+        assert_eq!(users, ["fix it", "and now?"]);
+        assert_eq!(thread.messages.len(), 4, "the two messages, the note and the new message");
+        assert_eq!(thread.title(), "fix it", "still named for what it was first asked");
+    }
+
+    #[test]
+    fn a_handoff_replayed_in_pieces_is_unfolded_when_the_session_is_ready() {
+        let mut said = started_thread();
+        said.messages.push(super::Msg::User("again".into(), vec![]));
+        let prompt = format!("{}and now?", super::handoff::write(&said.said()));
+        let mut thread = super::Thread::blank(1);
+        thread.blank = false;
+        thread.loading = true;
+        for piece in prompt.as_bytes().chunks(7) {
+            let piece = String::from_utf8_lossy(piece).to_string();
+            thread.update(&serde_json::json!({ "sessionUpdate": "user_message_chunk", "content": { "type": "text", "text": piece } }));
+        }
+        thread.unfold_handoffs();
+        let users: Vec<&str> = thread.messages.iter().filter_map(|msg| match msg { super::Msg::User(text, _) => Some(text.as_str()), _ => None }).collect();
+        assert_eq!(users, ["fix it", "again", "and now?"]);
+        assert_eq!(thread.title(), "fix it");
+    }
+
     // A stand-in agent that copies what it is sent to a file, to see that a running thread's
     // agent is asked to stop before it is killed, and that an idle one is simply let go.
     fn closed_with(busy: bool) -> String {
         let path = std::env::temp_dir().join(format!("po-retire-{}-{busy}", std::process::id()));
         std::fs::write(&path, "").unwrap();
-        let (client, _events) = crate::acp::Client::spawn(&format!("tee {}", path.display()), &std::env::temp_dir(), false, |_| vec![]).expect("spawns tee");
+        let (client, _events) = crate::acp::Client::spawn(&format!("tee {}", path.display()), &std::env::temp_dir(), false, None, |_| vec![]).expect("spawns tee");
         client.load("s1");
         let mut thread = super::Thread::blank(1);
         thread.busy = busy;
@@ -2905,11 +3127,11 @@ mod tests {
     #[test]
     fn a_run_of_calls_starts_folded_even_while_it_runs_or_fails() {
         let run = vec![tool("a", Step::Done), tool("b", Step::Done), tool("c", Step::Done)];
-        assert!(run_folded(&run));
+        assert!(run_folded(&run, false));
         let failed = vec![tool("a", Step::Done), tool("b", Step::Failed), tool("c", Step::Done)];
-        assert!(run_folded(&failed));
+        assert!(run_folded(&failed, false));
         let running = vec![tool("a", Step::Done), tool("b", Step::Working), tool("c", Step::Waiting)];
-        assert!(run_folded(&running));
+        assert!(run_folded(&running, false));
     }
 
     #[test]
@@ -2927,11 +3149,11 @@ mod tests {
         let mut run = vec![tool("a", Step::Done), tool("b", Step::Done), tool("c", Step::Done)];
         let Block::Tool(first) = &mut run[0] else { unreachable!() };
         first.fold = Some(false);
-        assert!(!run_folded(&run));
+        assert!(!run_folded(&run, false));
         let mut failed = vec![tool("a", Step::Failed), tool("b", Step::Done), tool("c", Step::Done)];
         let Block::Tool(first) = &mut failed[0] else { unreachable!() };
         first.fold = Some(true);
-        assert!(run_folded(&failed));
+        assert!(run_folded(&failed, false));
     }
 
     #[test]
@@ -2942,15 +3164,15 @@ mod tests {
             tool("b", Step::Done),
             tool("c", Step::Done),
         ];
-        assert_eq!(folded_runs(&blocks), vec![2]);
+        assert_eq!(folded_runs(&blocks, false), vec![2]);
     }
 
     #[test]
     fn thoughts_between_calls_fold_into_the_run_and_text_ends_it() {
         let thought = || Block::Thought("hm".into(), false);
         let blocks = vec![thought(), tool("a", Step::Done), thought(), tool("b", Step::Done), Block::Text("x".into()), thought(), thought(), thought()];
-        assert_eq!(folded_runs(&blocks), vec![0]);
-        let out = super::chat_blocks(&blocks, &[]);
+        assert_eq!(folded_runs(&blocks, false), vec![0]);
+        let out = super::chat_blocks(&blocks, false, &[]);
         assert!(matches!(out[0], crate::nsh::chat::Block::Run { index: 0, count: 4, calls: 2, .. }));
         assert_eq!(out.iter().filter(|b| matches!(b, crate::nsh::chat::Block::Run { .. })).count(), 1);
         // Thoughts alone have no call to keep the fold, so they stay as they are.
@@ -2980,11 +3202,68 @@ mod tests {
         assert_eq!(edits, vec!["b.rs".to_string()]);
     }
 
+    /// The phase and fold of the one run in `blocks`.
+    fn run_row(blocks: &[Block], live: bool) -> (crate::nsh::chat::Phase, bool) {
+        super::chat_blocks(blocks, live, &[]).iter().find_map(|b| match b {
+            crate::nsh::chat::Block::Run { phase, folded, .. } => Some((*phase, *folded)),
+            _ => None,
+        }).expect("the blocks hold a run")
+    }
+
+    #[test]
+    fn a_run_is_still_working_between_its_calls() {
+        use crate::nsh::chat::Phase;
+        let blocks = vec![tool("a", Step::Done), tool("b", Step::Done)];
+        assert_eq!(run_row(&blocks, true).0, Phase::Working);
+        // The turn over, it is done, with no call having changed.
+        assert_eq!(run_row(&blocks, false).0, Phase::Done);
+    }
+
+    #[test]
+    fn text_after_a_run_ends_it_while_the_turn_goes_on() {
+        use crate::nsh::chat::Phase;
+        let blocks = vec![tool("a", Step::Done), tool("b", Step::Done), Block::Text("x".into())];
+        assert_eq!(run_row(&blocks, true).0, Phase::Done);
+    }
+
+    #[test]
+    fn a_failure_moves_no_rows_until_the_run_ends_in_it() {
+        use crate::nsh::chat::Phase;
+        let blocks = vec![tool("a", Step::Done), tool("b", Step::Failed)];
+        assert_eq!(run_row(&blocks, true), (Phase::Working, true));
+        assert_eq!(folded_runs(&blocks, true), vec![0]);
+        assert_eq!(run_row(&blocks, false), (Phase::Failed, false));
+        assert_eq!(folded_runs(&blocks, false), Vec::<usize>::new());
+    }
+
+    #[test]
+    fn a_click_holds_on_a_run_still_going() {
+        let mut run = vec![tool("a", Step::Done), tool("b", Step::Done)];
+        let Block::Tool(first) = &mut run[0] else { unreachable!() };
+        first.fold = Some(false);
+        assert!(!run_folded(&run, true));
+    }
+
+    #[test]
+    fn only_the_last_message_of_a_busy_thread_has_a_run_going() {
+        use crate::nsh::chat::{Item, Phase};
+        let run = || Msg::Agent(vec![tool("a", Step::Done), tool("b", Step::Done)]);
+        let phases = |busy| -> Vec<Phase> {
+            super::chat_items(&[run(), run()], busy).iter().map(|item| {
+                let Item::Agent { blocks, .. } = item else { unreachable!() };
+                let crate::nsh::chat::Block::Run { phase, .. } = blocks[0] else { unreachable!() };
+                phase
+            }).collect()
+        };
+        assert_eq!(phases(true), [Phase::Done, Phase::Working]);
+        assert_eq!(phases(false), [Phase::Done, Phase::Done]);
+    }
+
     #[test]
     fn a_run_followed_by_text_folds_in_the_latest_message() {
         let blocks = vec![tool("a", Step::Done), tool("b", Step::Done), tool("c", Step::Done), Block::Text("x".into())];
-        assert_eq!(folded_runs(&blocks), vec![0]);
-        assert_eq!(folded_runs(&blocks[..3]), vec![0]);
+        assert_eq!(folded_runs(&blocks, false), vec![0]);
+        assert_eq!(folded_runs(&blocks[..3], false), vec![0]);
     }
 
     #[test]

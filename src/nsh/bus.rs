@@ -27,13 +27,20 @@ pub enum Cmd {
     ToggleMore(u64),
     OpenThread(u64, u64),
     CloseThread(u64, u64),
+    /// A thread is given a name of the user's own; an empty one gives it back the name made
+    /// from what it was first asked.
+    RenameThread(u64, u64, String),
     AddProject,
     NewThread,
     OpenSettings,
     ToggleIssues,
+    /// The Home page, the landing page: put up or put away.
+    ToggleHome,
+    /// An issue of the repo given, on the issues page.
+    OpenIssue(std::path::PathBuf, u64),
     CloseIssues,
-    /// Start a thread in a worktree on an issue.
-    WorkOnIssue(u64),
+    /// Start a thread in a worktree on an issue of the repo given.
+    WorkOnIssue(std::path::PathBuf, u64),
     /// The line under the Projects header is put away.
     DismissStatus,
     /// The window's own controls, which sit in the headers of the panes at its edges.

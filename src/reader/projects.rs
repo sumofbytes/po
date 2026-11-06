@@ -265,6 +265,10 @@ impl Reader {
         self.pr_status = None;
         self.worktree_status = None;
         self.confirm_discard = false;
+        // An open issues page goes where the screen went.
+        if self.issues_open {
+            self.follow_issues();
+        }
         self.focus.focus(window, cx);
         cx.notify();
     }
@@ -279,6 +283,7 @@ impl Reader {
         if !self.slots.iter().any(|slot| slot.id == id) {
             return;
         }
+        self.hide_home(window, cx);
         // Leaving a session listing unused drops it.
         if self.thread.is_listing() {
             self.close_thread(self.thread.id, window, cx);
@@ -380,6 +385,7 @@ impl Reader {
     pub(crate) fn open_worktree(&mut self, wt: worktree::Worktree, agent: String, first: Option<(Outgoing, (u64, u64))>, window: &mut Window, cx: &mut Context<Self>) {
         log::info!("worktree: {} for {agent}", wt.spec.branch);
         if let Some((root, number)) = self.issue_for_worktree.take() {
+            self.issue_draft = None;
             Self::issue_started(&root, number, Some(wt.spec.branch.clone()));
         }
         let mut project = Self::build_project(wt.spec.path.clone(), None, vec![]);
@@ -545,6 +551,7 @@ impl Reader {
         let mut slot = self.slots.remove(at);
         let worktree = slot.project.worktree.take();
         drop(slot);
+        self.leave_closed_issues();
         if let Some(mut wt) = worktree {
             cx.spawn(async move |this, cx| {
                 let kept = cx.background_executor().spawn(async move { wt.retire() }).await;

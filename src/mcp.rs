@@ -20,7 +20,7 @@ const READS: &str = "You can also ask about yourself and your project: control_i
 you are and what the user has granted; get_thread, thread_messages and last_reply read your \
 thread's state and transcript; thread_options lists its settings; list_threads, list_agents, \
 list_projects and project_changes say what else Po has open. list_issues, get_issue and \
-list_epics read the project's issues, which live in its .po folder. Reading the threads of others, \
+list_epics read the project's issues, which Po keeps outside the repo. Reading the threads of others, \
 rather than your own, needs a grant the user gives in Po.";
 
 /// What an orchestrator may do, added when its grant says so.
@@ -626,7 +626,7 @@ fn tools() -> Vec<(&'static str, &'static str, &'static str, Value, Scope)> {
                     "filter_epic": string("An epic's id to list the issues of."),
                     "priority": { "type": "string", "description": "How pressing.", "enum": ["urgent", "high", "medium", "low"] },
                     "late": json!({ "type": "boolean" }),
-                    "group": { "type": "string", "description": "How to group the list.", "enum": ["status", "priority", "epic", "none"] },
+                    "group": { "type": "string", "description": "How to group the list.", "enum": ["status", "priority", "project", "epic", "none"] },
                 },
             }),
             Scope::Orchestrate,

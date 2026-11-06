@@ -1,4 +1,4 @@
-//! Issues and epics: a small tracker that lives in the repo, under `.po/`. This is the model, with
+//! Issues and epics: a small tracker for each repo, kept in Po's data folder. This is the model, with
 //! no I/O: [`Tracker`] holds what a repo has and answers questions about it, and [`store`] reads
 //! and writes the files; [`api`] is what agents ask, [`shared`] the copy the app follows.
 pub mod api;
@@ -437,7 +437,7 @@ pub struct Label {
     pub color: String,
 }
 
-/// `.po/config.json`: what the repo's issues share.
+/// `config.json`: what the repo's issues share.
 #[derive(Clone, PartialEq, Debug)]
 pub struct Config {
     /// The letters in a key: `PO` in `PO-12`.
@@ -658,16 +658,6 @@ impl Tracker {
 
     pub fn milestone_progress(&self, epic: &str, milestone: &str) -> Progress {
         Progress::of(self.issues.values().filter(|issue| issue.epic.as_deref() == Some(epic) && issue.milestone.as_deref() == Some(milestone)))
-    }
-
-    /// How many issues are neither done nor canceled.
-    pub fn open_count(&self) -> usize {
-        self.issues.values().filter(|issue| issue.status.is_open()).count()
-    }
-
-    /// How many open issues were due before `today`.
-    pub fn late(&self, today: Date) -> usize {
-        self.issues.values().filter(|issue| issue.status.is_open() && issue.due.is_some_and(|due| due < today)).count()
     }
 
     /// Adds an issue to the backlog, and returns its number.
@@ -990,20 +980,6 @@ mod tests {
         t.remove_label("bug", 3);
         assert!(t.config.labels.is_empty());
         assert_eq!(t.issue(n).unwrap().labels, ["ui"]);
-    }
-
-    #[test]
-    fn only_open_issues_past_their_date_are_late() {
-        let mut t = tracker();
-        let today = day(2026, 10, 28);
-        let (a, b, c) = (t.create("a", 1), t.create("b", 1), t.create("c", 1));
-        for n in [a, b] {
-            t.update(n, 2, |issue| issue.due = Some(today.plus(-1)));
-        }
-        t.update(c, 2, |issue| issue.due = Some(today));
-        assert_eq!((t.late(today), t.open_count()), (2, 3));
-        t.update(a, 3, |issue| issue.status = Status::Done);
-        assert_eq!((t.late(today), t.open_count()), (1, 2));
     }
 
     #[test]

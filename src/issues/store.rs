@@ -1,10 +1,15 @@
-//! A repo's `.po/` folder, read into a [`Tracker`] and written back.
+//! A repo's issues folder, read into a [`Tracker`] and written back. It is kept in Po's data folder
+//! and not in the repo, so that issues don't go along with the code:
 //!
 //! ```text
-//! .po/config.json         the key prefix, the next number, the labels
-//! .po/issues/PO-12.json   an issue
-//! .po/epics/launch.json   an epic, with its milestones
+//! <data>/issues/github.com~me~repo/config.json         the key prefix, the next number, the labels
+//! <data>/issues/github.com~me~repo/issues/PO-12.json   an issue
+//! <data>/issues/github.com~me~repo/epics/launch.json   an epic, with its milestones
 //! ```
+//!
+//! A repo is known by its `origin`, so that it keeps its issues when moved and its clones share
+//! them, or else by its path. A repo's old `.po/` is copied here once, when there is nothing here
+//! yet, and is left where it is.
 //!
 //! The folder is always the primary checkout's: a worktree made for a thread has its own copy of
 //! the repo but shares the issues, so every thread sees the same ones. Writes go to a temp file
@@ -25,7 +30,7 @@ use serde_json::Value;
 
 use super::{Config, Epic, Issue, Tracker, default_prefix, is_id};
 
-/// The checkout that owns `path`'s `.po/`: itself, or for a git worktree, the checkout it was
+/// The checkout that owns `path`'s issues: itself, or for a git worktree, the checkout it was
 /// made from.
 pub fn primary_root(path: &Path) -> PathBuf {
     let own = || path.to_path_buf();
@@ -41,10 +46,128 @@ pub fn primary_root(path: &Path) -> PathBuf {
     }
 }
 
+/// The folder all repos' issues are kept under. A test's repo keeps them in itself, so that tests
+/// stay in their own temp folders and out of the real one.
+fn home() -> Option<PathBuf> {
+    if cfg!(test) { None } else { Some(crate::config::data_dir().join("issues")) }
+}
+
+/// Where the issues of the repo at `root`, a primary checkout, are kept.
+pub fn folder_of(root: &Path) -> PathBuf {
+    match home() {
+        Some(home) => central_dir(&home, root),
+        None => root.join(".po"),
+    }
+}
+
+/// The folder under `home` for the repo at `root`: named for its remote if it has one on a host,
+/// else for its path. One name, so no repo's folder can sit inside another's.
+fn central_dir(home: &Path, root: &Path) -> PathBuf {
+    let remote = std::fs::read_to_string(root.join(".git/config")).ok().and_then(|text| origin_url(&text)).and_then(|url| remote_parts(&url));
+    // A remote that leaves nothing of a name would be the home folder itself.
+    let name = remote.map(|parts| folder_name(&parts)).filter(|name| !name.is_empty()).unwrap_or_else(|| {
+        let path = root.components().map(|part| part.as_os_str().to_string_lossy().into_owned());
+        folder_name(&std::iter::once("local".to_string()).chain(path).collect::<Vec<_>>())
+    });
+    home.join(name)
+}
+
+/// The `url` of the `origin` remote in the text of a `.git/config`.
+fn origin_url(config: &str) -> Option<String> {
+    let mut in_origin = false;
+    for line in config.lines().map(str::trim) {
+        if line.starts_with('[') {
+            in_origin = line == r#"[remote "origin"]"#;
+        } else if in_origin && let Some((key, value)) = line.split_once('=') && key.trim() == "url" {
+            return Some(value.trim().trim_matches('"').to_string());
+        }
+    }
+    None
+}
+
+/// A remote's host, non-default port, and path, whichever way its URL is written, so
+/// `git@host:me/repo.git` and `https://host/me/repo` are one repo. A non-default port stays in
+/// the name: repositories served from another endpoint on the same host must not share issues.
+/// None for a remote that is a path on this machine.
+fn remote_parts(url: &str) -> Option<Vec<String>> {
+    let (scheme, authority, path) = match url.split_once("://") {
+        Some(("file", _)) => return None,
+        Some((scheme, rest)) => {
+            let (authority, path) = rest.split_once('/')?;
+            (Some(scheme), authority, path)
+        }
+        // `host:path`, unless it is a path (`./x`, `/x`) or a Windows drive (`C:\x`).
+        None => {
+            let (host, path) = url.split_once(':').filter(|(host, _)| !host.contains('/') && !host.contains('\\') && host.len() > 1)?;
+            (None, host, path)
+        }
+    };
+    let authority = authority.rsplit('@').next()?;
+    let (host, port) = authority.rsplit_once(':').filter(|(_, port)| !port.is_empty() && port.chars().all(|c| c.is_ascii_digit())).unwrap_or((authority, ""));
+    let mut parts = vec![host.to_lowercase()];
+    let default_port = match scheme.map(str::to_ascii_lowercase).as_deref() {
+        Some("http") => "80",
+        Some("https") => "443",
+        Some("ssh") => "22",
+        _ => "",
+    };
+    if !port.is_empty() && port != default_port {
+        parts.push(format!("port-{port}"));
+    }
+    let path = path.trim_end_matches('/');
+    let path = path.strip_suffix(".git").unwrap_or(path);
+    parts.extend(path.split('/').map(String::from));
+    (parts.len() > 1 && !parts[0].is_empty()).then_some(parts)
+}
+
+/// `parts` as one safe folder name. They come from a repo's own files, so whatever they say, the
+/// name can't lead out of the folder it is joined to.
+fn folder_name(parts: &[String]) -> String {
+    let safe = |part: &String| part.chars().map(|c| if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') { c } else { '_' }).collect::<String>();
+    parts.iter().map(safe).filter(|part| !part.chars().all(|c| matches!(c, '.' | '_'))).collect::<Vec<_>>().join("~")
+}
+
+/// Copies the issues in `old` to `dir`, if there is nothing at `dir` yet. All or nothing: they are
+/// copied beside it and renamed into place, and if another window got there first, that stands.
+/// `old` is left as it is. An error means the issues aren't there yet: they are tried again the
+/// next time the repo is opened, unless something has been written meanwhile.
+fn adopt(old: &Path, dir: &Path) -> io::Result<()> {
+    if dir.exists() || !old.is_dir() {
+        return Ok(());
+    }
+    let parent = dir.parent().ok_or_else(|| io::Error::other("no folder to put them in"))?;
+    std::fs::create_dir_all(parent)?;
+    let temp = parent.join(format!(".adopting-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&temp);
+    let copied = copy_issue_files(old, &temp).and_then(|()| std::fs::rename(&temp, dir));
+    if copied.is_err() {
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+    if dir.exists() { Ok(()) } else { copied }
+}
+
+/// The files of an issues folder: what is at its top and in `issues` and `epics`, and nothing else.
+fn copy_issue_files(from: &Path, to: &Path) -> io::Result<()> {
+    for folder in ["", "issues", "epics"] {
+        let target = to.join(folder);
+        std::fs::create_dir_all(&target)?;
+        let Ok(entries) = std::fs::read_dir(from.join(folder)) else { continue };
+        for entry in entries {
+            let entry = entry?;
+            if entry.file_type()?.is_file() {
+                std::fs::copy(entry.path(), target.join(entry.file_name()))?;
+            }
+        }
+    }
+    Ok(())
+}
+
 /// The issues of one repo, and where they are kept.
 #[derive(Debug)]
 pub struct Store {
-    /// The `.po` folder.
+    /// The checkout they belong to.
+    root: PathBuf,
+    /// Their folder.
     dir: PathBuf,
     pub tracker: Tracker,
     /// What was wrong with the files when they were read: skipped, unreadable, or mended.
@@ -55,7 +178,7 @@ pub struct Store {
     unreadable: HashSet<PathBuf>,
 }
 
-/// What reading a `.po` folder gave.
+/// What reading an issues folder gave.
 pub struct Loaded {
     tracker: Tracker,
     problems: Vec<String>,
@@ -86,20 +209,30 @@ pub fn fingerprint(dir: &Path) -> u64 {
 }
 
 impl Store {
-    /// The issues of the repo `project` is a checkout of. A repo with no `.po/` yet has none, and
-    /// nothing is made on disk until something is written.
+    /// The issues of the repo `project` is a checkout of. A repo with none yet has none, and
+    /// nothing is made on disk until something is written, but for a repo's old `.po/` coming over.
     pub fn open(project: &Path) -> Self {
         let root = primary_root(project);
-        let dir = root.join(".po");
-        let name = root.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
-        let (Loaded { tracker, problems, unreadable }, seen) = load(&dir, &default_prefix(&name));
-        Self { dir, tracker, problems, seen, unreadable }
+        let (old, dir) = (root.join(".po"), folder_of(&root));
+        let adopted = if old == dir { Ok(()) } else { adopt(&old, &dir) };
+        let mut store = Self::open_at(root, dir);
+        if let Err(error) = adopted {
+            log::error!("issues in {}: {error}", old.display());
+            store.problems.push(format!("The issues in {} could not be copied over: {error}", old.display()));
+        }
+        store
     }
 
-    /// What a poller needs to see whether the files changed without holding the store: where they
-    /// are, the prefix to read them with, and how they looked when last read.
-    pub fn watch_state(&self) -> (PathBuf, String, u64) {
-        (self.dir.clone(), self.tracker.config.prefix.clone(), self.seen)
+    fn open_at(root: PathBuf, dir: PathBuf) -> Self {
+        let name = root.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
+        let (Loaded { tracker, problems, unreadable }, seen) = load(&dir, &default_prefix(&name));
+        Self { root, dir, tracker, problems, seen, unreadable }
+    }
+
+    /// What a poller needs to see whether the files changed without holding the store: whose they
+    /// are, where they are, the prefix to read them with, and how they looked when last read.
+    pub fn watch_state(&self) -> (PathBuf, PathBuf, String, u64) {
+        (self.root.clone(), self.dir.clone(), self.tracker.config.prefix.clone(), self.seen)
     }
 
     /// Takes a reading made by [`load`] while the files looked like `seen`, if nothing has
@@ -116,7 +249,7 @@ impl Store {
 
     /// The checkout the issues belong to.
     pub fn root(&self) -> &Path {
-        self.dir.parent().unwrap_or(&self.dir)
+        &self.root
     }
 
     /// Whether the files differ from what was last read or written: another window, git, or a
@@ -379,6 +512,94 @@ mod tests {
 
     fn files(dir: &Path) -> Vec<String> {
         json_files(dir).into_iter().map(|(name, _)| name).collect()
+    }
+
+    #[test]
+    fn a_repo_is_known_by_its_remote_however_it_is_written() {
+        let parts = |url: &str| remote_parts(url).map(|parts| parts.join("/"));
+        for url in ["git@github.com:me/repo.git", "https://github.com/me/repo", "https://token@GitHub.com/me/repo.git/", "ssh://git@github.com:22/me/repo.git"] {
+            assert_eq!(parts(url).as_deref(), Some("github.com/me/repo"), "{url}");
+        }
+        for url in ["/srv/git/repo.git", "../repo", "./repo", "file:///srv/repo", r"C:\\repos\\x", "https://github.com"] {
+            assert_eq!(parts(url), None, "{url}");
+        }
+    }
+
+    #[test]
+    fn a_non_default_remote_port_keeps_its_issues_separate() {
+        let parts = |url: &str| remote_parts(url).map(|parts| parts.join("/"));
+        assert_eq!(parts("https://github.com:443/me/repo"), parts("https://github.com/me/repo"));
+        assert_ne!(parts("https://github.com:8443/me/repo"), parts("https://github.com/me/repo"));
+        assert_eq!(parts("https://github.com:8443/me/repo").as_deref(), Some("github.com/port-8443/me/repo"));
+    }
+
+    #[test]
+    fn origin_is_read_and_other_remotes_are_not() {
+        let config = "[core]\n\tbare = false\n[remote \"fork\"]\n\turl = git@host:them/repo\n[remote \"origin\"]\n\tfetch = x\n\turl = git@host:me/repo\n[branch \"a\"]\n\turl = wrong\n";
+        assert_eq!(origin_url(config).as_deref(), Some("git@host:me/repo"));
+        assert_eq!(origin_url("[remote \"fork\"]\n\turl = x\n"), None);
+    }
+
+    #[test]
+    fn a_repos_folder_stays_inside_the_issues_home_whatever_its_remote_says() {
+        let repo = Temp::new("hostile");
+        std::fs::create_dir_all(repo.0.join(".git")).unwrap();
+        for url in ["https://../../../../etc/passwd", "git@host:../../../secret", "git@..:..", "https://host/a/../../b"] {
+            std::fs::write(repo.0.join(".git/config"), format!("[remote \"origin\"]\n\turl = {url}\n")).unwrap();
+            let dir = central_dir(Path::new("/home"), &repo.0);
+            assert_eq!(dir.parent(), Some(Path::new("/home")), "{url}");
+            assert!(!dir.file_name().unwrap().to_string_lossy().contains('/'), "{url}");
+        }
+    }
+
+    #[test]
+    fn two_clones_share_a_folder_and_a_repo_without_a_remote_has_its_own() {
+        let (one, two, alone) = (Temp::new("one"), Temp::new("two"), Temp::new("alone"));
+        for repo in [&one, &two] {
+            std::fs::create_dir_all(repo.0.join(".git")).unwrap();
+            std::fs::write(repo.0.join(".git/config"), "[remote \"origin\"]\n\turl = git@github.com:me/repo.git\n").unwrap();
+        }
+        let home = Path::new("/home");
+        assert_eq!(central_dir(home, &one.0), home.join("github.com~me~repo"));
+        assert_eq!(central_dir(home, &one.0), central_dir(home, &two.0));
+        let own = central_dir(home, &alone.0);
+        assert!(own.file_name().unwrap().to_string_lossy().starts_with("local~"), "{own:?}");
+        assert_ne!(own, central_dir(home, &one.0));
+    }
+
+    #[test]
+    fn a_repos_old_issues_come_over_once_and_stay_where_they_were() {
+        let repo = Temp::new("old-issues");
+        let home = Temp::new("home");
+        let (old, dir) = (repo.0.join(".po"), home.0.join("repo"));
+        std::fs::create_dir_all(old.join("issues")).unwrap();
+        std::fs::create_dir_all(old.join("epics")).unwrap();
+        std::fs::create_dir_all(old.join("other")).unwrap();
+        std::fs::write(old.join("config.json"), r#"{"prefix":"PO","next":14}"#).unwrap();
+        std::fs::write(old.join("issues/PO-12.json"), r#"{"title":"mine"}"#).unwrap();
+        std::fs::write(old.join("epics/launch.json"), r#"{"name":"Launch"}"#).unwrap();
+        std::fs::write(old.join("other/note.json"), "{}").unwrap();
+
+        adopt(&old, &dir).unwrap();
+        let store = Store::open_at(repo.0.clone(), dir.clone());
+        assert_eq!(store.tracker.issue(12).unwrap().title, "mine");
+        assert_eq!(store.tracker.config.next, 14);
+        assert_eq!(store.root(), repo.0);
+        assert!(!dir.join("other").exists());
+        assert!(old.join("issues/PO-12.json").exists());
+        assert_eq!(std::fs::read_dir(&home.0).unwrap().count(), 1, "nothing is left beside it");
+
+        // Once it is there, what is in it stands, whatever the repo's folder says later.
+        std::fs::write(old.join("issues/PO-12.json"), r#"{"title":"from git"}"#).unwrap();
+        adopt(&old, &dir).unwrap();
+        assert_eq!(Store::open_at(repo.0.clone(), dir).tracker.issue(12).unwrap().title, "mine");
+    }
+
+    #[test]
+    fn a_repo_with_nothing_to_bring_over_makes_nothing() {
+        let (repo, home) = (Temp::new("nothing"), Temp::new("home"));
+        adopt(&repo.0.join(".po"), &home.0.join("repo")).unwrap();
+        assert!(!home.0.join("repo").exists());
     }
 
     #[test]

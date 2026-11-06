@@ -6,6 +6,10 @@ use serde_json::Value;
 /// Agents shipped in the binary; the user's config adds to or overrides them by `id`.
 const DEFAULT_AGENTS: &str = include_str!("../agents.json");
 
+/// The key of an `agents` or `mcp_servers` entry saying which plugin provided it. Po sets it
+/// when it folds a plugin's entries in, over whatever the manifest says.
+pub const FROM_PLUGIN: &str = "from_plugin";
+
 #[derive(Clone)]
 pub struct Agent {
     pub id: String,
@@ -16,6 +20,8 @@ pub struct Agent {
     pub daemon: Option<String>,
     /// The user named this command themselves, on the command line, so it needs no approval.
     pub vouched: bool,
+    /// The plugin that provided this agent, by its `id`.
+    pub plugin: Option<String>,
 }
 
 /// The user's home directory: `$HOME`, or `%USERPROFILE%` on Windows.
@@ -62,7 +68,8 @@ pub fn read_json(path: &Path) -> Option<Value> {
     }
 }
 
-/// The user's `config.json`, or null when there is none.
+/// The user's `config.json`, or null when there is none. What starts or lists agents wants
+/// [`crate::plugin::effective_config`], which has the plugins' entries in it too.
 #[hotpath::measure]
 pub fn load() -> Value {
     dir().and_then(|dir| read_json(&dir.join("config.json"))).unwrap_or(Value::Null)
@@ -110,7 +117,8 @@ fn parse(list: &Value) -> Vec<Agent> {
             let command = entry["command"].as_str()?.to_string();
             let name = entry["name"].as_str().unwrap_or(&id).to_string();
             let daemon = entry["daemon"].as_str().map(String::from);
-            Some(Agent { id, name, command, daemon, vouched: false })
+            let plugin = entry[FROM_PLUGIN].as_str().map(String::from);
+            Some(Agent { id, name, command, daemon, vouched: false, plugin })
         })
         .collect()
 }
@@ -120,6 +128,8 @@ pub fn agents(config: &Value) -> Vec<Agent> {
     let mut agents = serde_json::from_str(DEFAULT_AGENTS).map(|list: Value| parse(&list)).unwrap_or_default();
     for agent in parse(&config["agents"]) {
         match agents.iter_mut().find(|known| known.id == agent.id) {
+            // Plugins come first and repeat no `id` among them, so what it would replace is ours.
+            Some(known) if agent.plugin.is_some() => log::warn!("plugin {}: the agent `{}` is one of Po's own, so it stays", agent.plugin.as_deref().unwrap_or_default(), known.id),
             Some(known) => *known = agent,
             None => agents.push(agent),
         }
@@ -134,6 +144,8 @@ pub struct McpServer {
     pub command: String,
     pub args: Vec<String>,
     pub env: Vec<(String, String)>,
+    /// The plugin that provided this server, by its `id`. Not part of what is approved.
+    pub plugin: Option<String>,
 }
 
 impl McpServer {
@@ -193,7 +205,8 @@ pub fn mcp_entries(config: &Value) -> Vec<McpServer> {
             }
             other => log::warn!("mcp_servers: `{name}`: `env` is not an object and is ignored: {other}"),
         }
-        servers.push(McpServer { name: name.to_string(), command: command.to_string(), args, env });
+        let plugin = entry[FROM_PLUGIN].as_str().map(String::from);
+        servers.push(McpServer { name: name.to_string(), command: command.to_string(), args, env, plugin });
     }
     servers
 }
@@ -256,9 +269,10 @@ pub fn decline_mcp(servers: &[McpServer]) {
 /// Whether Po may run `agent` without asking: it is one of the bundled agents as shipped, the user
 /// named it on the command line, or they approved this exact command before. A command that came
 /// from `config.json` or changed there is asked about, so editing the config (or something editing
-/// it) can't make Po run a program the user never saw.
+/// it) can't make Po run a program the user never saw. A plugin's is asked about even when it is
+/// a bundled command, since the name it goes by in the picker is the plugin's to choose.
 pub fn trusted(agent: &Agent) -> bool {
-    agent.vouched || shipped(agent) || approved_this_run(agent) || approved_in(&approvals_path(), agent)
+    agent.vouched || (agent.plugin.is_none() && shipped(agent)) || approved_this_run(agent) || approved_in(&approvals_path(), agent)
 }
 
 /// Commands approved since Po started, kept apart from the file so that a yes holds even if the
@@ -387,7 +401,7 @@ mod tests {
     use super::*;
 
     fn agent(command: &str) -> Agent {
-        Agent { id: "x".into(), name: "X".into(), command: command.into(), daemon: None, vouched: false }
+        Agent { id: "x".into(), name: "X".into(), command: command.into(), daemon: None, vouched: false, plugin: None }
     }
 
     #[test]
@@ -400,7 +414,35 @@ mod tests {
     }
 
     fn server(name: &str, command: &str) -> McpServer {
-        McpServer { name: name.into(), command: command.into(), args: vec![], env: vec![] }
+        McpServer { name: name.into(), command: command.into(), args: vec![], env: vec![], plugin: None }
+    }
+
+    #[test]
+    fn a_plugin_cant_take_a_bundled_agents_place_but_the_config_can() {
+        let config = serde_json::json!({ "agents": [
+            { "id": "claude", "name": "Claude Code", "command": "elsewhere", FROM_PLUGIN: "p" },
+            { "id": "codex", "command": "my-codex" },
+            { "id": "new", "command": "new-agent", FROM_PLUGIN: "p" },
+        ] });
+        let agents = agents(&config);
+        let command = |id: &str| agents.iter().find(|agent| agent.id == id).map(|agent| agent.command.clone());
+        assert_eq!(command("claude").as_deref(), Some("claude-agent-acp"));
+        assert_eq!(command("codex").as_deref(), Some("my-codex"));
+        assert_eq!(command("new").as_deref(), Some("new-agent"));
+    }
+
+    #[test]
+    fn a_plugins_agent_is_asked_about_even_with_a_bundled_command() {
+        assert!(trusted(&agent("claude-agent-acp")));
+        assert!(!trusted(&Agent { plugin: Some("p".into()), ..agent("claude-agent-acp") }));
+    }
+
+    #[test]
+    fn who_provides_a_server_is_not_part_of_its_approval() {
+        let config = serde_json::json!({ "mcp_servers": [{ "name": "s", "command": "c", FROM_PLUGIN: "p" }] });
+        let provided = mcp_entries(&config).remove(0);
+        assert_eq!(provided.plugin.as_deref(), Some("p"));
+        assert_eq!(provided.approval(), server("s", "c").approval());
     }
 
     #[test]

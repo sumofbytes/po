@@ -47,16 +47,15 @@ pub fn toggle_button(name: IconName, tip: &'static str, selected: bool, on_press
     ghost_button(name, tip, selected, true, on_press)
 }
 
+/// [`toggle_button`], tighter, for buttons that sit inside a group's own container.
+pub fn compact_toggle_button(name: IconName, tip: &'static str, selected: bool, on_press: impl Fn() + 'static) -> View {
+    toggle_button(name, tip, selected, on_press).p(scale::s1())
+}
+
 /// [`toggle_button`], with the fill of its selected state optional: the window's own controls say
 /// they are on in their icon alone, as a fill that stays on the bar is noise there.
 fn ghost_button(name: IconName, tip: &'static str, selected: bool, filled: bool, on_press: impl Fn() + 'static) -> View {
     icon_button(name, tip, selected, filled, scale::s3_5(), Colors::muted(), on_press)
-}
-
-/// A ghost icon button with the sidebar rows' icon size (`s4`) in full strength: the
-/// conversation's own controls, where the four Places stand out beside the statuses.
-pub fn place_button(name: IconName, tip: &'static str, selected: bool, on_press: impl Fn() + 'static) -> View {
-    icon_button(name, tip, selected, true, scale::s4(), Colors::foreground(), on_press)
 }
 
 fn icon_button(name: IconName, tip: &'static str, selected: bool, filled: bool, size: Points, tint: impl Fn() -> AdaptiveColor + Copy + 'static, on_press: impl Fn() + 'static) -> View {
@@ -83,6 +82,11 @@ pub(super) fn controls(list: &[Control]) -> impl Iterator<Item = View> + '_ {
 /// `title` with `lead` before it and `right` then `trail` after, on a bar with a line under it
 /// (not on glass, where the headers' titles set the sections apart).
 pub fn pane_header(title: impl IntoReactive<SharedString>, right: impl IntoElement, lead: &[Control], trail: &[Control], glass: bool) -> View {
+    pane_header_with(body(title).number_of_lines(1).flex_shrink(1.).font_weight(FontWeight::MEDIUM), right, lead, trail, glass)
+}
+
+/// [`pane_header`], with the title made by the caller (a name that can be typed over).
+pub fn pane_header_with(title: impl IntoElement, right: impl IntoElement, lead: &[Control], trail: &[Control], glass: bool) -> View {
     let bar = view()
         .h(header_height())
         .flex_none()
@@ -98,7 +102,7 @@ pub fn pane_header(title: impl IntoReactive<SharedString>, right: impl IntoEleme
                 .gap(scale::s1())
                 .flex_shrink(1.)
                 .child(controls(lead).collect::<Vec<_>>())
-                .child(body(title).number_of_lines(1).flex_shrink(1.).font_weight(FontWeight::MEDIUM)),
+                .child(title),
         )
         .child(view().flex_row().items_center().gap(scale::s2()).child(right).child(controls(trail).collect::<Vec<_>>()));
     if glass { bar } else { bar.border_b_1().border_color(super::hairline()) }

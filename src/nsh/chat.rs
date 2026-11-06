@@ -9,8 +9,8 @@ use nsh_base::{menu, menu_item, menu_separator, text_view, Input, input};
 use nsh_core::prelude::*;
 use tokio::sync::watch;
 
-use super::header::{Control, pane_header};
-use super::{Colors, body, icon, mono_size, note, scale, text_base, text_sm, text_xs, tooltip, Sizing, Smooth};
+use super::header::{Control, pane_header_with};
+use super::{Renaming, Colors, Spin, body, icon, mono_size, note, scale, spin, spinner, text_base, text_sm, text_xs, tooltip, Sizing, Smooth};
 use crate::ui::icon::IconName;
 
 /// Whether a step of the agent's is waiting, going, done or failed: a tool call, the plan's
@@ -249,6 +249,8 @@ pub enum Place {
 pub struct Snapshot {
     pub glass: bool,
     pub title: String,
+    /// The project and id of the thread on screen, which its title can rename.
+    pub thread: (u64, u64),
     pub lead: Vec<Control>,
     pub trail: Vec<Control>,
     /// The status lines of the header's right, like `3 threads · 1 asking`.
@@ -260,6 +262,8 @@ pub struct Snapshot {
     pub blank: bool,
     /// A turn is going: the send button turns into a stop beside it.
     pub busy: bool,
+    /// A started thread's agent can be changed now.
+    pub switchable: bool,
     /// The agent takes messages mid-turn, so a send steers rather than queues.
     pub steer: bool,
     /// The agents a new thread can be started with, `(name, id)`.
@@ -356,7 +360,7 @@ pub enum Cmd {
     Show(bool),
     /// The terminal is shown, started if the project has none yet.
     Terminal,
-    /// The agent a new thread starts with.
+    /// The agent a new thread starts with, and the one on screen switches to.
     PickAgent(String),
     /// A setting of the session is changed.
     Setting { id: String, value: String },
@@ -411,7 +415,7 @@ fn separator() -> AnyElement {
 fn step_glyph(phase: Phase) -> View {
     let name = match phase {
         Phase::Waiting => IconName::Circle,
-        Phase::Working => IconName::CircleHalf,
+        Phase::Working => return lead_slot(spinner(STEP_ICON, move || phase_tint(phase), use_context::<Spin>().expect("the chat provides the spin"))),
         Phase::Done => IconName::CircleCheck,
         Phase::Failed => IconName::CircleX,
     };
@@ -433,14 +437,15 @@ fn lead_slot(content: impl IntoElement) -> View {
     view().flex_none().w(scale::s4()).flex_row().justify_center().child(content)
 }
 
-/// A fixed slot for what ends a step, as wide as the button that opens the file of a tool call
-/// (its icon and the padding of that button), so the ends of the steps line up too.
+/// The chevron of a tool call, in a button with the padding of the one that opens its file. A row
+/// with no such button (a thought, a run) ends with its chevron alone; the call's button hangs out
+/// by that padding, so every chevron ends its row at the same place.
 fn trail_slot(content: impl IntoElement) -> View {
     view().flex_none().w(step_button_pad() + step_button_pad() + STEP_ICON).flex_row().justify_center().child(content)
 }
 
 /// The popovers of the menus: the theme's own surface, with a shadow.
-const MENU: &str = "bg-popover border border-border rounded-xl shadow-2xl p-1 min-w-44";
+pub(super) const MENU: &str = "bg-popover border border-border rounded-xl shadow-2xl p-1 min-w-44";
 
 /// The Control menu: a fixed width, so the lines of its descriptions wrap to the same breaks
 /// when the popover is measured as when it is drawn, and its height holds them all.
@@ -476,7 +481,7 @@ fn menu_trigger(label: String, tip: impl Into<String>) -> View {
 
 /// A menu item's own looks, under the popover's. `on` marks the choice that is set with a check in
 /// a slot at the end, which is kept when it is off so the labels don't move.
-fn item(what: String, on: Option<bool>, on_press: impl Fn() + 'static) -> AnyElement {
+pub(super) fn item(what: String, on: Option<bool>, on_press: impl Fn() + 'static) -> AnyElement {
     let mut row = view().flex_row().items_center().gap(scale::s3()).w_full().child(text(what).flex_1().sized(text_sm()).text_color(Colors::foreground()));
     if let Some(on) = on {
         row = row.child(view().flex_none().w(scale::s3_5()).children(on.then(|| icon(IconName::Check, scale::s3_5(), Colors::foreground()))));
@@ -523,25 +528,68 @@ fn status_line(line: String) -> View {
 
 /// The pane header of the conversation: the title, the statuses, the buttons for the files, the changes, the terminal and the history, the Control
 /// menu, and the window's own controls at the ends.
-fn pane(title: String, snap: &Snapshot) -> View {
+fn pane(title: String, snap: &Snapshot, rename: Renaming) -> View {
     let mut right = view().flex_row().items_center().gap(scale::s1());
     for line in &snap.statuses {
         right = right.child(status_line(line.clone()));
     }
     if snap.picking.is_none() {
-        // The four Places share one pill, so they read as a single switcher.
-        let mut places = view().flex_none().flex_row().items_center().gap(scale::s0_5()).p(scale::s0_5()).rounded(super::pill()).bg(Colors::hover());
-        places = places.child(super::header::place_button(IconName::FolderTree, "Files (Ctrl+1)", snap.place == Place::Files, || tell(Cmd::Show(false))));
-        places = places.child(super::header::place_button(IconName::Diff, "Changes (Ctrl+2)", snap.place == Place::Changes, || tell(Cmd::Show(true))));
-        places = places.child(super::header::place_button(IconName::Terminal, "Terminal (Ctrl+`)", snap.place == Place::Terminal, || tell(Cmd::Terminal)));
-        places = places.child(super::header::place_button(IconName::History, "Resume an earlier session (Ctrl+Shift+H)", false, || tell(Cmd::History)));
+        // Two groups: where the user works (files, terminal), then what the thread made (changes, history), with a hairline between them.
+        let work = view()
+            .flex_none()
+            .flex_row()
+            .items_center()
+            .gap(scale::s0_5())
+            .p(scale::s0_5())
+            .rounded(super::soft_radius())
+            .border_1()
+            .border_color(super::hairline())
+            .child(super::header::compact_toggle_button(IconName::FolderTree, "Files (Ctrl+1)", snap.place == Place::Files, || tell(Cmd::Show(false))))
+            .child(super::header::compact_toggle_button(IconName::Terminal, "Terminal (Ctrl+`)", snap.place == Place::Terminal, || tell(Cmd::Terminal)));
+        let record = view()
+            .flex_none()
+            .flex_row()
+            .items_center()
+            .gap(scale::s0_5())
+            .p(scale::s0_5())
+            .rounded(super::soft_radius())
+            .border_1()
+            .border_color(super::hairline())
+            .child(super::header::compact_toggle_button(IconName::Diff, "Changes (Ctrl+2)", snap.place == Place::Changes, || tell(Cmd::Show(true))))
+            .child(super::header::compact_toggle_button(IconName::History, "Resume an earlier session (Ctrl+Shift+H)", false, || tell(Cmd::History)));
+        // Each button is a quiet icon, with a fill only under the Place that is open.
+        let places = view()
+            .flex_none()
+            .flex_row()
+            .items_center()
+            .gap(scale::s1())
+            .child(work)
+            .child(view().flex_none().w(Points(1.)).h(scale::s4()).bg(super::hairline()))
+            .child(record);
         right = right.child(places);
     }
     // The Control menu, once the user has set what the thread's agent may do.
     if let Some(grant) = snap.grant.filter(|grant| *grant != Grant::initial()) {
         right = right.child(grant_menu(grant, snap.grant_pending));
     }
-    pane_header(title, right, &snap.lead, &snap.trail, snap.glass)
+    // The title is the thread's name: pressing it twice, or F2, lets it be typed over.
+    let thread = snap.thread;
+    let name = if rename.editing.get() == Some(thread) {
+        super::rename_input("rename-title", rename.draft, move || rename.commit()).flex_shrink(1.).into_element()
+    } else {
+        let from = title.clone();
+        view()
+            .flex_shrink(1.)
+            .min_w(Points(0.))
+            .on_press(move || {
+                if rename.double(thread) {
+                    rename.start(thread, &from);
+                }
+            })
+            .child(body(title).number_of_lines(1).font_weight(FontWeight::MEDIUM))
+            .into_element()
+    };
+    pane_header_with(name, right, &snap.lead, &snap.trail, snap.glass)
 }
 
 /// What an agent that runs this thread may do through Po: one level of reach, picked from a
@@ -672,7 +720,7 @@ fn thought_row(message: usize, at: usize, text_: &str, open: bool, done: bool) -
                     .opacity(crate::theme::tokens::DIM)
             }))
             .children(open.then(|| view().flex_1().min_w_0()))
-            .child(trail_slot(icon(if open { IconName::ChevronDown } else { IconName::ChevronRight }, STEP_ICON, Colors::muted()))),
+            .child(icon(if open { IconName::ChevronDown } else { IconName::ChevronRight }, STEP_ICON, Colors::muted())),
     );
     if open {
         column = column.child(
@@ -758,6 +806,8 @@ fn tool_row(message: usize, at: usize, tool: &Tool) -> AnyElement {
                         .role(AccessibilityRole::Button)
                         .label(if tool.open { "Hide the call's details" } else { "Show the call's details" })
                         .flex_none()
+                        // The slot's padding hangs out, so the chevron ends the row where the chevrons of a run and a thought do.
+                        .mr(-step_button_pad())
                         .py(scale::s0_5())
                         .rounded(Colors::radius())
                         .cursor_pointer()
@@ -849,6 +899,8 @@ fn run_row(message: usize, at: usize, thoughts: usize, calls: usize, failed: usi
         .rounded(super::soft_radius())
         .cursor_pointer()
         .smooth()
+        // An open run keeps the tint of a hovered row, so its header marks where the steps start.
+        .style_when(!folded, |s| s.bg(Colors::hover()))
         .hover(|s| s.bg(Colors::hover()))
         .on_press(move || tell(Cmd::Fold { message, block: at, folded: !folded }))
         .child(step_glyph(phase))
@@ -856,7 +908,7 @@ fn run_row(message: usize, at: usize, thoughts: usize, calls: usize, failed: usi
         .child(text(label).selectable(false).number_of_lines(1).flex_shrink(1.).min_w_0().sized(text_sm()).text_color(Colors::muted()))
         .children(aside.map(|aside| text(aside).selectable(false).flex_none().number_of_lines(1).sized(text_sm()).text_color(Colors::muted())))
         .child(view().flex_1())
-        .child(trail_slot(icon(if folded { IconName::ChevronRight } else { IconName::ChevronDown }, STEP_ICON, Colors::muted())));
+        .child(icon(if folded { IconName::ChevronRight } else { IconName::ChevronDown }, STEP_ICON, Colors::muted()));
     if edits.is_empty() {
         return row.into_element();
     }
@@ -1311,7 +1363,10 @@ fn rail(count: usize, stage: f32, slot: ElementRef, position: Position) -> AnyEl
     let jump = {
         let (frames, origin, pinned, slot) = (frames, origin, pinned, slot);
         move |bar: usize, rep: usize| {
+            // The last bar is the end of the page, however tall the last message is.
+            let last = bar + 1 == shown;
             let target = match frames.get().get(rep) {
+                _ if last => f32::MAX,
                 Some(at) => message_stop(at.0 - origin.get().0),
                 None => return,
             };
@@ -1320,7 +1375,11 @@ fn rail(count: usize, stage: f32, slot: ElementRef, position: Position) -> AnyEl
             pinned.replace(Some((bar, target)));
             let slot = slot;
             spawn(async move {
-                slot.scroll_to(point(px(0.), px(target)), true);
+                if last {
+                    slot.scroll_to_end(true);
+                } else {
+                    slot.scroll_to(point(px(0.), px(target)), true);
+                }
             });
         }
     };
@@ -1737,16 +1796,17 @@ fn worktree_label(tone: impl Fn() -> AdaptiveColor + Copy + 'static) -> AnyEleme
         .into_element()
 }
 
-/// What a thread waits on before it starts: the agent to run it, and a chip that, when on, starts
-/// it in a git worktree of its own. Both sit in the row of chips under the field.
-fn setup(snap: &Snapshot) -> AnyElement {
-    let mut row = view().flex_row().flex_wrap().items_center().gap(scale::s2());
-    let name = snap
-        .chosen
+/// The name of the agent chosen for the thread, or `none`.
+fn agent_name(snap: &Snapshot, none: &str) -> String {
+    snap.chosen
         .as_ref()
         .map(|id| snap.agents.iter().find(|(_, key)| key == id).map_or(id.clone(), |(name, _)| name.clone()))
-        .unwrap_or_else(|| "Pick an agent".to_string());
-    let mut agents = menu().popup_class(MENU).trigger(menu_trigger(name, "Which agent the thread runs"));
+        .unwrap_or_else(|| none.to_string())
+}
+
+/// A menu of the agents to pick from, the one chosen marked.
+fn agent_menu(snap: &Snapshot, name: String, tip: &str) -> AnyElement {
+    let mut agents = menu().popup_class(MENU).trigger(menu_trigger(name, tip));
     let pick = snap.chosen.clone();
     for (agent_name, id) in snap.agents.clone() {
         let on = pick.as_ref() == Some(&id);
@@ -1755,7 +1815,14 @@ fn setup(snap: &Snapshot) -> AnyElement {
             tell(Cmd::PickAgent(id))
         }));
     }
-    row = row.child(agents.into_element());
+    agents.into_element()
+}
+
+/// What a thread waits on before it starts: the agent to run it, and a chip that, when on, starts
+/// it in a git worktree of its own. Both sit in the row of chips under the field.
+fn setup(snap: &Snapshot) -> AnyElement {
+    let mut row = view().flex_row().flex_wrap().items_center().gap(scale::s2());
+    row = row.child(agent_menu(snap, agent_name(snap, "Pick an agent"), "Which agent the thread runs"));
     if let Some(isolate) = snap.isolate {
         let tip = "Start the thread in a git worktree of its own";
         row = row.child(
@@ -1975,18 +2042,22 @@ fn bar(snap: Snapshot, draft: Signal<String>, field_ref: ElementRef) -> AnyEleme
     let field = draft;
     let low = draft;
     let has_pictures = !snap.pictures.is_empty();
-    // The chips under the field: before the thread starts its agent is chosen here, after it the
-    // agent is named; the settings and the Control menu follow, and the action ends the row.
+    // The chips under the field: the thread's agent, chosen here before it starts and changed here
+    // after, unless there is no other; the settings and the Control menu follow, and the action
+    // ends the row.
     let mut chips = view().flex_row().flex_wrap().items_center().gap(scale::s1()).flex_1().min_w_0();
     if snap.blank {
         chips = chips.child(setup(&snap));
     } else {
-        let name = snap
-            .chosen
-            .as_ref()
-            .map(|id| snap.agents.iter().find(|(_, key)| key == id).map_or(id.clone(), |(name, _)| name.clone()))
-            .unwrap_or_else(|| "Agent".to_string());
-        chips = chips.child(text(name).px(scale::s3()).sized(text_sm()).text_color(Colors::dim(Colors::muted())));
+        let name = agent_name(&snap, "Agent");
+        chips = chips.child(if snap.agents.len() < 2 {
+            text(name).px(scale::s3()).sized(text_sm()).text_color(Colors::dim(Colors::muted())).into_element()
+        } else if snap.switchable {
+            agent_menu(&snap, name, "Switch this thread to another agent")
+        } else {
+            // While a turn runs, or a question or a queue waits, the agent stays.
+            menu_trigger(name, "The agent can be switched once it is idle").opacity(crate::theme::tokens::DISABLED).into_element()
+        });
     }
     if !snap.settings.is_empty() {
         chips = chips.children(setting_chips(&snap.settings, snap.busy));
@@ -2081,6 +2152,9 @@ pub fn Chat() -> impl IntoElement {
             state.set(snapshot.borrow_and_update().clone());
         }
     });
+    // The ring of a step at work turns while a turn goes.
+    let busy_now = computed(move || state.with(|s| s.busy));
+    provide_context(spin(move || busy_now.get()));
 
     // What the draft field holds: the user's typing, taken over by the app's own writes (a
     // cleared draft after a send, a taken-back queue row), which the sentinel marks.
@@ -2141,9 +2215,19 @@ pub fn Chat() -> impl IntoElement {
         }
     });
 
+    // The thread's name being typed in the header; F2 starts it, Escape leaves it as it was.
+    let rename = Renaming::new();
+    on_key_with("f2", KeyOptions { when: nsh_core::keymap::When::Always, repeat: false }, move |_| {
+        let (thread, title) = state.with_untracked(|s| (s.thread, s.title.clone()));
+        if !state.with_untracked(|s| s.blank) {
+            rename.start(thread, &title);
+        }
+    });
+    on_key_with("escape", KeyOptions { when: nsh_core::keymap::When::Always, repeat: false }, move |_| rename.cancel());
+
     let header = move || {
         let (title, snap) = (state.with(|s| s.title.clone()), state.get());
-        pane(title, &snap)
+        pane(title, &snap, rename)
     };
 
     // The page above the composer is built again only when what it shows changes: a change of
@@ -2482,6 +2566,31 @@ mod tests {
         app.press("label:Start the thread").unwrap();
         let sent = drain(&mut app, commands);
         assert!(sent.contains(&Bus::Chat(Cmd::Send { later: false })), "{sent:?}");
+    }
+
+    #[test]
+    fn a_started_thread_can_switch_agent_when_it_is_idle() {
+        let mut guard = crate::nsh::bus::lock();
+        let commands = guard.as_mut().expect("the channel");
+        let agents = vec![("Claude".to_string(), "claude".to_string()), ("Codex".to_string(), "codex".to_string())];
+        let snap = |switchable| Snapshot {
+            agents: agents.clone(),
+            chosen: Some("claude".into()),
+            switchable,
+            items: vec![Item::Agent { index: 0, blocks: Arc::new(vec![]) }],
+            ..Snapshot::default()
+        };
+        let mut app = start(snap(false));
+        assert!(app.shows("Claude"), "{:?}", app.screen().texts());
+        assert!(app.press("label:The agent can be switched once it is idle").is_err(), "busy: the chip does nothing");
+
+        publish(snap(true));
+        app.wait(std::time::Duration::from_millis(100)).unwrap();
+        app.press("label:Switch this thread to another agent").unwrap();
+        app.settle();
+        app.press("text:Codex").unwrap();
+        let sent = drain(&mut app, commands);
+        assert!(sent.contains(&Bus::Chat(Cmd::PickAgent("codex".into()))), "{sent:?}");
     }
 
     #[test]

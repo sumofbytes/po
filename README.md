@@ -47,9 +47,12 @@ way (`src/nsh/`); their headless tests run with `cargo test`.
 
 ## Issues
 
-Each project has a lightweight issue and epic tracker, kept as JSON files in the
-repo's `.po/` folder so it travels with git. Open it from **Issues** in the
-sidebar: a list, a board, issue pages and epics with milestones. Agents can read
+Each project has a lightweight issue and epic tracker, kept as JSON files in `po`'s
+data folder (`~/.local/share/po/issues/`), so issues stay out of the repo and its git
+history. A repo's old `.po/` folder is copied there the first time it's opened, and
+you can delete it after that. Open it from **Issues** in the
+sidebar: one page for every open project, as a list, a board, issue pages and epics with
+milestones, each issue tagged with its project and narrowed by project chips. Agents can read
 and keep the same issues through Po's control tools. The format and the commands
 are in [`docs/issues-format.md`](docs/issues-format.md). The old todo list is
 gone; an empty tracker offers to import `todos.json`.
@@ -96,6 +99,10 @@ one replaces it, so you can change flags or the binary path. `command` is split
 on whitespace into program and arguments (no shell quoting). Choose the agent
 in the app, or pass `--agent` / `PO_AGENT`.
 
+A thread can change agent while it is idle, from the agent chip under the message field. The
+new agent gets its own session, and its first message carries the conversation so far: the text
+and the tool calls' titles, up to 100 KB, leaving out the middle of a longer one.
+
 The first time `po` is about to run a command that isn't one of the bundled ones as
 shipped, because it is new in `config.json` or changes a bundled entry, it shows the command
 and waits for you to choose **Run it**. Your answer is kept for that exact command in
@@ -125,6 +132,37 @@ The agent starts the server, but it runs as you, so a server is treated like an 
 the first time one is about to be handed to an agent, `po` shows its command line and waits for
 **Run it**. The answer is kept for that command, arguments and `env` (not the `name`), and
 changing any of them asks again. A server you decline is left out until `po` is restarted.
+
+#### Plugins
+
+A folder under `<config>/po/plugins/` with a `plugin.json` is a plugin. It
+adds the same things `config.json` adds — `agents`, `mcp_servers` — plus a
+`themes/` folder of colour schemes, without editing `config.json` (which the
+settings page rewrites whole). The manifest needs an `id` and reuses
+config.json's own shapes:
+
+```json
+{ "id": "lsp-tools",
+  "agents": [{ "id": "mine", "name": "My agent", "command": "my-agent --acp" }],
+  "mcp_servers": [{ "name": "lsp", "command": "${PLUGIN_DIR}/bin/lsp-mcp" }] }
+```
+
+`${PLUGIN_DIR}` is the plugin's folder. Other relative paths are refused,
+because commands run from the project you have open.
+
+Reading a manifest runs nothing, but what it names runs as you, so it goes
+through the same **Run it** approval as an entry typed by hand, and the card
+says which plugin asks. The approval is of the command line, not the files
+behind it, so updating a plugin that keeps its command line doesn't ask again:
+install plugins you trust.
+
+Your own entries in `config.json` and your own themes win over a plugin's, and
+of two plugins the first by folder name wins. A plugin can't replace one of
+`po`'s bundled agents. Changes to a plugin's agents apply on restart, and its
+MCP servers to new sessions.
+
+[`docs/plugin-architecture-plan.md`](docs/plugin-architecture-plan.md) is the
+plan for plugins that add screens. They aren't supported yet.
 
 #### Letting the agent show you things
 
