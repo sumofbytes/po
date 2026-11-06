@@ -168,10 +168,11 @@ impl Reader {
             command: key.to_string(),
             daemon: None,
             vouched: false,
+            plugin: None,
         });
         let new_agent = !config::trusted(&agent);
         // A dex daemon is not handed MCP servers.
-        let mcp = if agent.daemon.is_none() { config::unapproved_mcp(&config::load()) } else { vec![] };
+        let mcp = if agent.daemon.is_none() { config::unapproved_mcp(&plugin::effective_config()) } else { vec![] };
         if new_agent || !mcp.is_empty() {
             // Nothing is started until the user has seen the commands and said yes.
             self.thread.status = "waiting for approval".into();

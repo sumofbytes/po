@@ -144,7 +144,7 @@ impl Shared {
     fn mcp_servers(&self) -> Value {
         let mut servers = vec![];
         servers.extend(self.po_mcp.clone());
-        if let Value::Array(config) = crate::config::mcp_servers(&crate::config::load()) {
+        if let Value::Array(config) = crate::config::mcp_servers(&crate::plugin::effective_config()) {
             // A config server named `po` would hide Po's own from the agent.
             servers.extend(config.into_iter().filter(|server| self.po_mcp.is_none() || server["name"] != "po"));
         }
