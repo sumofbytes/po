@@ -456,7 +456,7 @@ impl Reader {
         let root = self.issues_root_of(id);
         let (number, prompt, key) = issues::shared::change_repo(&root, |tracker, _| {
             let number = issues::api::work_issue(tracker, args)?;
-            Ok::<_, String>((number, issues::api::work_prompt(tracker, number).ok_or("that issue is gone")?, tracker.key(number)))
+            Ok::<_, String>((number, issues::api::work_prompt(tracker, number, &root).ok_or("that issue is gone")?, tracker.key(number)))
         })?;
         let options = args["options"].as_object().map(|options| options.iter().filter_map(|(id, value)| value.as_str().map(|value| (id.clone(), value.to_string()))).collect()).unwrap_or_default();
         let agent = args["agent"].as_str().map(String::from);

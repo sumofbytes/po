@@ -4,6 +4,9 @@ Status: phases 1–5 are in and phase 6 partly · 2026-10-28 (`src/issues/`, `sr
 `src/nsh/epics.rs`; the format and API are in `docs/issues-format.md`).
 
 Where the build differs from the plan below:
+- Issues are kept in Po's data folder, not the repo, so they stay out of its git history
+  (`docs/issues-format.md`). Where this plan says they live in `.po/` or travel with git, that no
+  longer holds.
 - The detail view replaces the list (Back / Esc) instead of opening in a right-hand pane, and
   pickers are rows of chips, not popovers. Both are cheaper and test headlessly; NSH has `Popover`
   and `Menu` when a denser layout is wanted.

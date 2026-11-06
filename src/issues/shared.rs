@@ -219,10 +219,10 @@ pub(crate) fn poll() {
     let opened: Vec<Store> = checkouts.keys().filter(|root| !known.contains(root)).map(|root| Store::open(root)).collect();
     let readings: Vec<_> = states
         .into_iter()
-        .filter(|(dir, _, seen)| fingerprint(dir) != *seen)
-        .map(|(dir, prefix, seen)| {
+        .filter(|(_, dir, _, seen)| fingerprint(dir) != *seen)
+        .map(|(root, dir, prefix, seen)| {
             let (loaded, read_at) = load(&dir, &prefix);
-            (dir, loaded, seen, read_at)
+            (root, loaded, seen, read_at)
         })
         .collect();
 
@@ -232,8 +232,9 @@ pub(crate) fn poll() {
     for store in opened {
         held.stores.entry(store.root().to_path_buf()).or_insert(store);
     }
-    for (dir, loaded, seen, read_at) in readings {
-        if let Some(store) = held.stores.values_mut().find(|store| store.dir() == dir)
+    // By the repo and not the folder: two clones share a folder, and each has a store of its own.
+    for (root, loaded, seen, read_at) in readings {
+        if let Some(store) = held.stores.get_mut(&root)
             && store.install(loaded, seen, read_at)
         {
             changed = true;

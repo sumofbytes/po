@@ -1,4 +1,4 @@
-//! Issues and epics: a small tracker that lives in the repo, under `.po/`. This is the model, with
+//! Issues and epics: a small tracker for each repo, kept in Po's data folder. This is the model, with
 //! no I/O: [`Tracker`] holds what a repo has and answers questions about it, and [`store`] reads
 //! and writes the files; [`api`] is what agents ask, [`shared`] the copy the app follows.
 pub mod api;
@@ -437,7 +437,7 @@ pub struct Label {
     pub color: String,
 }
 
-/// `.po/config.json`: what the repo's issues share.
+/// `config.json`: what the repo's issues share.
 #[derive(Clone, PartialEq, Debug)]
 pub struct Config {
     /// The letters in a key: `PO` in `PO-12`.

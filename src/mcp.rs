@@ -20,7 +20,7 @@ const READS: &str = "You can also ask about yourself and your project: control_i
 you are and what the user has granted; get_thread, thread_messages and last_reply read your \
 thread's state and transcript; thread_options lists its settings; list_threads, list_agents, \
 list_projects and project_changes say what else Po has open. list_issues, get_issue and \
-list_epics read the project's issues, which live in its .po folder. Reading the threads of others, \
+list_epics read the project's issues, which Po keeps outside the repo. Reading the threads of others, \
 rather than your own, needs a grant the user gives in Po.";
 
 /// What an orchestrator may do, added when its grant says so.

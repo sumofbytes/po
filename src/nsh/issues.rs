@@ -769,7 +769,7 @@ fn header(state: State) -> View {
         .child(icon_button(IconName::Close, scale::s3_5(), "Close (Esc)", || send(Cmd::CloseIssues)))
 }
 
-/// What was wrong with the files in `.po` when they were read: one that can't be read is left
+/// What was wrong with the issue files when they were read: one that can't be read is left
 /// as it is and not shown, so the page says so rather than letting an issue quietly go missing.
 fn problems_banner(state: State) -> View {
     // Each with the project it is in, for the projects the filter lets through.
@@ -778,8 +778,8 @@ fn problems_banner(state: State) -> View {
         let found = found();
         let first = found.first().cloned().unwrap_or_default();
         match found.len() {
-            1 => format!("A problem with the files in .po: {first}"),
-            n => format!("{n} problems with the files in .po; the first: {first}"),
+            1 => format!("A problem with the issue files: {first}"),
+            n => format!("{n} problems with the issue files; the first: {first}"),
         }
     };
     view().child(when(move || !found().is_empty(), move || {
