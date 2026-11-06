@@ -85,19 +85,38 @@ fn origin_url(config: &str) -> Option<String> {
     None
 }
 
-/// A remote's host and path, whichever way its URL is written, so `git@host:me/repo.git` and
-/// `https://host/me/repo` are one repo. None for a remote that is a path on this machine.
+/// A remote's host, non-default port, and path, whichever way its URL is written, so
+/// `git@host:me/repo.git` and `https://host/me/repo` are one repo. A non-default port stays in
+/// the name: repositories served from another endpoint on the same host must not share issues.
+/// None for a remote that is a path on this machine.
 fn remote_parts(url: &str) -> Option<Vec<String>> {
-    let (authority, path) = match url.split_once("://") {
+    let (scheme, authority, path) = match url.split_once("://") {
         Some(("file", _)) => return None,
-        Some((_, rest)) => rest.split_once('/')?,
+        Some((scheme, rest)) => {
+            let (authority, path) = rest.split_once('/')?;
+            (Some(scheme), authority, path)
+        }
         // `host:path`, unless it is a path (`./x`, `/x`) or a Windows drive (`C:\x`).
-        None => url.split_once(':').filter(|(host, _)| !host.contains('/') && !host.contains('\\') && host.len() > 1)?,
+        None => {
+            let (host, path) = url.split_once(':').filter(|(host, _)| !host.contains('/') && !host.contains('\\') && host.len() > 1)?;
+            (None, host, path)
+        }
     };
-    let host = authority.rsplit('@').next()?.split(':').next()?.to_lowercase();
+    let authority = authority.rsplit('@').next()?;
+    let (host, port) = authority.rsplit_once(':').filter(|(_, port)| !port.is_empty() && port.chars().all(|c| c.is_ascii_digit())).unwrap_or((authority, ""));
+    let mut parts = vec![host.to_lowercase()];
+    let default_port = match scheme.map(str::to_ascii_lowercase).as_deref() {
+        Some("http") => "80",
+        Some("https") => "443",
+        Some("ssh") => "22",
+        _ => "",
+    };
+    if !port.is_empty() && port != default_port {
+        parts.push(format!("port-{port}"));
+    }
     let path = path.trim_end_matches('/');
     let path = path.strip_suffix(".git").unwrap_or(path);
-    let parts: Vec<String> = std::iter::once(host).chain(path.split('/').map(String::from)).collect();
+    parts.extend(path.split('/').map(String::from));
     (parts.len() > 1 && !parts[0].is_empty()).then_some(parts)
 }
 
@@ -504,6 +523,14 @@ mod tests {
         for url in ["/srv/git/repo.git", "../repo", "./repo", "file:///srv/repo", r"C:\\repos\\x", "https://github.com"] {
             assert_eq!(parts(url), None, "{url}");
         }
+    }
+
+    #[test]
+    fn a_non_default_remote_port_keeps_its_issues_separate() {
+        let parts = |url: &str| remote_parts(url).map(|parts| parts.join("/"));
+        assert_eq!(parts("https://github.com:443/me/repo"), parts("https://github.com/me/repo"));
+        assert_ne!(parts("https://github.com:8443/me/repo"), parts("https://github.com/me/repo"));
+        assert_eq!(parts("https://github.com:8443/me/repo").as_deref(), Some("github.com/port-8443/me/repo"));
     }
 
     #[test]
