@@ -1,13 +1,27 @@
-# The `.po/` issue format
+# The issue format
 
-Po keeps a repo's issues and epics as JSON files in the repo, so they travel with git and an agent
-can read them without Po's API. Code: `src/issues/` (model in `mod.rs`, files in `store.rs`).
+Po keeps each repo's issues and epics as JSON files in its data folder, outside the repo, so they
+never go along with the code. An agent can read them without Po's API. Code: `src/issues/` (model
+in `mod.rs`, files in `store.rs`).
 
 ```text
-.po/config.json         key prefix, next number, labels
-.po/issues/PO-12.json   one issue
-.po/epics/launch.json   one epic, with its milestones
+<data>/issues/<repo>/config.json         key prefix, next number, labels
+<data>/issues/<repo>/issues/PO-12.json   one issue
+<data>/issues/<repo>/epics/launch.json   one epic, with its milestones
 ```
+
+`<data>` is `$XDG_DATA_HOME/po`, or `~/.local/share/po` (`%LOCALAPPDATA%\po` on Windows).
+
+`<repo>` comes from the repo's `origin`: `github.com~me~repo`, however the URL is written. So a repo
+keeps its issues when it moves, and its clones share them. A repo with no `origin` on a host goes
+by its path, as `local~home~me~repo`, and moving it leaves its issues behind under the old name.
+Changing `origin` does the same; renaming the folder under `<data>/issues/` brings them back.
+
+Issues aren't synced between machines or shared with collaborators. To back them up or sync them,
+do it to `<data>/issues/`.
+
+A repo that has a `.po/` folder and nothing under `<data>/issues/` yet has it copied there the first
+time it is opened. The `.po/` folder is left as it is and not read again, so it can be deleted.
 
 Every file has `"version": 1`. Keys are written in a fixed order and empty fields are left out.
 Only the fields marked required have to be there; anything missing or not understood takes its
@@ -121,12 +135,8 @@ can't be applied (an unknown key, a parent that would make a loop) changes nothi
 
 ## Behaviour worth knowing
 
-- **Worktrees.** A thread's worktree shares the primary checkout's `.po/`; nothing is written in the
-  worktree itself.
-- **Merges.** Two branches that each create `PO-13` collide as an ordinary git add/add conflict on
-  that file; resolve it by renumbering one (and its `parent` references). Numbers made on other
-  branches never lower the counter, so the next issue after a merge gets a fresh number.
-- **Files that can't be read.** Invalid JSON (a merge in progress, say) is left exactly where it
+- **Worktrees.** A thread's worktree shares its repo's issues; nothing is written in the worktree.
+- **Files that can't be read.** Invalid JSON (a hand edit gone wrong, say) is left exactly where it
   is, skipped, and reported in a bar at the top of the Issues page; the rest still load. Reading
   never changes the folder. Only if Po has to write a file of that name does it first move the old
   one aside as `<name>.json.bak`.
@@ -135,4 +145,4 @@ can't be applied (an unknown key, a parent that would make a loop) changes nothi
 - **Saving.** Fields on an issue or epic page are saved a moment after typing pauses, each one
   alone, and at once when you leave the page. A field you did not touch is never written back.
 - **Writes.** A file is written to a temp file and renamed, and only if its contents changed, so
-  saving with no change leaves git clean.
+  saving with no change rewrites nothing.

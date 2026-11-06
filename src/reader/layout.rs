@@ -452,7 +452,7 @@ impl Reader {
             cx.notify();
             return;
         }
-        let Some(prompt) = issues::api::work_prompt(&page.tracker, number) else {
+        let Some(prompt) = issues::api::work_prompt(&page.tracker, number, &page.root) else {
             return;
         };
         // Another worktree is being made or merged, or there is no agent to start: nothing would

@@ -47,8 +47,10 @@ way (`src/nsh/`); their headless tests run with `cargo test`.
 
 ## Issues
 
-Each project has a lightweight issue and epic tracker, kept as JSON files in the
-repo's `.po/` folder so it travels with git. Open it from **Issues** in the
+Each project has a lightweight issue and epic tracker, kept as JSON files in `po`'s
+data folder (`~/.local/share/po/issues/`), so issues stay out of the repo and its git
+history. A repo's old `.po/` folder is copied there the first time it's opened, and
+you can delete it after that. Open it from **Issues** in the
 sidebar: one page for every open project, as a list, a board, issue pages and epics with
 milestones, each issue tagged with its project and narrowed by project chips. Agents can read
 and keep the same issues through Po's control tools. The format and the commands
