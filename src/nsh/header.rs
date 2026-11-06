@@ -47,6 +47,11 @@ pub fn toggle_button(name: IconName, tip: &'static str, selected: bool, on_press
     ghost_button(name, tip, selected, true, on_press)
 }
 
+/// [`toggle_button`], tighter, for buttons that sit inside a group's own container.
+pub fn compact_toggle_button(name: IconName, tip: &'static str, selected: bool, on_press: impl Fn() + 'static) -> View {
+    toggle_button(name, tip, selected, on_press).p(scale::s1())
+}
+
 /// [`toggle_button`], with the fill of its selected state optional: the window's own controls say
 /// they are on in their icon alone, as a fill that stays on the bar is noise there.
 fn ghost_button(name: IconName, tip: &'static str, selected: bool, filled: bool, on_press: impl Fn() + 'static) -> View {
