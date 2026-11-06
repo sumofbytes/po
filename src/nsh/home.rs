@@ -1,7 +1,7 @@
 //! The Home page, where Po opens: what is due today and what is late across every open project,
 //! the week, and the threads to pick up. Everything on it is read from the issues store and the
 //! sidebar's snapshot; what is pressed goes back as a [`Cmd`] or changes an issue in the store.
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use nsh_core::prelude::*;
 
@@ -142,7 +142,7 @@ fn greeting(hour: u32) -> &'static str {
 }
 
 /// Marks an issue Done, in whichever repo it is.
-fn complete(repo: &PathBuf, number: u64) {
+fn complete(repo: &Path, number: u64) {
     shared::change_repo(repo, |tracker, now| {
         tracker.update(number, now, |issue| issue.status = Status::Done);
     });
@@ -305,7 +305,7 @@ pub fn Home() -> impl IntoElement {
         let model = page.get();
         let day = today();
         let waiting = done.get();
-        let listed = model.tasks.iter().take(TASKS).cloned().map(|task| { let armed = task.number == waiting; task_row(task, day, armed, press_done.clone()) }).collect::<Vec<_>>();
+        let listed = model.tasks.iter().take(TASKS).cloned().map(|task| { let armed = task.number == waiting; task_row(task, day, armed, press_done) }).collect::<Vec<_>>();
         let more = model.tasks.len().saturating_sub(TASKS);
         card("Today", IconName::Calendar)
             .child(if listed.is_empty() { Some(note("Nothing is due today. Pick something from the issues, or start a thread.")) } else { None })
