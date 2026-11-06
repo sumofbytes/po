@@ -546,7 +546,7 @@ impl Reader {
             self.request_save(cx);
         }
         // An agent that was added on the command line isn't in the config; it stays.
-        let mut agents = config::agents(&settings);
+        let mut agents = config::agents(&plugin::effective_config());
         let kept: Vec<_> = self.agents.iter().filter(|agent| agent.vouched && !agents.iter().any(|known| known.id == agent.id)).cloned().collect();
         agents.extend(kept);
         self.agents = agents;

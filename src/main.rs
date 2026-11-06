@@ -17,6 +17,7 @@ mod handoff;
 mod issues;
 mod mcp;
 mod nsh;
+mod plugin;
 mod pr;
 mod profile;
 mod reader;
@@ -1637,11 +1638,11 @@ impl Reader {
                 nsh::overlay::OverlayEvent::Close => reader.hide_issues(window, cx),
             }),
         ];
-        let settings = config::load();
+        let settings = plugin::effective_config();
         let mut agents = config::agents(&settings);
         let idle_minutes = settings["idle_minutes"].as_u64().unwrap_or(15);
         if let Some(command) = command.as_ref().filter(|c| !agents.iter().any(|agent| agent.id == **c)) {
-            agents.push(config::Agent { id: command.clone(), name: "Custom".into(), command: command.clone(), daemon: None, vouched: true });
+            agents.push(config::Agent { id: command.clone(), name: "Custom".into(), command: command.clone(), daemon: None, vouched: true, plugin: None });
         }
         let project = Self::build_project(root, pr, files);
             let thread = Thread::blank(0);
@@ -2205,18 +2206,21 @@ fn chat_tool(at: usize, tool: &ToolBlock) -> nsh::chat::Tool {
 
 /// What the approval card says: the question Po asks, and the commands it would hand over.
 fn approval_text(agent: &config::Agent, new_agent: bool, mcp: &[config::McpServer]) -> (String, Vec<String>) {
+    let from = |plugin: &Option<String>| plugin.as_ref().map_or_else(String::new, |id| format!("  (plugin {id})"));
     let mut lines = Vec::new();
     if new_agent {
+        let source = from(&agent.plugin);
         lines.push(match &agent.daemon {
-            Some(url) => format!("{}  (daemon {url})", agent.command),
-            None => agent.command.clone(),
+            Some(url) => format!("{}  (daemon {url}){source}", agent.command),
+            None => format!("{}{source}", agent.command),
         });
     }
-    lines.extend(mcp.iter().map(|server| format!("{}: {}", server.name, server.line())));
+    lines.extend(mcp.iter().map(|server| format!("{}: {}{}", server.name, server.line(), from(&server.plugin))));
+    let agent_source = agent.plugin.as_ref().map_or_else(|| "your config".to_string(), |id| format!("the plugin {id}"));
     let question = match (new_agent, mcp.is_empty()) {
-        (true, true) => format!("“{}” is not one of Po's own agents: it comes from your config. Run this command?", agent.name),
-        (true, false) => format!("“{}” is not one of Po's own agents, and your config lists MCP servers for it. Run these commands?", agent.name),
-        (false, _) => "Your config lists MCP servers for the agent to start, which run as you. Hand them over?".to_string(),
+        (true, true) => format!("“{}” is not one of Po's own agents: it comes from {agent_source}. Run this command?", agent.name),
+        (true, false) => format!("“{}” is not one of Po's own agents, and your config or plugins list MCP servers for it. Run these commands?", agent.name),
+        (false, _) => "Your config or plugins list MCP servers for the agent to start, which run as you. Hand them over?".to_string(),
     };
     (question, lines)
 }

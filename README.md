@@ -131,6 +131,37 @@ the first time one is about to be handed to an agent, `po` shows its command lin
 **Run it**. The answer is kept for that command, arguments and `env` (not the `name`), and
 changing any of them asks again. A server you decline is left out until `po` is restarted.
 
+#### Plugins
+
+A folder under `<config>/po/plugins/` with a `plugin.json` is a plugin. It
+adds the same things `config.json` adds — `agents`, `mcp_servers` — plus a
+`themes/` folder of colour schemes, without editing `config.json` (which the
+settings page rewrites whole). The manifest needs an `id` and reuses
+config.json's own shapes:
+
+```json
+{ "id": "lsp-tools",
+  "agents": [{ "id": "mine", "name": "My agent", "command": "my-agent --acp" }],
+  "mcp_servers": [{ "name": "lsp", "command": "${PLUGIN_DIR}/bin/lsp-mcp" }] }
+```
+
+`${PLUGIN_DIR}` is the plugin's folder. Other relative paths are refused,
+because commands run from the project you have open.
+
+Reading a manifest runs nothing, but what it names runs as you, so it goes
+through the same **Run it** approval as an entry typed by hand, and the card
+says which plugin asks. The approval is of the command line, not the files
+behind it, so updating a plugin that keeps its command line doesn't ask again:
+install plugins you trust.
+
+Your own entries in `config.json` and your own themes win over a plugin's, and
+of two plugins the first by folder name wins. A plugin can't replace one of
+`po`'s bundled agents. Changes to a plugin's agents apply on restart, and its
+MCP servers to new sessions.
+
+[`docs/plugin-architecture-plan.md`](docs/plugin-architecture-plan.md) is the
+plan for plugins that add screens. They aren't supported yet.
+
 #### Letting the agent show you things
 
 Every ACP agent `po` starts is also handed `po`'s own MCP server, named `po` (it is `po`
