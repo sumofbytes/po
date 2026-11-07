@@ -2,6 +2,8 @@
 //! shell, to test whether Rune can draw a terminal. `cargo run --bin po-rune` opens it;
 //! `-- --snap po.png` renders it headless.
 
+#![recursion_limit = "1024"]
+
 use std::sync::Arc;
 
 use rune::tok::{Family, TextStyle};
@@ -11,20 +13,37 @@ use rune::{AppSpec, Color, Cx, El, Key as RuneKey, KeyEvent, Span, Tx, Waker, co
 #[path = "../terminal.rs"]
 mod terminal;
 
+#[allow(dead_code)]
+#[path = "../rune_ui/mod.rs"]
+mod rune_ui;
+#[allow(dead_code)]
+#[path = "../schemes.rs"]
+mod schemes;
+
 use terminal::{Frame, KeyInput, Rgb, Session};
 
 const COLS: u16 = 100;
 const ROWS: u16 = 30;
 const FONT: TextStyle = TextStyle { family: Family::SystemMono, line_height: 17.0, ..TextStyle::new(13.0, 400.0) };
 
-/// Rose Pine, Po's default theme.
-const BASE: Rgb = Rgb(0x19, 0x17, 0x24);
-const TEXT: Rgb = Rgb(0xe0, 0xde, 0xf4);
-
-#[derive(Default)]
 struct State {
     session: Option<Session>,
     frame: Arc<Frame>,
+    kit: rune_kit::Kit,
+}
+
+impl Default for State {
+    fn default() -> Self {
+        let name = std::env::var("PO_THEME").unwrap_or_else(|_| rune_ui::theme::DEFAULT.into());
+        let (kit, _) = rune_ui::theme::kit(&rune_ui::theme::load(&name));
+        Self { session: None, frame: Arc::default(), kit }
+    }
+}
+
+fn rgb(c: Color) -> Rgb {
+    let hex = c.hex();
+    let byte = |i: usize| u8::from_str_radix(&hex[i..i + 2], 16).unwrap_or(0);
+    Rgb(byte(1), byte(3), byte(5))
 }
 
 fn c(rgb: Rgb) -> Color {
@@ -33,7 +52,7 @@ fn c(rgb: Rgb) -> Color {
 
 /// One terminal row as text plus a span per styled run. Cells are placed by column, so a gap
 /// between runs becomes spaces.
-fn row(frame: &Frame, y: usize) -> El {
+fn row(frame: &Frame, kit: &rune_kit::Kit, y: usize) -> El {
     let mut line = String::new();
     let mut spans = vec![];
     let mut at = 0u16;
@@ -67,7 +86,7 @@ fn row(frame: &Frame, y: usize) -> El {
         }
         // The cursor's cell is the n-th char of the line: cells and chars agree off wide glyphs.
         if let Some((start, ch)) = line.char_indices().nth(cursor.col as usize) {
-            spans.push(Span::new(start, start + ch.len_utf8()).bg(c(TEXT), 0.0).color(c(BASE)).mono());
+            spans.push(Span::new(start, start + ch.len_utf8()).bg(kit.c.text_base, 0.0).color(kit.c.bg_base).mono());
         }
     }
     text(line).font(FONT).color(c(frame.foreground)).spans(spans)
@@ -76,9 +95,9 @@ fn row(frame: &Frame, y: usize) -> El {
 fn view(s: &State, _: &mut Cx<State>) -> El {
     let mut grid = col().key("terminal").focusable(true).on_key(on_key);
     for y in 0..ROWS as usize {
-        grid = grid.child(row(&s.frame, y));
+        grid = grid.child(row(&s.frame, &s.kit, y));
     }
-    col().w_full().h_full().fill(c(BASE)).padding(12.0).child(grid)
+    col().w_full().h_full().fill(s.kit.c.bg_base).padding(12.0).child(grid)
 }
 
 /// The key the encoder names for a typed character.
@@ -123,7 +142,7 @@ fn on_key(s: &mut State, event: &KeyEvent, _: &mut Tx) -> bool {
 
 fn setup(s: &mut State, wake: Waker) {
     let cwd = std::env::current_dir().unwrap_or_else(|_| "/".into());
-    s.session = Session::spawn(&cwd, COLS, ROWS, (TEXT, BASE), move || wake()).ok();
+    s.session = Session::spawn(&cwd, COLS, ROWS, (rgb(s.kit.c.text_base), rgb(s.kit.c.bg_base)), move || wake()).ok();
 }
 
 /// True when the shell drew something new.
