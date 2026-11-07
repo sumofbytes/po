@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use rune::tok::{Family, TextStyle};
-use rune::{Color, El, Key as RuneKey, KeyEvent, Span, Tx, Waker, col, color, text};
+use rune::{WheelEvent, Color, El, Key as RuneKey, KeyEvent, Span, Tx, Waker, col, color, text};
 use rune_kit::Kit;
 
 use crate::terminal::{self, Frame, Key, KeyInput, Rgb, Session};
@@ -15,10 +15,17 @@ const FONT: TextStyle = TextStyle { family: Family::SystemMono, line_height: 17.
 /// Where the host keeps the terminal: handlers reach it through this.
 pub type At<S> = fn(&mut S) -> &mut Term;
 
-#[derive(Default)]
 pub struct Term {
     session: Option<Session>,
     frame: Arc<Frame>,
+    /// The grid the shell was last told it has.
+    size: (u16, u16),
+}
+
+impl Default for Term {
+    fn default() -> Self {
+        Self { session: None, frame: Arc::default(), size: (COLS, ROWS) }
+    }
 }
 
 fn c(rgb: Rgb) -> Color {
@@ -60,6 +67,36 @@ impl Term {
         changed
     }
 
+    /// The area for the grid is now `width` by `height` points: the shell gets as many cells as fit.
+    pub fn fit(&mut self, width: f32, height: f32) {
+        let cell = rune::text::advance("M", FONT).max(1.0);
+        let size = (((width / cell).floor() as u16).clamp(10, 500), ((height / FONT.line_height).floor() as u16).clamp(3, 200));
+        if size == self.size || width < 1.0 {
+            return;
+        }
+        self.size = size;
+        if let Some(session) = &self.session {
+            session.resize(size.0, size.1, (cell as u32, FONT.line_height as u32));
+        }
+    }
+
+    /// The history moves by the wheel: `dy` points, positive showing earlier lines.
+    pub fn wheel(&self, dy: f32) -> bool {
+        let Some(session) = &self.session else { return false };
+        let lines = (dy / FONT.line_height).round() as isize;
+        if lines != 0 {
+            session.scroll(-lines);
+        }
+        true
+    }
+
+    /// Text pasted into the window goes to the shell.
+    pub fn paste(&self, text: &str) {
+        if let Some(session) = &self.session {
+            session.paste(text.to_string());
+        }
+    }
+
     pub fn running(&self) -> bool {
         self.session.is_some()
     }
@@ -68,6 +105,14 @@ impl Term {
     pub fn key(&self, event: &KeyEvent) -> bool {
         let Some(session) = &self.session else { return false };
         let m = event.mods;
+        // Copy and paste are the window's: Ctrl+Shift+C and V (or the platform key), where Ctrl+C
+        // and Ctrl+V are the shell's.
+        if let RuneKey::Command(ch) = &event.key
+            && matches!(ch.to_ascii_lowercase(), 'c' | 'v')
+            && (m.logo || (m.ctrl && m.shift))
+        {
+            return false;
+        }
         // Several characters at once (an IME commit, typed text) go in one by one: the encoder
         // takes one key with its text.
         if let RuneKey::Text(t) = &event.key
@@ -154,14 +199,23 @@ fn row(frame: &Frame, kit: &Kit, y: usize) -> El {
             spans.push(Span::new(start, start + ch.len_utf8()).bg(kit.c.text_base, 0.0).color(kit.c.bg_base).mono());
         }
     }
-    text(line).font(FONT).color(c(frame.foreground)).spans(spans)
+    text(line).font(FONT).color(c(frame.foreground)).spans(spans).selectable(true)
 }
 
 /// The grid, focusable, sending its keys to the shell.
 pub fn view<S: 'static>(term: &Term, kit: &Kit, at: At<S>) -> El {
-    let mut grid = col().key("terminal").focusable(true).on_key(move |s: &mut S, event: &KeyEvent, _: &mut Tx| at(s).key(event));
-    for y in 0..ROWS as usize {
+    let mut grid = col()
+        .key("terminal")
+        .w_full()
+        .h_full()
+        .min_h(0.0)
+        .focusable(true)
+        .selection_group(true)
+        .on_key(move |s: &mut S, event: &KeyEvent, _: &mut Tx| at(s).key(event))
+        .on_wheel(move |s: &mut S, event: WheelEvent, _: &mut Tx| at(s).wheel(event.dy))
+        .on_layout(move |s: &mut S, rect: [f32; 4]| at(s).fit(rect[2], rect[3]));
+    for y in 0..term.size.1 as usize {
         grid = grid.child(row(&term.frame, kit, y));
     }
-    col().w_full().h_full().fill(kit.c.bg_base).padding(12.0).child(grid)
+    col().w_full().h_full().min_h(0.0).fill(kit.c.bg_base).padding(12.0).child(grid)
 }

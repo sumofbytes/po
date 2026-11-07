@@ -1,7 +1,7 @@
 //! The window: a sidebar, the main pane and a viewer pane, as Rune's `SplitView` lays them out.
 //! Counterpart of the layout half of `Reader::render` in `main.rs`. What fills the panes comes from
 //! the screens; this decides what is shown where.
-use rune::{El, col};
+use rune::{El, Tx, col};
 use rune_kit::{Kit, PaneState, SplitView};
 
 use super::{agent, chat, diff, explorer, finder, home, issues, settings, sidebar, source, tabs, terminal};
@@ -282,8 +282,16 @@ pub fn view<S: Host>(host: &S, k: &Kit) -> El {
         None => (chat(), Some(pane())),
     };
     let split = SplitView::new(middle).sidebar::<S>(&shell.sidebar, sidebar_of::<S>, sidebar::view::<S>(&shell.sidebar_feed.value, &shell.side, k, side_of::<S>));
-    match right {
+    let root = match right {
         Some(right) => split.inspector::<S>(&shell.viewer, viewer_of::<S>, right).build(k),
         None => split.build(k),
-    }
+    };
+    // Text pasted while no field has the keyboard goes to the terminal, where it is showing.
+    root.on_paste(|s: &mut S, text: &str, _: &mut Tx| {
+        if s.layout().terminal_shown
+            && let Some(term) = s.terminal_mut()
+        {
+            term.paste(text);
+        }
+    })
 }

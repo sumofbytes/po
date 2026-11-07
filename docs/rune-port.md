@@ -28,7 +28,7 @@ gpui, NSH, `vendor/`, `src/nsh`, `src/ui`, `terminal_view.rs` and `theme.rs` are
 - **Issues**: no labels or parent editing, milestones, epic pages (an epic click filters the list),
   or project filter chips; the add box always targets the repo last shown.
 - **Chat**: no pictures, Control (grant) menu, transcript rail, virtualised transcript.
-- **Terminal**: no resize, scrollback, selection, copy/paste, mouse.
+- **Terminal**: resize, scrollback (wheel), paste and drag-selection (Rune's text selection) work; Ctrl+Shift+C/V and the platform key are left to the window. Not checked: copy to the clipboard, mouse reporting to programs, wide characters.
 - **Window**: pane widths are not saved back to the workspace; full-screen/active flags unused;
   drag-and-drop of files, desktop notifications and the `po update` flow are unchecked; Ctrl+P is
   not caught while a text field has focus.
