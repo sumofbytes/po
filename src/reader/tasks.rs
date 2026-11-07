@@ -44,7 +44,7 @@ impl Reader {
 
     /// What the user does on a screen drawn by NSH, run here where the window and the agents are.
     pub(crate) fn serve_nsh(window: &Window, cx: &mut Context<Self>) {
-        let Some(mut commands) = nsh::bus::commands() else { return };
+        let Some(mut commands) = model::bus::commands() else { return };
         let handle = window.window_handle();
         cx.spawn(async move |this, cx| {
             while let Some(cmd) = commands.recv().await {

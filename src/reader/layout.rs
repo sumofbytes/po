@@ -187,8 +187,8 @@ impl Reader {
     }
 
     /// What the viewer shows, for the buttons that pick it.
-    pub(crate) fn place(&self) -> nsh::chat::Place {
-        use nsh::chat::Place;
+    pub(crate) fn place(&self) -> model::chat::Place {
+        use model::chat::Place;
         if !self.side_open || (self.thread.shown.is_some() && !self.project.terminal_shown) {
             Place::Elsewhere
         } else if self.project.terminal_shown {
@@ -205,23 +205,20 @@ impl Reader {
     pub(crate) fn toggle_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.project.terminal_shown && self.side_open {
             self.project.terminal_shown = false;
-            window.focus(&self.focus, cx);
             cx.notify();
             return;
         }
         let root = self.project.root.clone();
         if self.project.terminal.is_none() {
-            let view = cx.new(|cx| terminal_view::TerminalView::new(root, cx));
-            // A shell that ends (Ctrl+D, `exit`) takes its tab with it, in whichever project it was.
-            cx.subscribe_in(&view, window, |reader, view, _: &terminal_view::Exited, window, cx| reader.terminal_exited(view, window, cx)).detach();
-            self.project.terminal = Some(view);
+            let host = cx.host();
+            let mut term = rune_ui::terminal::Term::default();
+            term.start_with(&root, self.term_theme, move || host.notify());
+            self.project.terminal = Some(term);
         }
-        let terminal = self.project.terminal.clone().expect("just made");
         self.project.terminal_shown = true;
         self.thread.offered = None;
         self.open_viewer_wide(cx);
-        // The view is not in the tree until it draws; the focus follows.
-        cx.defer_in(window, move |_, window, cx| terminal.update(cx, |terminal, cx| terminal.focus(window, cx)));
+        let _ = window;
     }
 
     /// The terminal's button was pressed: show it, which never hides it.
@@ -230,18 +227,19 @@ impl Reader {
         self.toggle_terminal(window, cx);
     }
 
-    /// `view`'s shell ended: its tab closes.
-    pub(crate) fn terminal_exited(&mut self, view: &Entity<terminal_view::TerminalView>, window: &mut Window, cx: &mut Context<Self>) {
-        if view.focus_handle(cx).is_focused(window) {
-            window.focus(&self.focus, cx);
-        }
+    /// A shell that ends (Ctrl+D, `exit`) takes its tab with it, in whichever project it was.
+    pub(crate) fn reap_terminals(&mut self, cx: &mut Context<Self>) {
+        let mut ended = false;
         for project in std::iter::once(&mut self.project).chain(self.slots.iter_mut().map(|slot| &mut slot.project)) {
-            if project.terminal.as_ref() == Some(view) {
+            if project.terminal.as_ref().is_some_and(|term| term.exited()) {
                 project.terminal = None;
                 project.terminal_shown = false;
+                ended = true;
             }
         }
-        cx.notify();
+        if ended {
+            cx.notify();
+        }
     }
 
     /// Opens the viewer if it is closed, wide since looking at code or a diff wants room; if it is
@@ -251,7 +249,6 @@ impl Reader {
             self.side_open = true;
             // It may have been opened from the middle, where the conversation always shows.
             self.agent_open = true;
-            self.sidebars.update(cx, |sidebars, _| sidebars.set_right_share(0.55));
             self.request_save(cx);
         }
         cx.notify();
@@ -349,9 +346,7 @@ impl Reader {
         if self.settings_open {
             return self.hide_settings(window, cx);
         }
-        nsh::settings::start(self.swapped);
         self.settings_open = true;
-        self.settings.update(cx, |settings, cx| settings.open(window, cx));
         cx.notify();
     }
 
@@ -369,7 +364,6 @@ impl Reader {
         }
         self.hide_issues(window, cx);
         self.home_open = true;
-        self.landing.update(cx, |home, cx| home.open(window, cx));
         cx.notify();
     }
 
@@ -378,8 +372,6 @@ impl Reader {
             return;
         }
         self.home_open = false;
-        self.landing.update(cx, |home, _| home.close());
-        self.focus.focus(window, cx);
         cx.notify();
     }
 
@@ -389,7 +381,6 @@ impl Reader {
         issues::shared::set_project(repo);
         if !self.issues_open {
             self.issues_open = true;
-            self.issues.update(cx, |issues, cx| issues.open(window, cx));
         }
         issues::shared::navigate(issues::shared::Nav { target: issues::shared::Target::Issue(number), filter: None, group: None });
         cx.notify();
@@ -402,7 +393,6 @@ impl Reader {
         self.hide_home(window, cx);
         self.follow_issues();
         self.issues_open = true;
-        self.issues.update(cx, |issues, cx| issues.open(window, cx));
         cx.notify();
     }
 
@@ -413,8 +403,6 @@ impl Reader {
             return;
         }
         self.issues_open = false;
-        self.issues.update(cx, |issues, _| issues.close());
-        self.focus.focus(window, cx);
         cx.notify();
     }
 
@@ -528,8 +516,6 @@ impl Reader {
 
     pub(crate) fn hide_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.settings_open = false;
-        self.settings.update(cx, |settings, _| settings.close());
-        self.focus.focus(window, cx);
         cx.notify();
     }
 

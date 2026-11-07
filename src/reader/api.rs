@@ -823,7 +823,7 @@ impl Reader {
 
     /// Holds a wait the window answered later, and starts its timer.
     pub(crate) fn add_waiter(&mut self, caller: command::Caller, wait: command::Wait, reply: std::sync::mpsc::Sender<command::Reply>, _window: &mut Window, cx: &mut Context<Self>) {
-        let (token, handle) = (self.next_waiter, self.window);
+        let (token, handle) = (self.next_waiter, cx.window_handle());
         self.next_waiter += 1;
         let left = wait.deadline.saturating_duration_since(std::time::Instant::now());
         self.waiters.push(Waiter { token, caller, threads: wait.threads, until: wait.until, form: wait.form, reply });
@@ -1003,7 +1003,7 @@ impl Reader {
         notice.text.push_str(&line);
         // Changes that happen within the coalesce window go out together.
         if self.notice_scheduled.insert(parent) {
-            let (handle, parent) = (self.window, parent);
+            let (handle, parent) = (cx.window_handle(), parent);
             cx.spawn(async move |this, cx| {
                 cx.background_executor().timer(NOTICE_COALESCE).await;
                 let _ = handle.update(cx, |_, window, cx| this.update(cx, |reader, cx| reader.flush_notice(parent, window, cx)));
@@ -1020,7 +1020,7 @@ impl Reader {
         }
         // Every notice is a turn of the parent's: more frequent ones merge into the next.
         if let Some(left) = notice_wait(self.notice_sent_at.get(&parent).map(Instant::elapsed)) {
-            let (handle, parent) = (self.window, parent);
+            let (handle, parent) = (cx.window_handle(), parent);
             cx.spawn(async move |this, cx| {
                 cx.background_executor().timer(left).await;
                 let _ = handle.update(cx, |_, window, cx| this.update(cx, |reader, cx| reader.flush_notice(parent, window, cx)));

@@ -2,31 +2,26 @@
 
 use crate::*;
 
-/// Whether the window is drawn as glass: the one thing of the toolkit's theme the snapshots carry.
-pub(crate) fn glass(cx: &App) -> bool {
-    cx.global::<Palette>().glass.is_some()
-}
-
 /// An agent's view as the pane shows it, with no chrome.
-pub(crate) fn agent_view_snapshot(view: &command::AgentView) -> nsh::agent::Snapshot {
-    nsh::agent::Snapshot { title: view.title.clone(), body: nsh::agent::Body::Markdown(nsh::source::Shared(Arc::from(view.body.as_str()))), ..Default::default() }
+pub(crate) fn agent_view_snapshot(view: &command::AgentView) -> model::agent::Snapshot {
+    model::agent::Snapshot { title: view.title.clone(), body: model::agent::Body::Markdown(model::source::Shared(Arc::from(view.body.as_str()))), ..Default::default() }
 }
 
 /// A form the agent put on screen as the pane shows it, with no chrome.
-pub(crate) fn form_view_snapshot(form: &command::AgentForm) -> nsh::agent::Snapshot {
+pub(crate) fn form_view_snapshot(form: &command::AgentForm) -> model::agent::Snapshot {
     let fields = form
         .fields
         .iter()
-        .map(|field| nsh::agent::Field { name: field.name.clone(), label: field.label.clone(), options: field.options.clone(), value: field.value.clone() })
+        .map(|field| model::agent::Field { name: field.name.clone(), label: field.label.clone(), options: field.options.clone(), value: field.value.clone() })
         .collect();
-    nsh::agent::Snapshot {
+    model::agent::Snapshot {
         title: form.title.clone(),
-        body: nsh::agent::Body::Form {
+        body: model::agent::Body::Form {
             id: form.id.clone(),
             fields,
             submit: form.submit.clone(),
             answered: form.answered.is_some(),
-            doc: form.body.as_deref().map(|body| nsh::source::Shared(Arc::from(body))),
+            doc: form.body.as_deref().map(|body| model::source::Shared(Arc::from(body))),
         },
         ..Default::default()
     }
@@ -35,16 +30,11 @@ pub(crate) fn form_view_snapshot(form: &command::AgentForm) -> nsh::agent::Snaps
 impl Reader {
     /// The left side: every project with its threads, drawn by NSH from what [`Self::sidebar_snapshot`]
     /// publishes.
-    pub(crate) fn left_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        nsh::sidebar::publish(self.sidebar_snapshot().with_glass(glass(cx)));
-        floating(div().size_full().flex().flex_col().child(self.sidebar.clone()), cx)
-    }
-
-    /// What the sidebar shows: the projects and threads that answer its filter, what waits on the
+        /// What the sidebar shows: the projects and threads that answer its filter, what waits on the
     /// user, and what agents have suggested.
     #[hotpath::measure(impl_type = "Reader")]
-    pub(crate) fn sidebar_snapshot(&self) -> nsh::sidebar::Snapshot {
-        use nsh::sidebar as side;
+    pub(crate) fn sidebar_snapshot(&self) -> model::sidebar::Snapshot {
+        use model::sidebar as side;
         let query = self.side_query.trim().to_lowercase();
         let searching = !query.is_empty();
         let views = self.views();
@@ -161,35 +151,10 @@ impl Reader {
 
     /// The conversation, drawn by NSH from what [`Self::chat_snapshot`] publishes; published here in place
     /// of the pane, as the viewer's panes are.
-    pub(crate) fn chat_pane(&self, lead: Vec<nsh::header::Control>, trail: Vec<nsh::header::Control>, cx: &mut Context<Self>) -> gpui::Div {
-        nsh::chat::publish(self.chat_snapshot().with_chrome(nsh::header::Chrome { glass: glass(cx), lead, trail }));
-        let tint = cx.global::<Palette>().primary.opacity(theme::tokens::DROP_TINT);
-        // Files dropped anywhere on the conversation join the draft. NSH's views can sit over this
-        // element and keep it from being the hovered one, so while a file is being dragged a layer
-        // above them takes the drop; it is only there for the drag, so clicks are never blocked.
-        let dragging = cx.has_active_drag();
-        div()
-            .size_full()
-            .relative()
-            .flex()
-            .flex_col()
-            .child(self.chat.clone())
-            .children(dragging.then(|| {
-                div()
-                    .absolute()
-                    .size_full()
-                    .occlude()
-                    .drag_over::<gpui::ExternalPaths>(move |style, _, _, _| style.bg(tint))
-                    .on_drop(cx.listener(|reader, dropped: &gpui::ExternalPaths, _, cx| {
-                        reader.attach(dropped.paths().iter().cloned().map(Source::Path).collect(), cx);
-                    }))
-            }))
-    }
-
-    /// What the conversation shows: the header, the transcript, and the composer.
+        /// What the conversation shows: the header, the transcript, and the composer.
     #[hotpath::measure(impl_type = "Reader")]
-    pub(crate) fn chat_snapshot(&self) -> nsh::chat::Snapshot {
-        use nsh::chat as chat;
+    pub(crate) fn chat_snapshot(&self) -> model::chat::Snapshot {
+        use model::chat as chat;
         let thread = &self.thread;
         // Bump the transcript's follow (the pane scrolls to its end) when the thread the pane
         // shows got louder: a message came or went, or the turn started or stopped.
@@ -308,8 +273,8 @@ impl Reader {
 
     /// Does what the user asked of on the conversation the NSH pane draws.
     #[hotpath::measure(impl_type = "Reader")]
-    pub(crate) fn chat_cmd(&mut self, cmd: nsh::chat::Cmd, window: &mut Window, cx: &mut Context<Self>) {
-        use nsh::chat::{Cmd as Chat, GrantChange, Scope as ChatScope};
+    pub(crate) fn chat_cmd(&mut self, cmd: model::chat::Cmd, window: &mut Window, cx: &mut Context<Self>) {
+        use model::chat::{Cmd as Chat, GrantChange, Scope as ChatScope};
         match cmd {
             Chat::Draft(text) => self.thread.draft = text,
             Chat::Send { later } => self.send(later, window, cx),
@@ -384,8 +349,8 @@ impl Reader {
 
     /// Does what the user asked of a screen drawn by NSH.
     #[hotpath::measure(impl_type = "Reader")]
-    pub(crate) fn run(&mut self, cmd: nsh::bus::Cmd, window: &mut Window, cx: &mut Context<Self>) {
-        use nsh::bus::Cmd;
+    pub(crate) fn run(&mut self, cmd: model::bus::Cmd, window: &mut Window, cx: &mut Context<Self>) {
+        use model::bus::Cmd;
         if !matches!(cmd, Cmd::CloseThread(..)) && self.closing.take().is_some() {
             cx.notify();
         }
@@ -453,7 +418,7 @@ impl Reader {
                 self.open_selected(true, window, cx);
                 cx.notify();
             }
-            Cmd::OpenUrl(url) => cx.open_url(&url),
+            Cmd::OpenUrl(url) => window.open_url(&url),
             Cmd::FinderQuery(query) => {
                 if query != self.finder_query {
                     self.finder_query = query;
@@ -485,132 +450,8 @@ impl Reader {
     /// The viewer or the diff viewer, as the project's mode says, with the file tree beside it
     /// unless that is hidden or the agent's own view is shown, which has no files to pick.
     #[hotpath::measure(impl_type = "Reader")]
-    pub(crate) fn pane(&self, cx: &mut Context<Self>) -> AnyElement {
-        let tabs = self.view_tabs();
-        let has_tabs = tabs.is_some();
-        let shown_form = self.thread.shown.as_deref().and_then(|id| self.thread.forms.get(id));
-        let shown = self
-            .thread
-            .shown
-            .as_deref()
-            .and_then(|id| self.thread.views.list().iter().find(|view| view.id == id));
-        let showing_terminal = self.project.terminal_shown.then(|| self.project.terminal.clone()).flatten();
-        let showing_agent = shown.is_some() || shown_form.is_some() || showing_terminal.is_some();
-        let with_tree = !showing_agent && self.tree_visible();
-        // A pane too narrow for the tree beside the file takes turns: the explorer fills it until a
-        // file is picked, then the file does, with a button back to the explorer.
-        let stacked = !showing_agent && self.viewer_narrow.get();
-        let nothing_picked = if self.mode == Mode::Diff { self.project.picked.is_none() } else { self.project.current.is_none() };
-        let explorer_only = stacked && (self.browse || nothing_picked);
-        // The window's own controls go on the tabs while there are any, and in the headers of the
-        // pane otherwise: the leftmost, the tree's or the viewer's. A pane wide enough shows the
-        // explorer beside what it shows, with the lead controls in the file's header; stacked, the
-        // file's alone gets them, with a way back to the explorer tacked on.
-        let (lead_controls, trail_controls) = if has_tabs { (vec![], vec![]) } else { self.pane_controls.borrow().clone() };
-        let tree_lead = if with_tree || explorer_only { lead_controls.clone() } else { vec![] };
-        let body_controls = |lead: Vec<nsh::header::Control>| if with_tree || explorer_only { (vec![], trail_controls.clone()) } else if stacked { ([lead, vec![nsh::header::Control::Explorer]].concat(), trail_controls.clone()) } else { (lead, trail_controls.clone()) };
-        let body = match (shown, shown_form, self.mode) {
-            _ if showing_terminal.is_some() => {
-                let background = cx.global::<Palette>().background;
-                // The tabs, when there are any, are its header; otherwise it has one of its own.
-                let header = (!has_tabs).then(|| {
-                    let (lead, trail) = body_controls(lead_controls);
-                    nsh::agent::publish(nsh::agent::Snapshot { title: "Terminal".into(), body: nsh::agent::Body::Bare, ..Default::default() }.with_chrome(nsh::header::Chrome { glass: glass(cx), lead, trail }));
-                    div().flex_none().h(HEADER_HEIGHT).child(self.agent_pane.clone())
-                });
-                div().size_full().flex().flex_col().bg(background).children(header).child(div().flex_1().min_h_0().children(showing_terminal)).into_any_element()
-            }
-            _ if explorer_only => {
-                let background = cx.global::<Palette>().background;
-                div().size_full().when(!has_tabs, |d| d.bg(background)).child(self.explorer(tree_lead.clone(), trail_controls.clone(), cx)).into_any_element()
-            }
-            (Some(view), _, _) => self.agent_view(view, body_controls(lead_controls), cx).into_any_element(),
-            (_, Some(form), _) => self.form_view(form, body_controls(lead_controls), cx).into_any_element(),
-            (None, None, Mode::Source) => {
-                let (lead, trail) = body_controls(lead_controls);
-                self.viewer(lead, trail, cx).into_any_element()
-            }
-            (None, None, Mode::Diff) => {
-                let (lead, trail) = body_controls(lead_controls);
-                self.diff_viewer(lead, trail, cx).into_any_element()
-            }
-        };
-        let background = cx.global::<Palette>().background;
-        let body = if with_tree {
-            // The viewers paint their own background; the column paints its own too, unless the
-            // pane does for both, which would lay a second translucent layer under glass.
-            let column = div().size_full().when(!has_tabs, |d| d.bg(background)).child(self.explorer(tree_lead, vec![], cx));
-            sidebars(&self.tree_cols).id("tree").left(true, TREE_RANGE, column).center(div().size_full().child(body)).into_any_element()
-        } else {
-            body
-        };
-        // Measures the pane, which it is drawn at whatever the tree is doing, and draws again
-        // when that changes whether the tree fits.
-        let narrow = self.viewer_narrow.clone();
-        let measure = gpui::canvas(
-            move |bounds, window, _| {
-                let now = !tree_fits(bounds.size.width.into());
-                if narrow.replace(now) != now {
-                    window.refresh();
-                }
-            },
-            |_, _, _, _| {},
-        )
-        .absolute()
-        .size_full();
-        floating(div().size_full().flex().flex_col().relative().when(has_tabs, |d| d.bg(background)).child(measure).children(tabs).child(div().flex_1().min_h_0().child(body)), cx)
-    }
-
-    /// A view the agent made, as a markdown document; the pane NSH draws from what is published.
-    pub(crate) fn agent_view(&self, view: &command::AgentView, (lead, trail): (Vec<nsh::header::Control>, Vec<nsh::header::Control>), cx: &mut Context<Self>) -> impl IntoElement + Styled + use<> {
-        nsh::agent::publish(agent_view_snapshot(view).with_chrome(nsh::header::Chrome { glass: glass(cx), lead, trail }));
-        div().size_full().child(self.agent_pane.clone())
-    }
-
-    /// A form the agent put on screen: what it is for, then the fields the user answers, drawn
-    /// and answered by NSH.
-    pub(crate) fn form_view(&self, form: &command::AgentForm, (lead, trail): (Vec<nsh::header::Control>, Vec<nsh::header::Control>), cx: &mut Context<Self>) -> impl IntoElement + Styled + use<> {
-        nsh::agent::publish(form_view_snapshot(form).with_chrome(nsh::header::Chrome { glass: glass(cx), lead, trail }));
-        div().size_full().child(self.agent_pane.clone())
-    }
-
-    /// The agent's views as tabs, with a prompt for one it added while the user was busy, and the
-    /// window's controls at the ends. None while there are none; the files, the changes and the
-    /// terminal are picked in the conversation's header.
-    pub(crate) fn view_tabs(&self) -> Option<AnyElement> {
-        if self.thread.views.is_empty() && self.thread.forms.is_empty() {
-            return None;
-        }
-        use nsh::tabs::{Snapshot, Tab};
-        let titled = |id: &String| {
-            self.thread
-                .views
-                .list()
-                .iter()
-                .find(|view| view.id == *id)
-                .map(|view| Tab { id: view.id.clone(), title: view.title.clone() })
-                .or_else(|| self.thread.forms.list().iter().find(|form| form.id == *id).map(|form| Tab { id: form.id.clone(), title: form.title.clone() }))
-        };
-        nsh::tabs::publish(
-            Snapshot {
-            shown: if self.project.terminal_shown { None } else { self.thread.shown.clone() },
-            tabs: self
-                .thread
-                .views
-                .list()
-                .iter()
-                .map(|view| Tab { id: view.id.clone(), title: view.title.clone() })
-                .chain(self.thread.forms.list().iter().map(|form| Tab { id: form.id.clone(), title: form.title.clone() }))
-                .collect(),
-            offer: self.thread.offered.as_ref().and_then(titled),
-            controls: Default::default(),
-        }
-        .with_controls(self.pane_controls.borrow().clone()),
-        );
-        Some(div().flex_none().h(TABS_HEIGHT).child(self.tabs.clone()).into_any_element())
-    }
-
-    pub(crate) fn close_agent_view(&mut self, id: &str, cx: &mut Context<Self>) {
+        /// A view the agent made, as a markdown document; the pane NSH draws from what is published.
+        pub(crate) fn close_agent_view(&mut self, id: &str, cx: &mut Context<Self>) {
         if self.thread.forms.remove(id) {
             let owner = self.thread.id;
             self.drop_form(owner, id);
@@ -632,14 +473,9 @@ impl Reader {
     }
 
     /// The picked file's changes, drawn by NSH from what [`Self::diff_snapshot`] publishes.
-    pub(crate) fn diff_viewer(&self, lead: Vec<nsh::header::Control>, trail: Vec<nsh::header::Control>, cx: &mut Context<Self>) -> impl IntoElement + Styled + use<> {
-        nsh::diff::publish(self.diff_snapshot().with_chrome(nsh::header::Chrome { glass: glass(cx), lead, trail }));
-        div().size_full().child(self.diff.clone())
-    }
-
-    #[hotpath::measure(impl_type = "Reader")]
-    pub(crate) fn diff_snapshot(&self) -> nsh::diff::Snapshot {
-        use nsh::diff::{Body, Snapshot};
+        #[hotpath::measure(impl_type = "Reader")]
+    pub(crate) fn diff_snapshot(&self) -> model::diff::Snapshot {
+        use model::diff::{Body, Snapshot};
         let project = &self.project;
         let (title, body) = match (&project.picked, &project.versions) {
             (None, _) => ("Changes".to_string(), Body::Hint(self.pick_hint("a changed file"))),
@@ -651,14 +487,9 @@ impl Reader {
     }
 
     /// The open file in the viewer, drawn by NSH from what [`Self::source_snapshot`] publishes.
-    pub(crate) fn viewer(&self, lead: Vec<nsh::header::Control>, trail: Vec<nsh::header::Control>, cx: &mut Context<Self>) -> impl IntoElement + Styled + use<> {
-        nsh::source::publish(self.source_snapshot().with_chrome(nsh::header::Chrome { glass: glass(cx), lead, trail }));
-        div().size_full().child(self.source.clone())
-    }
-
-    #[hotpath::measure(impl_type = "Reader")]
-    pub(crate) fn source_snapshot(&self) -> nsh::source::Snapshot {
-        use nsh::source::{Body, Snapshot};
+        #[hotpath::measure(impl_type = "Reader")]
+    pub(crate) fn source_snapshot(&self) -> model::source::Snapshot {
+        use model::source::{Body, Snapshot};
         let current = self.project.current.as_deref();
         let markdown = self.project.is_markdown;
         let rendered = markdown && self.rendered;
@@ -711,5 +542,123 @@ impl Reader {
             line.push_str(&format!(" · {failed} failed"));
         }
         Some(line)
+    }
+}
+
+/// What the window shows and where: the Rune host lays the panes out from it.
+#[derive(Clone, Copy, Default, PartialEq, Debug)]
+pub struct Layout {
+    pub left_open: bool,
+    pub side_open: bool,
+    pub swapped: bool,
+    pub agent_open: bool,
+    pub home_open: bool,
+    pub issues_open: bool,
+    pub finder_open: bool,
+    pub settings_open: bool,
+    /// The project's terminal stands in the viewer.
+    pub terminal_shown: bool,
+    /// The agent's own view or form is in the viewer, which has no files to pick.
+    pub showing_agent: bool,
+    pub diff: bool,
+}
+
+impl Reader {
+    pub(crate) fn layout(&self) -> Layout {
+        let showing_agent = self.project.terminal_shown
+            || self.thread.shown.as_deref().is_some_and(|id| self.thread.forms.get(id).is_some() || self.thread.views.list().iter().any(|view| view.id == id));
+        Layout {
+            left_open: self.left_open,
+            side_open: self.side_open,
+            swapped: self.swapped,
+            agent_open: self.agent_open,
+            home_open: self.home_open,
+            issues_open: self.issues_open,
+            finder_open: self.finder_open,
+            settings_open: self.settings_open,
+            terminal_shown: self.project.terminal_shown,
+            showing_agent,
+            diff: self.mode == Mode::Diff,
+        }
+    }
+
+    /// Publishes what each screen draws, with the window's controls the panes at its edges carry.
+    /// Each button is one pane and never changes what it means: the sidebar toggle at the left of
+    /// the leftmost pane, the viewer toggle in the viewer's header (or, while it is closed, in the
+    /// conversation's, on the side the viewer opens), and, with the viewer open, a button that
+    /// gives it the room by hiding the conversation.
+    #[hotpath::measure(impl_type = "Reader")]
+    pub(crate) fn publish_screens(&mut self) {
+        use model::header::{Chrome, Control};
+        self.settle_agent_changes();
+        let (left_open, side_open, swapped, agent_open) = (self.left_open, self.side_open, self.swapped, self.agent_open);
+        let focus = side_open && !agent_open;
+        let viewer = |on: bool| if swapped { Control::ViewerLeft(on) } else { Control::Viewer(on) };
+        let trail_all = vec![Control::Focus(focus), viewer(side_open)];
+        let trail_focus = {
+            use model::chat::Place;
+            let place = self.place();
+            [vec![Control::Files(place == Place::Files), Control::Changes(place == Place::Changes), Control::Terminal(place == Place::Terminal)], trail_all.clone()].concat()
+        };
+        let none = || (vec![], vec![]);
+        // (the conversation's controls, the viewer's)
+        let (chat, pane) = if self.home_open || self.issues_open {
+            (none(), none())
+        } else if !side_open {
+            if swapped { ((vec![Control::Sidebar(left_open), viewer(side_open)], vec![]), none()) } else { ((vec![Control::Sidebar(left_open)], vec![viewer(side_open)]), none()) }
+        } else if focus {
+            (none(), (vec![Control::Sidebar(left_open)], trail_focus))
+        } else if swapped {
+            (none(), (vec![Control::Sidebar(left_open)], trail_all))
+        } else {
+            ((vec![Control::Sidebar(left_open)], vec![]), (vec![], trail_all))
+        };
+        model::sidebar::publish(self.sidebar_snapshot());
+        model::chat::publish(self.chat_snapshot().with_chrome(Chrome { glass: false, lead: chat.0, trail: chat.1 }));
+        if self.home_open || self.issues_open || !side_open {
+            return;
+        }
+        let chrome = |(lead, trail): (Vec<Control>, Vec<Control>)| Chrome { glass: false, lead, trail };
+        let has_tabs = self.publish_tabs(pane.clone());
+        // The window's own controls go on the tabs while there are any, and on the pane otherwise.
+        let controls = if has_tabs { none() } else { pane.clone() };
+        self.publish_explorer(controls.clone());
+        let shown_form = self.thread.shown.as_deref().and_then(|id| self.thread.forms.get(id));
+        let shown = self.thread.shown.as_deref().and_then(|id| self.thread.views.list().iter().find(|view| view.id == id));
+        match (shown, shown_form, self.mode) {
+            _ if self.project.terminal_shown => model::agent::publish(model::agent::Snapshot { title: "Terminal".into(), body: model::agent::Body::Bare, ..Default::default() }.with_chrome(chrome(controls))),
+            (Some(view), _, _) => model::agent::publish(agent_view_snapshot(view).with_chrome(chrome(controls))),
+            (_, Some(form), _) => model::agent::publish(form_view_snapshot(form).with_chrome(chrome(controls))),
+            (None, None, Mode::Source) => model::source::publish(self.source_snapshot().with_chrome(chrome(controls))),
+            (None, None, Mode::Diff) => model::diff::publish(self.diff_snapshot().with_chrome(chrome(controls))),
+        }
+    }
+
+    /// The agent's views as tabs, with a prompt for one it added while the user was busy, and the
+    /// window's controls at the ends. False while there are none.
+    pub(crate) fn publish_tabs(&self, controls: (Vec<model::header::Control>, Vec<model::header::Control>)) -> bool {
+        if self.thread.views.is_empty() && self.thread.forms.is_empty() {
+            return false;
+        }
+        use model::tabs::{Snapshot, Tab};
+        let titled = |id: &String| {
+            self.thread
+                .views
+                .list()
+                .iter()
+                .find(|view| view.id == *id)
+                .map(|view| Tab { id: view.id.clone(), title: view.title.clone() })
+                .or_else(|| self.thread.forms.list().iter().find(|form| form.id == *id).map(|form| Tab { id: form.id.clone(), title: form.title.clone() }))
+        };
+        model::tabs::publish(
+            Snapshot {
+                shown: if self.project.terminal_shown { None } else { self.thread.shown.clone() },
+                tabs: self.thread.views.list().iter().map(|view| Tab { id: view.id.clone(), title: view.title.clone() }).chain(self.thread.forms.list().iter().map(|form| Tab { id: form.id.clone(), title: form.title.clone() })).collect(),
+                offer: self.thread.offered.as_ref().and_then(titled),
+                controls: Default::default(),
+            }
+            .with_controls(controls),
+        );
+        true
     }
 }

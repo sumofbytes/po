@@ -93,7 +93,7 @@ fn pill<S: 'static>(k: &Kit, label: &'static str, key: &'static str, on: bool, c
 }
 
 fn header<S: 'static>(k: &Kit, snapshot: &Snapshot) -> El {
-    let mut bar = row().w_full().items_center().gap(8.0).px(12.0).py(8.0);
+    let mut bar = row().w_full().items_center().gap(8.0).px(12.0).py(8.0).child(super::header::controls::<S>(k, &snapshot.lead));
     bar = bar.child(row().grow(1.0).min_w(0.0).child(text(snapshot.title.clone()).font(NAME).color(k.c.text_base)));
     if !snapshot.language.is_empty() {
         bar = bar.child(text(snapshot.language.clone()).font(CAPTION).color(k.c.text_muted));
@@ -101,7 +101,7 @@ fn header<S: 'static>(k: &Kit, snapshot: &Snapshot) -> El {
     if let Some(rendered) = snapshot.preview {
         bar = bar.child(pill::<S>(k, if rendered { "Source" } else { "Preview" }, "preview", false, Cmd::ToggleRendered));
     }
-    bar
+    bar.child(super::header::controls::<S>(k, &snapshot.trail))
 }
 
 pub fn view<S: 'static>(snapshot: &Snapshot, state: &State, k: &Kit) -> El {

@@ -14,14 +14,14 @@ impl Reader {
             pr,
             files,
             changes: vec![],
-            marks: Rc::default(),
+            marks: Arc::default(),
             diffing: None,
             listing: None,
             scanning: None,
             watching: None,
             changes_tree,
             picked: None,
-            rows: Rc::new(vec![]),
+            rows: Arc::new(vec![]),
             versions: None,
             counts: (0, 0),
             current: None,
@@ -50,7 +50,7 @@ impl Reader {
         let listed = rebuild || self.project.changes != changes;
         self.project.changes = changes;
         if listed {
-            self.project.marks = Rc::new(self.project.changes.iter().map(|c| (c.path.clone(), c.status)).collect());
+            self.project.marks = Arc::new(self.project.changes.iter().map(|c| (c.path.clone(), c.status)).collect());
         }
         if self.mode != Mode::Diff {
             return;
@@ -133,8 +133,8 @@ impl Reader {
             Kind::Removed => (a, r + 1),
             _ => (a, r),
         });
-        self.project.rows = Rc::new(rows);
-        self.project.versions = versions.map(|(old, new)| (nsh::source::Shared(Arc::from(old)), nsh::source::Shared(Arc::from(new))));
+        self.project.rows = Arc::new(rows);
+        self.project.versions = versions.map(|(old, new)| (model::source::Shared(Arc::from(old)), model::source::Shared(Arc::from(new))));
     }
 
     /// Shows `path`'s diff in the viewer, once `git` has produced it off the UI thread.
@@ -269,7 +269,6 @@ impl Reader {
         if self.issues_open {
             self.follow_issues();
         }
-        self.focus.focus(window, cx);
         cx.notify();
     }
 
@@ -518,21 +517,10 @@ impl Reader {
         self.close_project(id, window, cx);
     }
 
-    /// Asks for a folder and opens it as a project.
+    /// Asks for a folder and opens it as a project: the host shows the dialog and opens what is picked.
     pub(crate) fn pick_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let picked = cx.prompt_for_paths(gpui::PathPromptOptions {
-            files: false,
-            directories: true,
-            multiple: false,
-            prompt: Some("Open project".into()),
-        });
-        let handle = window.window_handle();
-        cx.spawn(async move |this, cx| {
-            let Ok(Ok(Some(paths))) = picked.await else { return };
-            let Some(root) = paths.into_iter().next().and_then(|path| path.canonicalize().ok()) else { return };
-            handle.update(cx, |_, window, cx| this.update(cx, |reader, cx| reader.add_project(root, None, window, cx))).ok();
-        })
-        .detach();
+        window.pick_folder();
+        cx.notify();
     }
 
     /// Closes project `id`: its agents stop, and a PR's worktree is removed. Never the last one.
@@ -573,8 +561,7 @@ impl Reader {
     pub(crate) fn show_finder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.finder_open = true;
         self.refind();
-        nsh::finder::start(&self.finder_query);
-        self.finder.update(cx, |finder, cx| finder.open(window, cx));
+        model::finder::start(&self.finder_query);
         cx.notify();
     }
 
@@ -582,7 +569,7 @@ impl Reader {
     #[hotpath::measure(impl_type = "Reader")]
     pub(crate) fn refind(&mut self) {
         self.finder_matches = match_files(&self.project.files, &self.finder_query);
-        nsh::finder::publish(nsh::finder::Snapshot {
+        model::finder::publish(model::finder::Snapshot {
             matches: self.finder_matches.clone(),
             capped: (self.project.files.len() >= MAX_FILES).then_some(MAX_FILES),
         });
@@ -604,8 +591,6 @@ impl Reader {
     /// Hides the finder and gives the keys back to the reader.
     pub(crate) fn hide_finder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.finder_open = false;
-        self.finder.update(cx, |finder, _| finder.close());
-        self.focus.focus(window, cx);
         cx.notify();
     }
 
@@ -626,7 +611,7 @@ impl Reader {
                 self.project.is_markdown = is_markdown(path);
                 // The same file keeps its place: the editor swaps the text in, and the scroll position
                 // and caret survive.
-                self.project.code = Some(nsh::source::Shared(Arc::from(text)));
+                self.project.code = Some(model::source::Shared(Arc::from(text)));
                 self.project.notice = None;
             }
             Err(error) => {
@@ -645,22 +630,22 @@ impl Reader {
     /// The file tree beside the viewer, drawn by NSH from what it publishes. `lead` and `trail` are
     /// the window's own controls, when this is the leftmost or rightmost pane.
     #[hotpath::measure(impl_type = "Reader")]
-    pub(crate) fn explorer(&self, lead: Vec<nsh::header::Control>, trail: Vec<nsh::header::Control>, cx: &mut Context<Self>) -> AnyElement {
+    pub(crate) fn publish_explorer(&self, (lead, trail): (Vec<model::header::Control>, Vec<model::header::Control>)) {
         let diff = self.mode == Mode::Diff;
         let tree = if diff { &self.project.changes_tree } else { &self.project.files_tree };
         let body = if diff && self.project.changes.is_empty() {
-            nsh::explorer::Body::Empty("No changes".into())
+            model::explorer::Body::Empty("No changes".into())
         } else {
             let marks = &self.project.marks;
-            nsh::explorer::Body::Rows(
+            model::explorer::Body::Rows(
                 tree.rows()
                     .into_iter()
-                    .map(|row| nsh::explorer::Entry { mark: diff.then(|| marks.get(row.id.as_str()).copied()).flatten(), row })
+                    .map(|row| model::explorer::Entry { mark: diff.then(|| marks.get(row.id.as_str()).copied()).flatten(), row })
                     .collect(),
             )
         };
-        nsh::strip::publish(nsh::strip::Snapshot {
-            worktree: self.project.worktree.as_ref().map(|wt| nsh::strip::Worktree {
+        model::strip::publish(model::strip::Snapshot {
+            worktree: self.project.worktree.as_ref().map(|wt| model::strip::Worktree {
                 branch: wt.spec.branch.clone(),
                 confirm_discard: self.confirm_discard,
             }),
@@ -668,12 +653,11 @@ impl Reader {
                 .project
                 .pr
                 .as_ref()
-                .map(|pr| nsh::strip::Pr::Opened { label: format!("PR #{} · {} files", pr.number, self.project.changes.len()) })
-                .or_else(|| diff.then(|| nsh::strip::Pr::Asking { status: self.pr_status.clone(), opening: self.opening })),
+                .map(|pr| model::strip::Pr::Opened { label: format!("PR #{} · {} files", pr.number, self.project.changes.len()) })
+                .or_else(|| diff.then(|| model::strip::Pr::Asking { status: self.pr_status.clone(), opening: self.opening })),
             pr_reset: self.pr_serial,
         });
-        nsh::explorer::publish(nsh::explorer::Snapshot { changes: diff, body, ..Default::default() }.with_chrome(nsh::header::Chrome { glass: crate::reader::render::glass(cx), lead, trail }));
-        div().size_full().child(self.explorer_pane.clone()).into_any_element()
+        model::explorer::publish(model::explorer::Snapshot { changes: diff, body, ..Default::default() }.with_chrome(model::header::Chrome { glass: false, lead, trail }));
     }
 
     /// Opens, or shows the diff of, the file selected in the explorer's tree, as clicking it does.
@@ -720,7 +704,7 @@ impl Reader {
 
     /// The file tree is drawn beside the viewer: the pane is wide enough for both.
     pub(crate) fn tree_visible(&self) -> bool {
-        !self.viewer_narrow.get()
+        true
     }
 
     pub(crate) fn pick_hint(&self, what: &str) -> String {

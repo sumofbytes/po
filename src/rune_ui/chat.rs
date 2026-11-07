@@ -387,14 +387,14 @@ fn composer<S: 'static>(k: &Kit, snapshot: &Snapshot, state: &State, at: At<S>) 
 }
 
 /// The header's title and status lines.
-fn header(k: &Kit, snapshot: &Snapshot) -> El {
-    let mut bar = row().w_full().items_center().gap(12.0).px(16.0).py(8.0).child(row().grow(1.0).min_w(0.0).child(text(snapshot.title.clone()).font(BODY).color(k.c.text_base)));
+fn header<S: 'static>(k: &Kit, snapshot: &Snapshot) -> El {
+    let mut bar = row().w_full().items_center().gap(12.0).px(16.0).py(8.0).child(super::header::controls::<S>(k, &snapshot.lead)).child(row().grow(1.0).min_w(0.0).child(text(snapshot.title.clone()).font(BODY).color(k.c.text_base)));
     for status in &snapshot.statuses {
         bar = bar.child(muted(k, status.clone()));
     }
-    bar
+    bar.child(super::header::controls::<S>(k, &snapshot.trail))
 }
 
 pub fn view<S: 'static>(snapshot: &Snapshot, state: &State, k: &Kit, at: At<S>) -> El {
-    col().w_full().h_full().min_h(0.0).child(header(k, snapshot)).child(transcript::<S>(k, snapshot)).child(composer::<S>(k, snapshot, state, at))
+    col().w_full().h_full().min_h(0.0).child(header::<S>(k, snapshot)).child(transcript::<S>(k, snapshot)).child(composer::<S>(k, snapshot, state, at))
 }

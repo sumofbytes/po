@@ -111,12 +111,12 @@ impl Date {
     /// `Tuesday, November 5`.
     pub fn long(self) -> String {
         let (_, month, day) = self.ymd();
-        format!("{}, {} {day}", crate::nsh::sentence(WEEKDAYS[self.weekday()]), crate::nsh::sentence(MONTHS[month as usize - 1]))
+        format!("{}, {} {day}", crate::sentence(WEEKDAYS[self.weekday()]), crate::sentence(MONTHS[month as usize - 1]))
     }
 
     /// `Tue`.
     pub fn short_weekday(self) -> String {
-        crate::nsh::sentence(&WEEKDAYS[self.weekday()][..3])
+        crate::sentence(&WEEKDAYS[self.weekday()][..3])
     }
 }
 

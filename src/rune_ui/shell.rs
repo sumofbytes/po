@@ -6,6 +6,8 @@ use rune_kit::{Kit, PaneState, SplitView};
 
 use super::{agent, chat, diff, explorer, finder, settings, sidebar, source, tabs, terminal};
 use crate::model;
+use crate::model::bus::{Cmd, send};
+use crate::reader::render::Layout;
 
 /// What the `Reader` last published for a screen, and the channel it comes through.
 pub struct Feed<T> {
@@ -29,19 +31,10 @@ impl<T: Clone> Feed<T> {
     }
 }
 
-/// What the main pane shows.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Page {
-    Terminal,
-    Settings,
-}
-
 pub struct Shell {
-    pub page: Page,
     pub sidebar: PaneState,
     pub viewer: PaneState,
     pub settings: Option<settings::Page>,
-    pub term: terminal::Term,
     /// The sidebar's filter, and what the `Reader` last published for it.
     pub side: sidebar::State,
     pub sidebar_feed: Feed<model::sidebar::Snapshot>,
@@ -58,19 +51,16 @@ pub struct Shell {
     pub chat_feed: Feed<model::chat::Snapshot>,
     pub chat: chat::State,
     pub finder: finder::State,
+    finder_was_open: bool,
     pub finder_feed: Feed<model::finder::Snapshot>,
-    /// The Ctrl+P finder is up over the main pane.
-    pub finder_open: bool,
 }
 
 impl Default for Shell {
     fn default() -> Self {
         Self {
-            page: Page::Terminal,
             sidebar: PaneState::new(260.0).range(180.0, 420.0),
             viewer: PaneState::new(460.0).range(280.0, 900.0).collapsed(),
             settings: None,
-            term: terminal::Term::default(),
             side: sidebar::State::default(),
             sidebar_feed: Feed::new(model::sidebar::watch()),
             explorer: explorer::State::default(),
@@ -86,18 +76,30 @@ impl Default for Shell {
             chat_feed: Feed::new(model::chat::watch()),
             chat: chat::State::default(),
             finder: finder::State::default(),
+            finder_was_open: false,
             finder_feed: Feed::new(model::finder::watch()),
-            finder_open: false,
         }
     }
 }
 
 impl Shell {
-    pub fn show(&mut self, page: Page) {
-        if page == Page::Settings && self.settings.is_none() {
-            self.settings = Some(settings::Page::load(false));
+    /// Follows the layout the `Reader` has: the panes that are open, the settings page that is up.
+    pub fn follow(&mut self, layout: &Layout, viewer_left: bool) {
+        self.sidebar.set_open(layout.left_open);
+        // The viewer is the right pane unless it fills the middle or the conversation is.
+        self.viewer.set_open(layout.side_open && layout.agent_open && !layout.home_open && !layout.issues_open);
+        if layout.settings_open && self.settings.is_none() {
+            self.settings = Some(settings::Page::load(viewer_left));
         }
-        self.page = page;
+        if !layout.settings_open {
+            self.settings = None;
+        }
+        if layout.finder_open && !self.finder_was_open {
+            self.finder.query = rune::TextEdit::new("");
+            self.finder.query.focused = true;
+            self.finder.at = 0;
+        }
+        self.finder_was_open = layout.finder_open;
     }
 
     /// Takes what the `Reader` published since the last call; true when the view is stale.
@@ -127,17 +129,14 @@ impl Shell {
         stale
     }
 
-    /// A key nothing in the window took: the shell's, while it is the page shown.
-    pub fn key(&mut self, event: &rune::KeyEvent) -> bool {
-        self.page == Page::Terminal && self.term.key(event)
-    }
-
-    /// Takes what a screen asked of the shell: a page that saved or closed is put away.
+    /// Takes what a screen asked of the shell: a settings page that saved or closed says so to the
+    /// `Reader`, which puts it away.
     pub fn settle(&mut self) {
         if let Some(outcome) = self.settings.as_mut().and_then(|page| page.outcome.take()) {
-            let _ = outcome;
-            self.settings = None;
-            self.page = Page::Terminal;
+            if outcome == settings::Outcome::Saved {
+                send(Cmd::SettingsSaved);
+            }
+            send(Cmd::CloseSettings);
         }
     }
 }
@@ -146,6 +145,11 @@ impl Shell {
 pub trait Host: 'static {
     fn shell(&mut self) -> &mut Shell;
     fn shell_ref(&self) -> &Shell;
+    /// What the window shows and where.
+    fn layout(&self) -> Layout;
+    /// The shell of the project on screen, if it has started one.
+    fn terminal(&self) -> Option<&terminal::Term>;
+    fn terminal_mut(&mut self) -> Option<&mut terminal::Term>;
 }
 
 fn sidebar_of<S: Host>(s: &mut S) -> &mut PaneState {
@@ -157,7 +161,7 @@ fn viewer_of<S: Host>(s: &mut S) -> &mut PaneState {
 }
 
 fn term_of<S: Host>(s: &mut S) -> &mut terminal::Term {
-    &mut s.shell().term
+    s.terminal_mut().expect("the terminal is drawn only where there is one")
 }
 
 fn settings_of<S: Host>(s: &mut S) -> &mut settings::Page {
@@ -192,45 +196,66 @@ fn finder_of<S: Host>(s: &mut S) -> &mut finder::State {
     &mut s.shell().finder
 }
 
-/// The viewer pane: the agent's tabs, the strips, and the tree. The source and diff screens go
-/// beside the tree once they are ported.
-fn viewer<S: Host>(shell: &Shell, host: &S, k: &Kit) -> El {
-    // The tree's own mode says which of the two panes goes under it.
-    let content = if shell.tabs_feed.value.shown.is_some() {
-        // A tab of the agent's: its document or form takes the place of the files.
-        return col()
-            .w_full()
-            .h_full()
-            .min_h(0.0)
-            .child(tabs::view::<S>(&shell.tabs_feed.value, k))
-            .child(col().w_full().grow(1.0).min_h(0.0).child(agent::view::<S>(&shell.agent_feed.value, &shell.agent, k, agent_of::<S>)));
-    } else if shell.explorer_feed.value.changes {
-        diff::view::<S>(&shell.diff_feed.value, host, k, diff_ref::<S>, diff_mut::<S>)
-    } else {
-        source::view::<S>(&shell.source_feed.value, &shell.source, k)
-    };
+/// The viewer pane: the agent's tabs, then what the viewer shows: the terminal, an agent's own
+/// view, or the strips and the tree with the file or the diff beside it.
+fn viewer<S: Host>(shell: &Shell, host: &S, layout: &Layout, k: &Kit) -> El {
+    let tabs_bar = tabs::view::<S>(&shell.tabs_feed.value, k);
+    if layout.terminal_shown {
+        let body = match host.terminal() {
+            Some(term) => terminal::view::<S>(term, k, term_of::<S>),
+            None => col(),
+        };
+        return col().w_full().h_full().min_h(0.0).child(tabs_bar).child(agent::view::<S>(&shell.agent_feed.value, &shell.agent, k, agent_of::<S>)).child(col().w_full().grow(1.0).min_h(0.0).child(body));
+    }
+    if layout.showing_agent {
+        return col().w_full().h_full().min_h(0.0).child(tabs_bar).child(col().w_full().grow(1.0).min_h(0.0).child(agent::view::<S>(&shell.agent_feed.value, &shell.agent, k, agent_of::<S>)));
+    }
+    let content = if layout.diff { diff::view::<S>(&shell.diff_feed.value, host, k, diff_ref::<S>, diff_mut::<S>) } else { source::view::<S>(&shell.source_feed.value, &shell.source, k) };
     col()
         .w_full()
         .h_full()
         .min_h(0.0)
-        .child(tabs::view::<S>(&shell.tabs_feed.value, k))
+        .child(tabs_bar)
         .child(explorer::strips::<S>(&shell.strip_feed.value, &shell.explorer, k, explorer_of::<S>))
         .child(col().w_full().grow(1.0).min_h(0.0).child(explorer::tree::<S>(&shell.explorer_feed.value, k)))
         .child(col().w_full().grow(2.0).min_h(0.0).child(content))
 }
 
-/// The whole window.
+fn placeholder(k: &Kit, what: &str) -> El {
+    col().w_full().h_full().center().child(rune::text(what.to_string()).color(k.c.text_muted))
+}
+
+/// The whole window, laid out as the `Reader` says: the sidebar, a middle pane and a right pane
+/// that are the conversation and the viewer, either way round, or a page (Home, the issues, the
+/// settings, the finder) in place of the conversation.
 pub fn view<S: Host>(host: &S, k: &Kit) -> El {
     let shell = host.shell_ref();
-    let main = match (&shell.page, &shell.settings) {
-        _ if shell.finder_open => finder::view::<S>(&shell.finder_feed.value, &shell.finder, k, finder_of::<S>),
-        (Page::Settings, Some(page)) => settings::view::<S>(page, k, settings_of::<S>),
-        // A thread on screen has its conversation; none, the terminal.
-        _ if !shell.chat_feed.value.title.is_empty() => chat::view::<S>(&shell.chat_feed.value, &shell.chat, k, chat_of::<S>),
-        _ => terminal::view::<S>(&shell.term, k, term_of::<S>),
+    let layout = host.layout();
+    let chat = || chat::view::<S>(&shell.chat_feed.value, &shell.chat, k, chat_of::<S>);
+    let pane = || viewer::<S>(shell, host, &layout, k);
+    let page = if layout.finder_open {
+        Some(finder::view::<S>(&shell.finder_feed.value, &shell.finder, k, finder_of::<S>))
+    } else if let (true, Some(page)) = (layout.settings_open, &shell.settings) {
+        Some(settings::view::<S>(page, k, settings_of::<S>))
+    } else if layout.home_open {
+        Some(placeholder(k, "Home"))
+    } else if layout.issues_open {
+        Some(placeholder(k, "Issues"))
+    } else {
+        None
     };
-    SplitView::new(main)
-        .sidebar::<S>(&shell.sidebar, sidebar_of::<S>, sidebar::view::<S>(&shell.sidebar_feed.value, &shell.side, k, side_of::<S>))
-        .inspector::<S>(&shell.viewer, viewer_of::<S>, viewer::<S>(shell, host, k))
-        .build(k)
+    // The viewer is the middle pane when it is swapped with the conversation or fills the window.
+    let focus = layout.side_open && !layout.agent_open;
+    let (middle, right) = match page {
+        Some(page) => (page, None),
+        None if !layout.side_open => (chat(), None),
+        None if focus => (pane(), None),
+        None if layout.swapped => (pane(), Some(chat())),
+        None => (chat(), Some(pane())),
+    };
+    let split = SplitView::new(middle).sidebar::<S>(&shell.sidebar, sidebar_of::<S>, sidebar::view::<S>(&shell.sidebar_feed.value, &shell.side, k, side_of::<S>));
+    match right {
+        Some(right) => split.inspector::<S>(&shell.viewer, viewer_of::<S>, right).build(k),
+        None => split.build(k),
+    }
 }

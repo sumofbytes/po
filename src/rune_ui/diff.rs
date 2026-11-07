@@ -55,11 +55,13 @@ pub fn view<S: 'static>(snapshot: &Snapshot, host: &S, k: &Kit, get: fn(&S) -> &
         .gap(8.0)
         .px(12.0)
         .py(8.0)
+        .child(super::header::controls::<S>(k, &snapshot.lead))
         .child(row().grow(1.0).min_w(0.0).child(text(snapshot.title.clone()).font(NAME).color(k.c.text_base)))
         .child(text(format!("+{added}")).font(CAPTION).color(k.c.success.fg))
         .child(text(format!("-{removed}")).font(CAPTION).color(k.c.danger.fg))
         .child(layout::<S>(k, "Inline", false, snapshot.split))
-        .child(layout::<S>(k, "Split", true, snapshot.split));
+        .child(layout::<S>(k, "Split", true, snapshot.split))
+        .child(super::header::controls::<S>(k, &snapshot.trail));
     let body = match &snapshot.body {
         Body::Hint(message) => centered(k, message),
         Body::NoChanges => centered(k, "No textual changes"),

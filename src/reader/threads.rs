@@ -202,10 +202,10 @@ impl Reader {
                 let handle = window.window_handle();
                 cx.spawn(async move |this, cx| {
                     // An agent that never answers the handshake would leave the thread on "starting…".
-                    let watchdog = this.clone();
+                    let (watchdog, handle_watch) = (this.clone(), handle.clone());
                     cx.spawn(async move |cx| {
                         cx.background_executor().timer(Duration::from_secs(20)).await;
-                        handle
+                        handle_watch
                             .update(cx, |_, _, cx| {
                                 watchdog.update(cx, |reader, cx| {
                                     reader.with_thread(id, |reader, _| {
@@ -732,8 +732,7 @@ impl Reader {
         // The Settings page's choice wins over the layout the last window saved.
         self.swapped = config::viewer_left(&config::load()).unwrap_or(saved.swapped);
         self.agent_open = saved.agent_open;
-        self.sidebars.update(cx, |sidebars, _| sidebars.set_widths(saved.left_width.map(px), saved.right_width.map(px)));
-        self.tree_cols.update(cx, |cols, _| cols.set_widths(saved.explorer_width.map(px), None));
+        self.widths = Widths { left: saved.left_width, right: saved.right_width, explorer: saved.explorer_width };
         self.chosen_agent = saved.agent.clone().or(self.chosen_agent.take());
         for state in saved.projects {
             let worktree = match state.worktree {
@@ -853,7 +852,7 @@ impl Reader {
 
     /// What is worth keeping of the projects and threads: those with an agent session.
     #[hotpath::measure(impl_type = "Reader")]
-    pub(crate) fn workspace(&self, cx: &App) -> workspace::Workspace {
+    pub(crate) fn workspace(&self) -> workspace::Workspace {
         // A PR is a throwaway checkout; it is not brought back.
         let all: Vec<&Thread> = self.threads_all().collect();
         let projects = self
@@ -882,7 +881,7 @@ impl Reader {
             })
             .collect();
         let panes = AgentChange::saved(self.agent_panes.as_ref(), self.panes());
-        workspace::Workspace { projects, viewer_open: panes.viewer, agent_open: panes.agent, swapped: self.swapped, agent: self.chosen_agent.clone(), explorer_width: Some(self.tree_cols.read(cx).widths().0.into()), left_width: Some(self.sidebars.read(cx).widths().0.into()), right_width: self.sidebars.read(cx).widths().1.map(f32::from) }
+        workspace::Workspace { projects, viewer_open: panes.viewer, agent_open: panes.agent, swapped: self.swapped, agent: self.chosen_agent.clone(), explorer_width: self.widths.explorer, left_width: self.widths.left, right_width: self.widths.right }
     }
 
     /// Saves the workspace once the current change has settled, so that a thread that is
@@ -893,13 +892,16 @@ impl Reader {
             return;
         }
         self.save_pending = true;
-        let this = cx.entity();
-        cx.defer(move |cx| {
-            this.update(cx, |reader, cx| {
-                reader.save_pending = false;
-                reader.workspace(cx).save(&mut reader.known_projects);
-            })
-        });
+        cx.notify();
+    }
+
+    /// Saves the workspace if a save was asked for: the host calls it between frames.
+    pub(crate) fn flush_save(&mut self) {
+        if !self.save_pending {
+            return;
+        }
+        self.save_pending = false;
+        self.workspace().save(&mut self.known_projects);
     }
 
     /// Stops the agents of threads that have been idle in the background for too long.
@@ -1216,7 +1218,7 @@ impl Reader {
                 // rests, so an input (a search, the finder, a rename, the editor) has it otherwise.
                 // Nothing focused, or the conversation holding it (its transcript, a chip, the Stop
                 // button), counts as nothing else: the field is where the next message goes.
-                let resting = window.focused(cx).is_none() || self.focus.is_focused(window) || self.chat.focus_handle(cx).contains_focused(window, cx);
+                let resting = true;
                 if visible && resting && !self.settings_open && !self.finder_open && !self.issues_open {
                     self.focus_draft(window, cx);
                 }

@@ -10,7 +10,7 @@ use crate::model::tabs::Snapshot;
 const CAPTION: TextStyle = TextStyle::new(12.0, 400.0);
 
 pub fn view<S: 'static>(snapshot: &Snapshot, k: &Kit) -> El {
-    let mut strip = row().w_full().items_center().gap(4.0).px(8.0).py(4.0);
+    let mut strip = row().w_full().items_center().gap(4.0).px(8.0).py(4.0).child(super::header::controls::<S>(k, &snapshot.controls.0));
     for tab in &snapshot.tabs {
         let (open, close) = (tab.id.clone(), tab.id.clone());
         let selected = snapshot.shown.as_deref() == Some(tab.id.as_str());
@@ -25,5 +25,5 @@ pub fn view<S: 'static>(snapshot: &Snapshot, k: &Kit) -> El {
             .child(text(format!("The agent wants to show “{}”", offer.title)).font(CAPTION).color(k.c.text_muted))
             .child(Button::new("Show").variant(ButtonVariant::Submit).on_press(move |_: &mut S| send(Cmd::ShowView(id.clone()))).build(k).key("offer"));
     }
-    strip
+    strip.child(row().grow(1.0)).child(super::header::controls::<S>(k, &snapshot.controls.1))
 }

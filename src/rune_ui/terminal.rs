@@ -34,7 +34,21 @@ fn rgb(c: Color) -> Rgb {
 impl Term {
     /// Starts the shell in `cwd`; `wake` is called, from another thread, when it has drawn.
     pub fn start(&mut self, cwd: &std::path::Path, kit: &Kit, wake: Waker) {
-        self.session = Session::spawn(cwd, COLS, ROWS, (rgb(kit.c.text_base), rgb(kit.c.bg_base)), move || wake()).ok();
+        self.start_with(cwd, (rgb(kit.c.text_base), rgb(kit.c.bg_base)), move || wake());
+    }
+
+    /// [`Self::start`], with the colours (foreground, background) the shell is told it has.
+    pub fn start_with(&mut self, cwd: &std::path::Path, theme: (Rgb, Rgb), wake: impl Fn() + Send + 'static) {
+        self.session = Session::spawn(cwd, COLS, ROWS, theme, wake).ok();
+    }
+
+    /// The shell has ended.
+    pub fn exited(&self) -> bool {
+        self.session.as_ref().is_some_and(|session| session.frame().exited.is_some())
+    }
+
+    pub fn frame(&self) -> &Arc<Frame> {
+        &self.frame
     }
 
     /// True when the shell drew something new since the last call.
