@@ -509,17 +509,6 @@ fn tool_result(update: &Value) -> String {
     out.join("\n")
 }
 
-/// The width, in pixels, the viewer's file tree starts with, and the range it is dragged within.
-const TREE_WIDTH: f32 = 240.0;
-/// A viewer pane narrower than this, in pixels, has no room for the file tree beside the file:
-/// the widest tree leaves the file this much less than that.
-const TREE_MIN_PANE: f32 = 560.0;
-
-/// Whether a viewer pane `width` pixels wide has room for the file tree beside the file.
-fn tree_fits(width: f32) -> bool {
-    width >= TREE_MIN_PANE
-}
-
 /// What an empty viewer says to do: pick from the tree, or how to get it back.
 fn pick_hint(what: &str, tree_visible: bool) -> String {
     if tree_visible {
@@ -1489,7 +1478,6 @@ struct Reader {
     finder_matches: Vec<String>,
     finder_open: bool,
     settings_open: bool,
-    painted: bool,
     agents: Vec<config::Agent>,
     /// Tell the desktop when a thread finishes or asks while it isn't being looked at.
     notifications: bool,
@@ -1614,7 +1602,6 @@ impl Reader {
             finder_open: false,
             pr_serial: 0,
             settings_open: false,
-            painted: false,
             agents,
             notifications: settings["notifications"].as_bool().unwrap_or(true),
             idle_after: (idle_minutes > 0).then(|| Duration::from_secs(idle_minutes * 60)),
@@ -2560,13 +2547,6 @@ mod tests {
         assert_eq!(route(false, false, false, false, true, false, false), Where::Queue, "ACP mid-turn");
         // A thread that is busy is not starting anything, however the rest stands.
         assert_eq!(route(false, false, false, true, true, false, false), Where::Queue);
-    }
-
-    #[test]
-    fn the_file_tree_needs_a_pane_of_at_least_the_minimum_width() {
-        use super::{TREE_MIN_PANE, tree_fits};
-        assert!(tree_fits(TREE_MIN_PANE));
-        assert!(!tree_fits(TREE_MIN_PANE - 1.0));
     }
 
     #[test]

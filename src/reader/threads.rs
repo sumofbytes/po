@@ -3,7 +3,6 @@
 use crate::*;
 
 /// The longest name a user can give a thread, in characters.
-const RENAME_MAX: usize = 120;
 
 impl Reader {
     /// The user's answer to a command Po asked about: remember it and start the agent, or leave it stopped.
@@ -226,17 +225,27 @@ impl Reader {
                     })
                     .detach();
                     while let Some(event) = events.next().await {
+                        // Everything the channel holds joins this one: a long history replays as
+                        // thousands of updates, and one hop per update would wake the window and
+                        // pay for a frame for every single message of it.
+                        let mut batch = vec![event];
+                        while let Ok(event) = events.try_recv() {
+                            batch.push(event);
+                        }
                         let done = handle.update(cx, |_, window, cx| {
                             this.update(cx, |reader, cx| {
-                                // The thread may have been closed, or its agent replaced, since.
                                 reader
                                     .with_thread(id, |reader, visible| {
-                                        let current = reader.thread.generation == generation;
-                                        if current {
+                                        for event in batch {
+                                            // The thread may have been closed, or its agent
+                                            // replaced, since: the rest of the batch is dropped.
+                                            if reader.thread.generation != generation {
+                                                return false;
+                                            }
                                             // The waiters and the parent hear of a change of state.
                                             reader.observed(window, cx, |reader, window, cx| reader.on_event(event, visible, window, cx));
                                         }
-                                        current
+                                        reader.thread.generation == generation
                                     })
                                     .unwrap_or(false)
                             })
@@ -723,7 +732,7 @@ impl Reader {
     /// screen is the one `po` was started on; the others wait in the background and the
     /// threads sleep until shown. True if the project on screen got its threads back.
     #[hotpath::measure(impl_type = "Reader")]
-    pub(crate) fn restore(&mut self, saved: workspace::Workspace, cx: &mut Context<Self>) -> bool {
+    pub(crate) fn restore(&mut self, saved: workspace::Workspace, _cx: &mut Context<Self>) -> bool {
         let mut resumed = false;
         let mut seen = HashSet::new();
         // Children of threads that came back with them, by the parent's session.
@@ -1032,26 +1041,6 @@ impl Reader {
         self.close_any_thread(pid, tid, window, cx);
     }
 
-    /// Gives thread `tid` of project `pid` the name `name`, trimmed to one line; a blank name
-    /// takes the user's name away.
-    pub(crate) fn rename_thread(&mut self, pid: u64, tid: u64, name: &str, cx: &mut Context<Self>) {
-        let name = name.split_whitespace().collect::<Vec<_>>().join(" ");
-        let name: String = name.chars().take(RENAME_MAX).collect();
-        let name = Some(name).filter(|name| !name.is_empty());
-        let thread = if pid == self.project_id {
-            std::iter::once(&mut self.thread).chain(self.parked.iter_mut()).find(|t| t.id == tid)
-        } else {
-            self.slots.iter_mut().find(|slot| slot.id == pid).and_then(|slot| std::iter::once(&mut slot.thread).chain(slot.parked.iter_mut()).find(|t| t.id == tid))
-        };
-        let Some(thread) = thread else { return };
-        if thread.renamed == name {
-            return;
-        }
-        thread.renamed = name;
-        self.request_save(cx);
-        cx.notify();
-    }
-
     /// Opens a blank thread in project `pid`.
     pub(crate) fn start_thread_in(&mut self, pid: u64, window: &mut Window, cx: &mut Context<Self>) {
         if pid != self.project_id {
@@ -1260,6 +1249,8 @@ impl Reader {
                 if !self.thread.ready {
                     self.thread.status = "failed to start".into();
                 }
+                // A load that failed is over: its error is drawn, as a finished history would be.
+                self.thread.loading = false;
                 self.return_pending();
                 self.thread.fail(error);
                 self.restore_queue(cx);
@@ -1270,6 +1261,7 @@ impl Reader {
             Event::Exited(status) => {
                 log::warn!("agent exited: {status}");
                 self.thread.ready = false;
+                self.thread.loading = false;
                 self.thread.status = "exited".into();
                 if self.thread.busy {
                     self.return_pending();

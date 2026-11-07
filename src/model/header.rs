@@ -16,8 +16,6 @@ pub enum Control {
     Terminal(bool),
     /// Gives the viewer the room by hiding the conversation (or gives it back).
     Focus(bool),
-    /// Back to the explorer, in a pane too narrow for it beside the file.
-    Explorer,
 }
 
 /// What the shell adds to a screen's snapshot: the window's theme and the controls its header

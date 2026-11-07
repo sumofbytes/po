@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use rune::tok::{Family, TextStyle};
-use rune::{WheelEvent, Color, El, Key as RuneKey, KeyEvent, Span, Tx, Waker, col, color, text};
+use rune::{WheelEvent, Color, El, Key as RuneKey, KeyEvent, Span, Tx, col, color, text};
 use rune_kit::Kit;
 
 use crate::terminal::{self, Frame, Key, KeyInput, Rgb, Session};
@@ -32,19 +32,8 @@ fn c(rgb: Rgb) -> Color {
     color::hex(&format!("#{:02x}{:02x}{:02x}", rgb.0, rgb.1, rgb.2)).expect("a valid colour")
 }
 
-fn rgb(c: Color) -> Rgb {
-    let hex = c.hex();
-    let byte = |i: usize| u8::from_str_radix(&hex[i..i + 2], 16).unwrap_or(0);
-    Rgb(byte(1), byte(3), byte(5))
-}
-
 impl Term {
-    /// Starts the shell in `cwd`; `wake` is called, from another thread, when it has drawn.
-    pub fn start(&mut self, cwd: &std::path::Path, kit: &Kit, wake: Waker) {
-        self.start_with(cwd, (rgb(kit.c.text_base), rgb(kit.c.bg_base)), move || wake());
-    }
-
-    /// [`Self::start`], with the colours (foreground, background) the shell is told it has.
+    /// Starts the shell in `cwd`, with the colours (foreground, background) the shell is told it has.
     pub fn start_with(&mut self, cwd: &std::path::Path, theme: (Rgb, Rgb), wake: impl Fn() + Send + 'static) {
         self.session = Session::spawn(cwd, COLS, ROWS, theme, wake).ok();
     }
@@ -52,10 +41,6 @@ impl Term {
     /// The shell has ended.
     pub fn exited(&self) -> bool {
         self.session.as_ref().is_some_and(|session| session.frame().exited.is_some())
-    }
-
-    pub fn frame(&self) -> &Arc<Frame> {
-        &self.frame
     }
 
     /// True when the shell drew something new since the last call.
@@ -95,10 +80,6 @@ impl Term {
         if let Some(session) = &self.session {
             session.paste(text.to_string());
         }
-    }
-
-    pub fn running(&self) -> bool {
-        self.session.is_some()
     }
 
     /// Sends a key to the shell; false when there is none to take it.

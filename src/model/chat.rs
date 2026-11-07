@@ -34,13 +34,6 @@ pub struct Grant {
     pub approvals: bool,
 }
 
-impl Grant {
-    /// What a thread's agent has until the user sets it; the Reader's `Grant::initial`.
-    pub fn initial() -> Self {
-        Self { scope: Scope::Global, read: false, approvals: false }
-    }
-}
-
 impl Default for Grant {
     fn default() -> Self {
         Self { scope: Scope::Viewer, read: false, approvals: false }
@@ -67,15 +60,6 @@ pub struct Picture {
     pub uri: Arc<str>,
     /// Its pixels, which give the box it is drawn in its shape.
     pub size: (u32, u32),
-}
-
-impl Picture {
-    /// The box the picture fills, as large as fits `w` by `h` points without a larger side than it has.
-    pub(crate) fn fit(&self, w: f32, h: f32) -> (f32, f32) {
-        let (pw, ph) = (self.size.0.max(1) as f32, self.size.1.max(1) as f32);
-        let scale = (w / pw).min(h / ph).min(1.);
-        ((pw * scale).round(), (ph * scale).round())
-    }
 }
 
 /// What waits to be sent when the turn is over: `kind` says how it got there (nothing is the
@@ -208,17 +192,6 @@ pub enum Item {
     Agent { index: usize, blocks: Arc<Vec<Block>> },
 }
 
-/// Which rows a message draws, decided once per message and kept while it is one kind only.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) enum Shown {
-    /// [`Item::User`] as [`user_row`].
-    User,
-    /// [`Item::Agent`] as [`agent_row`].
-    Agent,
-    /// Nothing: the message is not there yet.
-    Nothing,
-}
-
 /// What resuming a session shows: the sessions on offer, or why there are none.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Picking {
@@ -348,12 +321,6 @@ pub enum Cmd {
     Open(String),
     /// Which session to resume.
     Resume(String),
-    /// The agent's sessions are asked for.
-    History,
-    /// The files, or the changes (true), in the viewer.
-    Show(bool),
-    /// The terminal is shown, started if the project has none yet.
-    Terminal,
     /// The agent a new thread starts with, and the one on screen switches to.
     PickAgent(String),
     /// A setting of the session is changed.

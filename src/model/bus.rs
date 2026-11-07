@@ -22,14 +22,10 @@ pub enum Cmd {
     /// A project row was pressed: fold or unfold its threads, and show it.
     ToggleProject(u64),
     StartThread(u64),
-    CloseProject(u64),
     /// "N more" or "Show less" under a project.
     ToggleMore(u64),
     OpenThread(u64, u64),
     CloseThread(u64, u64),
-    /// A thread is given a name of the user's own; an empty one gives it back the name made
-    /// from what it was first asked.
-    RenameThread(u64, u64, String),
     AddProject,
     NewThread,
     OpenSettings,
@@ -50,11 +46,8 @@ pub enum Cmd {
     /// The files, or the changes (true), in the viewer; or the terminal.
     Show(bool),
     Terminal,
-    /// A narrow viewer pane shows the explorer (true) or the file.
-    Browse(bool),
     /// Markdown shown rendered, or as its source.
     ToggleRendered,
-    OpenUrl(String),
     /// A tab of the viewer: an agent's view or form, closing one.
     ShowView(String),
     CloseView(String),
@@ -104,13 +97,4 @@ pub fn send(cmd: Cmd) {
 /// The commands, for the one that runs them.
 pub fn commands() -> Option<Commands> {
     CHANNEL.1.lock().ok()?.take()
-}
-
-/// Held by a test of a screen for as long as it runs: the screens share this one channel, so they
-/// take turns. Starts with nothing waiting in it.
-#[cfg(test)]
-pub fn lock() -> std::sync::MutexGuard<'static, Option<Commands>> {
-    let mut commands = CHANNEL.1.lock().unwrap_or_else(|e| e.into_inner());
-    while commands.as_mut().is_some_and(|c| c.try_recv().is_ok()) {}
-    commands
 }

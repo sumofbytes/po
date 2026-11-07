@@ -1,8 +1,8 @@
 //! The Home page, where Po opens: what is due today and what is late across every open project,
-//! the week, and the threads to pick up. Counterpart of `src/nsh/home.rs`; the data is
+//! and the threads to pick up. Counterpart of `src/nsh/home.rs`; the data is
 //! [`crate::model::home`]'s.
 use rune::{El, ScrollSpec, col, row, text};
-use rune_kit::{Button, ButtonVariant, Kit};
+use rune_kit::{Button, ButtonVariant, ControlSize, Kit};
 
 use super::work::{BODY, SMALL, TITLE, card, metric, muted, priority_tint, status_glyph, status_tint};
 use crate::date::{Date, due_label};
@@ -42,28 +42,10 @@ fn task_row<S: 'static>(k: &Kit, task: &Task, today: Date, armed: bool, at: At<S
             }
         })))
         .child(row().w(3.0).h(18.0).radius(2.0).fill(priority_tint(k, task.priority)))
-        .child(k.interactive(row().key(format!("task-{}", task.key)).grow(1.0).min_w(0.0).child(text(task.title.clone()).font(BODY).color(k.c.text_base)).on_press(move |_: &mut S| send(Cmd::OpenIssue(open.clone(), number)))))
+        .child(k.interactive(row().key(format!("task-{}", task.key)).grow(1.0).min_w(0.0).child(text(task.title.clone()).font(BODY).color(k.c.text_base).truncate()).on_press(move |_: &mut S| send(Cmd::OpenIssue(open.clone(), number)))))
         .child(Button::new("Work on this").variant(ButtonVariant::Ghost).on_press(move |_: &mut S| send(Cmd::WorkOnIssue(work.clone(), number))).build(k))
         .child(muted(k, task.project.clone()))
         .child(row().w(64.0).justify_end().child(text(due).font(SMALL).color(if late { k.c.danger.fg } else { k.c.text_muted })))
-}
-
-fn week(k: &Kit, week: &[(Date, usize)], today: Date) -> El {
-    let mut strip = row().w_full().gap(4.0);
-    for &(day, due) in week {
-        let is_today = day == today;
-        let cell = col()
-            .grow(1.0)
-            .items_center()
-            .gap(2.0)
-            .py(8.0)
-            .radius(6.0)
-            .child(muted(k, day.short_weekday()))
-            .child(text(day.ymd().2.to_string()).font(BODY).color(k.c.text_base))
-            .child(text(if due > 0 { "•" } else { " " }).font(SMALL).color(k.c.warning.fg));
-        strip = strip.child(if is_today { cell.fill(k.c.layer_03) } else { cell });
-    }
-    strip
 }
 
 fn mark_note(k: &Kit, mark: Mark) -> (&'static str, rune::Color) {
@@ -85,8 +67,8 @@ fn thread_row<S: 'static>(k: &Kit, thread: &Pickup) -> El {
         .items_center()
         .gap(8.0)
         .py(6.0)
-        .child(col().grow(1.0).min_w(0.0).child(text(thread.label.clone()).font(BODY).color(k.c.text_base)).child(text(meta).font(SMALL).color(tint)))
-        .child(Button::new("Resume").variant(ButtonVariant::Ghost).on_press(move |_: &mut S| send(Cmd::OpenThread(project, id))).build(k))
+        .child(col().grow(1.0).min_w(0.0).child(text(thread.label.clone()).font(BODY).color(k.c.text_base).truncate()).child(text(meta).font(SMALL).color(tint).truncate()))
+        .child(row().w(72.0).justify_end().items_center().child(Button::new("Resume").variant(ButtonVariant::Outline).control_size(ControlSize::Small).on_press(move |_: &mut S| send(Cmd::OpenThread(project, id))).build(k)))
 }
 
 pub fn view<S: 'static>(model: &Model, state: &State, k: &Kit, at: At<S>) -> El {
@@ -113,7 +95,6 @@ pub fn view<S: 'static>(model: &Model, state: &State, k: &Kit, at: At<S>) -> El 
     let side = col()
         .w(340.0)
         .gap(16.0)
-        .child(card(k, "This week").child(week(k, &model.week, today)))
         .child(card(k, "Start").child(
             row()
                 .gap(8.0)

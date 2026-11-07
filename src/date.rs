@@ -113,11 +113,6 @@ impl Date {
         let (_, month, day) = self.ymd();
         format!("{}, {} {day}", crate::sentence(WEEKDAYS[self.weekday()]), crate::sentence(MONTHS[month as usize - 1]))
     }
-
-    /// `Tue`.
-    pub fn short_weekday(self) -> String {
-        crate::sentence(&WEEKDAYS[self.weekday()][..3])
-    }
 }
 
 /// A month by its name or the first three letters of it.

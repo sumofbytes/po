@@ -558,7 +558,7 @@ impl Reader {
     }
 
     /// Ctrl+P: shows the finder over the workspace's files, with the last query selected.
-    pub(crate) fn show_finder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn show_finder(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         self.finder_open = true;
         self.refind();
         model::finder::start(&self.finder_query);
@@ -589,7 +589,7 @@ impl Reader {
     }
 
     /// Hides the finder and gives the keys back to the reader.
-    pub(crate) fn hide_finder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn hide_finder(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         self.finder_open = false;
         cx.notify();
     }
@@ -689,12 +689,6 @@ impl Reader {
         if by_user {
             self.reveal_side(cx);
         }
-    }
-
-    /// Switches a narrow viewer pane between the explorer and the file.
-    pub(crate) fn set_browsing(&mut self, browse: bool, cx: &mut Context<Self>) {
-        self.browse = browse;
-        cx.notify();
     }
 
     /// Whether a thread answers the sidebar's filter: its title or its latest line says it.

@@ -96,8 +96,6 @@ enum Msg {
     Paste(String),
     Resize { cols: u16, rows: u16, cell: (u32, u32) },
     Scroll(isize),
-    /// The default foreground and background.
-    Theme(Rgb, Rgb),
     Exited(i32),
     Stop,
 }
@@ -190,10 +188,6 @@ impl Session {
     /// Scrolls the history by `lines`; up is negative.
     pub fn scroll(&self, lines: isize) {
         let _ = self.tx.send(Msg::Scroll(lines));
-    }
-
-    pub fn theme(&self, foreground: Rgb, background: Rgb) {
-        let _ = self.tx.send(Msg::Theme(foreground, background));
     }
 
     /// The window is now `cols` by `rows` cells of `cell` pixels.
@@ -307,7 +301,6 @@ fn emulate(rx: watched::Receiver<Msg>, to_shell: Sender<Vec<u8>>, backlog: Arc<A
                     let _ = terminal.resize(cols, rows, cell.0, cell.1);
                 }
                 Msg::Scroll(lines) => terminal.scroll_viewport(ScrollViewport::Delta(lines)),
-                Msg::Theme(fg, bg) => colors(&mut terminal, (fg, bg)),
                 Msg::Exited(status) => exited = Some(status),
                 Msg::Stop => break,
             }

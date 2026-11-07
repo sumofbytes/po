@@ -3,8 +3,8 @@
 use std::sync::Arc;
 
 use rune::tok::TextStyle;
-use rune::{El, col, row, text};
-use rune_kit::Kit;
+use rune::{El, Tx, col, row, text};
+use rune_kit::{Kit, SegmentedControl};
 use rune_kit::diff::{DiffMode, DiffState, DiffView, FileDiff};
 
 use crate::model::bus::{Cmd, send};
@@ -41,27 +41,21 @@ fn centered(k: &Kit, message: &str) -> El {
     col().w_full().grow(1.0).center().padding(16.0).child(text(message.to_string()).font(CAPTION).color(k.c.text_muted))
 }
 
-fn layout<S: 'static>(k: &Kit, label: &'static str, split: bool, current: bool) -> El {
-    let r = row().key(format!("layout-{label}")).px(8.0).py(2.0).radius(6.0).child(text(label).font(CAPTION).color(k.c.text_base)).on_press(move |_: &mut S| send(Cmd::SetSplit(split)));
-    k.interactive(if current == split { r.fill(k.c.layer_03) } else { r })
-}
-
 /// `get` and `get_mut` find the pane's [`State`] in the host's.
 pub fn view<S: 'static>(snapshot: &Snapshot, host: &S, k: &Kit, get: fn(&S) -> &State, get_mut: fn(&mut S) -> &mut State) -> El {
     let (added, removed) = snapshot.counts;
-    let bar = row()
+    let bar = super::header::ruled(k, row()
         .w_full()
         .items_center()
         .gap(8.0)
         .px(12.0)
-        .py(8.0)
+        .h(super::header::BAND)
         .child(super::header::controls::<S>(k, &snapshot.lead))
         .child(row().grow(1.0).min_w(0.0).child(text(snapshot.title.clone()).font(NAME).color(k.c.text_base)))
         .child(text(format!("+{added}")).font(CAPTION).color(k.c.success.fg))
         .child(text(format!("-{removed}")).font(CAPTION).color(k.c.danger.fg))
-        .child(layout::<S>(k, "Inline", false, snapshot.split))
-        .child(layout::<S>(k, "Split", true, snapshot.split))
-        .child(super::header::controls::<S>(k, &snapshot.trail));
+        .child(SegmentedControl::new(&["Inline", "Split"], Some(usize::from(snapshot.split))).label("Diff layout").fit().on_pick(|_: &mut S, i: usize, _: &mut Tx| send(Cmd::SetSplit(i == 1))).build(k))
+        .child(super::header::controls::<S>(k, &snapshot.trail)));
     let body = match &snapshot.body {
         Body::Hint(message) => centered(k, message),
         Body::NoChanges => centered(k, "No textual changes"),

@@ -5,9 +5,10 @@ use std::time::Duration;
 use rune::tok::{Family, TextStyle};
 use rune::{Color, El, GrowthSpec, Span, Key, KeyEvent, ScrollSpec, TextEdit, Tx, col, row, text};
 use rune_kit::markdown::Markdown;
-use rune_kit::{Button, ButtonVariant, Kit, Switch};
+use rune_kit::{Button, ButtonVariant, Kit, Spinner};
 use rune_kit::{TextArea};
 
+use super::dropdown::{self, Line};
 use super::pictures;
 
 use crate::model::bus::{Cmd as Bus, send};
@@ -19,6 +20,12 @@ const LABEL: TextStyle = TextStyle::new(12.0, 500.0);
 const MONO: TextStyle = TextStyle { family: Family::SystemMono, line_height: 17.0, ..TextStyle::new(12.0, 400.0) };
 /// The column the conversation and the composer share.
 const COLUMN: f32 = 760.0;
+/// How far in from the composer's edge its text starts (its border, its padding and its field's):
+/// the composer is this much wider than the transcript's column at each side, so the two texts
+/// start and end on the same lines.
+const COMPOSER_INSET: f32 = 20.0;
+/// The room the composer keeps at the stage's sides.
+const COMPOSER_MARGIN: f32 = 12.0;
 /// How many of a stretch's edited files get a chip of their own.
 const MAX_CHIPS: usize = 4;
 
@@ -33,11 +40,17 @@ pub struct State {
     focus: u64,
     /// The rows the transcript's virtual stack now shows, for the rail's marker.
     pub visible: std::ops::Range<usize>,
+    /// How wide the transcript's stage is, which says whether the rail has room beside the column.
+    stage: f32,
+    /// The line of the rail the pointer is over.
+    hover: Option<usize>,
+    /// The menu a composer chip has open.
+    pub menu: super::dropdown::State,
 }
 
 impl Default for State {
     fn default() -> Self {
-        Self { draft: TextEdit::new(""), reset: 0, focus: 0, visible: 0..0 }
+        Self { draft: TextEdit::new(""), reset: 0, focus: 0, visible: 0..0, stage: 0.0, hover: None, menu: Default::default() }
     }
 }
 
@@ -67,9 +80,12 @@ fn tint(k: &Kit, phase: Phase) -> Color {
 }
 
 fn glyph(k: &Kit, phase: Phase) -> El {
+    if phase == Phase::Working {
+        return row().w(14.0).h(14.0).center().child(Spinner::new().size(12.0).color(k.c.icon_accent).build(k));
+    }
     let mark = match phase {
         Phase::Waiting => "○",
-        Phase::Working => "◐",
+        Phase::Working => "",
         Phase::Done => "✓",
         Phase::Failed => "×",
     };
@@ -110,9 +126,10 @@ fn user_row(k: &Kit, body: &str, pictures: &[crate::model::chat::Picture]) -> El
         inner = inner.child(strip);
     }
     if !body.is_empty() {
-        inner = inner.child(text(body).font(BODY).color(k.c.text_base));
+        inner = inner.child(text(body).font(BODY).color(k.c.text_base).wrap_anywhere());
     }
-    row().w_full().child(col().w_full().px(16.0).py(12.0).radius(10.0).fill(k.c.layer_03).child(inner))
+    // The user's side: the bubble sits at the right, as wide as its words need up to a limit, and wraps.
+    row().w_full().justify_end().child(col().min_w(0.0).max_w(600.0).shrink().px(16.0).py(12.0).radius(10.0).fill(k.c.layer_03).child(inner))
 }
 
 fn thought<S: 'static>(k: &Kit, message: usize, at: usize, body: &str, open: bool) -> El {
@@ -122,15 +139,23 @@ fn thought<S: 'static>(k: &Kit, message: usize, at: usize, body: &str, open: boo
 }
 
 fn tool<S: 'static>(k: &Kit, message: usize, at: usize, t: &Tool) -> El {
-    let head = row().grow(1.0).min_w(0.0).items_center().gap(8.0).child(glyph(k, t.phase)).child(text(t.title.clone()).font(SMALL).color(k.c.text_muted));
+    // Collapsed, a call is one line: the first of its title, cut off where it runs out of room.
+    let first = t.title.lines().next().unwrap_or_default().trim().to_string();
+    let head = row().grow(1.0).min_w(0.0).items_center().gap(8.0).child(glyph(k, t.phase)).child(row().grow(1.0).min_w(0.0).child(text(first).font(SMALL).color(k.c.text_muted).truncate()));
     let mut card = col().w_full().child(pressable::<S>(k, format!("tool-{message}-{at}"), head, move || tell(Cmd::ToggleTool { message, block: at })));
     if t.open {
-        let mut detail = col().px(30.0).gap(4.0);
+        // Expanded, all of it shows and wraps to the column.
+        let rest = t.title.split_once('\n').map(|(_, rest)| rest.trim().to_string()).filter(|rest| !rest.is_empty());
+        let wrapped = |s: String, color| text(s).font(MONO).color(color).wrap_anywhere().w_full();
+        let mut detail = col().w_full().min_w(0.0).px(30.0).gap(4.0);
+        if let Some(rest) = rest {
+            detail = detail.child(wrapped(rest, k.c.text_muted));
+        }
         if !t.arguments.is_empty() {
-            detail = detail.child(text(t.arguments.clone()).font(MONO).color(k.c.text_muted));
+            detail = detail.child(wrapped(t.arguments.clone(), k.c.text_muted));
         }
         if !t.result.is_empty() {
-            detail = detail.child(text(t.result.clone()).font(MONO).color(k.c.text_base));
+            detail = detail.child(wrapped(t.result.clone(), k.c.text_base));
         }
         card = card.child(detail);
     }
@@ -167,7 +192,7 @@ fn run<S: 'static>(k: &Kit, message: usize, at: usize, thoughts: usize, calls: u
     if failed > 0 && phase != Phase::Failed {
         aside.push(format!("{failed} failed"));
     }
-    let mut head = row().grow(1.0).min_w(0.0).items_center().gap(8.0).child(glyph(k, phase)).child(muted(k, label));
+    let mut head = row().grow(1.0).min_w(0.0).items_center().gap(8.0).child(glyph(k, phase)).child(muted(k, label).truncate().shrink());
     if !aside.is_empty() {
         head = head.child(muted(k, format!("· {}", aside.join(" · "))));
     }
@@ -223,7 +248,7 @@ fn approve<S: 'static>(k: &Kit, message: usize, at: usize, question: &str, lines
     let head = row().gap(8.0).child(text("Approve").font(LABEL).color(k.c.text_muted)).child(row().grow(1.0).min_w(0.0).child(Markdown::new(question.to_string()).build(k)));
     let mut c = card(k, answered.is_none()).child(head);
     if !lines.is_empty() {
-        let mut body = col().px(12.0).gap(2.0);
+        let mut body = col().w_full().min_w(0.0).px(12.0).gap(2.0);
         for line in lines {
             body = body.child(text(line.clone()).font(MONO).color(k.c.text_base));
         }
@@ -278,7 +303,7 @@ fn agent<S: 'static>(k: &Kit, message: usize, blocks: &[Block]) -> El {
 }
 
 /// How many bars the rail holds at most; more and messages share one.
-const MAX_BARS: usize = 64;
+const MAX_BARS: usize = 24;
 
 fn transcript<S: 'static>(k: &Kit, snapshot: &Snapshot, state: &State, at: At<S>) -> El {
     let count = snapshot.items.len();
@@ -293,36 +318,85 @@ fn transcript<S: 'static>(k: &Kit, snapshot: &Snapshot, state: &State, at: At<S>
             Some(Item::Agent { index, blocks }) => agent::<S>(&kit, *index, blocks),
             _ => col(),
         };
-        row().w_full().justify_center().child(col().w_full().max_w(COLUMN).px(16.0).py(8.0).child(inner))
+        // As far in as the composer's text, whatever the width, which also keeps it clear of the scroll bar.
+        row().w_full().px(COMPOSER_MARGIN + COMPOSER_INSET).justify_center().child(col().w_full().max_w(COLUMN).py(8.0).child(inner))
     }).on_visible_rows::<S>(move |s: &mut S, range| {
         at(s).visible = range;
         true
     });
     let viewport = col().w_full().grow(1.0).min_h(0.0).scroll(ScrollSpec { stick_bottom: true }).child(stack);
-    col().w_full().grow(1.0).min_h(0.0).child(row().w_full().grow(1.0).min_h(0.0).child(k.scroll_bar(viewport)).child(rail::<S>(k, state, count)))
+    // The rail floats over the right edge, so the column is centred on the stage as the composer is.
+    let stage = state.stage;
+    let right = ((stage - COLUMN) / 2.0 - RAIL_GUTTER).max(RAIL_INSET);
+    let rail = (stage >= COLUMN + 2.0 * (RAIL_GUTTER + RAIL_INSET)).then(|| rail::<S>(k, state, count, at).pin(None, Some(0.0), Some(right), Some(0.0)));
+    col().w_full().grow(1.0).min_h(0.0).on_layout_tx::<S>(move |s: &mut S, r: [f32; 4], tx: &mut Tx| {
+        if (at(s).stage - r[2]).abs() > 0.5 {
+            at(s).stage = r[2];
+        } else {
+            tx.live_only();
+        }
+    }).child(k.scroll_bar(viewport)).children(rail)
 }
 
 /// The rail beside the column: a bar per message (messages shared when there are too many), a
 /// press on one scrolls there, and the marker over the rows that show. Nothing while the column
 /// fits the stage, which is when every row is in view.
-fn rail<S: 'static>(k: &Kit, state: &State, count: usize) -> El {
+fn rail<S: 'static>(k: &Kit, state: &State, count: usize, at: At<S>) -> El {
     if count < 2 || state.visible.len() >= count {
         return col();
     }
     let shown = count.min(MAX_BARS);
     let step = count as f64 / shown as f64;
-    let mut bars = col().key("rail").w_full().grow(1.0).min_h(0.0).gap(2.0).py(4.0);
+    // As the stage beside the column has room for it: short lines, a quiet one for each message and
+    // a firmer one where the view is, in the middle of the edge.
+    // Where the view is: how far down the messages it has come, from the first bar to the last, so
+    // the end of the page is the last bar. That line is the firm one, with only the next either
+    // side taking a little of it; the pointer, on the rail, says otherwise.
+    let room = count.saturating_sub(state.visible.len()).max(1);
+    let down = (state.visible.start as f64 / room as f64).clamp(0.0, 1.0);
+    let focus = state.hover.unwrap_or((down * (shown - 1) as f64).round() as usize);
+    let mut bars = col().key("rail").w_full().h_full().min_h(0.0).justify_center().items_center();
     for at_ in 0..shown {
         let from = (at_ as f64 * step) as usize;
-        let till = (((at_ + 1) as f64 * step).ceil() as usize).min(count);
-        let active = state.visible.start < till && from < state.visible.end;
         let press = move |_: &mut S, tx: &mut Tx| tx.scroll_into_view(format!("item-{from}"));
-        bars = bars.child(col().key(format!("slot-{at_}")).w_full().grow(1.0).min_h(0.0).items_center().child(
-            k.interactive(row().key(format!("bar-{at_}")).w(3.0).h(16.0).radius(1.5).fill(if active { k.c.text_base } else { k.c.border_base }).on_press_tx(press)),
-        ));
+        // The line under the pointer swells, and the ones beside it a little less, the further they
+        // are, easing as the pointer moves along; the slot is the target, so the space between the
+        // lines takes a press too.
+        // The size follows the pointer only; the colour follows it too, and else the view.
+        let swell = state.hover.map(|h| h.abs_diff(at_)).filter(|gap| *gap <= 2);
+        let (len, thick) = match swell {
+            Some(0) => (RAIL_WIDTH, 5.0),
+            Some(1) => (RAIL_BAR * 1.6, 3.5),
+            Some(_) => (RAIL_BAR * 1.25, 2.5),
+            None => (RAIL_BAR, 2.0),
+        };
+        // Firm at the focus, a step down one either side, and the rest quiet, in view or not.
+        let color = match focus.abs_diff(at_) {
+            0 => k.c.text_base,
+            1 => k.c.icon_faint,
+            _ => k.c.border_base,
+        };
+        let line = row().w(len).h(thick).radius(thick / 2.0).fill(color).motion(rune::Spring::SNAPPY);
+        let slot = col().key(format!("bar-{at_}")).w(RAIL_WIDTH).h(8.0).min_h(8.0).justify_center().items_center().child(line).on_press_tx(press).on_hover_change::<S>(move |s: &mut S, inside: bool, _: &mut Tx| {
+            let state = at(s);
+            if inside {
+                state.hover = Some(at_);
+            } else if state.hover == Some(at_) {
+                state.hover = None;
+            }
+        });
+        bars = bars.child(k.interactive(slot));
     }
-    col().key("rail-side").w(16.0).min_h(0.0).px(2.0).child(bars)
+    bars.w(RAIL_WIDTH)
 }
+
+/// A line of the rail, and the width of its target.
+const RAIL_WIDTH: f32 = 36.0;
+const RAIL_BAR: f32 = 18.0;
+/// The room the rail wants beside the column: its width and the margin from the column, and the
+/// least it keeps from the stage's edge.
+const RAIL_GUTTER: f32 = RAIL_WIDTH + 12.0;
+const RAIL_INSET: f32 = 4.0;
 
 fn queued<S: 'static>(k: &Kit, q: &Queued) -> El {
     let preview = if q.text.is_empty() { format!("{} picture{}", q.pictures, if q.pictures == 1 { "" } else { "s" }) } else { q.text.clone() };
@@ -367,91 +441,81 @@ fn scope_name(scope: Scope) -> &'static str {
     }
 }
 
-/// What an agent that runs this thread may do through Po: one level of reach, picked from a popup,
+/// What an agent that runs this thread may do through Po: one level of reach, picked from a menu,
 /// and two extras switched on or off beside it. [`tell`] tells the Reader.
-fn control_menu<S: 'static>(grant: Grant, pending: bool) -> rune::PopupMenu {
-    let mut menu = rune::PopupMenu::new()
-        .item(rune::PopupItem::new("basic", "Basic · show files and views").checked(grant.scope == Scope::Viewer))
-        .item(rune::PopupItem::new("delegate", "Delegate · also run its own threads, edit issues").checked(grant.scope == Scope::Orchestrate))
-        .item(rune::PopupItem::new("full", "Full access · also open projects, use worktrees").checked(grant.scope == Scope::Global));
-    menu = menu.separator()
-        .item(rune::PopupItem::new("read", "Read other threads").checked(grant.read))
-        .item(rune::PopupItem::new("answer", "Answer its threads' asks").checked(grant.approvals));
+fn control_lines(grant: Grant, pending: bool) -> (Vec<Line>, Vec<usize>) {
+    let pick = |label: &str, on: bool, change: GrantChange| Line::choice(label, on, Bus::Chat(Cmd::Grant(change)));
+    let mut lines = vec![
+        pick("Basic · show files and views", grant.scope == Scope::Viewer, GrantChange::Stop),
+        pick("Delegate · also run its own threads, edit issues", grant.scope == Scope::Orchestrate, GrantChange::Set(Grant { scope: Scope::Orchestrate, ..grant })),
+        pick("Full access · also open projects, use worktrees", grant.scope == Scope::Global, GrantChange::Set(Grant { scope: Scope::Global, ..grant })),
+        pick("Read other threads", grant.read, GrantChange::Read),
+        pick("Answer its threads' asks", grant.approvals, GrantChange::Approvals),
+    ];
+    let mut rules = vec![3];
     if pending {
-        menu = menu.separator().item(rune::PopupItem::new("pending", "Restart the agent to apply").enabled(false));
+        rules.push(lines.len());
+        lines.push(Line::note("Restart the agent to apply"));
     }
-    menu
+    (lines, rules)
 }
 
-/// The Control chip: names what the thread's agent may do, and opens the popup that changes it.
-fn control_chip<S: 'static>(k: &Kit, snapshot: &Snapshot) -> El {
+/// Where a chip's menu is kept: in the conversation's state.
+fn menu_of<S: 'static>(at: At<S>) -> dropdown::At<S> {
+    std::rc::Rc::new(move |s: &mut S| &mut at(s).menu)
+}
+
+/// A chip that only says: a choice that is not the user's to change now.
+fn still_chip(k: &Kit, label: String) -> El {
+    row().px(8.0).py(2.0).radius(6.0).child(text(label).font(SMALL).color(k.c.text_muted))
+}
+
+/// The Control chip: names what the thread's agent may do, and opens the menu that changes it.
+fn control_chip<S: 'static>(k: &Kit, snapshot: &Snapshot, at: At<S>) -> El {
     let Some(grant) = snapshot.grant else { return col() };
-    if !snapshot.grant_pending && grant == Grant::initial() {
-        return muted(k, scope_name(grant.scope).to_string());
-    }
     let label = format!("{}{}", scope_name(grant.scope), if snapshot.grant_pending { " · restart to apply" } else { "" });
-    let pending = snapshot.grant_pending;
-    k.interactive(row().key("control").px(8.0).py(2.0).radius(6.0).fill(k.c.layer_02).child(text(label).font(SMALL).color(k.c.text_base)).on_press_tx(move |_: &mut S, tx: &mut Tx| {
-        tx.popup_menu(control_menu::<S>(grant, pending), "control", move |_: &mut S, picked: Option<&str>, _: &mut Tx| {
-            let change = match picked {
-                Some("basic") => GrantChange::Stop,
-                Some("delegate") => GrantChange::Set(Grant { scope: Scope::Orchestrate, ..grant }),
-                Some("full") => GrantChange::Set(Grant { scope: Scope::Global, ..grant }),
-                Some("read") => GrantChange::Read,
-                Some("answer") => GrantChange::Approvals,
-                _ => return,
-            };
-            tell(Cmd::Grant(change));
-        });
-    }))
+    let (lines, rules) = control_lines(grant, snapshot.grant_pending);
+    dropdown::chip::<S>(k, "control", label, lines, rules, menu_of(at))
 }
 
-fn chips<S: 'static>(k: &Kit, snapshot: &Snapshot) -> El {
+fn chips<S: 'static>(k: &Kit, snapshot: &Snapshot, at: At<S>) -> El {
+    let menu = menu_of(at);
     let mut bar = row().grow(1.0).min_w(0.0).items_center().gap(6.0).flex_wrap();
+    let chosen = snapshot.chosen.as_ref().and_then(|c| snapshot.agents.iter().find(|(_, id)| id == c)).map(|(n, _)| n.clone());
     if snapshot.blank && !snapshot.agents.is_empty() {
-        let ids: Vec<String> = snapshot.agents.iter().map(|(_, id)| id.clone()).collect();
-        let label = snapshot.chosen.as_ref().and_then(|c| snapshot.agents.iter().find(|(_, id)| id == c)).map_or("Agent".to_string(), |(n, _)| n.clone());
-        let mut menu = rune::PopupMenu::new();
-        for (name, id) in &snapshot.agents {
-            menu = menu.item(rune::PopupItem::new(id.as_str(), name.as_str()).checked(snapshot.chosen.as_ref() == Some(id)));
-        }
-        bar = bar.child(k.interactive(row().key("agent-pick").px(8.0).py(2.0).radius(6.0).child(text(format!("{label} ⌄")).font(SMALL).color(k.c.text_base)).on_press_tx(move |_: &mut S, tx: &mut Tx| {
-            let (menu, ids) = (menu.clone(), ids.clone());
-            tx.popup_menu(menu, "agent-pick", move |_: &mut S, picked: Option<&str>, _: &mut Tx| {
-                if let Some(id) = picked.and_then(|p| ids.iter().find(|i| i.as_str() == p)) {
-                    tell(Cmd::PickAgent(id.clone()));
-                }
-            });
-        })));
-    } else if let Some((name, id)) = snapshot.chosen.as_ref().and_then(|c| snapshot.agents.iter().find(|(_, id)| id == c)).map(|(n, i)| (n.clone(), i.clone())) {
-        let _ = id;
-        bar = bar.child(muted(k, name));
+        let lines = snapshot.agents.iter().map(|(name, id)| Line::choice(name.as_str(), snapshot.chosen.as_ref() == Some(id), Bus::Chat(Cmd::PickAgent(id.clone())))).collect();
+        bar = bar.child(dropdown::chip::<S>(k, "agent-pick", chosen.unwrap_or_else(|| "Agent".to_string()), lines, vec![], menu.clone()));
+    } else if let Some(name) = chosen {
+        bar = bar.child(still_chip(k, name));
     }
     for setting in &snapshot.settings {
-        let next = setting.choices.iter().position(|(v, _)| *v == setting.current).map(|i| (i + 1) % setting.choices.len()).and_then(|i| setting.choices.get(i)).map(|(v, _)| v.clone());
-        let (id, busy) = (setting.id.clone(), snapshot.busy);
         let label = setting.current_name().to_string();
-        bar = bar.child(Button::new(label).variant(ButtonVariant::Ghost).disabled(busy || next.is_none()).on_press(move |_: &mut S| {
-            if let Some(value) = &next {
-                tell(Cmd::Setting { id: id.clone(), value: value.clone() });
-            }
-        }).build(k));
+        if snapshot.busy || setting.choices.len() < 2 {
+            bar = bar.child(still_chip(k, label));
+            continue;
+        }
+        let lines = setting.choices.iter().map(|(value, name)| Line::choice(name.as_str(), *value == setting.current, Bus::Chat(Cmd::Setting { id: setting.id.clone(), value: value.clone() }))).collect();
+        bar = bar.child(dropdown::chip::<S>(k, &format!("setting-{}", setting.id), label, lines, vec![], menu.clone()));
     }
     if snapshot.blank
         && let Some(on) = snapshot.isolate
     {
-        bar = bar.child(Switch::new(on).label("Own worktree").on_toggle(move |_: &mut S| tell(Cmd::Isolate(!on))).build(k));
+        // A chip that is on while the thread gets a worktree of its own.
+        let fill = if on { k.c.layer_03 } else { k.c.layer_02 };
+        let mark = if on { "✓ Worktree" } else { "Worktree" };
+        bar = bar.child(k.interactive(row().key("worktree").px(8.0).py(2.0).radius(6.0).fill(fill).child(text(mark).font(SMALL).color(if on { k.c.text_base } else { k.c.text_muted })).on_press(move |_: &mut S| tell(Cmd::Isolate(!on)))));
     }
-    bar = bar.child(control_chip::<S>(k, snapshot));
-    bar
+    bar.child(control_chip::<S>(k, snapshot, at))
 }
 
 fn composer<S: 'static>(k: &Kit, snapshot: &Snapshot, state: &State, at: At<S>) -> El {
     let steer = snapshot.steer;
     let field = TextArea::new(&state.draft)
         .label("Message")
-        .placeholder(if snapshot.blank { "Message the agent" } else { "Reply" })
+        .placeholder(if snapshot.blank { "Message the agent" } else { "Ask for follow-up changes" })
         .auto_grow(2, 8)
+        // The focused look has no shadow; the ring it draws is cleared below.
+        .state(rune_kit::State::Focus)
         .width(None)
         .on_edit(move |s: &mut S| &mut at(s).draft)
         .on_change(move |s: &mut S, _: &mut Tx| tell(Cmd::Draft(at(s).draft.text.clone())))
@@ -464,6 +528,9 @@ fn composer<S: 'static>(k: &Kit, snapshot: &Snapshot, state: &State, at: At<S>) 
             false
         })
         .build(k)
+        // The card around the composer is the frame: the field itself has no fill or ring.
+        .fill(Color::TRANSPARENT)
+        .outline(0.0, 0.0, Color::TRANSPARENT)
         // What the clipboard held beyond text goes to the draft: files attach, an image pastes
         // (the clipboard offers it as PNG). Plain text pastes as the field always does.
         .on_input_paste(|_: &mut S, content: &rune::ClipboardContent, _: &mut Tx| {
@@ -487,7 +554,7 @@ fn composer<S: 'static>(k: &Kit, snapshot: &Snapshot, state: &State, at: At<S>) 
     } else {
         actions = actions.child(Button::new("↑").help("Send").variant(ButtonVariant::Submit).on_press(|_: &mut S| tell(Cmd::Send { later: false })).build(k));
     }
-    let mut core = col().w_full().max_w(COLUMN).gap(8.0).padding(12.0).radius(16.0).border(1.0, k.c.border_base);
+    let mut core = col().w_full().max_w(COLUMN + 2.0 * COMPOSER_INSET).gap(8.0).padding(12.0).radius(16.0).fill(k.c.bg_base).border(1.0, k.c.border_base);
     if let Some(note) = &snapshot.note {
         core = core.child(row().w_full().items_center().gap(8.0).child(row().grow(1.0).child(muted(k, note.clone()))).child(Button::new("Dismiss").variant(ButtonVariant::Ghost).on_press(|_: &mut S| tell(Cmd::DismissNote)).build(k)));
     }
@@ -501,13 +568,13 @@ fn composer<S: 'static>(k: &Kit, snapshot: &Snapshot, state: &State, at: At<S>) 
         }
         core = core.child(strip);
     }
-    core = core.child(field).child(row().w_full().items_end().gap(8.0).child(chips::<S>(k, snapshot)).child(actions));
-    let mut column = col().w_full().items_center().gap(6.0).px(12.0).pt(8.0).pb(12.0);
+    core = core.child(field).child(row().w_full().items_end().gap(8.0).child(chips::<S>(k, snapshot, at)).child(actions));
+    let mut column = col().w_full().items_center().gap(6.0).px(COMPOSER_MARGIN).pt(8.0).pb(12.0);
     if let Some(picking) = snapshot.picking.as_ref().filter(|p| **p != Picking::Loading) {
-        column = column.child(col().w_full().max_w(COLUMN).child(picker::<S>(k, picking)));
+        column = column.child(col().w_full().max_w(COLUMN + 2.0 * COMPOSER_INSET).child(picker::<S>(k, picking)));
     }
     if !snapshot.queue.is_empty() {
-        let mut tray = col().w_full().max_w(COLUMN).py(4.0).radius(10.0).fill(k.c.layer_02);
+        let mut tray = col().w_full().max_w(COLUMN + 2.0 * COMPOSER_INSET).py(4.0).radius(10.0).fill(k.c.layer_02);
         for q in &snapshot.queue {
             tray = tray.child(queued::<S>(k, q));
         }
@@ -520,8 +587,7 @@ fn composer<S: 'static>(k: &Kit, snapshot: &Snapshot, state: &State, at: At<S>) 
 /// lines and trailing controls. Where the conversation is not in the middle pane it keeps this
 /// band inside itself ([`view`] with `framed`).
 pub fn toolbar<S: 'static>(k: &Kit, snapshot: &Snapshot) -> rune_kit::shell::Toolbar {
-    let lead: Vec<_> = snapshot.lead.iter().copied().filter(|c| !matches!(c, crate::model::header::Control::Sidebar(_))).collect();
-    let mut bar = rune_kit::shell::Toolbar::new().leading(super::header::controls::<S>(k, &lead)).leading(text(snapshot.title.clone()).font(BODY).color(k.c.text_base).truncate());
+    let mut bar = rune_kit::shell::Toolbar::new().leading(super::header::controls::<S>(k, &snapshot.lead)).leading(text(snapshot.title.clone()).font(BODY).color(k.c.text_base).truncate());
     for status in &snapshot.statuses {
         bar = bar.trailing(muted(k, status.clone()));
     }
@@ -531,11 +597,11 @@ pub fn toolbar<S: 'static>(k: &Kit, snapshot: &Snapshot) -> rune_kit::shell::Too
 /// The header's title and status lines, for a conversation that is not under the window's toolbar.
 fn header<S: 'static>(k: &Kit, snapshot: &Snapshot) -> El {
     let lead: Vec<_> = snapshot.lead.iter().copied().filter(|c| !matches!(c, crate::model::header::Control::Sidebar(_))).collect();
-    let mut bar = row().w_full().items_center().gap(12.0).px(16.0).py(8.0).child(super::header::controls::<S>(k, &lead)).child(row().grow(1.0).min_w(0.0).child(text(snapshot.title.clone()).font(BODY).color(k.c.text_base)));
+    let mut bar = row().w_full().h(super::header::BAND).items_center().gap(12.0).px(16.0).child(super::header::controls::<S>(k, &lead)).child(row().grow(1.0).min_w(0.0).child(text(snapshot.title.clone()).font(BODY).color(k.c.text_base)));
     for status in &snapshot.statuses {
         bar = bar.child(muted(k, status.clone()));
     }
-    bar.child(super::header::controls::<S>(k, &snapshot.trail))
+    super::header::ruled(k, bar.child(super::header::controls::<S>(k, &snapshot.trail)))
 }
 
 /// The conversation; `framed` keeps its own header, else the window's toolbar carries it.

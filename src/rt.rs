@@ -27,7 +27,6 @@ pub struct Core {
 /// The window, as far as the reader goes: what it asked for is recorded here, and the host does it.
 pub struct Window {
     host: Host<Core>,
-    pub fullscreen: bool,
     pub active: bool,
     /// The reader asked for the keyboard to go to the conversation's field.
     pub focus_asked: bool,
@@ -41,11 +40,7 @@ pub struct Window {
 
 impl Window {
     pub fn new(host: Host<Core>) -> Self {
-        Self { host, fullscreen: false, active: true, focus_asked: false, close_asked: false, folder_asked: false, urls: vec![] }
-    }
-
-    pub fn is_fullscreen(&self) -> bool {
-        self.fullscreen
+        Self { host, active: true, focus_asked: false, close_asked: false, folder_asked: false, urls: vec![] }
     }
 
     pub fn is_window_active(&self) -> bool {
@@ -56,16 +51,8 @@ impl Window {
         WindowHandle { host: self.host.clone() }
     }
 
-    pub fn focus_chat(&mut self) {
-        self.focus_asked = true;
-    }
-
     pub fn remove_window(&mut self) {
         self.close_asked = true;
-    }
-
-    pub fn open_url(&mut self, url: &str) {
-        self.urls.push(url.to_string());
     }
 
     pub fn pick_folder(&mut self) {
@@ -119,10 +106,6 @@ impl Context<Reader> {
         spawn_thread(move || async move { f(weak, &mut app).await })
     }
 
-    pub fn background_executor(&self) -> Executor {
-        Executor
-    }
-
     /// The window's own thread, as a task reaches it.
     pub fn window_handle(&self) -> WindowHandle {
         WindowHandle { host: self.host.clone() }
@@ -132,11 +115,6 @@ impl Context<Reader> {
         Executor.spawn(work)
     }
 
-    /// Runs `f` on the window's thread once the current work is done.
-    pub fn defer(&mut self, f: impl FnOnce(&mut Context<Reader>) + Send + 'static) {
-        let host = self.host.clone();
-        self.host.update(move |_| f(&mut Context::new(host)));
-    }
 }
 
 /// What an async task holds to reach the reader.
@@ -165,7 +143,6 @@ impl AsyncApp {
 pub struct App {
     reader: *mut Reader,
     window: *mut Window,
-    host: Host<Core>,
 }
 
 /// Lets a closure that borrows from a task cross to the window's thread. Sound because the task
@@ -228,11 +205,6 @@ impl WeakEntity<Reader> {
         cx.reach(&self.host, move |reader, _, cx| f(reader, cx))
     }
 
-    /// [`Self::update`], with the window.
-    pub fn update_in<C: Reach, R>(&self, cx: &mut C, f: impl FnOnce(&mut Reader, &mut Window, &mut Context<Reader>) -> R) -> Result<R, Gone> {
-        cx.reach(&self.host, f)
-    }
-
     /// Reads the reader the same way.
     pub fn read_with<C: Reach, R>(&self, cx: &mut C, f: impl FnOnce(&Reader, &()) -> R) -> Result<R, Gone> {
         cx.reach(&self.host, move |reader, _, _| f(reader, &()))
@@ -248,9 +220,8 @@ pub struct WindowHandle {
 impl WindowHandle {
     /// Runs `f` on the window's thread, with the window and a way to the reader from there.
     pub fn update<R>(&self, _: &mut AsyncApp, f: impl FnOnce(&mut (), &mut Window, &mut App) -> R) -> Result<R, Gone> {
-        let host = self.host.clone();
         on_window(&self.host, move |core| {
-            let mut app = App { reader: &mut core.reader, window: &mut core.window, host };
+            let mut app = App { reader: &mut core.reader, window: &mut core.window };
             f(&mut (), unsafe { &mut *app.window }, &mut app)
         })
     }

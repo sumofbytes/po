@@ -1,5 +1,5 @@
 //! What Home, the issues page and the epics share: how an issue's status and priority look.
-use rune::{Color, El, col, row, text};
+use rune::{Color, El, col, text};
 use rune::tok::TextStyle;
 use rune_kit::Kit;
 
@@ -7,7 +7,6 @@ use crate::issues::{Priority, Status};
 
 pub const BODY: TextStyle = TextStyle::new(13.0, 400.0);
 pub const SMALL: TextStyle = TextStyle::new(12.0, 400.0);
-pub const LABEL: TextStyle = TextStyle::new(12.0, 500.0);
 pub const TITLE: TextStyle = TextStyle::new(22.0, 600.0);
 pub const HEADING: TextStyle = TextStyle::new(14.0, 600.0);
 
@@ -55,6 +54,3 @@ pub fn metric(k: &Kit, label: &str, value: usize, tint: Color) -> El {
     col().grow(1.0).min_w(0.0).px(16.0).py(12.0).radius(10.0).border(1.0, k.c.border_base).child(text(value.to_string()).font(TextStyle::new(24.0, 600.0)).color(tint)).child(muted(k, label))
 }
 
-pub fn line() -> El {
-    row().w_full().items_center().gap(8.0)
-}

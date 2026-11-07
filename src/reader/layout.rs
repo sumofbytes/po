@@ -367,7 +367,7 @@ impl Reader {
         cx.notify();
     }
 
-    pub(crate) fn hide_home(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn hide_home(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         if !self.home_open {
             return;
         }
@@ -514,7 +514,7 @@ impl Reader {
         });
     }
 
-    pub(crate) fn hide_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn hide_settings(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         self.settings_open = false;
         cx.notify();
     }

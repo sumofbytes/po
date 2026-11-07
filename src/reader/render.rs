@@ -27,6 +27,9 @@ pub(crate) fn form_view_snapshot(form: &command::AgentForm) -> model::agent::Sna
     }
 }
 
+/// The threads a project always lists, most recent first, before the rest fold under "more".
+const MIN_THREADS: usize = 3;
+
 impl Reader {
     /// The left side: every project with its threads, drawn by NSH from what [`Self::sidebar_snapshot`]
     /// publishes.
@@ -87,14 +90,15 @@ impl Reader {
                     recent.retain(|t| self.matches_query(t, &query));
                 }
                 let expanded = self.threads_expanded.contains(&pid) || searching;
-                let shown_count = recent.iter().filter(|t| active(t)).count();
-                let foldable = !searching && recent.len() > shown_count.max(1);
+                // At least the few most recent threads stay, and so does whatever is active.
+                let kept = |i: usize, t: &Thread| i < MIN_THREADS || active(t);
+                let shown_count = recent.iter().enumerate().filter(|(i, t)| kept(*i, t)).count();
+                let foldable = !searching && recent.len() > shown_count;
                 let hidden = if expanded || !foldable {
                     0
                 } else {
-                    let keep: Vec<&Thread> = recent.iter().copied().filter(|t| active(t)).collect();
-                    let hidden = recent.len() - keep.len().max(1);
-                    recent = if keep.is_empty() { recent[..1].to_vec() } else { keep };
+                    let hidden = recent.len() - shown_count;
+                    recent = recent.iter().copied().enumerate().filter(|(i, t)| kept(*i, t)).map(|(_, t)| t).collect();
                     hidden
                 };
                 if collapsed {
@@ -261,7 +265,10 @@ impl Reader {
             }).collect(),
             pictures: thread.attachments.iter().map(|a| chat::Picture { uri: a.data_uri(), size: a.size }).collect(),
             note: thread.attach_note.clone(),
-            items: chat_items(&thread.messages, thread.busy),
+            // A resumed session's history is published once, when it is done (`Event::Ready`):
+            // replayed as hundreds of updates, it would otherwise be rebuilt from the start for
+            // every one of them, each frame walking the whole transcript it has so far.
+            items: if thread.loading { Vec::new() } else { chat_items(&thread.messages, thread.busy) },
             picking,
             draft: thread.draft.clone(),
             draft_reset: self.chat_reset.get(),
@@ -300,9 +307,6 @@ impl Reader {
             Chat::Fold { message, block, folded } => self.fold_run(message, block, folded, cx),
             Chat::Open(path) => self.reveal(&path, window, cx),
             Chat::Resume(id) => self.resume_session(&id, window, cx),
-            Chat::History => self.resume_thread(window, cx),
-            Chat::Show(changes) => self.show_viewer(if changes { Mode::Diff } else { Mode::Source }, cx),
-            Chat::Terminal => self.toggle_terminal_on(window, cx),
             Chat::PickAgent(id) => self.pick_agent(id, window, cx),
             Chat::Setting { id, value } => self.choose_option(&id, &value, cx),
             Chat::ClosePicker => {
@@ -373,7 +377,6 @@ impl Reader {
                 }
             }
             Cmd::StartThread(pid) => self.start_thread_in(pid, window, cx),
-            Cmd::CloseProject(pid) => self.close_project(pid, window, cx),
             Cmd::ToggleMore(pid) => {
                 if !self.threads_expanded.insert(pid) {
                     self.threads_expanded.remove(&pid);
@@ -382,7 +385,6 @@ impl Reader {
             }
             Cmd::OpenThread(pid, tid) => self.open_thread(pid, tid, window, cx),
             Cmd::CloseThread(pid, tid) => self.close_asked(pid, tid, window, cx),
-            Cmd::RenameThread(pid, tid, name) => self.rename_thread(pid, tid, &name, cx),
             Cmd::AddProject => self.pick_project(window, cx),
             Cmd::NewThread => self.new_blank_thread(window, cx),
             Cmd::OpenSettings => self.toggle_settings(window, cx),
@@ -400,7 +402,6 @@ impl Reader {
             Cmd::ToggleFocus => self.toggle_focus(cx),
             Cmd::Show(changes) => self.show_viewer(if changes { Mode::Diff } else { Mode::Source }, cx),
             Cmd::Terminal => self.toggle_terminal_on(window, cx),
-            Cmd::Browse(browse) => self.set_browsing(browse, cx),
             Cmd::ToggleRendered => self.toggle_rendered(cx),
             Cmd::SetSplit(split) => self.set_split(split, cx),
             Cmd::ShowView(id) => self.show_agent_view(&id, cx),
@@ -418,7 +419,6 @@ impl Reader {
                 self.open_selected(true, window, cx);
                 cx.notify();
             }
-            Cmd::OpenUrl(url) => window.open_url(&url),
             Cmd::FinderQuery(query) => {
                 if query != self.finder_query {
                     self.finder_query = query;

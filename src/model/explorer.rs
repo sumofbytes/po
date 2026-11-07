@@ -6,7 +6,7 @@ use serde_json::{Map, Value};
 use tokio::sync::watch;
 
 use super::header::Control;
-use crate::explorer::{FileKind, Row, Step};
+use crate::explorer::{Row, Step};
 
 /// A row of the tree, with what Po knows of its file.
 #[derive(Clone, PartialEq, Debug)]

@@ -6,6 +6,13 @@ use rune_kit::{IconButton, IconButtonVariant, Kit};
 use crate::model::bus::{Cmd, send};
 use crate::model::header::Control;
 
+/// The height of the window's top band, as the old pane headers had it (2.75 rem).
+pub const BAND: f32 = 44.0;
+
+/// What the kit's own band, the toolbar's and the sidebar's, is tall. The shell hangs the kit's
+/// layout this much above the window, so that the part of it that shows is [`BAND`] tall.
+pub const KIT_BAND: f32 = rune_kit::shell::TOOLBAR_HEIGHT;
+
 static PANEL_LEFT: Icon = Icon {
     name: "po-panel-left",
     view: 16.0,
@@ -54,17 +61,49 @@ fn of(control: Control) -> (&'static Icon, &'static str, bool, Cmd) {
         Control::Terminal(on) => (&TERMINAL, "Terminal (Ctrl+`)", on, Cmd::Terminal),
         Control::Focus(true) => (&MINIMIZE, "Show the conversation (Ctrl+Shift+F)", false, Cmd::ToggleFocus),
         Control::Focus(false) => (&MAXIMIZE, "Focus the viewer (Ctrl+Shift+F)", false, Cmd::ToggleFocus),
-        Control::Explorer => (&FOLDER_TREE, "Back to the explorer", false, Cmd::Browse(true)),
     }
 }
 
-/// A row of the controls given, in the order given; empty when there are none.
+/// A pane's header bar with its bottom border drawn inside its height, so that every header
+/// (and the window's band, which has the same height) is ruled the same.
+pub fn ruled(k: &Kit, bar: El) -> El {
+    bar.child(rune::el().absolute(0.0, BAND - 1.0).w_full().h(1.0).fill(k.c.border_base))
+}
+
+/// A row of the controls given, in the order given but for the places (the files, the terminal,
+/// the changes), which go first in two pills with a hairline between: where the user works, then
+/// what the thread made. Empty when there are none.
 pub fn controls<S: 'static>(k: &Kit, which: &[Control]) -> El {
-    let mut bar = row().items_center().gap(2.0);
-    for (i, control) in which.iter().enumerate() {
-        let (icon, help, on, cmd) = of(*control);
+    let button = |i: usize, control: Control, small: bool| {
+        let (icon, help, on, cmd) = of(control);
         let variant = if on { IconButtonVariant::Neutral } else { IconButtonVariant::Ghost };
-        bar = bar.child(IconButton::new(icon).variant(variant).label(help).help(help).on_press(move |_: &mut S| send(cmd.clone())).build(k).key(format!("control-{i}-{help}")));
+        let b = IconButton::new(icon).variant(variant).label(help).help(help).on_press(move |_: &mut S| send(cmd.clone()));
+        let b = if small { b.control_size(rune_kit::ControlSize::Small) } else { b };
+        b.build(k).key(format!("control-{i}-{help}"))
+    };
+    let place = |c: &Control| matches!(c, Control::Files(_) | Control::Terminal(_) | Control::Changes(_));
+    let pill = |members: Vec<El>| {
+        let mut pill = row().items_center().gap(2.0).padding(2.0).radius(8.0).border(1.0, k.c.border_base);
+        for member in members {
+            pill = pill.child(member);
+        }
+        pill
+    };
+    let mut bar = row().items_center().gap(2.0);
+    let work: Vec<_> = which.iter().enumerate().filter(|(_, c)| matches!(c, Control::Files(_) | Control::Terminal(_))).map(|(i, c)| button(i, *c, true)).collect();
+    let record: Vec<_> = which.iter().enumerate().filter(|(_, c)| matches!(c, Control::Changes(_))).map(|(i, c)| button(i, *c, true)).collect();
+    let both = !work.is_empty() && !record.is_empty();
+    if !work.is_empty() {
+        bar = bar.child(pill(work));
+    }
+    if both {
+        bar = bar.child(row().w(1.0).h(16.0).fill(k.c.border_base));
+    }
+    if !record.is_empty() {
+        bar = bar.child(pill(record));
+    }
+    for (i, control) in which.iter().enumerate().filter(|(_, c)| !place(c)) {
+        bar = bar.child(button(i, *control, false));
     }
     bar
 }

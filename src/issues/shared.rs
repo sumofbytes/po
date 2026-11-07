@@ -330,11 +330,6 @@ pub fn take_nav() -> Option<Nav> {
     PENDING.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take()
 }
 
-/// Ticks whenever [`navigate`] is called.
-pub fn nav_watch() -> watch::Receiver<u64> {
-    NUDGE.subscribe()
-}
-
 /// Moves the issues linked to `branch` to Done: the branch was merged.
 pub fn branch_merged(project: &Path, branch: &str) {
     change_repo(project, |tracker, now| {

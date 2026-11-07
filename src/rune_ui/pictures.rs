@@ -7,7 +7,6 @@ use base64::Engine;
 use rune::image::ImageCache;
 use rune::{El, SurfaceFit};
 
-use crate::model::chat::Picture;
 
 /// How large a picture draws in the transcript, and in the strip under the field.
 pub const LARGE: (f32, f32) = (560.0, 320.0);
@@ -43,9 +42,4 @@ pub fn el(uri: &str, size: (u32, u32), large: (f32, f32)) -> El {
         }
     }
     e
-}
-
-/// `Picture::fit`, for whoever draws a picture's box first and asks for the pixels later.
-pub fn size_of(picture: &Picture, large: (f32, f32)) -> (f32, f32) {
-    fit(picture.size, large)
 }
