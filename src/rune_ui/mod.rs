@@ -15,3 +15,4 @@ pub mod home;
 pub mod issues;
 pub mod work;
 pub mod header;
+pub mod pictures;

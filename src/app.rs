@@ -91,6 +91,8 @@ fn view(s: &State, _: &mut Cx<State>) -> El {
 
 /// Builds the reader, now that the window can be woken from other threads.
 fn setup(s: &mut State, waker: Waker) {
+    // Pictures: the cache that decodes the model's `data:` URIs, awake with the runtime.
+    rune_ui::pictures::set(waker.clone());
     let Some(launch) = LAUNCH.lock().ok().and_then(|mut launch| launch.take()) else { return };
     let wake: Wake = waker;
     let (host, inbox) = host::host::<Core>(wake);

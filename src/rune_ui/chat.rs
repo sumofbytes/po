@@ -1,6 +1,5 @@
 //! The conversation on Rune: the transcript (the user's messages and the agent's blocks), and the
-//! composer under it. Counterpart of `src/nsh/chat.rs`. Not ported yet: pictures on the draft, the
-//! Control (grant) menu, the transcript rail, and a virtualised transcript (every message is built).
+//! composer under it. Counterpart of `src/nsh/chat.rs`.
 use std::time::Duration;
 
 use rune::tok::{Family, TextStyle};
@@ -8,6 +7,8 @@ use rune::{Color, El, Span, Key, KeyEvent, ScrollSpec, TextEdit, Tx, col, row, t
 use rune_kit::markdown::Markdown;
 use rune_kit::{Button, ButtonVariant, Kit, SegmentedControl, Switch};
 use rune_kit::{TextArea};
+
+use super::pictures;
 
 use crate::model::bus::{Cmd as Bus, send};
 use crate::model::chat::{AskOption, Block, Cmd, Entry, Item, Kind, Phase, Picking, Queued, Snapshot, Tool};
@@ -97,9 +98,19 @@ fn gist(text_: &str) -> String {
     line.replace(['*', '`'], "").trim_matches('_').to_string()
 }
 
-fn user_row(k: &Kit, body: &str, pictures: usize) -> El {
-    let shown = if body.is_empty() && pictures > 0 { format!("{pictures} picture{}", if pictures == 1 { "" } else { "s" }) } else { body.to_string() };
-    row().w_full().justify_end().child(col().max_w(560.0).px(12.0).py(8.0).radius(12.0).fill(k.c.layer_03).child(text(shown).font(BODY).color(k.c.text_base)))
+fn user_row(k: &Kit, body: &str, pictures: &[crate::model::chat::Picture]) -> El {
+    let mut inner = col().gap(8.0);
+    if !pictures.is_empty() {
+        let mut strip = row().flex_wrap().gap(8.0);
+        for (i, picture) in pictures.iter().enumerate() {
+            strip = strip.child(pictures::el(&picture.uri, picture.size, pictures::LARGE).key(format!("user-picture-{i}")));
+        }
+        inner = inner.child(strip);
+    }
+    if !body.is_empty() {
+        inner = inner.child(text(body).font(BODY).color(k.c.text_base));
+    }
+    row().w_full().justify_end().child(col().max_w(560.0).px(12.0).py(8.0).radius(12.0).fill(k.c.layer_03).child(inner))
 }
 
 fn thought<S: 'static>(k: &Kit, message: usize, at: usize, body: &str, open: bool) -> El {
@@ -268,7 +279,7 @@ fn transcript<S: 'static>(k: &Kit, snapshot: &Snapshot) -> El {
     let mut list = col().w_full().max_w(COLUMN).gap(16.0).px(16.0).py(16.0);
     for (i, item) in snapshot.items.iter().enumerate() {
         list = list.child(match item {
-            Item::User { text, pictures } => user_row(k, text, pictures.len()).key(format!("user-{i}")),
+            Item::User { text, pictures } => user_row(k, text, pictures).key(format!("user-{i}")),
             Item::Agent { index, blocks } => agent::<S>(k, *index, blocks).key(format!("agent-{i}")),
         });
     }
@@ -370,6 +381,16 @@ fn composer<S: 'static>(k: &Kit, snapshot: &Snapshot, state: &State, at: At<S>) 
     let mut core = col().w_full().max_w(COLUMN).gap(8.0).padding(8.0).radius(12.0).border(1.0, k.c.border_base);
     if let Some(note) = &snapshot.note {
         core = core.child(row().w_full().items_center().gap(8.0).child(row().grow(1.0).child(muted(k, note.clone()))).child(Button::new("Dismiss").variant(ButtonVariant::Ghost).on_press(|_: &mut S| tell(Cmd::DismissNote)).build(k)));
+    }
+    if !snapshot.pictures.is_empty() {
+        let mut strip = row().w_full().flex_wrap().gap(8.0);
+        for (i, picture) in snapshot.pictures.iter().enumerate() {
+            // A thumbnail with its own way off: the strip as a whole is not one button.
+            let thumbs = k.interactive(row().key(format!("detach-{i}")).px(4.0).py(1.0).radius(6.0).fill(k.c.layer_02).child(text("×").font(SMALL).color(k.c.text_muted)).on_press(move |_: &mut S| tell(Cmd::Detach(i))));
+            let thumb = pictures::el(&picture.uri, picture.size, pictures::SMALL).key(format!("draft-picture-{i}"));
+            strip = strip.child(col().gap(2.0).child(thumb).child(thumbs));
+        }
+        core = core.child(strip);
     }
     core = core.child(field).child(row().w_full().items_end().gap(8.0).child(chips::<S>(k, snapshot)).child(actions));
     let mut column = col().w_full().items_center().gap(6.0).px(12.0).pt(8.0).pb(12.0);
