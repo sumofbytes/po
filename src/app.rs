@@ -40,6 +40,8 @@ struct State {
     viewer_left: bool,
     /// The terminal was what the viewer showed, as of the last poll: it takes the keyboard on opening.
     terminal_was_shown: bool,
+    /// The saved pane widths were handed to the panes.
+    widths_applied: bool,
 }
 
 impl Host for State {
@@ -68,7 +70,7 @@ fn init() -> State {
     let settings = config::load();
     let name = std::env::var("PO_THEME").ok().or_else(|| settings["theme"].as_str().map(String::from)).unwrap_or_else(|| rune_ui::theme::DEFAULT.into());
     let (kit, _) = rune_ui::theme::kit(&rune_ui::theme::load(&name));
-    State { kit, shell: Shell::default(), live: None, viewer_left: config::viewer_left(&settings).unwrap_or(false), terminal_was_shown: false }
+    State { kit, shell: Shell::default(), live: None, viewer_left: config::viewer_left(&settings).unwrap_or(false), terminal_was_shown: false, widths_applied: false }
 }
 
 fn view(s: &State, _: &mut Cx<State>) -> El {
@@ -138,6 +140,24 @@ fn poll(s: &mut State, _: f64, tx: &mut Tx) -> bool {
     }
     s.terminal_was_shown = layout.terminal_shown;
     s.shell.follow(&layout, s.viewer_left);
+    // The panes start as the workspace left them, and what they are dragged to is saved.
+    let widths = &mut core.reader.widths;
+    if !s.widths_applied {
+        s.widths_applied = true;
+        if let Some(width) = widths.left {
+            s.shell.sidebar.set_width(width);
+        }
+        if let Some(width) = widths.right {
+            s.shell.viewer.set_width(width);
+        }
+    } else {
+        let now = crate::Widths { left: Some(s.shell.sidebar.width()), right: Some(s.shell.viewer.width()), explorer: widths.explorer };
+        let dragging = s.shell.sidebar.is_resizing() || s.shell.viewer.is_resizing();
+        if !dragging && now != *widths && widths.left.is_some() | widths.right.is_some() | (now.left != Some(s.shell.sidebar.default_width())) | (now.right != Some(s.shell.viewer.default_width())) {
+            *widths = now;
+            core.reader.request_save(&mut cx);
+        }
+    }
     s.shell.settle();
     stale | s.shell.poll()
 }
