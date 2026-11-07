@@ -318,7 +318,7 @@ pub(super) fn accent(name: &str) -> AdaptiveColor {
     AdaptiveColor { light: hsla(hue, 0.6, 0.42, 1.), dark: hsla(hue, 0.6, 0.68, 1.) }
 }
 
-/// The project row's "new thread": a big bold + in the foreground color, brighter than the row's other buttons.
+/// The project row's "new thread": a big bold + in the muted color.
 fn new_thread_button(pid: u64) -> View {
     view()
         .role(AccessibilityRole::Button)
@@ -327,11 +327,9 @@ fn new_thread_button(pid: u64) -> View {
         .items_center()
         .cursor_pointer()
         .transition_colors()
-        .opacity(0.6)
-        .hover(|s| s.opacity(1.))
         .tooltip(super::tooltip("New thread in this project"))
         .on_press(move || send(Cmd::StartThread(pid)))
-        .child(icon(IconName::PlusBold, scale::s4(), Colors::foreground()))
+        .child(icon(IconName::PlusBold, scale::s4(), Colors::muted()))
 }
 
 #[hotpath::measure]
