@@ -1,7 +1,8 @@
 //! The window: a sidebar, the main pane and a viewer pane, as Rune's `SplitView` lays them out.
 //! Counterpart of the layout half of `Reader::render` in `main.rs`. What fills the panes comes from
 //! the screens; this decides what is shown where.
-use rune::{El, Tx, col};
+use rune::{El, Tx, col, row};
+use rune_kit::shell::SidebarToggle;
 use rune_kit::{Kit, PaneState, SplitView};
 
 use super::{agent, chat, diff, explorer, finder, home, issues, settings, sidebar, source, tabs, terminal};
@@ -263,7 +264,7 @@ fn placeholder(k: &Kit, what: &str) -> El {
 pub fn view<S: Host>(host: &S, k: &Kit) -> El {
     let shell = host.shell_ref();
     let layout = host.layout();
-    let chat = || chat::view::<S>(&shell.chat_feed.value, &shell.chat, k, chat_of::<S>);
+    let chat = |framed: bool| chat::view::<S>(&shell.chat_feed.value, &shell.chat, k, chat_of::<S>, framed);
     let pane = || viewer::<S>(shell, host, &layout, k);
     let page = if layout.finder_open {
         Some(finder::view::<S>(&shell.finder_feed.value, &shell.finder, k, finder_of::<S>))
@@ -280,15 +281,26 @@ pub fn view<S: Host>(host: &S, k: &Kit) -> El {
     let focus = layout.side_open && !layout.agent_open;
     let (middle, right) = match page {
         Some(page) => (page, None),
-        None if !layout.side_open => (chat(), None),
+        None if !layout.side_open => (chat(false), None),
         None if focus => (pane(), None),
-        None if layout.swapped => (pane(), Some(chat())),
-        None => (chat(), Some(pane())),
+        None if layout.swapped => (pane(), Some(chat(true))),
+        None => (chat(false), Some(pane())),
     };
-    let split = SplitView::new(middle).sidebar::<S>(&shell.sidebar, sidebar_of::<S>, sidebar::view::<S>(&shell.sidebar_feed.value, &shell.side, k, side_of::<S>));
+    // The conversation in the middle pane puts its header in the window's toolbar.
+    let toolbar = (!layout.finder_open && !layout.settings_open && !layout.home_open && !layout.issues_open && !focus && (!layout.side_open || !layout.swapped)).then(|| chat::toolbar::<S>(k, &shell.chat_feed.value));
+    let mut split = SplitView::new(middle).frame_inset(0.0);
+    if let Some(toolbar) = toolbar {
+        split = split.toolbar(toolbar);
+    }
+    let split = split.sidebar_toggle(SidebarToggle::new().in_header()).sidebar::<S>(&shell.sidebar, sidebar_of::<S>, row().w_full().h_full().child(col().grow(1.0).min_w(0.0).h_full().child(sidebar::view::<S>(&shell.sidebar_feed.value, &shell.side, k, side_of::<S>, layout.settings_open))).child(rune::el().w(1.0).h_full().fill(k.c.border_muted)));
+    // The kit draws the main pane as a bordered, rounded card; Po's panes sit flush, told apart by
+    // their backgrounds, so the shell is built with a kit that has neither.
+    let mut flat = k.clone();
+    flat.radius.lg = 0.0;
+    flat.c.border_muted = flat.c.bg_base;
     let root = match right {
-        Some(right) => split.inspector::<S>(&shell.viewer, viewer_of::<S>, right).build(k),
-        None => split.build(k),
+        Some(right) => split.inspector::<S>(&shell.viewer, viewer_of::<S>, right).build(&flat),
+        None => split.build(&flat),
     };
     // What is pasted while no field has the keyboard: files and images attach to the message being
     // written; plain text goes to the terminal, where it is showing.

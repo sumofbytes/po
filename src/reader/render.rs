@@ -605,7 +605,7 @@ impl Reader {
         let (chat, pane) = if self.home_open || self.issues_open {
             (none(), none())
         } else if !side_open {
-            if swapped { ((vec![Control::Sidebar(left_open), viewer(side_open)], vec![]), none()) } else { ((vec![Control::Sidebar(left_open)], vec![viewer(side_open)]), none()) }
+            if swapped { ((vec![Control::Sidebar(left_open), viewer(side_open)], vec![]), none()) } else { ((vec![Control::Sidebar(left_open)], vec![Control::Files(false), Control::Changes(false), Control::Terminal(false), viewer(side_open)]), none()) }
         } else if focus {
             (none(), (vec![Control::Sidebar(left_open)], trail_focus))
         } else if swapped {

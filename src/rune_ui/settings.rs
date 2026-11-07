@@ -243,7 +243,6 @@ pub fn view<S: 'static>(p: &Page, k: &Kit, page: At<S>) -> El {
         .w_full()
         .h_full()
         .min_h(0.0)
-        .fill(k.c.layer_01)
         .child(header)
         .child(divider(k))
         .child(col().grow(1.0).min_h(0.0).child(k.scroll_bar(col().grow(1.0).min_h(0.0).scroll(rune::ScrollSpec { stick_bottom: false }).child(body))))

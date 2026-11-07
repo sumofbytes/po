@@ -5,7 +5,7 @@ use std::time::Duration;
 use rune::tok::{Family, TextStyle};
 use rune::{Color, El, GrowthSpec, Span, Key, KeyEvent, ScrollSpec, TextEdit, Tx, col, row, text};
 use rune_kit::markdown::Markdown;
-use rune_kit::{Button, ButtonVariant, Kit, SegmentedControl, Switch};
+use rune_kit::{Button, ButtonVariant, Kit, Switch};
 use rune_kit::{TextArea};
 
 use super::pictures;
@@ -112,7 +112,7 @@ fn user_row(k: &Kit, body: &str, pictures: &[crate::model::chat::Picture]) -> El
     if !body.is_empty() {
         inner = inner.child(text(body).font(BODY).color(k.c.text_base));
     }
-    row().w_full().justify_end().child(col().max_w(560.0).px(12.0).py(8.0).radius(12.0).fill(k.c.layer_03).child(inner))
+    row().w_full().child(col().w_full().px(16.0).py(12.0).radius(10.0).fill(k.c.layer_03).child(inner))
 }
 
 fn thought<S: 'static>(k: &Kit, message: usize, at: usize, body: &str, open: bool) -> El {
@@ -293,7 +293,7 @@ fn transcript<S: 'static>(k: &Kit, snapshot: &Snapshot, state: &State, at: At<S>
             Some(Item::Agent { index, blocks }) => agent::<S>(&kit, *index, blocks),
             _ => col(),
         };
-        col().w_full().max_w(COLUMN).items_center().px(16.0).py(8.0).child(inner)
+        row().w_full().justify_center().child(col().w_full().max_w(COLUMN).px(16.0).py(8.0).child(inner))
     }).on_visible_rows::<S>(move |s: &mut S, range| {
         at(s).visible = range;
         true
@@ -387,9 +387,9 @@ fn control_menu<S: 'static>(grant: Grant, pending: bool) -> rune::PopupMenu {
 fn control_chip<S: 'static>(k: &Kit, snapshot: &Snapshot) -> El {
     let Some(grant) = snapshot.grant else { return col() };
     if !snapshot.grant_pending && grant == Grant::initial() {
-        return muted(k, format!("Control: {}", scope_name(grant.scope)));
+        return muted(k, scope_name(grant.scope).to_string());
     }
-    let label = format!("Control: {}{}", scope_name(grant.scope), if snapshot.grant_pending { " · restart to apply" } else { "" });
+    let label = format!("{}{}", scope_name(grant.scope), if snapshot.grant_pending { " · restart to apply" } else { "" });
     let pending = snapshot.grant_pending;
     k.interactive(row().key("control").px(8.0).py(2.0).radius(6.0).fill(k.c.layer_02).child(text(label).font(SMALL).color(k.c.text_base)).on_press_tx(move |_: &mut S, tx: &mut Tx| {
         tx.popup_menu(control_menu::<S>(grant, pending), "control", move |_: &mut S, picked: Option<&str>, _: &mut Tx| {
@@ -409,10 +409,20 @@ fn control_chip<S: 'static>(k: &Kit, snapshot: &Snapshot) -> El {
 fn chips<S: 'static>(k: &Kit, snapshot: &Snapshot) -> El {
     let mut bar = row().grow(1.0).min_w(0.0).items_center().gap(6.0).flex_wrap();
     if snapshot.blank && !snapshot.agents.is_empty() {
-        let names: Vec<&str> = snapshot.agents.iter().map(|(n, _)| n.as_str()).collect();
-        let current = snapshot.chosen.as_ref().and_then(|c| snapshot.agents.iter().position(|(_, id)| id == c));
         let ids: Vec<String> = snapshot.agents.iter().map(|(_, id)| id.clone()).collect();
-        bar = bar.child(SegmentedControl::new(&names, current).label("Agent").on_pick(move |_: &mut S, i: usize, _: &mut Tx| tell(Cmd::PickAgent(ids[i].clone()))).build(k));
+        let label = snapshot.chosen.as_ref().and_then(|c| snapshot.agents.iter().find(|(_, id)| id == c)).map_or("Agent".to_string(), |(n, _)| n.clone());
+        let mut menu = rune::PopupMenu::new();
+        for (name, id) in &snapshot.agents {
+            menu = menu.item(rune::PopupItem::new(id.as_str(), name.as_str()).checked(snapshot.chosen.as_ref() == Some(id)));
+        }
+        bar = bar.child(k.interactive(row().key("agent-pick").px(8.0).py(2.0).radius(6.0).child(text(format!("{label} ⌄")).font(SMALL).color(k.c.text_base)).on_press_tx(move |_: &mut S, tx: &mut Tx| {
+            let (menu, ids) = (menu.clone(), ids.clone());
+            tx.popup_menu(menu, "agent-pick", move |_: &mut S, picked: Option<&str>, _: &mut Tx| {
+                if let Some(id) = picked.and_then(|p| ids.iter().find(|i| i.as_str() == p)) {
+                    tell(Cmd::PickAgent(id.clone()));
+                }
+            });
+        })));
     } else if let Some((name, id)) = snapshot.chosen.as_ref().and_then(|c| snapshot.agents.iter().find(|(_, id)| id == c)).map(|(n, i)| (n.clone(), i.clone())) {
         let _ = id;
         bar = bar.child(muted(k, name));
@@ -420,7 +430,7 @@ fn chips<S: 'static>(k: &Kit, snapshot: &Snapshot) -> El {
     for setting in &snapshot.settings {
         let next = setting.choices.iter().position(|(v, _)| *v == setting.current).map(|i| (i + 1) % setting.choices.len()).and_then(|i| setting.choices.get(i)).map(|(v, _)| v.clone());
         let (id, busy) = (setting.id.clone(), snapshot.busy);
-        let label = format!("{}: {}", setting.name, setting.current_name());
+        let label = setting.current_name().to_string();
         bar = bar.child(Button::new(label).variant(ButtonVariant::Ghost).disabled(busy || next.is_none()).on_press(move |_: &mut S| {
             if let Some(value) = &next {
                 tell(Cmd::Setting { id: id.clone(), value: value.clone() });
@@ -430,7 +440,7 @@ fn chips<S: 'static>(k: &Kit, snapshot: &Snapshot) -> El {
     if snapshot.blank
         && let Some(on) = snapshot.isolate
     {
-        bar = bar.child(Switch::new(on).label("Own worktree").on_toggle(move |_: &mut S| tell(Cmd::Isolate(!on))).build(k)).child(muted(k, "Own worktree"));
+        bar = bar.child(Switch::new(on).label("Own worktree").on_toggle(move |_: &mut S| tell(Cmd::Isolate(!on))).build(k));
     }
     bar = bar.child(control_chip::<S>(k, snapshot));
     bar
@@ -440,7 +450,7 @@ fn composer<S: 'static>(k: &Kit, snapshot: &Snapshot, state: &State, at: At<S>) 
     let steer = snapshot.steer;
     let field = TextArea::new(&state.draft)
         .label("Message")
-        .placeholder(if snapshot.blank { "What should the agent do?" } else { "Reply" })
+        .placeholder(if snapshot.blank { "Message the agent" } else { "Reply" })
         .auto_grow(2, 8)
         .width(None)
         .on_edit(move |s: &mut S| &mut at(s).draft)
@@ -473,11 +483,11 @@ fn composer<S: 'static>(k: &Kit, snapshot: &Snapshot, state: &State, at: At<S>) 
     let mut actions = row().gap(6.0);
     if snapshot.busy {
         actions = actions.child(Button::new(if steer { "Steer" } else { "Queue" }).variant(ButtonVariant::Ghost).on_press(|_: &mut S| tell(Cmd::Send { later: true })).build(k));
-        actions = actions.child(Button::new("Stop").on_press(|_: &mut S| tell(Cmd::Stop)).build(k));
+        actions = actions.child(Button::new("■").help("Stop").on_press(|_: &mut S| tell(Cmd::Stop)).build(k));
     } else {
-        actions = actions.child(Button::new("Send").variant(ButtonVariant::Submit).on_press(|_: &mut S| tell(Cmd::Send { later: false })).build(k));
+        actions = actions.child(Button::new("↑").help("Send").variant(ButtonVariant::Submit).on_press(|_: &mut S| tell(Cmd::Send { later: false })).build(k));
     }
-    let mut core = col().w_full().max_w(COLUMN).gap(8.0).padding(8.0).radius(12.0).border(1.0, k.c.border_base);
+    let mut core = col().w_full().max_w(COLUMN).gap(8.0).padding(12.0).radius(16.0).border(1.0, k.c.border_base);
     if let Some(note) = &snapshot.note {
         core = core.child(row().w_full().items_center().gap(8.0).child(row().grow(1.0).child(muted(k, note.clone()))).child(Button::new("Dismiss").variant(ButtonVariant::Ghost).on_press(|_: &mut S| tell(Cmd::DismissNote)).build(k)));
     }
@@ -506,15 +516,29 @@ fn composer<S: 'static>(k: &Kit, snapshot: &Snapshot, state: &State, at: At<S>) 
     column.child(core)
 }
 
-/// The header's title and status lines.
+/// The thread's header as the window's toolbar: its leading controls and title, then its status
+/// lines and trailing controls. Where the conversation is not in the middle pane it keeps this
+/// band inside itself ([`view`] with `framed`).
+pub fn toolbar<S: 'static>(k: &Kit, snapshot: &Snapshot) -> rune_kit::shell::Toolbar {
+    let lead: Vec<_> = snapshot.lead.iter().copied().filter(|c| !matches!(c, crate::model::header::Control::Sidebar(_))).collect();
+    let mut bar = rune_kit::shell::Toolbar::new().leading(super::header::controls::<S>(k, &lead)).leading(text(snapshot.title.clone()).font(BODY).color(k.c.text_base).truncate());
+    for status in &snapshot.statuses {
+        bar = bar.trailing(muted(k, status.clone()));
+    }
+    bar.trailing(super::header::controls::<S>(k, &snapshot.trail))
+}
+
+/// The header's title and status lines, for a conversation that is not under the window's toolbar.
 fn header<S: 'static>(k: &Kit, snapshot: &Snapshot) -> El {
-    let mut bar = row().w_full().items_center().gap(12.0).px(16.0).py(8.0).child(super::header::controls::<S>(k, &snapshot.lead)).child(row().grow(1.0).min_w(0.0).child(text(snapshot.title.clone()).font(BODY).color(k.c.text_base)));
+    let lead: Vec<_> = snapshot.lead.iter().copied().filter(|c| !matches!(c, crate::model::header::Control::Sidebar(_))).collect();
+    let mut bar = row().w_full().items_center().gap(12.0).px(16.0).py(8.0).child(super::header::controls::<S>(k, &lead)).child(row().grow(1.0).min_w(0.0).child(text(snapshot.title.clone()).font(BODY).color(k.c.text_base)));
     for status in &snapshot.statuses {
         bar = bar.child(muted(k, status.clone()));
     }
     bar.child(super::header::controls::<S>(k, &snapshot.trail))
 }
 
-pub fn view<S: 'static>(snapshot: &Snapshot, state: &State, k: &Kit, at: At<S>) -> El {
-    col().w_full().h_full().min_h(0.0).child(header::<S>(k, snapshot)).child(transcript::<S>(k, snapshot, state, at)).child(composer::<S>(k, snapshot, state, at))
+/// The conversation; `framed` keeps its own header, else the window's toolbar carries it.
+pub fn view<S: 'static>(snapshot: &Snapshot, state: &State, k: &Kit, at: At<S>, framed: bool) -> El {
+    col().w_full().h_full().min_h(0.0).children(framed.then(|| header::<S>(k, snapshot))).child(transcript::<S>(k, snapshot, state, at)).child(composer::<S>(k, snapshot, state, at))
 }
