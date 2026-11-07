@@ -27,7 +27,7 @@ gpui, NSH, `vendor/`, `src/nsh`, `src/ui`, `terminal_view.rs` and `theme.rs` are
 
 - **Issues**: no labels or parent editing, milestones, epic pages (an epic click filters the list),
   or project filter chips; the add box always targets the repo last shown.
-- **Chat**: no pictures, Control (grant) menu, transcript rail, virtualised transcript.
+- **Chat**: pictures work (dropped or pasted into the draft, shown in it and in the transcript, detachable); no Control (grant) menu, transcript rail, or virtualised transcript.
 - **Terminal**: resize, scrollback (wheel), paste and drag-selection (Rune's text selection) work; Ctrl+Shift+C/V and the platform key are left to the window. Not checked: copy to the clipboard, mouse reporting to programs, wide characters.
 - **Window**: pane widths save and restore, the window reports whether it is active, files dropped
   on it attach to the message being written, and Ctrl+P works with a field focused. Unchecked:
