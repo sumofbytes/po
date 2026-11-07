@@ -14,6 +14,8 @@ gpui_platform = { package = "gpui-fast-platform", version = "=0.1.13", default-f
 nsh-platform-gpui = { version = "0.3.0", default-features = false }
 nsh-core = "0.3.0"
 nsh-base = { version = "0.3.0" }
+# The UI port: Rune replaces gpui and NSH on this branch. Pin a `dev` rev; `dev` is never rewritten.
+rune = { git = "https://github.com/anomalyco/rune", rev = "b99c7b04e75c0b7587fe8d09ba6a679e11ede9c9" }
 env_logger = "0.11"
 log = "0.4"
 libc = "0.2"
