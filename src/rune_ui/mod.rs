@@ -12,5 +12,6 @@ pub mod diff;
 pub mod agent;
 pub mod chat;
 pub mod home;
+pub mod issues;
 pub mod work;
 pub mod header;

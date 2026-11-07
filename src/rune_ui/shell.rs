@@ -4,7 +4,8 @@
 use rune::{El, col};
 use rune_kit::{Kit, PaneState, SplitView};
 
-use super::{agent, chat, diff, explorer, finder, home, settings, sidebar, source, tabs, terminal};
+use super::{agent, chat, diff, explorer, finder, home, issues, settings, sidebar, source, tabs, terminal};
+use crate::issues::shared;
 use crate::model;
 use crate::model::bus::{Cmd, send};
 use crate::reader::render::Layout;
@@ -52,6 +53,7 @@ pub struct Shell {
     pub chat: chat::State,
     pub home: home::State,
     pub home_model: model::home::Model,
+    pub issues: issues::State,
     overview_feed: Feed<crate::issues::shared::Overview>,
     pub finder: finder::State,
     finder_was_open: bool,
@@ -80,6 +82,7 @@ impl Default for Shell {
             chat: chat::State::default(),
             home: home::State::default(),
             home_model: Default::default(),
+            issues: issues::State::default(),
             overview_feed: Feed::new(crate::issues::shared::overview()),
             finder: finder::State::default(),
             finder_was_open: false,
@@ -106,6 +109,11 @@ impl Shell {
             self.finder.at = 0;
         }
         self.finder_was_open = layout.finder_open;
+        if layout.issues_open {
+            if let Some(nav) = shared::take_nav() {
+                self.issues.go_to(nav, &self.overview_feed.value);
+            }
+        }
     }
 
     /// Takes what the `Reader` published since the last call; true when the view is stale.
@@ -116,6 +124,7 @@ impl Shell {
             self.home_model = model::home::model(&self.overview_feed.value, &self.sidebar_feed.value, crate::date::today());
         }
         stale |= overview;
+        stale |= self.issues.tick(&self.overview_feed.value);
         stale |= self.explorer_feed.poll();
         stale |= self.strip_feed.poll();
         stale |= self.tabs_feed.poll();
@@ -203,6 +212,10 @@ fn chat_of<S: Host>(s: &mut S) -> &mut chat::State {
     &mut s.shell().chat
 }
 
+fn issues_of<S: Host>(s: &mut S) -> &mut issues::State {
+    &mut s.shell().issues
+}
+
 fn home_of<S: Host>(s: &mut S) -> &mut home::State {
     &mut s.shell().home
 }
@@ -255,7 +268,7 @@ pub fn view<S: Host>(host: &S, k: &Kit) -> El {
     } else if layout.home_open {
         Some(home::view::<S>(&shell.home_model, &shell.home, k, home_of::<S>))
     } else if layout.issues_open {
-        Some(placeholder(k, "Issues"))
+        Some(issues::view::<S>(&shell.overview_feed.value, &shell.issues, k, issues_of::<S>))
     } else {
         None
     };
