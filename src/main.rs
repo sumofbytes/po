@@ -16,6 +16,7 @@ mod fonts;
 mod handoff;
 mod issues;
 mod mcp;
+mod model;
 mod nsh;
 mod plugin;
 mod pr;
