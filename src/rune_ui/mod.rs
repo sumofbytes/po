@@ -10,3 +10,4 @@ pub mod tabs;
 pub mod source;
 pub mod diff;
 pub mod agent;
+pub mod chat;

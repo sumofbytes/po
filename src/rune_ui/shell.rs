@@ -4,7 +4,7 @@
 use rune::{El, col};
 use rune_kit::{Kit, PaneState, SplitView};
 
-use super::{agent, diff, explorer, finder, settings, sidebar, source, tabs, terminal};
+use super::{agent, chat, diff, explorer, finder, settings, sidebar, source, tabs, terminal};
 use crate::model;
 
 /// What the `Reader` last published for a screen, and the channel it comes through.
@@ -55,6 +55,8 @@ pub struct Shell {
     pub diff: diff::State,
     pub agent_feed: Feed<model::agent::Snapshot>,
     pub agent: agent::State,
+    pub chat_feed: Feed<model::chat::Snapshot>,
+    pub chat: chat::State,
     pub finder: finder::State,
     pub finder_feed: Feed<model::finder::Snapshot>,
     /// The Ctrl+P finder is up over the main pane.
@@ -81,6 +83,8 @@ impl Default for Shell {
             diff: diff::State::default(),
             agent_feed: Feed::new(model::agent::watch()),
             agent: agent::State::default(),
+            chat_feed: Feed::new(model::chat::watch()),
+            chat: chat::State::default(),
             finder: finder::State::default(),
             finder_feed: Feed::new(model::finder::watch()),
             finder_open: false,
@@ -113,6 +117,10 @@ impl Shell {
         }
         if self.agent_feed.poll() {
             self.agent.follow(&self.agent_feed.value);
+            stale = true;
+        }
+        if self.chat_feed.poll() {
+            self.chat.follow(&self.chat_feed.value);
             stale = true;
         }
         self.explorer.follow(&self.strip_feed.value);
@@ -176,6 +184,10 @@ fn agent_of<S: Host>(s: &mut S) -> &mut agent::State {
     &mut s.shell().agent
 }
 
+fn chat_of<S: Host>(s: &mut S) -> &mut chat::State {
+    &mut s.shell().chat
+}
+
 fn finder_of<S: Host>(s: &mut S) -> &mut finder::State {
     &mut s.shell().finder
 }
@@ -213,6 +225,8 @@ pub fn view<S: Host>(host: &S, k: &Kit) -> El {
     let main = match (&shell.page, &shell.settings) {
         _ if shell.finder_open => finder::view::<S>(&shell.finder_feed.value, &shell.finder, k, finder_of::<S>),
         (Page::Settings, Some(page)) => settings::view::<S>(page, k, settings_of::<S>),
+        // A thread on screen has its conversation; none, the terminal.
+        _ if !shell.chat_feed.value.title.is_empty() => chat::view::<S>(&shell.chat_feed.value, &shell.chat, k, chat_of::<S>),
         _ => terminal::view::<S>(&shell.term, k, term_of::<S>),
     };
     SplitView::new(main)

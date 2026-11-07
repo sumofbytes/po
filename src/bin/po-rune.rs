@@ -114,6 +114,26 @@ fn demo() {
         };
         model::agent::publish(model::agent::Snapshot { title: "What next?".into(), body, ..Default::default() });
     }
+    if std::env::var("PO_RUNE_CHAT").is_ok() {
+        use model::chat::{AskOption, Block, Entry, Item, Phase, Snapshot, Tool};
+        let blocks = vec![
+            Block::Markdown { text: "I'll look at the **sidebar** first, then `port` it.".into(), stitch: false },
+            Block::Thought { index: 1, text: "The sidebar reads snapshots.\nSo the port is a view.".into(), open: false },
+            Block::Tool(Tool { index: 2, title: "Read src/nsh/sidebar.rs".into(), phase: Phase::Done, open: true, arguments: "{\"path\":\"src/nsh/sidebar.rs\"}".into(), result: "421 lines".into(), path: Some("src/rune_ui/sidebar.rs".into()) }),
+            Block::Run { index: 3, count: 0, calls: 4, failed: 1, phase: Phase::Done, folded: true, task: None, took: Some(std::time::Duration::from_secs(95)), latest: None, kinds: vec![(model::chat::Kind::Read, 3), (model::chat::Kind::Edit, 1)], edits: vec!["src/rune_ui/chat.rs".into()] },
+            Block::Plan(vec![Entry { text: "Port the transcript".into(), phase: Phase::Done }, Entry { text: "Port the composer".into(), phase: Phase::Working }]),
+            Block::Ask { index: 5, title: "Run `cargo test`?".into(), options: vec![AskOption { at: 0, label: "Allow".into(), primary: true }, AskOption { at: 1, label: "Deny".into(), primary: false }], answered: None },
+        ];
+        model::chat::publish(Snapshot {
+            title: "Port the sidebar".into(),
+            statuses: vec!["3 threads · 1 asking".into()],
+            busy: true,
+            steer: true,
+            settings: vec![model::chat::Setting { id: "model".into(), name: "Model".into(), current: "a".into(), choices: vec![("a".into(), "Opus".into()), ("b".into(), "Sonnet".into())] }],
+            items: vec![Item::User { text: "Port the sidebar to Rune".into(), pictures: vec![] }, Item::Agent { index: 1, blocks: std::sync::Arc::new(blocks) }],
+            ..Default::default()
+        });
+    }
     let shared = |t: &str| model::source::Shared(std::sync::Arc::from(t));
     let old = "fn total() -> u32 {\n    let a = 1;\n    a\n}\n\nfn same() {}\n";
     let new = "fn total() -> u64 {\n    let a = 1;\n    let b = 2;\n    a + b\n}\n\nfn same() {}\n";
