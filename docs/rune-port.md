@@ -29,9 +29,9 @@ gpui, NSH, `vendor/`, `src/nsh`, `src/ui`, `terminal_view.rs` and `theme.rs` are
   or project filter chips; the add box always targets the repo last shown.
 - **Chat**: no pictures, Control (grant) menu, transcript rail, virtualised transcript.
 - **Terminal**: resize, scrollback (wheel), paste and drag-selection (Rune's text selection) work; Ctrl+Shift+C/V and the platform key are left to the window. Not checked: copy to the clipboard, mouse reporting to programs, wide characters.
-- **Window**: pane widths are not saved back to the workspace; full-screen/active flags unused;
-  drag-and-drop of files, desktop notifications and the `po update` flow are unchecked; Ctrl+P is
-  not caught while a text field has focus.
+- **Window**: pane widths save and restore, the window reports whether it is active, files dropped
+  on it attach to the message being written, and Ctrl+P works with a field focused. Unchecked:
+  desktop notifications and the `po update` flow.
 - **Tests**: the NSH `Headless` screen tests went with NSH; the `model` tests remain. There are
   no `rune::Runtime` tests of `rune_ui` yet.
 - **Platforms**: only Linux was run. Wayland IME and clipboard, macOS and Windows are unchecked.
