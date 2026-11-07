@@ -19,3 +19,12 @@ pub enum Control {
     /// Back to the explorer, in a pane too narrow for it beside the file.
     Explorer,
 }
+
+/// What the shell adds to a screen's snapshot: the window's theme and the controls its header
+/// carries. Decided by the layout, so the core never builds it.
+#[derive(Clone, Default, PartialEq, Debug)]
+pub struct Chrome {
+    pub glass: bool,
+    pub lead: Vec<Control>,
+    pub trail: Vec<Control>,
+}

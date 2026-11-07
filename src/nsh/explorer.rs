@@ -132,6 +132,7 @@ mod tests {
     use nsh_testing::Headless;
 
     use super::*;
+    use crate::explorer::Row;
 
     fn entry(id: &str, name: &str, depth: usize, folder: bool, mark: Option<char>) -> Entry {
         Entry { row: Row { id: id.into(), name: name.into(), depth, folder, expanded: folder, selected: false }, mark }

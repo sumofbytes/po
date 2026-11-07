@@ -96,6 +96,7 @@ mod tests {
     use nsh_testing::Headless;
 
     use super::*;
+    use crate::model::source::Shared;
 
     #[test]
     fn the_diff_pane_compares_two_versions_and_reports_its_layout_buttons() {

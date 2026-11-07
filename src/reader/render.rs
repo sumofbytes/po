@@ -2,18 +2,23 @@
 
 use crate::*;
 
+/// Whether the window is drawn as glass: the one thing of the toolkit's theme the snapshots carry.
+pub(crate) fn glass(cx: &App) -> bool {
+    cx.global::<Palette>().glass.is_some()
+}
+
 impl Reader {
     /// The left side: every project with its threads, drawn by NSH from what [`Self::sidebar_snapshot`]
     /// publishes.
     pub(crate) fn left_sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        nsh::sidebar::publish(self.sidebar_snapshot(cx));
+        nsh::sidebar::publish(self.sidebar_snapshot().with_glass(glass(cx)));
         floating(div().size_full().flex().flex_col().child(self.sidebar.clone()), cx)
     }
 
     /// What the sidebar shows: the projects and threads that answer its filter, what waits on the
     /// user, and what agents have suggested.
     #[hotpath::measure(impl_type = "Reader")]
-    pub(crate) fn sidebar_snapshot(&self, cx: &App) -> nsh::sidebar::Snapshot {
+    pub(crate) fn sidebar_snapshot(&self) -> nsh::sidebar::Snapshot {
         use nsh::sidebar as side;
         let query = self.side_query.trim().to_lowercase();
         let searching = !query.is_empty();
@@ -116,7 +121,7 @@ impl Reader {
             .collect();
 
         side::Snapshot {
-            glass: cx.global::<Palette>().glass.is_some(),
+            glass: false,
             waiting,
             projects,
             suggestions,
@@ -132,7 +137,7 @@ impl Reader {
     /// The conversation, drawn by NSH from what [`Self::chat_snapshot`] publishes; published here in place
     /// of the pane, as the viewer's panes are.
     pub(crate) fn chat_pane(&self, lead: Vec<nsh::header::Control>, trail: Vec<nsh::header::Control>, cx: &mut Context<Self>) -> gpui::Div {
-        nsh::chat::publish(self.chat_snapshot(lead, trail, cx));
+        nsh::chat::publish(self.chat_snapshot().with_chrome(nsh::header::Chrome { glass: glass(cx), lead, trail }));
         let tint = cx.global::<Palette>().primary.opacity(theme::tokens::DROP_TINT);
         // Files dropped anywhere on the conversation join the draft. NSH's views can sit over this
         // element and keep it from being the hovered one, so while a file is being dragged a layer
@@ -158,7 +163,7 @@ impl Reader {
 
     /// What the conversation shows: the header, the transcript, and the composer.
     #[hotpath::measure(impl_type = "Reader")]
-    pub(crate) fn chat_snapshot(&self, lead: Vec<nsh::header::Control>, trail: Vec<nsh::header::Control>, cx: &App) -> nsh::chat::Snapshot {
+    pub(crate) fn chat_snapshot(&self) -> nsh::chat::Snapshot {
         use nsh::chat as chat;
         let thread = &self.thread;
         // Bump the transcript's follow (the pane scrolls to its end) when the thread the pane
@@ -224,11 +229,11 @@ impl Reader {
         });
         let grant = self.grants.get(&thread.id).copied().unwrap_or_else(command::Grant::initial);
         chat::Snapshot {
-            glass: cx.global::<Palette>().glass.is_some(),
+            glass: false,
             title: capitalized(thread.title()),
             thread: (self.project_id, thread.id),
-            lead,
-            trail,
+            lead: vec![],
+            trail: vec![],
             statuses,
             place: self.place(),
             blank: thread.blank,
@@ -628,12 +633,12 @@ impl Reader {
 
     /// The picked file's changes, drawn by NSH from what [`Self::diff_snapshot`] publishes.
     pub(crate) fn diff_viewer(&self, lead: Vec<nsh::header::Control>, trail: Vec<nsh::header::Control>, cx: &mut Context<Self>) -> impl IntoElement + Styled + use<> {
-        nsh::diff::publish(self.diff_snapshot(lead, trail, cx));
+        nsh::diff::publish(self.diff_snapshot().with_chrome(nsh::header::Chrome { glass: glass(cx), lead, trail }));
         div().size_full().child(self.diff.clone())
     }
 
     #[hotpath::measure(impl_type = "Reader")]
-    pub(crate) fn diff_snapshot(&self, lead: Vec<nsh::header::Control>, trail: Vec<nsh::header::Control>, cx: &App) -> nsh::diff::Snapshot {
+    pub(crate) fn diff_snapshot(&self) -> nsh::diff::Snapshot {
         use nsh::diff::{Body, Snapshot};
         let project = &self.project;
         let (title, body) = match (&project.picked, &project.versions) {
@@ -642,17 +647,17 @@ impl Reader {
             (Some(path), None) => (path.clone(), Body::NoChanges),
             (Some(path), Some((old, new))) => (path.clone(), Body::Versions { path: path.clone(), old: old.clone(), new: new.clone() }),
         };
-        Snapshot { glass: cx.global::<Palette>().glass.is_some(), title, lead, trail, split: self.split, counts: project.counts, body }
+        Snapshot { glass: false, title, lead: vec![], trail: vec![], split: self.split, counts: project.counts, body }
     }
 
     /// The open file in the viewer, drawn by NSH from what [`Self::source_snapshot`] publishes.
     pub(crate) fn viewer(&self, lead: Vec<nsh::header::Control>, trail: Vec<nsh::header::Control>, cx: &mut Context<Self>) -> impl IntoElement + Styled + use<> {
-        nsh::source::publish(self.source_snapshot(lead, trail, cx));
+        nsh::source::publish(self.source_snapshot().with_chrome(nsh::header::Chrome { glass: glass(cx), lead, trail }));
         div().size_full().child(self.source.clone())
     }
 
     #[hotpath::measure(impl_type = "Reader")]
-    pub(crate) fn source_snapshot(&self, lead: Vec<nsh::header::Control>, trail: Vec<nsh::header::Control>, cx: &App) -> nsh::source::Snapshot {
+    pub(crate) fn source_snapshot(&self) -> nsh::source::Snapshot {
         use nsh::source::{Body, Snapshot};
         let current = self.project.current.as_deref();
         let markdown = self.project.is_markdown;
@@ -664,10 +669,10 @@ impl Reader {
             (None, None) => Body::Hint(self.pick_hint("a file")),
         };
         Snapshot {
-            glass: cx.global::<Palette>().glass.is_some(),
+            glass: false,
             title: current.map_or_else(|| "No file open".to_string(), str::to_string),
-            lead,
-            trail,
+            lead: vec![],
+            trail: vec![],
             language: current.map(language).unwrap_or("").to_string(),
             preview: markdown.then_some(self.rendered),
             body,

@@ -116,7 +116,7 @@ mod tests {
     fn counting() -> (Wake, Arc<AtomicUsize>) {
         let woken = Arc::new(AtomicUsize::new(0));
         let wake = woken.clone();
-        (Arc::new(move || drop(wake.fetch_add(1, Ordering::SeqCst))), woken)
+        (Arc::new(move || { wake.fetch_add(1, Ordering::SeqCst); }), woken)
     }
 
     /// Polls `inbox` until `done`, the way a window polls each frame.

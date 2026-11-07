@@ -221,6 +221,7 @@ mod tests {
     use nsh_testing::Headless;
 
     use super::*;
+    use std::sync::Arc;
 
     #[test]
     fn the_agents_view_renders_markdown_and_holds_a_form_and_reports_its_answer() {

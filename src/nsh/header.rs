@@ -6,7 +6,7 @@ use super::bus::{Cmd, send};
 use super::{Colors, body, caption, header_height, icon, scale, tooltip};
 use crate::ui::icon::IconName;
 
-pub use crate::model::header::Control;
+pub use crate::model::header::{Chrome, Control};
 
 impl Control {
     fn parts(self) -> (IconName, &'static str, bool, Cmd) {

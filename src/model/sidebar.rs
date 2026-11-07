@@ -103,3 +103,11 @@ pub fn publish(snapshot: Snapshot) {
         changed
     });
 }
+
+impl Snapshot {
+    /// The snapshot with the window's theme, which the core doesn't know.
+    pub fn with_glass(mut self, glass: bool) -> Self {
+        self.glass = glass;
+        self
+    }
+}

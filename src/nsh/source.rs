@@ -156,6 +156,8 @@ mod tests {
     use nsh_testing::Headless;
 
     use super::*;
+    use std::sync::Arc;
+    use crate::model::header::Control;
 
     fn code(path: &str, text: &str) -> Body {
         Body::Code { path: path.into(), text: Shared(Arc::from(text)) }
