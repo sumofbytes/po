@@ -137,6 +137,8 @@ fn poll(s: &mut State, _: f64, _: &mut Tx) -> bool {
 
 fn main() {
     rune::run(AppSpec::<State> {
+        // Mono spans draw in the mono slot: point it at the system's monospace font.
+        families: ("Inter", "ui-monospace"),
         setup: Some(setup),
         poll: Some(poll),
         ..AppSpec::new("Po", (1000.0, 560.0), State::default, view)
