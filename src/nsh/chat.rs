@@ -929,7 +929,6 @@ fn run_row(message: usize, at: usize, thoughts: usize, calls: usize, failed: usi
             .smooth()
             .bg(Colors::hover())
             .on_press(move || tell(Cmd::Open(path.clone())))
-            .child(icon(IconName::FileText, STEP_ICON, Colors::muted()))
             .child(text(name).selectable(false).number_of_lines(1).sized(text_sm()).text_color(Colors::foreground()))
     });
     let more = edits.len().saturating_sub(MAX_CHIPS);

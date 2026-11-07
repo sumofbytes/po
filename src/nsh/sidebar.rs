@@ -321,10 +321,8 @@ pub(super) fn accent(name: &str) -> AdaptiveColor {
 #[hotpath::measure]
 fn project_group(project: &Project, spin: Spin, rename: Renaming) -> View {
     let pid = project.id;
-    let tint = accent(&project.name);
     // With one of its threads selected, the highlight says where we are; the name steps back.
     let label = Colors::foreground();
-    let chevron = if project.collapsed { IconName::ChevronRight } else { IconName::ChevronDown };
     let name = text(project.name.clone())
         .number_of_lines(1)
         .flex_1()
@@ -333,18 +331,15 @@ fn project_group(project: &Project, spin: Spin, rename: Renaming) -> View {
         .font_weight(FontWeight::SEMIBOLD)
         .text_color(label);
     // Pressing the row opens the project and folds or unfolds its threads; the buttons on it are
-    // their own targets.
+    // their own targets, and the + is always there.
     let head = side_row(None)
         .h(space::tree())
         .test_id(&format!("agent-project-{pid}"))
         .hover(|s| s.bg(Colors::hover()))
         .on_press(move || send(Cmd::ToggleProject(pid)))
         .child(name)
-        // The buttons show on hover; the chevron ends the row.
-        .child(on_hover(icon_button(IconName::Plus, scale::s3(), "New thread in this project", move || send(Cmd::StartThread(pid)))))
         .child(project.closable.then(|| on_hover(icon_button(IconName::Close, scale::s3(), "Close project", move || send(Cmd::CloseProject(pid))))))
-        // As in the transcript, the chevron is the last thing in the row.
-        .child(icon(chevron, scale::s4(), move || tint));
+        .child(icon_button(IconName::Plus, scale::s3(), "New thread in this project", move || send(Cmd::StartThread(pid))));
     let fold = project.fold.map(|(expanded, hidden)| {
         let label = if expanded { "Show less".to_string() } else { format!("{hidden} more") };
         let chevron = if expanded { IconName::ChevronUp } else { IconName::ChevronDown };
