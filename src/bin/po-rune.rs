@@ -20,6 +20,20 @@ mod rune_ui;
 #[path = "../schemes.rs"]
 mod schemes;
 
+#[allow(dead_code)]
+#[path = "../config.rs"]
+mod config;
+#[allow(dead_code)]
+#[path = "../settings.rs"]
+mod settings;
+/// Only the names the settings page reads: the gpui `fonts` module can't come along. The Rune
+/// port replaces it.
+mod fonts {
+    pub const SIZES: std::ops::RangeInclusive<f32> = 8.0..=48.0;
+    pub const BUNDLED_UI_FAMILY: &str = "Geist";
+    pub const BUNDLED_MONO_FAMILY: &str = "Geist Mono";
+}
+
 use terminal::{Frame, KeyInput, Rgb, Session};
 
 const COLS: u16 = 100;
@@ -30,13 +44,16 @@ struct State {
     session: Option<Session>,
     frame: Arc<Frame>,
     kit: rune_kit::Kit,
+    /// `PO_RUNE_SCREEN=settings` shows the settings page instead of the shell.
+    settings: Option<rune_ui::settings::Page>,
 }
 
 impl Default for State {
     fn default() -> Self {
-        let name = std::env::var("PO_THEME").unwrap_or_else(|_| rune_ui::theme::DEFAULT.into());
+        let name = std::env::var("PO_THEME").ok().or_else(|| config::load()["theme"].as_str().map(String::from)).unwrap_or_else(|| rune_ui::theme::DEFAULT.into());
         let (kit, _) = rune_ui::theme::kit(&rune_ui::theme::load(&name));
-        Self { session: None, frame: Arc::default(), kit }
+        let settings = (std::env::var("PO_RUNE_SCREEN").as_deref() == Ok("settings")).then(|| rune_ui::settings::Page::load(false));
+        Self { session: None, frame: Arc::default(), kit, settings }
     }
 }
 
@@ -93,6 +110,9 @@ fn row(frame: &Frame, kit: &rune_kit::Kit, y: usize) -> El {
 }
 
 fn view(s: &State, _: &mut Cx<State>) -> El {
+    if let Some(page) = &s.settings {
+        return rune_ui::settings::view::<State>(page, &s.kit, |s| s.settings.as_mut().expect("the page"));
+    }
     let mut grid = col().key("terminal").focusable(true).on_key(on_key);
     for y in 0..ROWS as usize {
         grid = grid.child(row(&s.frame, &s.kit, y));
@@ -141,6 +161,9 @@ fn on_key(s: &mut State, event: &KeyEvent, _: &mut Tx) -> bool {
 }
 
 fn setup(s: &mut State, wake: Waker) {
+    if s.settings.is_some() {
+        return;
+    }
     let cwd = std::env::current_dir().unwrap_or_else(|_| "/".into());
     s.session = Session::spawn(&cwd, COLS, ROWS, (rgb(s.kit.c.text_base), rgb(s.kit.c.bg_base)), move || wake()).ok();
 }
