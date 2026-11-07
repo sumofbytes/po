@@ -1,15 +1,12 @@
 //! The viewer's diff pane: one changed file, old against new, side by side or inline. nsh's
 //! `DiffView` compares the two versions, highlights the words that changed and folds the lines
 //! between changes; [`Snapshot`] is what [`crate::Reader`] publishes.
-use std::sync::LazyLock;
 
 use nsh_base::{DiffLayout, diff_view};
 use nsh_core::prelude::*;
-use tokio::sync::watch;
 
 use super::bus::{Cmd, send};
-use super::header::{Control, pane_header};
-use super::source::Shared;
+use super::header::pane_header;
 use super::{Colors, note, scale, small, text_xs, Smooth};
 
 pub use crate::model::diff::*;

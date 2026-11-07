@@ -14,6 +14,8 @@ mod diff;
 mod explorer;
 mod fonts;
 mod handoff;
+#[allow(dead_code)]
+mod host;
 mod issues;
 mod mcp;
 mod model;

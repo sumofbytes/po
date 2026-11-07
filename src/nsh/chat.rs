@@ -3,13 +3,12 @@
 //! to start with, the session's settings, what the agent may do through Po). [`Snapshot`] is
 //! what [`crate::Reader`] publishes; the screen draws it, and what the user does on it comes
 //! back as a [`Cmd`].
-use std::sync::{Arc, LazyLock};
+use std::sync::Arc;
 
 use nsh_base::{menu, menu_item, menu_separator, text_view, Input, input};
 use nsh_core::prelude::*;
-use tokio::sync::watch;
 
-use super::header::{Control, pane_header_with};
+use super::header::pane_header_with;
 use super::{Renaming, Colors, Spin, body, icon, mono_size, note, scale, spin, spinner, text_base, text_sm, text_xs, tooltip, Sizing, Smooth};
 use crate::ui::icon::IconName;
 

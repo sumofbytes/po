@@ -1,13 +1,11 @@
 //! The viewer's source pane: the open file in a read-only editor, or a markdown file rendered, with
 //! a find bar. [`Snapshot`] is what [`crate::Reader`] publishes; the screen draws it.
-use std::sync::{Arc, LazyLock};
 
 use nsh_base::{EditorApi, EditorSearch, EditorSearchResult, editor, text_view};
 use nsh_core::prelude::*;
-use tokio::sync::watch;
 
 use super::bus::{Cmd, send};
-use super::header::{Control, header_button, pane_header, status, toggle_button};
+use super::header::{header_button, pane_header, status, toggle_button};
 use super::{Colors, icon_button, note, scale};
 use crate::ui::icon::IconName;
 

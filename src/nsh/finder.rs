@@ -1,9 +1,7 @@
 //! Ctrl+P: a query field over the project's files. [`Snapshot`] is the files that match, which
 //! [`crate::Reader`] works out; the screen keeps the query and which file is picked.
-use std::sync::{LazyLock, Mutex};
 
 use nsh_core::prelude::*;
-use tokio::sync::watch;
 
 use super::bus::{Cmd, send};
 use super::overlay::{self, Height};

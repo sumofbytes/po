@@ -1,10 +1,8 @@
 //! The left side: New, Search, Issues, what needs the user, and every project with its threads.
 //! [`Snapshot`] is what [`crate::Reader`] publishes (already filtered by the search); the screen
 //! only draws it, and what is pressed goes back as a [`Cmd`].
-use std::sync::LazyLock;
 
 use nsh_core::prelude::*;
-use tokio::sync::watch;
 
 use super::bus::{Cmd, send};
 use super::{Renaming, Colors, Spin, header_height, icon, leading, icon_button, on_hover, scale, small, spin, spinner, text_base, Sizing, Smooth};

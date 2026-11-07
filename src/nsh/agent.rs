@@ -1,14 +1,12 @@
 //! The viewer showing what the agent put on screen: a markdown document it wrote, or a form the
 //! user answers. [`Snapshot`] is what [`crate::Reader`] publishes; the screen draws it and
 //! answers a form back through [`Cmd::SubmitForm`].
-use std::sync::{Arc, LazyLock};
 
 use nsh_base::text_view;
 use nsh_core::prelude::*;
-use tokio::sync::watch;
 
 use super::bus::{Cmd, send};
-use super::header::{Control, pane_header, status};
+use super::header::{pane_header, status};
 use super::source::Shared;
 use super::{Colors, body, field_height, note, scale, text_base, text_sm, Smooth};
 use serde_json::{Map, Value};

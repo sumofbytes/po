@@ -1,16 +1,14 @@
 //! The file tree beside the viewer: every file, or the changed ones in Changes mode, under a
 //! header with the mode switch and the PR and worktree strips. [`Snapshot`] is what
 //! [`crate::Reader`] publishes; the screen draws it.
-use std::sync::LazyLock;
 
 use nsh_core::prelude::*;
-use tokio::sync::watch;
 
 use super::bus::{Cmd, send};
-use super::header::{Control, pane_header};
+use super::header::pane_header;
 use super::strip::strips_view;
 use super::{Colors, body, icon, note, scale, text_xs};
-use crate::explorer::{FileKind, Row, Step, file_kind};
+use crate::explorer::{FileKind, Step, file_kind};
 use crate::ui::icon::IconName;
 
 pub use crate::model::explorer::*;
