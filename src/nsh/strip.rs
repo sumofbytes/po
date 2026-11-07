@@ -1,53 +1,14 @@
 //! The strips under the explorer's header: how a PR review is opened or closed, and how a
 //! worktree's branch is finished. [`Snapshot`] is what [`crate::Reader`] publishes; the screen
 //! draws it.
-use std::sync::LazyLock;
 
 use nsh_core::prelude::*;
-use tokio::sync::watch;
 
 use super::bus::{Cmd, send};
 use super::{Colors, body, caption, field_with, scale, text_xs, tooltip};
 
-/// The strip a PR-reviewed project shows, or the way to review one.
-#[derive(Clone, PartialEq, Debug)]
-pub enum Pr {
-    /// The open PR's summary, with its way out.
-    Opened { label: String },
-    /// Nothing open: a field for the PR's number or URL, whether opening one is running, and
-    /// how the last attempt went (`Some` while it runs, and failed once it stopped).
-    Asking { status: Option<String>, opening: bool },
-}
-
-/// The strip a worktree project shows: its branch, and the ways to finish it.
-#[derive(Clone, PartialEq, Debug)]
-pub struct Worktree {
-    pub branch: String,
-    /// Discard was asked for once and waits for a second click, since it can't be undone.
-    pub confirm_discard: bool,
-}
-
-#[derive(Clone, PartialEq, Debug, Default)]
-pub struct Snapshot {
-    pub worktree: Option<Worktree>,
-    pub pr: Option<Pr>,
-    /// Bumped each time the PR field was emptied after a PR opened: the screen clears what
-    /// its field holds when it sees a new value.
-    pub pr_reset: u64,
-}
-
-static SNAPSHOT: LazyLock<watch::Sender<Snapshot>> = LazyLock::new(|| watch::Sender::new(Snapshot::default()));
-
-/// Shows `snapshot`; nothing is redrawn when it is what the screen already has.
-pub fn publish(snapshot: Snapshot) {
-    SNAPSHOT.send_if_modified(|now| {
-        let changed = *now != snapshot;
-        if changed {
-            *now = snapshot;
-        }
-        changed
-    });
-}
+pub use crate::model::strip::*;
+pub(crate) use crate::model::strip::SNAPSHOT;
 
 /// A small text button: an outline, or a ghost one with only its hover behind it.
 fn small_button(label: impl IntoReactive<SharedString> + Clone + 'static, outline: bool, tip: Option<&'static str>, on_press: impl Fn() + 'static) -> View {

@@ -7,6 +7,31 @@ pub(crate) fn glass(cx: &App) -> bool {
     cx.global::<Palette>().glass.is_some()
 }
 
+/// An agent's view as the pane shows it, with no chrome.
+pub(crate) fn agent_view_snapshot(view: &command::AgentView) -> nsh::agent::Snapshot {
+    nsh::agent::Snapshot { title: view.title.clone(), body: nsh::agent::Body::Markdown(nsh::source::Shared(Arc::from(view.body.as_str()))), ..Default::default() }
+}
+
+/// A form the agent put on screen as the pane shows it, with no chrome.
+pub(crate) fn form_view_snapshot(form: &command::AgentForm) -> nsh::agent::Snapshot {
+    let fields = form
+        .fields
+        .iter()
+        .map(|field| nsh::agent::Field { name: field.name.clone(), label: field.label.clone(), options: field.options.clone(), value: field.value.clone() })
+        .collect();
+    nsh::agent::Snapshot {
+        title: form.title.clone(),
+        body: nsh::agent::Body::Form {
+            id: form.id.clone(),
+            fields,
+            submit: form.submit.clone(),
+            answered: form.answered.is_some(),
+            doc: form.body.as_deref().map(|body| nsh::source::Shared(Arc::from(body))),
+        },
+        ..Default::default()
+    }
+}
+
 impl Reader {
     /// The left side: every project with its threads, drawn by NSH from what [`Self::sidebar_snapshot`]
     /// publishes.
@@ -490,7 +515,7 @@ impl Reader {
                 // The tabs, when there are any, are its header; otherwise it has one of its own.
                 let header = (!has_tabs).then(|| {
                     let (lead, trail) = body_controls(lead_controls);
-                    nsh::agent::publish(nsh::agent::Snapshot { glass: cx.global::<Palette>().glass.is_some(), title: "Terminal".into(), lead, trail, body: nsh::agent::Body::Bare });
+                    nsh::agent::publish(nsh::agent::Snapshot { title: "Terminal".into(), body: nsh::agent::Body::Bare, ..Default::default() }.with_chrome(nsh::header::Chrome { glass: glass(cx), lead, trail }));
                     div().flex_none().h(HEADER_HEIGHT).child(self.agent_pane.clone())
                 });
                 div().size_full().flex().flex_col().bg(background).children(header).child(div().flex_1().min_h_0().children(showing_terminal)).into_any_element()
@@ -538,42 +563,14 @@ impl Reader {
 
     /// A view the agent made, as a markdown document; the pane NSH draws from what is published.
     pub(crate) fn agent_view(&self, view: &command::AgentView, (lead, trail): (Vec<nsh::header::Control>, Vec<nsh::header::Control>), cx: &mut Context<Self>) -> impl IntoElement + Styled + use<> {
-        nsh::agent::publish(nsh::agent::Snapshot {
-            glass: cx.global::<Palette>().glass.is_some(),
-            title: view.title.clone(),
-            lead,
-            trail,
-            body: nsh::agent::Body::Markdown(nsh::source::Shared(Arc::from(view.body.as_str()))),
-        });
+        nsh::agent::publish(agent_view_snapshot(view).with_chrome(nsh::header::Chrome { glass: glass(cx), lead, trail }));
         div().size_full().child(self.agent_pane.clone())
     }
 
     /// A form the agent put on screen: what it is for, then the fields the user answers, drawn
     /// and answered by NSH.
     pub(crate) fn form_view(&self, form: &command::AgentForm, (lead, trail): (Vec<nsh::header::Control>, Vec<nsh::header::Control>), cx: &mut Context<Self>) -> impl IntoElement + Styled + use<> {
-        let fields = form
-            .fields
-            .iter()
-            .map(|field| nsh::agent::Field {
-                name: field.name.clone(),
-                label: field.label.clone(),
-                options: field.options.clone(),
-                value: field.value.clone(),
-            })
-            .collect();
-        nsh::agent::publish(nsh::agent::Snapshot {
-            glass: cx.global::<Palette>().glass.is_some(),
-            title: form.title.clone(),
-            lead,
-            trail,
-            body: nsh::agent::Body::Form {
-                id: form.id.clone(),
-                fields,
-                submit: form.submit.clone(),
-                answered: form.answered.is_some(),
-                doc: form.body.as_deref().map(|body| nsh::source::Shared(Arc::from(body))),
-            },
-        });
+        nsh::agent::publish(form_view_snapshot(form).with_chrome(nsh::header::Chrome { glass: glass(cx), lead, trail }));
         div().size_full().child(self.agent_pane.clone())
     }
 
@@ -594,7 +591,8 @@ impl Reader {
                 .map(|view| Tab { id: view.id.clone(), title: view.title.clone() })
                 .or_else(|| self.thread.forms.list().iter().find(|form| form.id == *id).map(|form| Tab { id: form.id.clone(), title: form.title.clone() }))
         };
-        nsh::tabs::publish(Snapshot {
+        nsh::tabs::publish(
+            Snapshot {
             shown: if self.project.terminal_shown { None } else { self.thread.shown.clone() },
             tabs: self
                 .thread
@@ -605,8 +603,10 @@ impl Reader {
                 .chain(self.thread.forms.list().iter().map(|form| Tab { id: form.id.clone(), title: form.title.clone() }))
                 .collect(),
             offer: self.thread.offered.as_ref().and_then(titled),
-            controls: self.pane_controls.borrow().clone(),
-        });
+            controls: Default::default(),
+        }
+        .with_controls(self.pane_controls.borrow().clone()),
+        );
         Some(div().flex_none().h(TABS_HEIGHT).child(self.tabs.clone()).into_any_element())
     }
 

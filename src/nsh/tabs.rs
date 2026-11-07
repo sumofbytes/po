@@ -1,45 +1,16 @@
 //! The row of tabs above the viewer while the agent has views or forms on screen: each of them,
 //! with a way to close it, the agent's offer to show one, and the window's controls. [`Snapshot`] is what [`crate::Reader`] publishes; the
 //! screen draws it.
-use std::sync::LazyLock;
 
 use nsh_core::prelude::*;
-use tokio::sync::watch;
 
 use super::bus::{Cmd, send};
-use super::header::{Control, controls};
+use super::header::controls;
 use super::{Colors, body, scale, text_sm};
 use crate::ui::icon::IconName;
 
-#[derive(Clone, PartialEq, Debug)]
-pub struct Tab {
-    pub id: String,
-    pub title: String,
-}
-
-#[derive(Clone, PartialEq, Debug, Default)]
-pub struct Snapshot {
-    /// The tab on screen; none is the files or the changes.
-    pub shown: Option<String>,
-    pub tabs: Vec<Tab>,
-    /// A view the agent offers to show, by its title.
-    pub offer: Option<Tab>,
-    /// The window's own controls at the strip's ends, which the pane's headers then go without.
-    pub controls: (Vec<Control>, Vec<Control>),
-}
-
-static SNAPSHOT: LazyLock<watch::Sender<Snapshot>> = LazyLock::new(|| watch::Sender::new(Snapshot::default()));
-
-/// Shows `snapshot`; nothing is redrawn when it is what the screen already has.
-pub fn publish(snapshot: Snapshot) {
-    SNAPSHOT.send_if_modified(|now| {
-        let changed = *now != snapshot;
-        if changed {
-            *now = snapshot;
-        }
-        changed
-    });
-}
+pub use crate::model::tabs::*;
+pub(crate) use crate::model::tabs::SNAPSHOT;
 
 fn tab_button(label: String, selected: bool, on_press: impl Fn() + 'static) -> View {
     let b = super::smooth(view())
@@ -119,6 +90,7 @@ mod tests {
     use nsh_testing::Headless;
 
     use super::*;
+    use crate::model::header::Control;
 
     #[test]
     fn the_tabs_switch_close_and_take_up_an_offer() {

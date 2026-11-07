@@ -672,7 +672,7 @@ impl Reader {
                 .or_else(|| diff.then(|| nsh::strip::Pr::Asking { status: self.pr_status.clone(), opening: self.opening })),
             pr_reset: self.pr_serial,
         });
-        nsh::explorer::publish(nsh::explorer::Snapshot { glass: cx.global::<Palette>().glass.is_some(), changes: diff, lead, trail, body });
+        nsh::explorer::publish(nsh::explorer::Snapshot { changes: diff, body, ..Default::default() }.with_chrome(nsh::header::Chrome { glass: crate::reader::render::glass(cx), lead, trail }));
         div().size_full().child(self.explorer_pane.clone()).into_any_element()
     }
 

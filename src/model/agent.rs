@@ -57,3 +57,11 @@ pub fn publish(snapshot: Snapshot) {
         changed
     });
 }
+
+impl Snapshot {
+    /// The snapshot with the shell's chrome: what the core builds has none.
+    pub fn with_chrome(mut self, chrome: super::header::Chrome) -> Self {
+        (self.glass, self.lead, self.trail) = (chrome.glass, chrome.lead, chrome.trail);
+        self
+    }
+}
