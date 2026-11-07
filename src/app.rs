@@ -61,9 +61,9 @@ impl Host for State {
         self.live.as_ref().and_then(|live| live.core.reader.project.terminal.as_ref())
     }
 
-    fn attach(&mut self, paths: Vec<std::path::PathBuf>) {
+    fn attach(&mut self, sources: Vec<crate::Source>) {
         if let Some(Live { core, host, .. }) = self.live.as_mut() {
-            core.reader.attach(paths.into_iter().map(crate::Source::Path).collect(), &mut Context::new(host.clone()));
+            core.reader.attach(sources, &mut Context::new(host.clone()));
         }
     }
 

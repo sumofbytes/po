@@ -11,7 +11,7 @@ use rune_kit::{TextArea};
 use super::pictures;
 
 use crate::model::bus::{Cmd as Bus, send};
-use crate::model::chat::{AskOption, Block, Cmd, Entry, Item, Kind, Phase, Picking, Queued, Snapshot, Tool};
+use crate::model::chat::{AskOption, Block, Cmd, Entry, Grant, GrantChange, Item, Kind, Phase, Picking, Queued, Scope, Snapshot, Tool};
 
 const BODY: TextStyle = TextStyle::new(14.0, 400.0);
 const SMALL: TextStyle = TextStyle::new(12.0, 400.0);
@@ -324,6 +324,54 @@ fn picker<S: 'static>(k: &Kit, picking: &Picking) -> El {
 
 /// What is chosen before and around the field: the agent of a thread not started, the settings, the
 /// worktree switch.
+/// The name a scope has on the control chip and in its menu.
+fn scope_name(scope: Scope) -> &'static str {
+    match scope {
+        Scope::Viewer => "Basic",
+        Scope::Orchestrate => "Delegate",
+        Scope::Global => "Full access",
+    }
+}
+
+/// What an agent that runs this thread may do through Po: one level of reach, picked from a popup,
+/// and two extras switched on or off beside it. [`tell`] tells the Reader.
+fn control_menu<S: 'static>(grant: Grant, pending: bool) -> rune::PopupMenu {
+    let mut menu = rune::PopupMenu::new()
+        .item(rune::PopupItem::new("basic", "Basic · show files and views").checked(grant.scope == Scope::Viewer))
+        .item(rune::PopupItem::new("delegate", "Delegate · also run its own threads, edit issues").checked(grant.scope == Scope::Orchestrate))
+        .item(rune::PopupItem::new("full", "Full access · also open projects, use worktrees").checked(grant.scope == Scope::Global));
+    menu = menu.separator()
+        .item(rune::PopupItem::new("read", "Read other threads").checked(grant.read))
+        .item(rune::PopupItem::new("answer", "Answer its threads' asks").checked(grant.approvals));
+    if pending {
+        menu = menu.separator().item(rune::PopupItem::new("pending", "Restart the agent to apply").enabled(false));
+    }
+    menu
+}
+
+/// The Control chip: names what the thread's agent may do, and opens the popup that changes it.
+fn control_chip<S: 'static>(k: &Kit, snapshot: &Snapshot) -> El {
+    let Some(grant) = snapshot.grant else { return col() };
+    if !snapshot.grant_pending && grant == Grant::initial() {
+        return muted(k, format!("Control: {}", scope_name(grant.scope)));
+    }
+    let label = format!("Control: {}{}", scope_name(grant.scope), if snapshot.grant_pending { " · restart to apply" } else { "" });
+    let pending = snapshot.grant_pending;
+    k.interactive(row().key("control").px(8.0).py(2.0).radius(6.0).fill(k.c.layer_02).child(text(label).font(SMALL).color(k.c.text_base)).on_press_tx(move |_: &mut S, tx: &mut Tx| {
+        tx.popup_menu(control_menu::<S>(grant, pending), "control", move |_: &mut S, picked: Option<&str>, _: &mut Tx| {
+            let change = match picked {
+                Some("basic") => GrantChange::Stop,
+                Some("delegate") => GrantChange::Set(Grant { scope: Scope::Orchestrate, ..grant }),
+                Some("full") => GrantChange::Set(Grant { scope: Scope::Global, ..grant }),
+                Some("read") => GrantChange::Read,
+                Some("answer") => GrantChange::Approvals,
+                _ => return,
+            };
+            tell(Cmd::Grant(change));
+        });
+    }))
+}
+
 fn chips<S: 'static>(k: &Kit, snapshot: &Snapshot) -> El {
     let mut bar = row().grow(1.0).min_w(0.0).items_center().gap(6.0).flex_wrap();
     if snapshot.blank && !snapshot.agents.is_empty() {
@@ -350,6 +398,7 @@ fn chips<S: 'static>(k: &Kit, snapshot: &Snapshot) -> El {
     {
         bar = bar.child(Switch::new(on).label("Own worktree").on_toggle(move |_: &mut S| tell(Cmd::Isolate(!on))).build(k)).child(muted(k, "Own worktree"));
     }
+    bar = bar.child(control_chip::<S>(k, snapshot));
     bar
 }
 
@@ -370,7 +419,23 @@ fn composer<S: 'static>(k: &Kit, snapshot: &Snapshot, state: &State, at: At<S>) 
             }
             false
         })
-        .build(k);
+        .build(k)
+        // What the clipboard held beyond text goes to the draft: files attach, an image pastes
+        // (the clipboard offers it as PNG). Plain text pastes as the field always does.
+        .on_input_paste(|_: &mut S, content: &rune::ClipboardContent, _: &mut Tx| {
+            let paths: Vec<String> = content.files().iter().map(|path| format!("file:{}", path.to_string_lossy())).collect();
+            match (content.image(), paths) {
+                (Some(image), paths) if paths.is_empty() => {
+                    tell(Cmd::Paste(vec![image.png().to_vec()]));
+                    true
+                }
+                (_, paths) if !paths.is_empty() => {
+                    tell(Cmd::Drop(paths));
+                    true
+                }
+                _ => false,
+            }
+        });
     let mut actions = row().gap(6.0);
     if snapshot.busy {
         actions = actions.child(Button::new(if steer { "Steer" } else { "Queue" }).variant(ButtonVariant::Ghost).on_press(|_: &mut S| tell(Cmd::Send { later: true })).build(k));

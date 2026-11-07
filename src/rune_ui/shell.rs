@@ -172,8 +172,8 @@ pub trait Host: 'static {
     fn terminal_mut(&mut self) -> Option<&mut terminal::Term>;
     /// The window has, or has lost, the user's attention.
     fn set_active(&mut self, active: bool);
-    /// Files dropped on the window, to attach to the message being written.
-    fn attach(&mut self, paths: Vec<std::path::PathBuf>);
+    /// Files on the desk or the clipboard, pictures pasted: what the draft takes.
+    fn attach(&mut self, sources: Vec<crate::Source>);
 }
 
 fn sidebar_of<S: Host>(s: &mut S) -> &mut PaneState {
@@ -290,12 +290,17 @@ pub fn view<S: Host>(host: &S, k: &Kit) -> El {
         Some(right) => split.inspector::<S>(&shell.viewer, viewer_of::<S>, right).build(k),
         None => split.build(k),
     };
-    // Text pasted while no field has the keyboard goes to the terminal, where it is showing.
-    root.on_drop_files(|s: &mut S, paths: &[std::path::PathBuf], _: &mut Tx| s.attach(paths.to_vec())).on_window_focus(|s: &mut S, focused: bool, _: &mut Tx| s.set_active(focused)).on_paste(|s: &mut S, text: &str, _: &mut Tx| {
-        if s.layout().terminal_shown
+    // What is pasted while no field has the keyboard: files and images attach to the message being
+    // written; plain text goes to the terminal, where it is showing.
+    root.on_drop_files(|s: &mut S, paths: &[std::path::PathBuf], _: &mut Tx| s.attach(paths.iter().cloned().map(crate::Source::Path).collect())).on_window_focus(|s: &mut S, focused: bool, _: &mut Tx| s.set_active(focused)).on_paste_content(|s: &mut S, content: &rune::ClipboardContent, _: &mut Tx| {
+        if !content.files().is_empty() {
+            s.attach(content.files().iter().cloned().map(crate::Source::Path).collect());
+        } else if let Some(image) = content.image() {
+            s.attach(vec![crate::Source::Bytes(image.png().to_vec())]);
+        } else if s.layout().terminal_shown
             && let Some(term) = s.terminal_mut()
         {
-            term.paste(text);
+            term.paste(content.text());
         }
     })
 }
