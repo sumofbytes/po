@@ -8,13 +8,7 @@ readme = "README.md"
 repository = "https://github.com/sumofbytes/po"
 
 [dependencies]
-gpui = { package = "gpui-fast", version = "=0.1.13", default-features = false, features = ["stacker", "font-kit", "wayland", "x11"] }
-gpui_platform = { package = "gpui-fast-platform", version = "=0.1.13", default-features = false, features = ["font-kit", "wayland", "x11"] }
-# NSH: screens drawn as NSH apps inside Po's window. Rust roots only, so no QuickJS or web views.
-nsh-platform-gpui = { version = "0.3.0", default-features = false }
-nsh-core = "0.3.0"
-nsh-base = { version = "0.3.0" }
-# The UI port: Rune replaces gpui and NSH on this branch. Pin a `dev` rev; `dev` is never rewritten.
+# The UI: Rune. Pin a `dev` rev; `dev` is never rewritten.
 rune = { git = "https://github.com/anomalyco/rune", rev = "b99c7b04e75c0b7587fe8d09ba6a679e11ede9c9" }
 rune-kit = { features = ["mermaid"], git = "https://github.com/anomalyco/rune", rev = "b99c7b04e75c0b7587fe8d09ba6a679e11ede9c9" }
 env_logger = "0.11"
@@ -42,34 +36,8 @@ hotpath = { version = "0.30", default-features = false }
 hotpath = ["hotpath/hotpath", "hotpath/threads", "hotpath/futures", "hotpath/tokio"]
 hotpath-alloc = ["hotpath", "hotpath/hotpath-alloc"]
 
-[dev-dependencies]
-# Headless runs of the NSH screens.
-nsh-engine = { version = "0.3.0", default-features = false }
-nsh-testing = { version = "0.3.0", default-features = false }
-
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }
 
 [profile.dev]
 debug = "line-tables-only"
-
-# The vendored sources are the gpui-fast 0.1.13 crates.io crates with po's own fixes re-applied on
-# top. The two gpui pins above and the vendored crates below must move in lock-step (all gpui-fast
-# 0.1.x): bump them together, then re-merge the fixes onto the new crate sources.
-# Po fixes carried here: trying Vulkan alone before probing GL/EGL, which costs ~75 ms at launch
-# (wgpu), building the font system off the main thread (wgpu), the Wayland drag accept fix, and
-# macOS zoom-on-maximize. Upstream 0.1.13 already carries the rest of what was here before, so the
-# vendored files are now minimal relative to the published crates.
-[patch.crates-io]
-gpui-fast-linux = { path = "vendor/gpui-fast-linux" }
-gpui-fast-wgpu = { path = "vendor/gpui-fast-wgpu" }
-gpui-fast-apple = { path = "vendor/gpui-fast-apple" }
-gpui-fast-windows = { path = "vendor/gpui-fast-windows" }
-# nsh-platform-gpui 0.3.0 predates gpui-fast 0.1.13's stricter `KeyBinding::new(&'static str)`,
-# so it doesn't compile as published; the vendored copy is upstream + a one-line leak fix in
-# `src/chrome.rs` (`leak_str`). Drop the patch when nsh-platform-gpui publishes a 0.1.13-compatible
-# release.
-nsh-platform-gpui = { path = "vendor/nsh-platform-gpui" }
-# The green macOS traffic light zooms instead of entering native full screen
-# (see `vendor/gpui-fast-macos/src/window.rs`, `MacWindow::open`).
-gpui-fast-macos = { path = "vendor/gpui-fast-macos" }
