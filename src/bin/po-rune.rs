@@ -71,6 +71,32 @@ fn demo() {
         issues: (12, 2),
         ..Default::default()
     });
+    use model::explorer::{Body, Entry};
+    let entry = |id: &str, name: &str, depth, folder, expanded, selected, mark| Entry { row: explorer::Row { id: id.into(), name: name.into(), depth, folder, expanded, selected }, mark };
+    model::explorer::publish(model::explorer::Snapshot {
+        changes: true,
+        body: Body::Rows(vec![
+            entry("src", "src", 0, true, true, false, None),
+            entry("src/main.rs", "main.rs", 1, false, false, true, Some('M')),
+            entry("src/host.rs", "host.rs", 1, false, false, false, Some('A')),
+            entry("docs", "docs", 0, true, false, false, None),
+            entry("old.txt", "old.txt", 0, false, false, false, Some('D')),
+        ]),
+        ..Default::default()
+    });
+    model::strip::publish(model::strip::Snapshot {
+        worktree: Some(model::strip::Worktree { branch: "feat/rune".into(), confirm_discard: false }),
+        pr: Some(model::strip::Pr::Asking { status: None, opening: false }),
+        pr_reset: 0,
+    });
+    use model::tabs::Tab;
+    model::tabs::publish(model::tabs::Snapshot {
+        shown: Some("plan".into()),
+        tabs: vec![Tab { id: "plan".into(), title: "Plan".into() }, Tab { id: "notes".into(), title: "Notes".into() }],
+        offer: Some(Tab { id: "risks".into(), title: "Risks".into() }),
+        controls: Default::default(),
+    });
+    model::finder::publish(model::finder::Snapshot { matches: vec!["src/main.rs".into(), "src/rune_ui/shell.rs".into(), "docs/rune-port.md".into()], capped: None });
 }
 
 impl Host for State {
@@ -91,6 +117,7 @@ impl Default for State {
         let echo = std::env::var("PO_RUNE_SCREEN").as_deref() == Ok("demo");
         if echo {
             demo();
+            shell.viewer.set_open(true);
         }
         Self { kit, shell, commands: model::bus::commands(), echo }
     }
@@ -116,6 +143,7 @@ fn poll(s: &mut State, _: f64, _: &mut Tx) -> bool {
         match cmd {
             model::bus::Cmd::OpenSettings => s.shell.show(Page::Settings),
             model::bus::Cmd::CloseSettings => s.shell.show(Page::Terminal),
+            model::bus::Cmd::CloseFinder | model::bus::Cmd::FinderPick(_) => s.shell.finder_open = false,
             _ => {}
         }
     }
@@ -126,6 +154,12 @@ fn poll(s: &mut State, _: f64, _: &mut Tx) -> bool {
 }
 
 fn on_key(s: &mut State, event: &rune::KeyEvent, _: &mut Tx) -> bool {
+    // Ctrl+P is the finder.
+    if event.is_command('p') {
+        s.shell.finder_open = true;
+        s.shell.finder.query.focused = true;
+        return true;
+    }
     s.shell.key(event)
 }
 

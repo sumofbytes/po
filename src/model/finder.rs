@@ -31,3 +31,8 @@ pub(crate) static QUERY: Mutex<String> = Mutex::new(String::new());
 pub fn start(query: &str) {
     *QUERY.lock().unwrap_or_else(|e| e.into_inner()) = query.to_string();
 }
+
+/// The snapshot now and after every change, for a screen that draws it.
+pub fn watch() -> watch::Receiver<Snapshot> {
+    SNAPSHOT.subscribe()
+}

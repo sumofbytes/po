@@ -381,3 +381,8 @@ impl Snapshot {
         self
     }
 }
+
+/// The snapshot now and after every change, for a screen that draws it.
+pub fn watch() -> watch::Receiver<Snapshot> {
+    SNAPSHOT.subscribe()
+}
