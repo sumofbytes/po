@@ -25,8 +25,9 @@ gpui, NSH, `vendor/`, `src/nsh`, `src/ui`, `terminal_view.rs` and `theme.rs` are
 
 ## Not ported yet (known gaps)
 
-- **Issues**: no labels or parent editing, milestones, epic pages (an epic click filters the list),
-  or project filter chips; the add box always targets the repo last shown.
+- **Issues**: project filter chips, the priority/label/late filters (a "More" popup), an epic's
+  page (its fields, milestones and its issues, even created), labels and parent set on an issue's
+  detail. The add box always targets the repo last shown.
 - **Chat**: pictures (dropped or pasted into the draft, shown in it and in the transcript, detachable), the Control (grant) menu, and a virtualised transcript with its message rail all work.
 - **Terminal**: resize, scrollback (wheel), paste, drag-selection and copy to the clipboard
   (Ctrl+Shift+C, the platform key, and the selection's own menu) work. Unchecked: mouse reporting

@@ -1,7 +1,8 @@
-//! The issues page: a list across every open project (grouped, searched, filtered by scope), a
-//! board by status, the epics with their progress, and one issue's page with its fields editable.
-//! Counterpart of `src/nsh/issues.rs` and `epics.rs`; what it edits is [`crate::issues::shared`].
-//! Not carried over yet: labels and parent editing, milestones, epic pages, project filter chips.
+//! The issues page: a list across every open project (grouped, searched, filtered by scope,
+//! project, priority, label or lateness), a board by status, the epics with their progress, and
+//! one issue's or epic's page with its fields editable. Counterpart of `src/nsh/issues.rs` and
+//! `epics.rs`; what it edits is [`crate::issues::shared`]. The add box always targets the repo
+//! last shown.
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -12,7 +13,7 @@ use super::work::{BODY, HEADING, SMALL, TITLE, muted, priority_tint, status_glyp
 use crate::date::{Date, due_label, parse_due, today};
 use crate::issues::query::{Filter, Group, Scope, parse_quick, sections_across};
 use crate::issues::shared::{self, Nav, Overview, Target};
-use crate::issues::{Priority, Status};
+use crate::issues::{EpicStatus, Priority, Status};
 use crate::model::bus::{Cmd, send};
 
 /// How long typing pauses before what was typed is written to the issue's file.
@@ -26,6 +27,8 @@ pub enum Page {
     Epics,
     /// An issue of the repo with this root.
     Issue(PathBuf, u64),
+    /// An epic of the repo with this root, on its page.
+    Epic(PathBuf, String),
 }
 
 #[derive(Default)]
@@ -34,12 +37,28 @@ pub struct State {
     scope: Scope,
     group: Group,
     epic: Option<String>,
+    /// The repo each chip narrows to; empty is every open project.
+    projects: Vec<PathBuf>,
+    priority: Option<Priority>,
+    label: Option<String>,
+    late: bool,
     search: TextEdit,
     new_title: TextEdit,
     new_due: TextEdit,
     title: TextEdit,
     description: TextEdit,
     due: TextEdit,
+    /// The parent: a key typed over empties; held like the other fields, written on the pause.
+    parent: TextEdit,
+    /// Which epic's fields the editor holds, and what it typed amid its save pause.
+    epic_loaded: Option<(PathBuf, String)>,
+    epic_dirty: Option<Instant>,
+    epic_name: TextEdit,
+    epic_description: TextEdit,
+    epic_target: TextEdit,
+    /// The milestone being added: its name and when it is done.
+    milestone_name: TextEdit,
+    milestone_due: TextEdit,
     /// The issue the detail fields hold, so they are loaded once and not over what is typed.
     loaded: Option<(PathBuf, u64)>,
     /// When something was last typed in the detail fields and not yet saved.
@@ -67,8 +86,12 @@ impl State {
             (Target::Board, _) => Page::Board,
             (Target::Epics, _) => Page::Epics,
             (Target::Epic(id), _) => {
-                self.epic = Some(id);
-                Page::List
+                self.epic = Some(id.clone());
+                // The page knows one epic more closely: opened with the repo that has it.
+                match overview.repos.iter().find(|repo| repo.tracker.epic(&id).is_some()) {
+                    Some(repo) => Page::Epic(repo.root.clone(), id.clone()),
+                    None => Page::Epics,
+                }
             }
             (Target::Issue(number), Some(root)) => Page::Issue(root, number),
             (Target::Issue(_), None) => Page::List,
@@ -83,10 +106,12 @@ impl State {
             let (root, number) = (&root, &number);
             if self.loaded.as_ref() != Some(&(root.clone(), *number)) {
                 self.flush(overview);
-                if let Some(issue) = overview.repos.iter().find(|r| r.root == *root).and_then(|r| r.tracker.issue(*number)) {
+                if let Some((repo, issue)) = overview.repos.iter().find(|r| r.root == *root).and_then(|repo| repo.tracker.issue(*number).map(|issue| (repo, issue))) {
                     self.title = TextEdit::new(&issue.title);
                     self.description = TextEdit::new(&issue.description);
-                    self.due = TextEdit::new(&issue.due.map(Date::iso).unwrap_or_default());
+                    self.due = TextEdit::new(issue.due.map(Date::iso).unwrap_or_default().as_str());
+                    let parent = issue.parent.map(|p| repo.tracker.key(p)).unwrap_or_default();
+                    self.parent = TextEdit::new(&parent);
                     self.loaded = Some((root.clone(), *number));
                     changed = true;
                 }
@@ -94,8 +119,28 @@ impl State {
         } else {
             self.loaded = None;
         }
+        // The epic's own page carries its fields the same way: loaded once, written after a pause.
+        if let Page::Epic(root, id) = self.page.clone() {
+            if self.epic_loaded.as_ref() != Some(&(root.clone(), id.clone())) {
+                self.flush_epic();
+                if let Some(epic) = overview.repos.iter().find(|repo| repo.root == root).and_then(|repo| repo.tracker.epic(&id)) {
+                    self.epic_name = TextEdit::new(&epic.name);
+                    self.epic_description = TextEdit::new(&epic.description);
+                    self.epic_target = TextEdit::new(epic.target.map(Date::iso).unwrap_or_default().as_str());
+                    self.milestone_name = TextEdit::new("");
+                    self.milestone_due = TextEdit::new("");
+                    self.epic_loaded = Some((root.clone(), id.clone()));
+                    changed = true;
+                }
+            }
+        } else {
+            self.epic_loaded = None;
+        }
         if self.dirty.is_some_and(|at| at.elapsed() >= SAVE_AFTER) {
             self.flush(overview);
+        }
+        if self.epic_dirty.is_some_and(|at| at.elapsed() >= SAVE_AFTER) {
+            self.flush_epic();
         }
         changed
     }
@@ -109,7 +154,14 @@ impl State {
         let title = self.title.text.trim().to_string();
         let description = self.description.text.clone();
         let due = parse_due(&self.due.text, today());
+        let parent = self.parent.text.clone();
         shared::change_repo(&root, |tracker, now| {
+            // Emptiness clears the parent; a key of an issue here sets it; anything else waits.
+            let parent = if parent.trim().is_empty() {
+                None
+            } else {
+                tracker.parse_key(&parent).filter(|p| tracker.issue(*p).is_some() && !tracker.would_loop(number, *p))
+            };
             tracker.update(number, now, |issue| {
                 if !title.is_empty() {
                     issue.title = title;
@@ -118,12 +170,59 @@ impl State {
                 if let Some(due) = due {
                     issue.due = due;
                 }
+                issue.parent = parent;
             });
         });
     }
 
+    /// The epics of every open repo, by id, so a detail's epic chips name them all.
+    fn epics(&self, overview: &Overview) -> Vec<(String, String)> {
+        overview.repos.iter().flat_map(|repo| repo.tracker.epics().iter().map(move |epic| (epic.id.clone(), epic.name.clone()))).collect()
+    }
+
+    /// Writes what was typed on the epic's page: its fields, and a milestone being added.
+    fn flush_epic(&mut self) {
+        if self.epic_dirty.take().is_none() {
+            return;
+        }
+        let Some((root, id)) = self.epic_loaded.clone() else { return };
+        let name = self.epic_name.text.trim().to_string();
+        let description = self.epic_description.text.clone();
+        let target = parse_due(&self.epic_target.text, today());
+        let (milestone, due) = (self.milestone_name.text.trim().to_string(), parse_due(&self.milestone_due.text, today()));
+        let add = !milestone.is_empty() && due.is_some();
+        shared::change_repo(&root, |tracker, now| {
+            tracker.update_epic(&id, now, |epic| {
+                if !name.is_empty() {
+                    epic.name = name;
+                }
+                epic.description = description;
+                if let Some(target) = target {
+                    epic.target = target;
+                }
+                if add && let Some(milestone_due) = due {
+                    epic.add_milestone(&milestone, milestone_due);
+                }
+            });
+        });
+        if add {
+            self.milestone_name = TextEdit::new("");
+            self.milestone_due = TextEdit::new("");
+            self.epic_dirty = Some(Instant::now());
+        }
+    }
+
+    /// A project chip's press: the repo joins the narrowed set or leaves it.
+    fn toggle_project(&mut self, root: PathBuf) {
+        if self.projects.contains(&root) {
+            self.projects.retain(|kept| *kept != root);
+        } else {
+            self.projects.push(root);
+        }
+    }
+
     fn filter(&self) -> Filter {
-        Filter { scope: self.scope, text: self.search.text.clone(), epic: self.epic.clone(), ..Filter::default() }
+        Filter { scope: self.scope, text: self.search.text.clone(), epic: self.epic.clone(), label: self.label.clone(), priority: self.priority, late: self.late }
     }
 
     /// The repo a new issue goes to: the one the page last showed, else the first.
@@ -159,11 +258,31 @@ impl State {
         self.new_title.focused = true;
     }
 
-    fn open(&mut self, overview: &Overview, root: PathBuf, number: u64) {
-        self.flush(overview);
-        self.arm_delete = false;
-        self.page = Page::Issue(root, number);
+    /// An issue for the epic's page: created in the epic's repo, its epic set.
+    fn add_epic_issue(&mut self, root: PathBuf, epic: &str) {
+        let line = self.new_title.text.split_whitespace().collect::<Vec<_>>().join(" ");
+        let Some(due) = parse_due(&self.new_due.text, today()) else { return };
+        let epic = epic.to_string();
+        let overview = shared::overview().borrow().clone();
+        let Some(tracker) = overview.repos.iter().find(|repo| repo.root == root).map(|repo| &repo.tracker) else { return };
+        let quick = parse_quick(&line, tracker);
+        if quick.title.is_empty() {
+            return;
+        }
+        shared::change_repo(&root, |tracker, now| {
+            let number = tracker.create(&quick.title, now);
+            tracker.update(number, now, |issue| {
+                issue.status = Status::Todo;
+                issue.priority = quick.priority.unwrap_or(Priority::None);
+                issue.labels = quick.labels.clone();
+                issue.due = due;
+                issue.epic = Some(epic.clone());
+            });
+        });
+        self.new_title = TextEdit::new("");
+        self.new_due = TextEdit::new("");
     }
+
 }
 
 /// The next status along, for a click on the circle: Done wraps to Backlog; Canceled is only picked.
@@ -193,6 +312,7 @@ fn tabs<S: 'static>(k: &Kit, state: &State, at: At<S>) -> El {
         Page::Board => Some(1),
         Page::Epics => Some(2),
         Page::Issue(..) => None,
+        Page::Epic(..) => Some(2),
     };
     SegmentedControl::new(&["List", "Board", "Epics"], page)
         .label("Issues view")
@@ -222,12 +342,191 @@ fn toolbar<S: 'static>(k: &Kit, state: &State, at: At<S>, overview: &Overview) -
     if matches!(state.page, Page::List) {
         bar = bar.child(groups);
     }
-    let mut out = col().w_full().gap(8.0).child(bar);
+    let mut out = col().w_full().gap(8.0);
+    // With more than one project open, the page narrows to any of them.
+    if overview.repos.len() > 1 {
+        let mut projects = row().w_full().flex_wrap().gap(4.0).items_center().child(muted(k, "Projects"));
+        projects = projects.child(chip::<S>(k, "projects-all".into(), "All projects".into(), state.projects.is_empty(), move |s| at(s).projects = Vec::new()));
+        for repo in &overview.repos {
+            let (root, shown) = (repo.root.clone(), state.projects.contains(&repo.root));
+            let name = repo.name.clone();
+            let press = move |s: &mut S| at(s).toggle_project(root.clone());
+            projects = projects.child(chip::<S>(k, format!("project-{name}"), name, shown, press));
+        }
+        out = out.child(projects);
+    }
+    out = out.child(bar);
+    if let Some(more) = more_filters::<S>(k, state, at, overview) {
+        out = out.child(more);
+    }
     if let Some(id) = &state.epic {
         let name = overview.repos.iter().find_map(|r| r.tracker.epic(id)).map_or(id.clone(), |e| e.name.clone());
         out = out.child(row().gap(8.0).items_center().child(muted(k, format!("Epic: {name}"))).child(chip::<S>(k, "clear-epic".into(), "Clear".into(), false, move |s| at(s).epic = None)));
     }
     out
+}
+
+/// The less used filters (priority, label, late) in one popup from the page's More chip; what
+/// of them is set shows beside it as chips that take it off.
+fn more_filters<S: 'static>(k: &Kit, state: &State, at: At<S>, overview: &Overview) -> Option<El> {
+    let mut menu = rune::PopupMenu::new();
+    for (priority, name) in [(Priority::Urgent, "Urgent"), (Priority::High, "High"), (Priority::Medium, "Medium"), (Priority::Low, "Low")] {
+        menu = menu.item(rune::PopupItem::new(name.to_lowercase(), name).checked(state.priority == Some(priority)));
+    }
+    let mut labels: Vec<String> = overview.repos.iter().flat_map(|repo| repo.tracker.config.labels.iter().map(|label| label.name.clone())).collect();
+    labels.sort();
+    labels.dedup();
+    if !labels.is_empty() {
+        menu = menu.separator();
+        for label in labels {
+            menu = menu.item(rune::PopupItem::new(label.clone(), format!("#{label}")).checked(state.label.as_ref() == Some(&label)));
+        }
+    }
+    menu = menu.separator().item(rune::PopupItem::new("late", "Late only").checked(state.late));
+    let mut bar = row().w_full().flex_wrap().gap(4.0).items_center();
+    if let Some(priority) = state.priority {
+        let name = priority.name();
+        bar = bar.child(chip::<S>(k, format!("set-{}", name.to_lowercase()), format!("!{}", name.to_lowercase()), true, move |s| at(s).priority = None));
+    }
+    if let Some(label) = state.label.clone() {
+        bar = bar.child(chip::<S>(k, format!("set-#{label}"), format!("#{label}"), true, move |s| at(s).label = None));
+    }
+    if state.late {
+        bar = bar.child(chip::<S>(k, "set-late".into(), "Late".into(), true, move |s| at(s).late = false));
+    }
+    // The chip that opens the menu shows the count of what is set, so a page dressed by it stays
+    // one press from being cleared.
+    let n = state.priority.is_some() as usize + state.label.is_some() as usize + state.late as usize;
+    let label = if n == 0 { "More".to_string() } else { format!("More ({n})") };
+    let chip = k.interactive(row().key("more-filters").px(10.0).py(4.0).radius(12.0).fill(k.c.layer_02).child(text(label).font(SMALL).color(k.c.text_muted)).on_press_tx(move |_: &mut S, tx: &mut Tx| {
+        let menu = menu.clone();
+        tx.popup_menu(menu, "more-filters", move |s: &mut S, picked: Option<&str>, _: &mut Tx| {
+            let state = at(s);
+            match picked {
+                Some("late") => state.late = !state.late,
+                Some(hit) if hit.starts_with('#') => {
+                    let picked = hit.trim_start_matches('#').to_string();
+                    state.label = if state.label.as_ref() == Some(&picked) { None } else { Some(picked) };
+                }
+                Some(hit) => {
+                    let picked = priority_of(hit);
+                    state.priority = if state.priority == picked { None } else { picked };
+                }
+                _ => {}
+            }
+        });
+    }));
+    bar = bar.child(chip);
+    Some(bar)
+}
+
+/// An epic on its page: its fields, how far along, its milestones and the issues it holds.
+fn epic_detail<S: 'static>(k: &Kit, state: &State, overview: &Overview, root: &PathBuf, id: &str, at: At<S>) -> El {
+    let back = Button::new("\u{2190} Back").variant(ButtonVariant::Ghost).on_press(move |s: &mut S| {
+        let state = at(s);
+        state.flush_epic();
+        state.arm_delete = false;
+        state.epic = None;
+        state.page = Page::Epics;
+    });
+    let Some(view) = overview.repos.iter().find(|repo| repo.root == *root) else {
+        return col().w_full().gap(12.0).child(back.build(k)).child(muted(k, "This project isn't open any more."));
+    };
+    let Some(epic) = view.tracker.epic(id) else {
+        return col().w_full().gap(12.0).child(back.build(k)).child(muted(k, "This epic is gone."));
+    };
+    let dirty = move |s: &mut S, _: &mut Tx| at(s).epic_dirty = Some(Instant::now());
+    let name = TextInput::new(&state.epic_name).label("Name").width(None).on_edit(move |s: &mut S| &mut at(s).epic_name).on_change(dirty).build(k);
+    let description = TextArea::new(&state.epic_description).label("Description").placeholder("Description (markdown)").auto_grow(4, 16).width(None).on_edit(move |s: &mut S| &mut at(s).epic_description).on_change(dirty).build(k);
+    let target = TextInput::new(&state.epic_target).label("Target").placeholder("Due: fri, nov 2, 2026-12-01...").width(Some(240.0)).on_edit(move |s: &mut S| &mut at(s).epic_target).on_change(dirty).build(k);
+    let r = root.clone();
+    let epic_id = id.to_string();
+    let delete = Button::new(if state.arm_delete { "Press again to delete" } else { "Delete" }).variant(ButtonVariant::Ghost).on_press(move |s: &mut S| {
+        let state = at(s);
+        if !state.arm_delete {
+            state.arm_delete = true;
+            return;
+        }
+        state.arm_delete = false;
+        state.epic_dirty = None;
+        state.epic_loaded = None;
+        let epic_id = epic_id.clone();
+        shared::change_repo(&r, |tracker, now| tracker.remove_epic(&epic_id, now));
+        state.page = Page::Epics;
+    }).build(k);
+
+    let mut statuses = row().gap(4.0).flex_wrap();
+    for status in EpicStatus::ALL {
+        let r = root.clone();
+        let id = id.to_string();
+        statuses = statuses.child(chip::<S>(k, format!("epic-status-{}", status.slug()), status.name().into(), epic.status == status, move |_| {
+            shared::change_repo(&r, |tracker, now| tracker.update_epic(&id, now, |epic| epic.status = status));
+        }));
+    }
+
+    let progress = |p: crate::issues::Progress| {
+        let share = if p.all == 0 { 0.0 } else { p.done as f32 / p.all as f32 };
+        row().w(160.0).h(6.0).radius(3.0).fill(k.c.layer_03).child(row().grow(share.max(0.0001)).h(6.0).radius(3.0).fill(k.c.success.fg)).child(row().grow((1.0 - share).max(0.0001)))
+    };
+
+    let mut milestones = col().w_full().gap(4.0);
+    for milestone in &epic.milestones {
+        let p = view.tracker.milestone_progress(id, &milestone.id);
+        let key = format!("milestone-{id}-{}", milestone.id);
+        let (r2, id2, mid) = (root.clone(), id.to_string(), milestone.id.clone());
+        let remove = k.interactive(row().key(key).px(6.0).radius(6.0).child(text("×").font(SMALL).color(k.c.text_muted)).on_press(move |_: &mut S| {
+            shared::change_repo(&r2, |tracker, now| tracker.update_epic(&id2, now, |epic| epic.milestones.retain(|m| m.id != *mid.as_str())));
+        }));
+        milestones = milestones.child(row().w_full().items_center().gap(8.0).child(text(milestone.name.clone()).font(BODY).color(k.c.text_base).grow(1.0)).child(progress(p)).child(muted(k, format!("{}/{}", p.done, p.all))).child(muted(k, milestone.target.map(|t| due_label(t, today())).unwrap_or_default())).child(remove));
+    }
+    let milestone_name = TextInput::new(&state.milestone_name).label("New milestone").placeholder("New milestone").width(None).on_edit(move |s: &mut S| &mut at(s).milestone_name).on_change(dirty).build(k);
+    let milestone_due = TextInput::new(&state.milestone_due).label("Done by").placeholder("Due: fri, nov 2...").width(Some(220.0)).on_edit(move |s: &mut S| &mut at(s).milestone_due).on_change(dirty).build(k);
+
+    let mut issues = col().w_full().gap(4.0);
+    let mut any_issues = false;
+    let filter = Filter { scope: Scope::All, epic: Some(id.to_string()), ..Filter::default() };
+    let epic_repos = [(view.name.as_str(), &view.tracker)];
+    for section in sections_across(&epic_repos, &filter, Group::None, today()) {
+        for (repo, number) in section.issues {
+            if let Some(line) = issue_line::<S>(k, overview, repo, number, at, false) {
+                issues = issues.child(line);
+                any_issues = true;
+            }
+        }
+    }
+    if !any_issues {
+        issues = issues.child(muted(k, "No issues in this epic yet. Add one below."));
+    }
+    let root_for_add = root.clone();
+    let id_for_add = id.to_string();
+    let new_title = TextInput::new(&state.new_title).label("New issue").placeholder("New issue - title !high #label").width(None).on_edit(move |s: &mut S| &mut at(s).new_title).on_submit(move |s: &mut S, _: &mut Tx| at(s).add_epic_issue(root_for_add.clone(), &id_for_add)).build(k);
+    let new_due = TextInput::new(&state.new_due).label("Due").placeholder("Due: fri, nov 2...").width(Some(220.0)).on_edit(move |s: &mut S| &mut at(s).new_due).build(k);
+
+    let overall = view.tracker.epic_progress(id);
+    let property = |name: &str, value: El| row().w_full().items_center().gap(12.0).child(row().w(80.0).child(muted(k, name.to_string()))).child(value);
+    col()
+        .w_full()
+        .gap(14.0)
+        .child(row().w_full().items_center().child(row().grow(1.0).child(back.build(k))).child(delete))
+        .child(muted(k, format!("{}", view.name)))
+        .child(name)
+        .child(property("Status", statuses))
+        .child(property("Target", target))
+        .child(property("Description", description))
+        .child(property("Progress", col().w_full().gap(4.0).child(progress(overall)).child(muted(k, format!("{}/{} done", overall.done, overall.all)))))
+        .child(property("Milestones", col().w_full().gap(4.0).child(row().gap(8.0).child(milestone_name).child(milestone_due)).child(milestones)))
+        .child(property("Issues", col().w_full().gap(4.0).child(row().gap(8.0).child(new_title).child(new_due)).child(issues)))
+}
+
+/// The priority a filter item's id names.
+fn priority_of(hit: &str) -> Option<Priority> {
+    match hit.to_lowercase().as_str() {
+        "urgent" => Some(Priority::Urgent),
+        "high" => Some(Priority::High),
+        "medium" => Some(Priority::Medium),
+        "low" => Some(Priority::Low),
+        _ => None,
+    }
 }
 
 fn add_box<S: 'static>(k: &Kit, state: &State, at: At<S>, overview: &Overview) -> El {
@@ -289,8 +588,17 @@ fn issue_line<S: 'static>(k: &Kit, overview: &Overview, repo: usize, number: u64
     Some(line)
 }
 
+/// The repos the page shows, narrowed to the projects the chips chose.
+fn shown<'a>(overview: &'a Overview, state: &State) -> Vec<(&'a str, &'a crate::issues::Tracker)> {
+    if state.projects.is_empty() {
+        overview.repos.iter().map(|repo| (repo.name.as_str(), &repo.tracker)).collect()
+    } else {
+        overview.repos.iter().filter(|repo| state.projects.contains(&repo.root)).map(|repo| (repo.name.as_str(), &repo.tracker)).collect()
+    }
+}
+
 fn list<S: 'static>(k: &Kit, state: &State, overview: &Overview, at: At<S>) -> El {
-    let repos: Vec<(&str, &crate::issues::Tracker)> = overview.repos.iter().map(|r| (r.name.as_str(), &r.tracker)).collect();
+    let repos = shown(overview, state);
     let sections = sections_across(&repos, &state.filter(), state.group, today());
     let mut out = col().w_full().gap(12.0);
     if sections.is_empty() {
@@ -312,7 +620,7 @@ fn list<S: 'static>(k: &Kit, state: &State, overview: &Overview, at: At<S>) -> E
 }
 
 fn board<S: 'static>(k: &Kit, state: &State, overview: &Overview, at: At<S>) -> El {
-    let repos: Vec<(&str, &crate::issues::Tracker)> = overview.repos.iter().map(|r| (r.name.as_str(), &r.tracker)).collect();
+    let repos = shown(overview, state);
     let filter = Filter { scope: Scope::All, ..state.filter() };
     let sections = sections_across(&repos, &filter, Group::Status, today());
     let mut columns = row().w_full().gap(12.0).items_start();
@@ -364,27 +672,32 @@ fn epics<S: 'static>(k: &Kit, overview: &Overview, at: At<S>) -> El {
     let mut out = col().w_full().gap(8.0);
     let mut any = false;
     for repo in &overview.repos {
+        let root = repo.root.clone();
+        let name = repo.name.clone();
         for epic in repo.tracker.epics() {
             any = true;
             let p = repo.tracker.epic_progress(&epic.id);
             let id = epic.id.clone();
             let share = if p.all == 0 { 0.0 } else { p.done as f32 / p.all as f32 };
             let bar = row().w_full().h(6.0).radius(3.0).fill(k.c.layer_03).child(row().grow(share.max(0.0001)).h(6.0).radius(3.0).fill(k.c.success.fg)).child(row().grow((1.0 - share).max(0.0001)));
+            let (open_root, open_id) = (root.clone(), id.clone());
             out = out.child(k.interactive(
                 col()
-                    .key(format!("epic-{}-{}", repo.name, epic.id))
+                    .key(format!("epic-{name}-{}", epic.id))
                     .w_full()
                     .gap(6.0)
                     .padding(12.0)
                     .radius(8.0)
                     .border(1.0, k.c.border_base)
-                    .child(row().w_full().items_center().gap(8.0).child(row().grow(1.0).child(text(epic.name.clone()).font(HEADING).color(k.c.text_base))).child(muted(k, repo.name.clone())).child(muted(k, epic.status.name())))
+                    .child(row().w_full().items_center().gap(8.0).child(row().grow(1.0).child(text(epic.name.clone()).font(HEADING).color(k.c.text_base))).child(muted(k, name.clone())).child(muted(k, epic.status.name())))
                     .child(bar)
                     .child(muted(k, format!("{} of {} done · {} in progress", p.done, p.all, p.started)))
                     .on_press(move |s: &mut S| {
                         let state = at(s);
-                        state.epic = Some(id.clone());
-                        state.page = Page::List;
+                        state.epic = Some(open_id.clone());
+                        // The epic opens on its page, like an issue opens on its own.
+                        state.epic_loaded = None;
+                        state.page = Page::Epic(open_root.clone(), open_id.clone());
                     }),
             ));
         }
@@ -420,6 +733,7 @@ fn detail<S: 'static>(k: &Kit, state: &State, overview: &Overview, root: &PathBu
         .on_change(move |s: &mut S, _: &mut Tx| at(s).dirty = Some(Instant::now()))
         .build(k);
     let due = TextInput::new(&state.due).label("Due").placeholder("YYYY-MM-DD").width(Some(200.0)).on_edit(move |s: &mut S| &mut at(s).due).on_change(move |s: &mut S, _: &mut Tx| at(s).dirty = Some(Instant::now())).build(k);
+    let parent = TextInput::new(&state.parent).label("Parent").placeholder("Parent: PO-4; empty clears it").width(Some(220.0)).on_edit(move |s: &mut S| &mut at(s).parent).on_change(move |s: &mut S, _: &mut Tx| at(s).dirty = Some(Instant::now())).build(k);
 
     let mut statuses = row().gap(4.0).flex_wrap();
     for status in Status::ALL {
@@ -431,6 +745,20 @@ fn detail<S: 'static>(k: &Kit, state: &State, overview: &Overview, root: &PathBu
         let r = root.clone();
         priorities = priorities.child(chip::<S>(k, format!("prio-{}", priority.slug()), priority.name().into(), issue.priority == priority, move |_| {
             shared::change_repo(&r, |tracker, now| tracker.update(number, now, |issue| issue.priority = priority));
+        }));
+    }
+    let mut label_chips = row().gap(4.0).flex_wrap();
+    for label in view.tracker.config.labels.iter().map(|l| l.name.clone()) {
+        let r = root.clone();
+        let on = issue.labels.contains(&label);
+        label_chips = label_chips.child(chip::<S>(k, format!("label-{}--{}", view.name, label), format!("#{label}"), on, move |_| {
+            shared::change_repo(&r, |tracker, now| tracker.update(number, now, |issue| {
+                if issue.labels.contains(&label) {
+                    issue.labels.retain(|kept| *kept != label);
+                } else {
+                    issue.labels.push(label.clone());
+                }
+            }));
         }));
     }
     let property = |name: &str, value: El| row().w_full().items_center().gap(12.0).child(row().w(80.0).child(muted(k, name.to_string()))).child(value);
@@ -458,16 +786,24 @@ fn detail<S: 'static>(k: &Kit, state: &State, overview: &Overview, root: &PathBu
         .child(title)
         .child(property("Status", statuses))
         .child(property("Priority", priorities))
-        .child(property("Due", due));
-    if !issue.labels.is_empty() {
-        page = page.child(property("Labels", muted(k, issue.labels.iter().map(|l| format!("#{l}")).collect::<Vec<_>>().join(" "))));
+        .child(property("Due", due))
+        .child(property("Parent", parent));
+    if !view.tracker.config.labels.is_empty() {
+        page = page.child(property("Labels", label_chips));
     }
-    if let Some(epic) = issue.epic.as_ref().and_then(|id| view.tracker.epic(id)) {
-        page = page.child(property("Epic", muted(k, epic.name.clone())));
+    // The epic it belongs to, from a chip per epic; None is one of them.
+    if !state.epics(overview).is_empty() {
+        let mut epic_chips = row().gap(4.0).flex_wrap();
+        for (epic_id, epic_name) in state.epics(overview) {
+            let r = root.clone();
+            let id = epic_id.clone();
+            epic_chips = epic_chips.child(chip::<S>(k, format!("epic-{}-{epic_id}", view.name), epic_name, issue.epic.as_ref() == Some(&epic_id), move |_| {
+                shared::change_repo(&r, |tracker, now| tracker.update(number, now, |issue| issue.epic = if issue.epic.as_ref() == Some(&id) { None } else { Some(id.clone()) }));
+            }));
+        }
+        page = page.child(property("Epic", epic_chips));
     }
-    if let Some(parent) = issue.parent {
-        page = page.child(property("Parent", muted(k, format!("{} {}", view.tracker.key(parent), view.tracker.issue(parent).map(|p| p.title.clone()).unwrap_or_default()))));
-    }
+
     let children: Vec<_> = view.tracker.children(number).collect();
     if !children.is_empty() {
         let mut subs = col().gap(4.0);
@@ -482,6 +818,7 @@ fn detail<S: 'static>(k: &Kit, state: &State, overview: &Overview, root: &PathBu
 pub fn view<S: 'static>(overview: &Overview, state: &State, k: &Kit, at: At<S>) -> El {
     let body = match &state.page {
         Page::Issue(root, number) => detail::<S>(k, state, overview, root, *number, at),
+        Page::Epic(root, id) => epic_detail::<S>(k, state, overview, root, &id.clone(), at),
         page => {
             let content = match page {
                 Page::Board => board::<S>(k, state, overview, at),
