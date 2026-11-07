@@ -7,3 +7,5 @@ pub mod sidebar;
 pub mod explorer;
 pub mod finder;
 pub mod tabs;
+pub mod source;
+pub mod diff;

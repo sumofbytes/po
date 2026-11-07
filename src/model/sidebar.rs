@@ -88,6 +88,7 @@ pub struct Snapshot {
 pub(crate) static SNAPSHOT: LazyLock<watch::Sender<Snapshot>> = LazyLock::new(|| watch::Sender::new(Snapshot::default()));
 
 /// The snapshot now and after every change, for a screen that shows threads of its own.
+#[allow(dead_code)] // read by the Rune host only
 pub fn watch() -> watch::Receiver<Snapshot> {
     SNAPSHOT.subscribe()
 }

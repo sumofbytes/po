@@ -96,12 +96,35 @@ fn demo() {
         offer: Some(Tab { id: "risks".into(), title: "Risks".into() }),
         controls: Default::default(),
     });
+    let shared = |t: &str| model::source::Shared(std::sync::Arc::from(t));
+    let old = "fn total() -> u32 {\n    let a = 1;\n    a\n}\n\nfn same() {}\n";
+    let new = "fn total() -> u64 {\n    let a = 1;\n    let b = 2;\n    a + b\n}\n\nfn same() {}\n";
+    if std::env::var("PO_RUNE_FILES").is_ok() {
+        let mut now = model::explorer::SNAPSHOT.borrow().clone();
+        now.changes = false;
+        model::explorer::publish(now);
+    }
+    model::source::publish(model::source::Snapshot {
+        title: "src/main.rs".into(),
+        language: "Rust".into(),
+        body: model::source::Body::Code { path: "src/main.rs".into(), text: shared(new) },
+        ..Default::default()
+    });
+    model::diff::publish(model::diff::Snapshot {
+        title: "src/main.rs".into(),
+        counts: (3, 2),
+        body: model::diff::Body::Versions { path: "src/main.rs".into(), old: shared(old), new: shared(new) },
+        ..Default::default()
+    });
     model::finder::publish(model::finder::Snapshot { matches: vec!["src/main.rs".into(), "src/rune_ui/shell.rs".into(), "docs/rune-port.md".into()], capped: None });
 }
 
 impl Host for State {
     fn shell(&mut self) -> &mut Shell {
         &mut self.shell
+    }
+    fn shell_ref(&self) -> &Shell {
+        &self.shell
     }
 }
 
@@ -124,7 +147,7 @@ impl Default for State {
 }
 
 fn view(s: &State, _: &mut Cx<State>) -> El {
-    rune_ui::shell::view::<State>(&s.shell, &s.kit)
+    rune_ui::shell::view::<State>(s, &s.kit)
 }
 
 fn setup(s: &mut State, wake: Waker) {

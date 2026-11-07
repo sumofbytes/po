@@ -4,7 +4,7 @@
 use rune::{El, col};
 use rune_kit::{Kit, PaneState, SplitView};
 
-use super::{explorer, finder, settings, sidebar, tabs, terminal};
+use super::{diff, explorer, finder, settings, sidebar, source, tabs, terminal};
 use crate::model;
 
 /// What the `Reader` last published for a screen, and the channel it comes through.
@@ -49,6 +49,10 @@ pub struct Shell {
     pub explorer_feed: Feed<model::explorer::Snapshot>,
     pub strip_feed: Feed<model::strip::Snapshot>,
     pub tabs_feed: Feed<model::tabs::Snapshot>,
+    pub source_feed: Feed<model::source::Snapshot>,
+    pub source: source::State,
+    pub diff_feed: Feed<model::diff::Snapshot>,
+    pub diff: diff::State,
     pub finder: finder::State,
     pub finder_feed: Feed<model::finder::Snapshot>,
     /// The Ctrl+P finder is up over the main pane.
@@ -69,6 +73,10 @@ impl Default for Shell {
             explorer_feed: Feed::new(model::explorer::watch()),
             strip_feed: Feed::new(model::strip::watch()),
             tabs_feed: Feed::new(model::tabs::watch()),
+            source_feed: Feed::new(model::source::watch()),
+            source: source::State::default(),
+            diff_feed: Feed::new(model::diff::watch()),
+            diff: diff::State::default(),
             finder: finder::State::default(),
             finder_feed: Feed::new(model::finder::watch()),
             finder_open: false,
@@ -91,6 +99,14 @@ impl Shell {
         stale |= self.strip_feed.poll();
         stale |= self.tabs_feed.poll();
         stale |= self.finder_feed.poll();
+        if self.source_feed.poll() {
+            self.source.follow(&self.source_feed.value);
+            stale = true;
+        }
+        if self.diff_feed.poll() {
+            self.diff.follow(&self.diff_feed.value);
+            stale = true;
+        }
         self.explorer.follow(&self.strip_feed.value);
         stale
     }
@@ -113,6 +129,7 @@ impl Shell {
 /// The state of the app a [`Shell`] lives in: handlers reach it through this.
 pub trait Host: 'static {
     fn shell(&mut self) -> &mut Shell;
+    fn shell_ref(&self) -> &Shell;
 }
 
 fn sidebar_of<S: Host>(s: &mut S) -> &mut PaneState {
@@ -139,24 +156,40 @@ fn explorer_of<S: Host>(s: &mut S) -> &mut explorer::State {
     &mut s.shell().explorer
 }
 
+fn diff_ref<S: Host>(s: &S) -> &diff::State {
+    &s.shell_ref().diff
+}
+
+fn diff_mut<S: Host>(s: &mut S) -> &mut diff::State {
+    &mut s.shell().diff
+}
+
 fn finder_of<S: Host>(s: &mut S) -> &mut finder::State {
     &mut s.shell().finder
 }
 
 /// The viewer pane: the agent's tabs, the strips, and the tree. The source and diff screens go
 /// beside the tree once they are ported.
-fn viewer<S: Host>(shell: &Shell, k: &Kit) -> El {
+fn viewer<S: Host>(shell: &Shell, host: &S, k: &Kit) -> El {
+    // The tree's own mode says which of the two panes goes under it.
+    let content = if shell.explorer_feed.value.changes {
+        diff::view::<S>(&shell.diff_feed.value, host, k, diff_ref::<S>, diff_mut::<S>)
+    } else {
+        source::view::<S>(&shell.source_feed.value, &shell.source, k)
+    };
     col()
         .w_full()
         .h_full()
         .min_h(0.0)
         .child(tabs::view::<S>(&shell.tabs_feed.value, k))
         .child(explorer::strips::<S>(&shell.strip_feed.value, &shell.explorer, k, explorer_of::<S>))
-        .child(explorer::tree::<S>(&shell.explorer_feed.value, k))
+        .child(col().w_full().grow(1.0).min_h(0.0).child(explorer::tree::<S>(&shell.explorer_feed.value, k)))
+        .child(col().w_full().grow(2.0).min_h(0.0).child(content))
 }
 
 /// The whole window.
-pub fn view<S: Host>(shell: &Shell, k: &Kit) -> El {
+pub fn view<S: Host>(host: &S, k: &Kit) -> El {
+    let shell = host.shell_ref();
     let main = match (&shell.page, &shell.settings) {
         _ if shell.finder_open => finder::view::<S>(&shell.finder_feed.value, &shell.finder, k, finder_of::<S>),
         (Page::Settings, Some(page)) => settings::view::<S>(page, k, settings_of::<S>),
@@ -164,6 +197,6 @@ pub fn view<S: Host>(shell: &Shell, k: &Kit) -> El {
     };
     SplitView::new(main)
         .sidebar::<S>(&shell.sidebar, sidebar_of::<S>, sidebar::view::<S>(&shell.sidebar_feed.value, &shell.side, k, side_of::<S>))
-        .inspector::<S>(&shell.viewer, viewer_of::<S>, viewer::<S>(shell, k))
+        .inspector::<S>(&shell.viewer, viewer_of::<S>, viewer::<S>(shell, host, k))
         .build(k)
 }

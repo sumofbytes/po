@@ -5572,6 +5572,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "pulldown-cmark"
+version = "0.13.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3db2be46835f013dd3f4fa7f5f7402c537787b54ebb6fe2b94bbdd7e2669bb7b"
+dependencies = [
+ "bitflags 2.13.2",
+ "memchr",
+ "unicase",
+]
+
+[[package]]
 name = "pulp"
 version = "0.22.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6115,9 +6126,19 @@ name = "rune-kit"
 version = "0.0.1"
 source = "git+https://github.com/anomalyco/rune?rev=b99c7b04e75c0b7587fe8d09ba6a679e11ede9c9#b99c7b04e75c0b7587fe8d09ba6a679e11ede9c9"
 dependencies = [
+ "pulldown-cmark",
  "rune",
+ "rune-mermaid",
  "rune-motion",
  "unicode-segmentation",
+]
+
+[[package]]
+name = "rune-mermaid"
+version = "0.0.1"
+source = "git+https://github.com/anomalyco/rune?rev=b99c7b04e75c0b7587fe8d09ba6a679e11ede9c9#b99c7b04e75c0b7587fe8d09ba6a679e11ede9c9"
+dependencies = [
+ "rune",
 ]
 
 [[package]]
@@ -7474,6 +7495,12 @@ dependencies = [
  "tempfile",
  "windows-sys 0.60.2",
 ]
+
+[[package]]
+name = "unicase"
+version = "2.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "357cc3acc6a036009fd6c973ed009037c732d60d0b4f6c673e9041497482a28f"
 
 [[package]]
 name = "unicode-bidi"

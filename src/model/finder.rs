@@ -33,6 +33,7 @@ pub fn start(query: &str) {
 }
 
 /// The snapshot now and after every change, for a screen that draws it.
+#[allow(dead_code)] // read by the Rune host only
 pub fn watch() -> watch::Receiver<Snapshot> {
     SNAPSHOT.subscribe()
 }
