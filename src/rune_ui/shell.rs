@@ -4,7 +4,7 @@
 use rune::{El, col};
 use rune_kit::{Kit, PaneState, SplitView};
 
-use super::{agent, chat, diff, explorer, finder, settings, sidebar, source, tabs, terminal};
+use super::{agent, chat, diff, explorer, finder, home, settings, sidebar, source, tabs, terminal};
 use crate::model;
 use crate::model::bus::{Cmd, send};
 use crate::reader::render::Layout;
@@ -50,6 +50,9 @@ pub struct Shell {
     pub agent: agent::State,
     pub chat_feed: Feed<model::chat::Snapshot>,
     pub chat: chat::State,
+    pub home: home::State,
+    pub home_model: model::home::Model,
+    overview_feed: Feed<crate::issues::shared::Overview>,
     pub finder: finder::State,
     finder_was_open: bool,
     pub finder_feed: Feed<model::finder::Snapshot>,
@@ -75,6 +78,9 @@ impl Default for Shell {
             agent: agent::State::default(),
             chat_feed: Feed::new(model::chat::watch()),
             chat: chat::State::default(),
+            home: home::State::default(),
+            home_model: Default::default(),
+            overview_feed: Feed::new(crate::issues::shared::overview()),
             finder: finder::State::default(),
             finder_was_open: false,
             finder_feed: Feed::new(model::finder::watch()),
@@ -105,6 +111,11 @@ impl Shell {
     /// Takes what the `Reader` published since the last call; true when the view is stale.
     pub fn poll(&mut self) -> bool {
         let mut stale = self.sidebar_feed.poll();
+        let overview = self.overview_feed.poll();
+        if stale || overview {
+            self.home_model = model::home::model(&self.overview_feed.value, &self.sidebar_feed.value, crate::date::today());
+        }
+        stale |= overview;
         stale |= self.explorer_feed.poll();
         stale |= self.strip_feed.poll();
         stale |= self.tabs_feed.poll();
@@ -192,6 +203,10 @@ fn chat_of<S: Host>(s: &mut S) -> &mut chat::State {
     &mut s.shell().chat
 }
 
+fn home_of<S: Host>(s: &mut S) -> &mut home::State {
+    &mut s.shell().home
+}
+
 fn finder_of<S: Host>(s: &mut S) -> &mut finder::State {
     &mut s.shell().finder
 }
@@ -238,7 +253,7 @@ pub fn view<S: Host>(host: &S, k: &Kit) -> El {
     } else if let (true, Some(page)) = (layout.settings_open, &shell.settings) {
         Some(settings::view::<S>(page, k, settings_of::<S>))
     } else if layout.home_open {
-        Some(placeholder(k, "Home"))
+        Some(home::view::<S>(&shell.home_model, &shell.home, k, home_of::<S>))
     } else if layout.issues_open {
         Some(placeholder(k, "Issues"))
     } else {

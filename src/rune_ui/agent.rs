@@ -70,7 +70,8 @@ fn field<S: 'static>(k: &Kit, i: usize, field: &Field, state: &State, at: At<S>)
 pub fn view<S: 'static>(snapshot: &Snapshot, state: &State, k: &Kit, at: At<S>) -> El {
     let title = row().w_full().items_center().gap(8.0).px(12.0).py(8.0).child(super::header::controls::<S>(k, &snapshot.lead)).child(row().grow(1.0).child(text(snapshot.title.clone()).font(NAME).color(k.c.text_base))).child(super::header::controls::<S>(k, &snapshot.trail));
     let body = match &snapshot.body {
-        Body::Bare => col().grow(1.0),
+        // Only the header: what is below it is the shell's.
+        Body::Bare => return title,
         Body::Markdown(source) => page(k, col().w_full().max_w(820.0).padding(16.0).child(Markdown::new(source.0.to_string()).selectable(true).build(k))),
         Body::Form { id, fields, submit, answered, doc } => {
             let mut form = col().w_full().max_w(640.0).gap(12.0).padding(16.0);

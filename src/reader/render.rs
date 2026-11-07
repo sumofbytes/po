@@ -622,7 +622,10 @@ impl Reader {
         let has_tabs = self.publish_tabs(pane.clone());
         // The window's own controls go on the tabs while there are any, and on the pane otherwise.
         let controls = if has_tabs { none() } else { pane.clone() };
-        self.publish_explorer(controls.clone());
+        // With the tree beside the file the tree's header takes the lead controls and the file's the trail.
+        let with_tree = !self.layout().showing_agent;
+        let (tree_controls, controls) = if with_tree { ((controls.0.clone(), vec![]), (vec![], controls.1.clone())) } else { (none(), controls) };
+        self.publish_explorer(tree_controls);
         let shown_form = self.thread.shown.as_deref().and_then(|id| self.thread.forms.get(id));
         let shown = self.thread.shown.as_deref().and_then(|id| self.thread.views.list().iter().find(|view| view.id == id));
         match (shown, shown_form, self.mode) {

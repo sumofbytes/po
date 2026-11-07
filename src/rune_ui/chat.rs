@@ -68,7 +68,7 @@ fn glyph(k: &Kit, phase: Phase) -> El {
         Phase::Waiting => "○",
         Phase::Working => "◐",
         Phase::Done => "✓",
-        Phase::Failed => "✕",
+        Phase::Failed => "×",
     };
     text(mark).font(SMALL).color(tint(k, phase)).w(14.0)
 }
@@ -314,7 +314,7 @@ fn picker<S: 'static>(k: &Kit, picking: &Picking) -> El {
 /// What is chosen before and around the field: the agent of a thread not started, the settings, the
 /// worktree switch.
 fn chips<S: 'static>(k: &Kit, snapshot: &Snapshot) -> El {
-    let mut bar = row().grow(1.0).min_w(0.0).items_center().gap(6.0);
+    let mut bar = row().grow(1.0).min_w(0.0).items_center().gap(6.0).flex_wrap();
     if snapshot.blank && !snapshot.agents.is_empty() {
         let names: Vec<&str> = snapshot.agents.iter().map(|(n, _)| n.as_str()).collect();
         let current = snapshot.chosen.as_ref().and_then(|c| snapshot.agents.iter().position(|(_, id)| id == c));

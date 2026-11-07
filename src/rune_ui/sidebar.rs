@@ -32,7 +32,7 @@ fn status(mark: Mark) -> Option<RowStatus> {
         Mark::Unread => Some(RowStatus::Unread),
         Mark::Running => Some(RowStatus::Busy),
         Mark::Asking => Some(RowStatus::Attention),
-        Mark::Failed => Some(RowStatus::Other(text("✕"))),
+        Mark::Failed => Some(RowStatus::Other(text("×"))),
     }
 }
 

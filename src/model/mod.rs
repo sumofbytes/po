@@ -11,3 +11,4 @@ pub mod source;
 pub mod finder;
 pub mod tabs;
 pub mod strip;
+pub mod home;

@@ -38,6 +38,8 @@ struct State {
     live: Option<Live>,
     /// The viewer is on the left in the settings, for the page that edits it.
     viewer_left: bool,
+    /// The terminal was what the viewer showed, as of the last poll: it takes the keyboard on opening.
+    terminal_was_shown: bool,
 }
 
 impl Host for State {
@@ -66,7 +68,7 @@ fn init() -> State {
     let settings = config::load();
     let name = std::env::var("PO_THEME").ok().or_else(|| settings["theme"].as_str().map(String::from)).unwrap_or_else(|| rune_ui::theme::DEFAULT.into());
     let (kit, _) = rune_ui::theme::kit(&rune_ui::theme::load(&name));
-    State { kit, shell: Shell::default(), live: None, viewer_left: config::viewer_left(&settings).unwrap_or(false) }
+    State { kit, shell: Shell::default(), live: None, viewer_left: config::viewer_left(&settings).unwrap_or(false), terminal_was_shown: false }
 }
 
 fn view(s: &State, _: &mut Cx<State>) -> El {
@@ -131,6 +133,10 @@ fn poll(s: &mut State, _: f64, tx: &mut Tx) -> bool {
         });
     }
     let layout = core.reader.layout();
+    if layout.terminal_shown && !s.terminal_was_shown {
+        tx.blur();
+    }
+    s.terminal_was_shown = layout.terminal_shown;
     s.shell.follow(&layout, s.viewer_left);
     s.shell.settle();
     stale | s.shell.poll()
@@ -245,7 +251,7 @@ pub fn run(root: std::path::PathBuf, pr: Option<pr::Pr>, command: Option<String>
     *LAUNCH.lock().expect("launch") = Some(Launch { root, pr, command, prefetch });
     let settings = config::load();
     // The fonts the settings name, as a list the text system tries in order, over the bundled ones.
-    let ui: &'static str = Box::leak(settings["font"]["family"].as_str().map_or_else(|| crate::fonts::BUNDLED_UI_FAMILY.to_string(), |f| format!("{f}, {}", crate::fonts::BUNDLED_UI_FAMILY)).into_boxed_str());
+    let ui: &'static str = Box::leak(settings["font"]["family"].as_str().map_or_else(|| format!("{}, system-ui", crate::fonts::BUNDLED_UI_FAMILY), |f| format!("{f}, {}, system-ui", crate::fonts::BUNDLED_UI_FAMILY)).into_boxed_str());
     let mono: &'static str = Box::leak(settings["font"]["mono_family"].as_str().map_or_else(|| format!("{}, ui-monospace", crate::fonts::BUNDLED_MONO_FAMILY), |f| format!("{f}, {}, ui-monospace", crate::fonts::BUNDLED_MONO_FAMILY)).into_boxed_str());
     rune::set_app_id("po");
     rune::run(AppSpec::<State> {
