@@ -4,7 +4,7 @@
 use rune::{El, col};
 use rune_kit::{Kit, PaneState, SplitView};
 
-use super::{diff, explorer, finder, settings, sidebar, source, tabs, terminal};
+use super::{agent, diff, explorer, finder, settings, sidebar, source, tabs, terminal};
 use crate::model;
 
 /// What the `Reader` last published for a screen, and the channel it comes through.
@@ -53,6 +53,8 @@ pub struct Shell {
     pub source: source::State,
     pub diff_feed: Feed<model::diff::Snapshot>,
     pub diff: diff::State,
+    pub agent_feed: Feed<model::agent::Snapshot>,
+    pub agent: agent::State,
     pub finder: finder::State,
     pub finder_feed: Feed<model::finder::Snapshot>,
     /// The Ctrl+P finder is up over the main pane.
@@ -77,6 +79,8 @@ impl Default for Shell {
             source: source::State::default(),
             diff_feed: Feed::new(model::diff::watch()),
             diff: diff::State::default(),
+            agent_feed: Feed::new(model::agent::watch()),
+            agent: agent::State::default(),
             finder: finder::State::default(),
             finder_feed: Feed::new(model::finder::watch()),
             finder_open: false,
@@ -105,6 +109,10 @@ impl Shell {
         }
         if self.diff_feed.poll() {
             self.diff.follow(&self.diff_feed.value);
+            stale = true;
+        }
+        if self.agent_feed.poll() {
+            self.agent.follow(&self.agent_feed.value);
             stale = true;
         }
         self.explorer.follow(&self.strip_feed.value);
@@ -164,6 +172,10 @@ fn diff_mut<S: Host>(s: &mut S) -> &mut diff::State {
     &mut s.shell().diff
 }
 
+fn agent_of<S: Host>(s: &mut S) -> &mut agent::State {
+    &mut s.shell().agent
+}
+
 fn finder_of<S: Host>(s: &mut S) -> &mut finder::State {
     &mut s.shell().finder
 }
@@ -172,7 +184,15 @@ fn finder_of<S: Host>(s: &mut S) -> &mut finder::State {
 /// beside the tree once they are ported.
 fn viewer<S: Host>(shell: &Shell, host: &S, k: &Kit) -> El {
     // The tree's own mode says which of the two panes goes under it.
-    let content = if shell.explorer_feed.value.changes {
+    let content = if shell.tabs_feed.value.shown.is_some() {
+        // A tab of the agent's: its document or form takes the place of the files.
+        return col()
+            .w_full()
+            .h_full()
+            .min_h(0.0)
+            .child(tabs::view::<S>(&shell.tabs_feed.value, k))
+            .child(col().w_full().grow(1.0).min_h(0.0).child(agent::view::<S>(&shell.agent_feed.value, &shell.agent, k, agent_of::<S>)));
+    } else if shell.explorer_feed.value.changes {
         diff::view::<S>(&shell.diff_feed.value, host, k, diff_ref::<S>, diff_mut::<S>)
     } else {
         source::view::<S>(&shell.source_feed.value, &shell.source, k)

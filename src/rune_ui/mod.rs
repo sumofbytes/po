@@ -9,3 +9,4 @@ pub mod finder;
 pub mod tabs;
 pub mod source;
 pub mod diff;
+pub mod agent;

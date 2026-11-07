@@ -91,11 +91,29 @@ fn demo() {
     });
     use model::tabs::Tab;
     model::tabs::publish(model::tabs::Snapshot {
-        shown: Some("plan".into()),
+        shown: std::env::var("PO_RUNE_AGENT").ok().map(|_| "plan".to_string()),
         tabs: vec![Tab { id: "plan".into(), title: "Plan".into() }, Tab { id: "notes".into(), title: "Notes".into() }],
         offer: Some(Tab { id: "risks".into(), title: "Risks".into() }),
         controls: Default::default(),
     });
+    if let Ok(kind) = std::env::var("PO_RUNE_AGENT") {
+        use model::agent::{Body, Field};
+        let body = if kind == "form" {
+            Body::Form {
+                id: "f1".into(),
+                fields: vec![
+                    Field { name: "topic".into(), label: "What to work on".into(), options: vec![], value: Some("the port".into()) },
+                    Field { name: "size".into(), label: "How big a step".into(), options: vec!["Small".into(), "Whole".into()], value: None },
+                ],
+                submit: "Go".into(),
+                answered: false,
+                doc: Some(model::source::Shared(std::sync::Arc::from("A *form* from the agent."))),
+            }
+        } else {
+            Body::Markdown(model::source::Shared(std::sync::Arc::from("# Plan\n\n- one\n- two\n\n`code` and **bold**")))
+        };
+        model::agent::publish(model::agent::Snapshot { title: "What next?".into(), body, ..Default::default() });
+    }
     let shared = |t: &str| model::source::Shared(std::sync::Arc::from(t));
     let old = "fn total() -> u32 {\n    let a = 1;\n    a\n}\n\nfn same() {}\n";
     let new = "fn total() -> u64 {\n    let a = 1;\n    let b = 2;\n    a + b\n}\n\nfn same() {}\n";
