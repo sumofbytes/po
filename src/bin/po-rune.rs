@@ -74,12 +74,17 @@ fn poll(s: &mut State, _: f64, _: &mut Tx) -> bool {
     drew || page != s.shell.page
 }
 
+fn on_key(s: &mut State, event: &rune::KeyEvent, _: &mut Tx) -> bool {
+    s.shell.key(event)
+}
+
 fn main() {
     rune::run(AppSpec::<State> {
         // Mono spans draw in the mono slot: point it at the system's monospace font.
         families: ("Inter", "ui-monospace"),
         setup: Some(setup),
         poll: Some(poll),
+        on_key: Some(on_key),
         ..AppSpec::new("Po", (1200.0, 760.0), State::default, view)
     });
 }

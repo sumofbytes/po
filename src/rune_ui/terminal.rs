@@ -50,8 +50,20 @@ impl Term {
         self.session.is_some()
     }
 
-    fn key(&self, event: &KeyEvent) -> bool {
+    /// Sends a key to the shell; false when there is none to take it.
+    pub fn key(&self, event: &KeyEvent) -> bool {
         let Some(session) = &self.session else { return false };
+        let m = event.mods;
+        // Several characters at once (an IME commit, typed text) go in one by one: the encoder
+        // takes one key with its text.
+        if let RuneKey::Text(t) = &event.key
+            && t.chars().nth(1).is_some()
+        {
+            for ch in t.chars() {
+                session.key(KeyInput { key: key_of(ch), text: Some(ch.to_string()), shift: m.shift, alt: m.alt, ctrl: m.ctrl, meta: false });
+            }
+            return true;
+        }
         let (key, text) = match &event.key {
             RuneKey::Text(t) => (t.chars().next().map(key_of).unwrap_or(Key::Unidentified), Some(t.clone())),
             RuneKey::Command(ch) => (key_of(*ch), None),
@@ -71,7 +83,6 @@ impl Term {
             RuneKey::Tab => (Key::Tab, None),
             _ => return false,
         };
-        let m = event.mods;
         session.key(KeyInput { key, text, shift: m.shift, alt: m.alt, ctrl: m.ctrl, meta: false });
         true
     }

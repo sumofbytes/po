@@ -41,6 +41,11 @@ impl Shell {
         self.page = page;
     }
 
+    /// A key nothing in the window took: the shell's, while it is the page shown.
+    pub fn key(&mut self, event: &rune::KeyEvent) -> bool {
+        self.page == Page::Terminal && self.term.key(event)
+    }
+
     /// Takes what a screen asked of the shell: a page that saved or closed is put away.
     pub fn settle(&mut self) {
         if let Some(outcome) = self.settings.as_mut().and_then(|page| page.outcome.take()) {
@@ -74,7 +79,11 @@ fn settings_of<S: Host>(s: &mut S) -> &mut settings::Page {
 
 fn sidebar<S: Host>(shell: &Shell, k: &Kit) -> El {
     let pages = SidebarSection::new("Po")
-        .row(SidebarRow::new("Terminal").selected(shell.page == Page::Terminal).on_select(|s: &mut S, _: &mut Tx| s.shell().show(Page::Terminal)).build(k))
+        .row(SidebarRow::new("Terminal").selected(shell.page == Page::Terminal).on_select(|s: &mut S, tx: &mut Tx| {
+            s.shell().show(Page::Terminal);
+            // The row keeps no focus, so the window's keys reach the shell ([`Shell::key`]).
+            tx.blur();
+        }).build(k))
         .row(SidebarRow::new("Settings").selected(shell.page == Page::Settings).on_select(|s: &mut S, _: &mut Tx| s.shell().show(Page::Settings)).build(k));
     Sidebar::new().label("Po").section(pages).build(k)
 }
