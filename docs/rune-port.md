@@ -15,6 +15,12 @@ Run it: `cargo run --bin po-rune` (the gpui `po` binary still builds beside it).
   copy and paste, mouse, wide characters, a square cursor.
 - **Settings**: `rune_ui::settings` is the page, over the unchanged `settings::Form`.
 - **Shell**: `rune_ui::shell` lays out sidebar, main pane and viewer with `SplitView`.
+- **Model**: `src/model/` holds what the screens and the `Reader` exchange (chat, sidebar, diff,
+  explorer, source, agent and finder snapshots; the bus `Cmd`; header `Control`), with no view
+  code. `nsh` re-exports it; the 44 NSH screen tests pass unchanged.
+- **Host**: `src/host.rs` is a toolkit-free stand-in for gpui's `cx.notify`, `cx.spawn` and
+  `cx.background_executor` (`notify`, `update`, `query`, `spawn`, `background`, `timer`), with
+  tests. Nothing uses it yet.
 
 ## How the screens connect
 
@@ -37,9 +43,12 @@ gpui calls the Reader makes, to be replaced:
 
 ## Remaining
 
-1. **Decouple `Reader` from gpui.** Give it a small `Host` (notify, spawn, wake) in place of
-   `window`/`cx`, and move the `Snapshot` and `Cmd` types out of `src/nsh/*` into gpui-free
-   modules. Do this inside the gpui build first, so each step still runs.
+1. **Decouple `Reader` from gpui.** Replace its `window`/`cx` parameters with `host::Host`. The
+   `Snapshot` and `Cmd` types are already out (`src/model/`), except home, issues and the
+   strips, whose state is signal-based. Do this inside the gpui build first, so each step runs.
+   Open question: `Reader` is `Context<Self>`-shaped (`this.update(cx, ..)` in 25 spawned
+   tasks); either rewrite those as `host.update`/`host.query`, or put the Reader on its own
+   thread behind a channel of `Cmd`s and snapshots.
 2. **Port the screens** onto `rune_ui` (NSH lines): sidebar 795, chat 2675, issues 1991,
    home 459, source 275, diff 182, explorer 211, tabs 155, strip 285, finder 238, agent 338,
    epics 324, header 130, overlay 140. Chat is the largest: Rune has `virtual_rows`, `memo`,
