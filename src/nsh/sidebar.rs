@@ -318,6 +318,20 @@ pub(super) fn accent(name: &str) -> AdaptiveColor {
     AdaptiveColor { light: hsla(hue, 0.6, 0.42, 1.), dark: hsla(hue, 0.6, 0.68, 1.) }
 }
 
+/// The project row's "new thread": a big bold + in the muted color.
+fn new_thread_button(pid: u64) -> View {
+    view()
+        .role(AccessibilityRole::Button)
+        .label("New thread in this project")
+        .flex_none()
+        .items_center()
+        .cursor_pointer()
+        .transition_colors()
+        .tooltip(super::tooltip("New thread in this project"))
+        .on_press(move || send(Cmd::StartThread(pid)))
+        .child(icon(IconName::PlusBold, scale::s4(), Colors::muted()))
+}
+
 #[hotpath::measure]
 fn project_group(project: &Project, spin: Spin, rename: Renaming) -> View {
     let pid = project.id;
@@ -339,7 +353,7 @@ fn project_group(project: &Project, spin: Spin, rename: Renaming) -> View {
         .on_press(move || send(Cmd::ToggleProject(pid)))
         .child(name)
         .child(project.closable.then(|| on_hover(icon_button(IconName::Close, scale::s3(), "Close project", move || send(Cmd::CloseProject(pid))))))
-        .child(icon_button(IconName::Plus, scale::s3(), "New thread in this project", move || send(Cmd::StartThread(pid))));
+        .child(new_thread_button(pid));
     let fold = project.fold.map(|(expanded, hidden)| {
         let label = if expanded { "Show less".to_string() } else { format!("{hidden} more") };
         let chevron = if expanded { IconName::ChevronUp } else { IconName::ChevronDown };
