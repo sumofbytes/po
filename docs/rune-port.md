@@ -65,3 +65,39 @@ gpui calls the Reader makes, to be replaced:
 - The mono-text terminal is good enough to type in; check `vim`, `htop` and large output.
 - Linux Wayland: IME, clipboard and drag-and-drop in Rune are unchecked.
 - The settings page is a main-pane page here; Po's current one is an overlay.
+
+## Splitting `Reader`: the inventory
+
+The aim is a core (projects, threads, agents, grants, the control socket, timers, watchers) that
+takes `Event`s and publishes snapshots, and a shell that owns the toolkit. What the `Reader` reads
+from and does to gpui today (`main.rs` and `src/reader/*`):
+
+**Reads from the toolkit** (becomes an `Event` into the core)
+- The theme: `cx.global::<Palette>()` at 15 sites, for `glass` (in every snapshot) and the
+  background colour (drawing only).
+- Window state: `window.is_window_active()` (gates notifications, `threads.rs:942`), whether an
+  input is focused (`threads.rs:1219`), `cx.has_active_drag()` (drop tint, drawing only).
+- Pixel layout: `viewer_narrow`, the two `SidebarsState` widths, `tree_cols`.
+
+**Does to the toolkit** (becomes an `Effect` out of the core)
+- Focus: `window.focus(..)` at `layout.rs:208`, `:236` and `main.rs:2238`.
+- A folder picker (`cx.prompt_for_paths`, `projects.rs:523`) and `cx.open_url` (`render.rs:426`).
+- The terminal: `layout.rs:214-224` builds a gpui `TerminalView` and listens for it exiting. The
+  pty `Session` is the core's; the view is the shell's.
+- Window chrome (`refresh`, `remove_window`, titlebar, background appearance, quit): shell only.
+
+That list is short. The bulk of the coupling is plumbing, not behaviour: 98 `cx.notify()`,
+about 25 `cx.spawn` tasks, and some 256 `window`/`cx` parameters that are passed straight through.
+
+**The finding that shapes step 1.** Snapshots are built inside `render()`: 10 of the 12
+`nsh::*::publish` calls are on the render path (`render.rs`), and each snapshot carries chrome the
+core must not decide (`glass`, and the `lead`/`trail` header controls, which depend on pane
+widths and `viewer_narrow`). So the core can't publish yet. In order:
+
+1. Pull the publishing out of `render` into one `sync_screens` step, fed by a plain `Layout`
+   (`glass`, `viewer_narrow`, the pane flags) instead of `cx`.
+2. Split each snapshot into domain data and chrome (`glass`, `lead`, `trail`); the shell adds the
+   chrome when it draws. The pane flags that commands flip and the workspace saves
+   (`left_open`, `side_open`, `swapped`, `agent_open`, `browse`, `mode`) stay in the core; pixel
+   widths, focus and hover belong to the shell.
+3. Move `Reader`'s domain methods behind `Event`/`Effect` and run them on their own thread.
