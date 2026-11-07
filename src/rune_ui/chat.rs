@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use rune::tok::{Family, TextStyle};
-use rune::{Color, El, Span, Key, KeyEvent, ScrollSpec, TextEdit, Tx, col, row, text};
+use rune::{Color, El, GrowthSpec, Span, Key, KeyEvent, ScrollSpec, TextEdit, Tx, col, row, text};
 use rune_kit::markdown::Markdown;
 use rune_kit::{Button, ButtonVariant, Kit, SegmentedControl, Switch};
 use rune_kit::{TextArea};
@@ -31,11 +31,13 @@ pub struct State {
     pub draft: TextEdit,
     reset: u64,
     focus: u64,
+    /// The rows the transcript's virtual stack now shows, for the rail's marker.
+    pub visible: std::ops::Range<usize>,
 }
 
 impl Default for State {
     fn default() -> Self {
-        Self { draft: TextEdit::new(""), reset: 0, focus: 0 }
+        Self { draft: TextEdit::new(""), reset: 0, focus: 0, visible: 0..0 }
     }
 }
 
@@ -275,19 +277,51 @@ fn agent<S: 'static>(k: &Kit, message: usize, blocks: &[Block]) -> El {
     c
 }
 
-fn transcript<S: 'static>(k: &Kit, snapshot: &Snapshot) -> El {
-    let mut list = col().w_full().max_w(COLUMN).gap(16.0).px(16.0).py(16.0);
-    for (i, item) in snapshot.items.iter().enumerate() {
-        list = list.child(match item {
-            Item::User { text, pictures } => user_row(k, text, pictures).key(format!("user-{i}")),
-            Item::Agent { index, blocks } => agent::<S>(k, *index, blocks).key(format!("agent-{i}")),
-        });
+/// How many bars the rail holds at most; more and messages share one.
+const MAX_BARS: usize = 64;
+
+fn transcript<S: 'static>(k: &Kit, snapshot: &Snapshot, state: &State, at: At<S>) -> El {
+    let count = snapshot.items.len();
+    // The rows build at layout, only those in the viewport (and two viewports either side), so a
+    // long transcript costs the rows it shows: every row keyed by its place, built from the
+    // snapshot this pass took.
+    let items = snapshot.items.clone();
+    let kit = k.clone();
+    let stack = col().key("transcript").w_full().growth(GrowthSpec::default()).virtual_rows::<S>(count, 96.0, |_: &S, i| format!("item-{i}").into(), move |_: &S, i| {
+        let inner = match items.get(i) {
+            Some(Item::User { text, pictures }) => user_row(&kit, text, pictures),
+            Some(Item::Agent { index, blocks }) => agent::<S>(&kit, *index, blocks),
+            _ => col(),
+        };
+        col().w_full().max_w(COLUMN).items_center().px(16.0).py(8.0).child(inner)
+    }).on_visible_rows::<S>(move |s: &mut S, range| {
+        at(s).visible = range;
+        true
+    });
+    let viewport = col().w_full().grow(1.0).min_h(0.0).scroll(ScrollSpec { stick_bottom: true }).child(stack);
+    col().w_full().grow(1.0).min_h(0.0).child(row().w_full().grow(1.0).min_h(0.0).child(k.scroll_bar(viewport)).child(rail::<S>(k, state, count)))
+}
+
+/// The rail beside the column: a bar per message (messages shared when there are too many), a
+/// press on one scrolls there, and the marker over the rows that show. Nothing while the column
+/// fits the stage, which is when every row is in view.
+fn rail<S: 'static>(k: &Kit, state: &State, count: usize) -> El {
+    if count < 2 || state.visible.len() >= count {
+        return col();
     }
-    col()
-        .w_full()
-        .grow(1.0)
-        .min_h(0.0)
-        .child(k.scroll_bar(col().w_full().grow(1.0).min_h(0.0).items_center().scroll(ScrollSpec { stick_bottom: true }).child(list)))
+    let shown = count.min(MAX_BARS);
+    let step = count as f64 / shown as f64;
+    let mut bars = col().key("rail").w_full().grow(1.0).min_h(0.0).gap(2.0).py(4.0);
+    for at_ in 0..shown {
+        let from = (at_ as f64 * step) as usize;
+        let till = (((at_ + 1) as f64 * step).ceil() as usize).min(count);
+        let active = state.visible.start < till && from < state.visible.end;
+        let press = move |_: &mut S, tx: &mut Tx| tx.scroll_into_view(format!("item-{from}"));
+        bars = bars.child(col().key(format!("slot-{at_}")).w_full().grow(1.0).min_h(0.0).items_center().child(
+            k.interactive(row().key(format!("bar-{at_}")).w(3.0).h(16.0).radius(1.5).fill(if active { k.c.text_base } else { k.c.border_base }).on_press_tx(press)),
+        ));
+    }
+    col().key("rail-side").w(16.0).min_h(0.0).px(2.0).child(bars)
 }
 
 fn queued<S: 'static>(k: &Kit, q: &Queued) -> El {
@@ -482,5 +516,5 @@ fn header<S: 'static>(k: &Kit, snapshot: &Snapshot) -> El {
 }
 
 pub fn view<S: 'static>(snapshot: &Snapshot, state: &State, k: &Kit, at: At<S>) -> El {
-    col().w_full().h_full().min_h(0.0).child(header::<S>(k, snapshot)).child(transcript::<S>(k, snapshot)).child(composer::<S>(k, snapshot, state, at))
+    col().w_full().h_full().min_h(0.0).child(header::<S>(k, snapshot)).child(transcript::<S>(k, snapshot, state, at)).child(composer::<S>(k, snapshot, state, at))
 }

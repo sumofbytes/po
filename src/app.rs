@@ -8,7 +8,7 @@ use rune::{AppSpec, Cx, El, Key, KeyEvent, Tx, Waker};
 use rune_kit::Kit;
 
 use crate::host::{self, Inbox, Wake};
-use crate::model::bus::{self, Cmd};
+use crate::model::bus::{self};
 use crate::reader::render::Layout;
 use crate::rt::{Context, Core, Window};
 use crate::rune_ui::shell::{Host, Shell};
@@ -42,6 +42,8 @@ struct State {
     terminal_was_shown: bool,
     /// The saved pane widths were handed to the panes.
     widths_applied: bool,
+    /// The `PO_BENCH` fill ran once.
+    bench_filled: bool,
 }
 
 impl Host for State {
@@ -82,7 +84,7 @@ fn init() -> State {
     let settings = config::load();
     let name = std::env::var("PO_THEME").ok().or_else(|| settings["theme"].as_str().map(String::from)).unwrap_or_else(|| rune_ui::theme::DEFAULT.into());
     let (kit, _) = rune_ui::theme::kit(&rune_ui::theme::load(&name));
-    State { kit, shell: Shell::default(), live: None, viewer_left: config::viewer_left(&settings).unwrap_or(false), terminal_was_shown: false, widths_applied: false }
+    State { kit, shell: Shell::default(), live: None, viewer_left: config::viewer_left(&settings).unwrap_or(false), terminal_was_shown: false, widths_applied: false, bench_filled: false }
 }
 
 fn view(s: &State, _: &mut Cx<State>) -> El {
@@ -115,7 +117,28 @@ fn terminal_colors(kit: &Kit) -> (crate::terminal::Rgb, crate::terminal::Rgb) {
 
 /// Between frames: what tasks asked of the reader, what the screens sent, what the reader asks of
 /// the window; then what the reader publishes goes to the screens. True when the view is stale.
-fn poll(s: &mut State, _: f64, tx: &mut Tx) -> bool {
+/// A stand-in for an agent when profiling: `PO_BENCH=stream:<rounds>` fills the thread with
+/// `rounds` question-and-answer pairs so a long transcript lays out with nobody at the window.
+/// Runs on the first poll after two seconds, so the headless script has already opened a thread.
+fn bench_fill(reader: &mut crate::Reader) -> bool {
+    let rounds = std::env::var("PO_BENCH").ok().filter(|spec| spec.starts_with("stream")).and_then(|spec| spec.split(':').nth(1).and_then(|n| n.parse::<usize>().ok())).unwrap_or(20);
+    let markdown = |seed: usize| {
+        let mut out = String::new();
+        for part in 0..3 {
+            out.push_str(&format!("## Part {seed}.{part}: ownership and borrowing\n\n"));
+            out.push_str("Rust's ownership model gives every value a single owner, so the compiler can tell when it is freed and who may touch it meanwhile. A **shared** borrow lets many readers look at a value; a *mutable* borrow lets exactly one writer change it, and never both at once.\n\n- A value has one owner at a time\n- Borrows are checked at compile time, with `&T` and `&mut T`\n- Lifetimes say how long a borrow may live\n\n```rust\nfn longest<'a>(a: &'a str, b: &'a str) -> &'a str {\n    if a.len() >= b.len() { a } else { b }\n}\n```\n\n");
+        }
+        out
+    };
+    reader.thread.blank = false;
+    for i in 0..rounds {
+        reader.thread.messages.push(crate::Msg::User(format!("Question {i}: explain part {i} of Rust's ownership model."), vec![]));
+        reader.thread.messages.push(crate::Msg::Agent(vec![crate::Block::Text(markdown(i))]));
+    }
+    rounds > 0
+}
+
+fn poll(s: &mut State, now: f64, tx: &mut Tx) -> bool {
     let Some(live) = s.live.as_mut() else { return false };
     let Live { core, host, inbox, commands } = live;
     let mut stale = inbox.run(core);
@@ -129,6 +152,10 @@ fn poll(s: &mut State, _: f64, tx: &mut Tx) -> bool {
     core.reader.publish_screens();
     if let Some(term) = core.reader.project.terminal.as_mut() {
         stale |= term.poll();
+    }
+    if now >= 2.0 && !s.bench_filled {
+        s.bench_filled = true;
+        stale |= bench_fill(&mut core.reader);
     }
     let window = &mut core.window;
     for url in window.urls.drain(..) {
