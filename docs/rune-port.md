@@ -25,18 +25,15 @@ gpui, NSH, `vendor/`, `src/nsh`, `src/ui`, `terminal_view.rs` and `theme.rs` are
 
 ## Not ported yet (known gaps)
 
-- **Issues**: project filter chips, the priority/label/late filters (a "More" popup), an epic's
-  page (its fields, milestones and its issues, even created), labels and parent set on an issue's
-  detail. The add box always targets the repo last shown.
-- **Chat**: pictures (dropped or pasted into the draft, shown in it and in the transcript, detachable), the Control (grant) menu, and a virtualised transcript with its message rail all work.
-- **Terminal**: resize, scrollback (wheel), paste, drag-selection and copy to the clipboard
-  (Ctrl+Shift+C, the platform key, and the selection's own menu) work. Unchecked: mouse reporting
-  to programs, wide characters.
-- **Window**: pane widths save and restore, the window reports whether it is active, files dropped
-  on it attach to the message being written, and Ctrl+P works with a field focused. Desktop
-  notifications gate on that active flag; `po update` is a terminal command, covered by its own
-  e2e tests.
-- **Tests**: the NSH `Headless` screen tests went with NSH; the `model` tests remain. For
-  profiling, `PO_BENCH=stream:<rounds>` fills the thread with `rounds` rounds so a long
-  transcript lays out with nobody there. There are no `rune::Runtime` tests of `rune_ui` yet.
+What earlier gaps remain, now that the terminal (resize, scrollback, paste, selection and its
+copy), the chat (pictures, the Control menu, a virtualised transcript with its rail), the window
+(saved pane widths, the active flag, dropped files) and the issues page (project chips, a More
+popup for priority, label and lateness, an epic's page with its fields, milestones and issues,
+labels and parent on an issue's detail) all work:
+
+- **Terminal**: mouse reporting to programs, wide characters.
+- **Chat**: the add box on the issues page always targets the repo last shown.
+- **Tests**: the NSH `Headless` screen tests went with NSH; the `model` tests remain; there are no
+  `rune::Runtime` tests of `rune_ui`. For profiling, `PO_BENCH=stream:<rounds>` fills the thread
+  with `rounds` rounds so a long transcript lays out with nobody there.
 - **Platforms**: only Linux was run. Wayland IME and clipboard, macOS and Windows are unchecked.
