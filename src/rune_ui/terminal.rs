@@ -202,6 +202,12 @@ fn row(frame: &Frame, kit: &Kit, y: usize) -> El {
     text(line).font(FONT).color(c(frame.foreground)).spans(spans).selectable(true)
 }
 
+/// The window's copy chord: the modifier key, or Ctrl+Shift+C elsewhere. Paste is handled by the
+/// window, so this takes the copy chord only.
+fn copy_chord(event: &KeyEvent) -> bool {
+    matches!(&event.key, RuneKey::Command('c')) && (event.mods.logo || (event.mods.ctrl && event.mods.shift))
+}
+
 /// The grid, focusable, sending its keys to the shell.
 pub fn view<S: 'static>(term: &Term, kit: &Kit, at: At<S>) -> El {
     let mut grid = col()
@@ -211,7 +217,17 @@ pub fn view<S: 'static>(term: &Term, kit: &Kit, at: At<S>) -> El {
         .min_h(0.0)
         .focusable(true)
         .selection_group(true)
-        .on_key(move |s: &mut S, event: &KeyEvent, _: &mut Tx| at(s).key(event))
+        .on_key(move |s: &mut S, event: &KeyEvent, tx: &mut Tx| {
+            // The selection goes to the clipboard on the window's copy chord, where Ctrl+C is the
+            // shell's and the selection's own menu copies besides.
+            if copy_chord(event)
+                && let Some(selected) = tx.text_selection()
+            {
+                tx.copy(selected.text().to_string());
+                return true;
+            }
+            at(s).key(event)
+        })
         .on_wheel(move |s: &mut S, event: WheelEvent, _: &mut Tx| at(s).wheel(event.dy))
         .on_layout(move |s: &mut S, rect: [f32; 4]| at(s).fit(rect[2], rect[3]));
     for y in 0..term.size.1 as usize {

@@ -205,11 +205,22 @@ fn poll(s: &mut State, now: f64, tx: &mut Tx) -> bool {
 
 /// The window's shortcuts, which the focused control did not take. Where the terminal is what the
 /// viewer shows, the keys of readline, fzf and tmux (Ctrl+O, T, B, N, P, W and \) go to its shell.
-fn on_key(s: &mut State, event: &KeyEvent, _: &mut Tx) -> bool {
+fn on_key(s: &mut State, event: &KeyEvent, tx: &mut Tx) -> bool {
     let Some(live) = s.live.as_mut() else { return false };
     let Live { core, host, .. } = live;
     core.reader.last_input = Instant::now();
     let terminal_has_keys = core.reader.layout().terminal_shown && core.reader.project.terminal.is_some();
+    // The terminal's selection goes to the clipboard on the window's copy chord, where Ctrl+C is
+    // the shell's and otherwise the selection's own menu copies. Only the terminal's: elsewhere
+    // the copy chord reads as a field's or a menu's and is theirs.
+    if let Key::Command('c') = &event.key
+        && (event.mods.logo || (event.mods.ctrl && event.mods.shift))
+        && let Some(selected) = tx.text_selection()
+        && selected.texts().first().is_some_and(|text| text.path().contains("/terminal/"))
+    {
+        tx.copy(selected.text().to_string());
+        return true;
+    }
     let readline = ['o', 't', 'b', 'n', 'p', 'w', '\\'].into_iter().any(|c| event.is_command(c)) && !event.mods.shift;
     if terminal_has_keys && readline {
         return core.reader.project.terminal.as_ref().is_some_and(|term| term.key(event));

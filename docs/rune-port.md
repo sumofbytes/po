@@ -28,10 +28,13 @@ gpui, NSH, `vendor/`, `src/nsh`, `src/ui`, `terminal_view.rs` and `theme.rs` are
 - **Issues**: no labels or parent editing, milestones, epic pages (an epic click filters the list),
   or project filter chips; the add box always targets the repo last shown.
 - **Chat**: pictures (dropped or pasted into the draft, shown in it and in the transcript, detachable), the Control (grant) menu, and a virtualised transcript with its message rail all work.
-- **Terminal**: resize, scrollback (wheel), paste and drag-selection (Rune's text selection) work; Ctrl+Shift+C/V and the platform key are left to the window. Not checked: copy to the clipboard, mouse reporting to programs, wide characters.
+- **Terminal**: resize, scrollback (wheel), paste, drag-selection and copy to the clipboard
+  (Ctrl+Shift+C, the platform key, and the selection's own menu) work. Unchecked: mouse reporting
+  to programs, wide characters.
 - **Window**: pane widths save and restore, the window reports whether it is active, files dropped
-  on it attach to the message being written, and Ctrl+P works with a field focused. Unchecked:
-  desktop notifications and the `po update` flow.
+  on it attach to the message being written, and Ctrl+P works with a field focused. Desktop
+  notifications gate on that active flag; `po update` is a terminal command, covered by its own
+  e2e tests.
 - **Tests**: the NSH `Headless` screen tests went with NSH; the `model` tests remain. For
   profiling, `PO_BENCH=stream:<rounds>` fills the thread with `rounds` rounds so a long
   transcript lays out with nobody there. There are no `rune::Runtime` tests of `rune_ui` yet.
