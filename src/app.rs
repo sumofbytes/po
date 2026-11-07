@@ -120,8 +120,9 @@ fn terminal_colors(kit: &Kit) -> (crate::terminal::Rgb, crate::terminal::Rgb) {
 /// A stand-in for an agent when profiling: `PO_BENCH=stream:<rounds>` fills the thread with
 /// `rounds` question-and-answer pairs so a long transcript lays out with nobody at the window.
 /// Runs on the first poll after two seconds, so the headless script has already opened a thread.
-fn bench_fill(reader: &mut crate::Reader) -> bool {
-    let rounds = std::env::var("PO_BENCH").ok().filter(|spec| spec.starts_with("stream")).and_then(|spec| spec.split(':').nth(1).and_then(|n| n.parse::<usize>().ok())).unwrap_or(20);
+/// Without `PO_BENCH` nothing happens: this is off unless it asks for it.
+fn bench_fill(reader: &mut crate::Reader) -> Option<usize> {
+    let rounds = std::env::var("PO_BENCH").ok().filter(|spec| spec.starts_with("stream")).and_then(|spec| spec.split(':').nth(1).and_then(|n| n.parse::<usize>().ok()))?;
     let markdown = |seed: usize| {
         let mut out = String::new();
         for part in 0..3 {
@@ -135,7 +136,7 @@ fn bench_fill(reader: &mut crate::Reader) -> bool {
         reader.thread.messages.push(crate::Msg::User(format!("Question {i}: explain part {i} of Rust's ownership model."), vec![]));
         reader.thread.messages.push(crate::Msg::Agent(vec![crate::Block::Text(markdown(i))]));
     }
-    rounds > 0
+    Some(rounds)
 }
 
 fn poll(s: &mut State, now: f64, tx: &mut Tx) -> bool {
@@ -153,9 +154,9 @@ fn poll(s: &mut State, now: f64, tx: &mut Tx) -> bool {
     if let Some(term) = core.reader.project.terminal.as_mut() {
         stale |= term.poll();
     }
-    if now >= 2.0 && !s.bench_filled {
+    if now >= 2.0 && !s.bench_filled && let Some(rounds) = bench_fill(&mut core.reader) {
         s.bench_filled = true;
-        stale |= bench_fill(&mut core.reader);
+        stale |= rounds > 0;
     }
     let window = &mut core.window;
     for url in window.urls.drain(..) {
