@@ -18,6 +18,15 @@ Run it: `cargo run --bin po-rune` (the gpui `po` binary still builds beside it).
 - **Model**: `src/model/` holds what the screens and the `Reader` exchange (chat, sidebar, diff,
   explorer, source, agent and finder snapshots; the bus `Cmd`; header `Control`), with no view
   code. `nsh` re-exports it; the 44 NSH screen tests pass unchanged.
+- **Screens on Rune** (each draws its model snapshot and sends the same `Cmd`s as its NSH
+  counterpart; interactions were checked with headless `--script` runs):
+  sidebar, explorer tree, worktree and PR strips, tabs, finder (Ctrl+P), source (numbered lines,
+  rune-kit scanners, rendered markdown), diff (rune-kit `DiffView`, inline/split), the agent's
+  document and form, and the conversation (transcript, queue, session picker, composer with
+  send, stop, steer and the agent and setting chips).
+  Demo data: `PO_RUNE_SCREEN=demo`, plus `PO_RUNE_FILES=1` (files, not changes), `PO_RUNE_AGENT=form|doc`
+  and `PO_RUNE_CHAT=1`. Chat leaves out pictures, the Control (grant) menu, the transcript rail and
+  a virtualised transcript.
 - **Host**: `src/host.rs` is a toolkit-free stand-in for gpui's `cx.notify`, `cx.spawn` and
   `cx.background_executor` (`notify`, `update`, `query`, `spawn`, `background`, `timer`), with
   tests. Nothing uses it yet.
@@ -49,10 +58,11 @@ gpui calls the Reader makes, to be replaced:
    Open question: `Reader` is `Context<Self>`-shaped (`this.update(cx, ..)` in 25 spawned
    tasks); either rewrite those as `host.update`/`host.query`, or put the Reader on its own
    thread behind a channel of `Cmd`s and snapshots.
-2. **Port the screens** onto `rune_ui` (NSH lines): sidebar 795, chat 2675, issues 1991,
-   home 459, source 275, diff 182, explorer 211, tabs 155, strip 285, finder 238, agent 338,
-   epics 324, header 130, overlay 140. Chat is the largest: Rune has `virtual_rows`, `memo`,
-   `stick_bottom` scrolling and a `Markdown` component (feature `markdown`).
+2. **Port the rest of the screens** onto `rune_ui`: issues (1991 NSH lines, signal-based state
+   over `issues::shared`), home 459, epics 324, overlays 140, header controls (`Control`s are in
+   the snapshots but not drawn), and chat's gaps above. Everything else is ported.
+   Rune's main pane shows the conversation when `chat.title` is set and the terminal otherwise;
+   the real rule (a thread's `Place`) comes with the `Reader` split.
 3. **Window chrome**: titlebar, drag regions, resizable panes (`PaneState` exists), full screen,
    keybindings, drag and drop of files, notifications, `po update`.
 4. **Fonts**: replace `src/fonts.rs` (gpui) with Rune's `families` and `AppSpec::fonts`.
