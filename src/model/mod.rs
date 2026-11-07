@@ -3,3 +3,9 @@
 pub mod bus;
 pub mod chat;
 pub mod header;
+pub mod agent;
+pub mod diff;
+pub mod explorer;
+pub mod sidebar;
+pub mod source;
+pub mod finder;

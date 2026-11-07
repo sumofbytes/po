@@ -12,50 +12,8 @@ use super::header::{Control, pane_header};
 use super::source::Shared;
 use super::{Colors, note, scale, small, text_xs, Smooth};
 
-#[derive(Clone, PartialEq, Debug)]
-pub enum Body {
-    /// No file is picked: what to do about it.
-    Hint(String),
-    /// The diff is being worked out.
-    Loading,
-    /// The file has no textual changes.
-    NoChanges,
-    /// The file's two versions, `path` naming the language.
-    Versions { path: String, old: Shared, new: Shared },
-}
-
-#[derive(Clone, PartialEq, Debug)]
-pub struct Snapshot {
-    pub glass: bool,
-    pub title: String,
-    pub lead: Vec<Control>,
-    pub trail: Vec<Control>,
-    /// Side by side (true) or inline.
-    pub split: bool,
-    /// The lines added and removed.
-    pub counts: (usize, usize),
-    pub body: Body,
-}
-
-impl Default for Snapshot {
-    fn default() -> Self {
-        Self { glass: false, title: String::new(), lead: vec![], trail: vec![], split: true, counts: (0, 0), body: Body::Loading }
-    }
-}
-
-static SNAPSHOT: LazyLock<watch::Sender<Snapshot>> = LazyLock::new(|| watch::Sender::new(Snapshot::default()));
-
-/// Shows `snapshot`; nothing is redrawn when it is what the screen already has.
-#[hotpath::measure]
-pub fn publish(snapshot: Snapshot) {
-    SNAPSHOT.send_if_modified(|now| {
-        let changed = *now != snapshot;
-        if changed {
-            *now = snapshot;
-        }
-        changed
-    });
-}
+pub use crate::model::diff::*;
+pub(crate) use crate::model::diff::SNAPSHOT;
 
 fn centered(message: String) -> View {
     view().flex_1().items_center().justify_center().px(scale::s4()).child(note(message))

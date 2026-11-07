@@ -12,34 +12,8 @@ use super::{Colors, field_with, scale, text_base};
 /// The height the screen needs, which the overlay around it takes.
 pub static HEIGHT: Height = overlay::height();
 
-/// The files that match the query, in the order to show them.
-#[derive(Clone, PartialEq, Debug, Default)]
-pub struct Snapshot {
-    pub matches: Vec<String>,
-    /// The walk stopped at this many files, so the list may be missing some.
-    pub capped: Option<usize>,
-}
-
-static SNAPSHOT: LazyLock<watch::Sender<Snapshot>> = LazyLock::new(|| watch::Sender::new(Snapshot::default()));
-
-/// Shows `snapshot`; nothing is redrawn when it is what the screen already has.
-pub fn publish(snapshot: Snapshot) {
-    SNAPSHOT.send_if_modified(|now| {
-        let changed = *now != snapshot;
-        if changed {
-            *now = snapshot;
-        }
-        changed
-    });
-}
-
-/// What the field holds as the finder opens: the last query, which is selected.
-static QUERY: Mutex<String> = Mutex::new(String::new());
-
-/// Sets what the next finder starts from.
-pub fn start(query: &str) {
-    *QUERY.lock().unwrap_or_else(|e| e.into_inner()) = query.to_string();
-}
+pub use crate::model::finder::*;
+pub(crate) use crate::model::finder::{QUERY, SNAPSHOT};
 
 /// What the list below the field has room for.
 fn list_height() -> Points {
