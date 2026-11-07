@@ -327,7 +327,7 @@ fn new_thread_button(pid: u64) -> View {
         .items_center()
         .cursor_pointer()
         .transition_colors()
-        .opacity(0.9)
+        .opacity(0.6)
         .hover(|s| s.opacity(1.))
         .tooltip(super::tooltip("New thread in this project"))
         .on_press(move || send(Cmd::StartThread(pid)))
