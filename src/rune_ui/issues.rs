@@ -508,7 +508,7 @@ fn epic_detail<S: 'static>(k: &Kit, state: &State, overview: &Overview, root: &P
         .w_full()
         .gap(14.0)
         .child(row().w_full().items_center().child(row().grow(1.0).child(back.build(k))).child(delete))
-        .child(muted(k, format!("{}", view.name)))
+        .child(muted(k, view.name.clone()))
         .child(name)
         .child(property("Status", statuses))
         .child(property("Target", target))
