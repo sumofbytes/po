@@ -61,6 +61,12 @@ impl Host for State {
         self.live.as_ref().and_then(|live| live.core.reader.project.terminal.as_ref())
     }
 
+    fn attach(&mut self, paths: Vec<std::path::PathBuf>) {
+        if let Some(Live { core, host, .. }) = self.live.as_mut() {
+            core.reader.attach(paths.into_iter().map(crate::Source::Path).collect(), &mut Context::new(host.clone()));
+        }
+    }
+
     fn set_active(&mut self, active: bool) {
         if let Some(live) = self.live.as_mut() {
             live.core.window.active = active;

@@ -172,6 +172,8 @@ pub trait Host: 'static {
     fn terminal_mut(&mut self) -> Option<&mut terminal::Term>;
     /// The window has, or has lost, the user's attention.
     fn set_active(&mut self, active: bool);
+    /// Files dropped on the window, to attach to the message being written.
+    fn attach(&mut self, paths: Vec<std::path::PathBuf>);
 }
 
 fn sidebar_of<S: Host>(s: &mut S) -> &mut PaneState {
@@ -289,7 +291,7 @@ pub fn view<S: Host>(host: &S, k: &Kit) -> El {
         None => split.build(k),
     };
     // Text pasted while no field has the keyboard goes to the terminal, where it is showing.
-    root.on_window_focus(|s: &mut S, focused: bool, _: &mut Tx| s.set_active(focused)).on_paste(|s: &mut S, text: &str, _: &mut Tx| {
+    root.on_drop_files(|s: &mut S, paths: &[std::path::PathBuf], _: &mut Tx| s.attach(paths.to_vec())).on_window_focus(|s: &mut S, focused: bool, _: &mut Tx| s.set_active(focused)).on_paste(|s: &mut S, text: &str, _: &mut Tx| {
         if s.layout().terminal_shown
             && let Some(term) = s.terminal_mut()
         {
