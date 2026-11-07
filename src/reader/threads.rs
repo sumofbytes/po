@@ -1098,6 +1098,19 @@ impl Reader {
             }
             return;
         }
+        // The thread has no name of its own yet, and the session loads in pieces: what the user
+        // just picked is what it was rather than "New thread" while nothing has come back.
+        let name = self
+            .thread
+            .sessions
+            .as_ref()
+            .and_then(|sessions| sessions.iter().find(|session| session.id == id))
+            .map(|session| session.title.clone())
+            .filter(|title| !title.is_empty())
+            .or_else(|| self.project.closed.iter().find(|closed| closed.session == id).and_then(|closed| (!closed.title.is_empty()).then(|| closed.title.clone())));
+        if let Some(name) = name {
+            self.thread.saved_title = Some(name);
+        }
         let Some(client) = &self.thread.client else { return };
         if self.thread.loading || !client.load(id) {
             return;
