@@ -1,10 +1,11 @@
 //! The window: a sidebar, the main pane and a viewer pane, as Rune's `SplitView` lays them out.
 //! Counterpart of the layout half of `Reader::render` in `main.rs`. What fills the panes comes from
 //! the screens; this decides what is shown where.
-use rune::{El, Tx, col, text};
-use rune_kit::{Kit, PaneState, Sidebar, SidebarRow, SidebarSection, SplitView};
+use rune::{El, col, text};
+use rune_kit::{Kit, PaneState, SplitView};
 
-use super::{settings, terminal};
+use super::{settings, sidebar, terminal};
+use crate::model;
 
 /// What the main pane shows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -19,6 +20,10 @@ pub struct Shell {
     pub viewer: PaneState,
     pub settings: Option<settings::Page>,
     pub term: terminal::Term,
+    /// The sidebar's filter, and what the `Reader` last published for it.
+    pub side: sidebar::State,
+    pub snapshot: model::sidebar::Snapshot,
+    snapshots: tokio::sync::watch::Receiver<model::sidebar::Snapshot>,
 }
 
 impl Default for Shell {
@@ -29,6 +34,9 @@ impl Default for Shell {
             viewer: PaneState::new(460.0).range(280.0, 900.0).collapsed(),
             settings: None,
             term: terminal::Term::default(),
+            side: sidebar::State::default(),
+            snapshot: model::sidebar::Snapshot::default(),
+            snapshots: model::sidebar::watch(),
         }
     }
 }
@@ -39,6 +47,15 @@ impl Shell {
             self.settings = Some(settings::Page::load(false));
         }
         self.page = page;
+    }
+
+    /// Takes the sidebar snapshot the `Reader` published since the last call; true when there was one.
+    pub fn poll(&mut self) -> bool {
+        if self.snapshots.has_changed().unwrap_or(false) {
+            self.snapshot = self.snapshots.borrow_and_update().clone();
+            return true;
+        }
+        false
     }
 
     /// A key nothing in the window took: the shell's, while it is the page shown.
@@ -77,15 +94,8 @@ fn settings_of<S: Host>(s: &mut S) -> &mut settings::Page {
     s.shell().settings.as_mut().expect("the settings page is open")
 }
 
-fn sidebar<S: Host>(shell: &Shell, k: &Kit) -> El {
-    let pages = SidebarSection::new("Po")
-        .row(SidebarRow::new("Terminal").selected(shell.page == Page::Terminal).on_select(|s: &mut S, tx: &mut Tx| {
-            s.shell().show(Page::Terminal);
-            // The row keeps no focus, so the window's keys reach the shell ([`Shell::key`]).
-            tx.blur();
-        }).build(k))
-        .row(SidebarRow::new("Settings").selected(shell.page == Page::Settings).on_select(|s: &mut S, _: &mut Tx| s.shell().show(Page::Settings)).build(k));
-    Sidebar::new().label("Po").section(pages).build(k)
+fn side_of<S: Host>(s: &mut S) -> &mut sidebar::State {
+    &mut s.shell().side
 }
 
 fn viewer(k: &Kit) -> El {
@@ -99,7 +109,7 @@ pub fn view<S: Host>(shell: &Shell, k: &Kit) -> El {
         _ => terminal::view::<S>(&shell.term, k, term_of::<S>),
     };
     SplitView::new(main)
-        .sidebar::<S>(&shell.sidebar, sidebar_of::<S>, sidebar::<S>(shell, k))
+        .sidebar::<S>(&shell.sidebar, sidebar_of::<S>, sidebar::view::<S>(&shell.snapshot, &shell.side, k, side_of::<S>))
         .inspector::<S>(&shell.viewer, viewer_of::<S>, viewer(k))
         .build(k)
 }

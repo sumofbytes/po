@@ -14,6 +14,12 @@ mod terminal;
 #[path = "../rune_ui/mod.rs"]
 mod rune_ui;
 #[allow(dead_code)]
+#[path = "../explorer.rs"]
+mod explorer;
+#[allow(dead_code)]
+#[path = "../model/mod.rs"]
+mod model;
+#[allow(dead_code)]
 #[path = "../schemes.rs"]
 mod schemes;
 
@@ -36,6 +42,35 @@ use rune_ui::shell::{Host, Page, Shell};
 struct State {
     kit: Kit,
     shell: Shell,
+    /// What the screens ask for, until the `Reader` is on Rune to run it.
+    commands: Option<model::bus::Commands>,
+    /// Say each command on stderr (`PO_RUNE_SCREEN=demo`).
+    echo: bool,
+}
+
+/// A made-up sidebar, for looking at the screen before the `Reader` publishes a real one.
+fn demo() {
+    use model::sidebar::{Mark, Project, Snapshot, Suggestion, Thread, Waiting};
+    let thread = |id, label: &str, mark, selected| Thread { project: 1, id, label: label.into(), name: label.into(), mark, selected, controlled: false, ago: Some("5m".into()), closing: false };
+    model::sidebar::publish(Snapshot {
+        waiting: vec![Waiting { thread: Thread { project: 2, ..thread(30, "Ship the release notes", Mark::Asking, false) }, project: "docs".into() }],
+        projects: vec![
+            Project {
+                id: 1,
+                name: "po".into(),
+                active: true,
+                collapsed: false,
+                closable: true,
+                threads: vec![thread(10, "Port the sidebar", Mark::Running, true), thread(11, "Fix the diff header", Mark::Unread, false), thread(12, "Retry bug", Mark::Idle, false)],
+                fold: Some((false, 4)),
+            },
+            Project { id: 2, name: "docs".into(), active: false, collapsed: true, closable: true, threads: vec![], fold: None },
+        ],
+        suggestions: vec![Suggestion { id: 7, text: "\u{201c}Claude\u{201d} suggests docs".into(), yes: "Go" }],
+        status: Some("Worktree made on feat/rune".into()),
+        issues: (12, 2),
+        ..Default::default()
+    });
 }
 
 impl Host for State {
@@ -53,7 +88,11 @@ impl Default for State {
         if std::env::var("PO_RUNE_SCREEN").as_deref() == Ok("settings") {
             shell.show(Page::Settings);
         }
-        Self { kit, shell }
+        let echo = std::env::var("PO_RUNE_SCREEN").as_deref() == Ok("demo");
+        if echo {
+            demo();
+        }
+        Self { kit, shell, commands: model::bus::commands(), echo }
     }
 }
 
@@ -68,7 +107,19 @@ fn setup(s: &mut State, wake: Waker) {
 
 /// True when something the view shows changed on its own: the shell drew, or a page closed.
 fn poll(s: &mut State, _: f64, _: &mut Tx) -> bool {
-    let drew = s.shell.term.poll();
+    let mut asked = false;
+    while let Some(cmd) = s.commands.as_mut().and_then(|c| c.try_recv().ok()) {
+        if s.echo {
+            eprintln!("cmd: {cmd:?}");
+        }
+        asked = true;
+        match cmd {
+            model::bus::Cmd::OpenSettings => s.shell.show(Page::Settings),
+            model::bus::Cmd::CloseSettings => s.shell.show(Page::Terminal),
+            _ => {}
+        }
+    }
+    let drew = s.shell.term.poll() | s.shell.poll() | asked;
     let page = s.shell.page;
     s.shell.settle();
     drew || page != s.shell.page
