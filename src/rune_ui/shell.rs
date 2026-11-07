@@ -170,6 +170,8 @@ pub trait Host: 'static {
     /// The shell of the project on screen, if it has started one.
     fn terminal(&self) -> Option<&terminal::Term>;
     fn terminal_mut(&mut self) -> Option<&mut terminal::Term>;
+    /// The window has, or has lost, the user's attention.
+    fn set_active(&mut self, active: bool);
 }
 
 fn sidebar_of<S: Host>(s: &mut S) -> &mut PaneState {
@@ -287,7 +289,7 @@ pub fn view<S: Host>(host: &S, k: &Kit) -> El {
         None => split.build(k),
     };
     // Text pasted while no field has the keyboard goes to the terminal, where it is showing.
-    root.on_paste(|s: &mut S, text: &str, _: &mut Tx| {
+    root.on_window_focus(|s: &mut S, focused: bool, _: &mut Tx| s.set_active(focused)).on_paste(|s: &mut S, text: &str, _: &mut Tx| {
         if s.layout().terminal_shown
             && let Some(term) = s.terminal_mut()
         {

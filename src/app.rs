@@ -61,6 +61,12 @@ impl Host for State {
         self.live.as_ref().and_then(|live| live.core.reader.project.terminal.as_ref())
     }
 
+    fn set_active(&mut self, active: bool) {
+        if let Some(live) = self.live.as_mut() {
+            live.core.window.active = active;
+        }
+    }
+
     fn terminal_mut(&mut self) -> Option<&mut rune_ui::terminal::Term> {
         self.live.as_mut().and_then(|live| live.core.reader.project.terminal.as_mut())
     }
