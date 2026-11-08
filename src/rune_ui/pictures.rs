@@ -8,8 +8,10 @@ use rune::image::ImageCache;
 use rune::{El, SurfaceFit};
 
 
-/// How large a picture draws in the transcript, and in the strip under the field.
-pub const LARGE: (f32, f32) = (560.0, 320.0);
+/// A thumbnail in the transcript's user row, and the picture shown large over the window.
+pub const THUMB: (f32, f32) = (56.0, 42.0);
+pub const PREVIEW: (f32, f32) = (900.0, 640.0);
+/// How large a picture draws in the strip under the field.
 pub const SMALL: (f32, f32) = (110.0, 82.0);
 
 static IMAGES: OnceLock<Mutex<Option<ImageCache>>> = OnceLock::new();

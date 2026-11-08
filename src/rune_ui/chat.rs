@@ -45,11 +45,13 @@ pub struct State {
     hover: Option<usize>,
     /// The menu a composer chip has open.
     pub menu: super::dropdown::State,
+    /// The picture shown large over the window, after its thumbnail was pressed.
+    pub preview: Option<crate::model::chat::Picture>,
 }
 
 impl Default for State {
     fn default() -> Self {
-        Self { draft: TextEdit::new(""), reset: 0, focus: 0, visible: 0..0, stage: 0.0, hover: None, menu: Default::default() }
+        Self { draft: TextEdit::new(""), reset: 0, focus: 0, visible: 0..0, stage: 0.0, hover: None, menu: Default::default(), preview: None }
     }
 }
 
@@ -125,20 +127,26 @@ fn gist(text_: &str) -> String {
     line.replace(['*', '`'], "").trim_matches('_').to_string()
 }
 
-fn user_row(k: &Kit, body: &str, pictures: &[crate::model::chat::Picture]) -> El {
-    let mut inner = col().gap(8.0);
-    if !pictures.is_empty() {
-        let mut strip = row().flex_wrap().gap(8.0);
-        for (i, picture) in pictures.iter().enumerate() {
-            strip = strip.child(pictures::el(&picture.uri, picture.size, pictures::LARGE).key(format!("user-picture-{i}")));
-        }
-        inner = inner.child(strip);
-    }
+fn user_row<S: 'static>(k: &Kit, body: &str, pictures: &[crate::model::chat::Picture], at: At<S>) -> El {
+    // The words, then a small thumbnail of each picture at the row's end: pressing one shows it large.
+    let mut inner = row().gap(12.0).items_center();
     if !body.is_empty() {
-        inner = inner.child(text(body).font(BODY).color(k.c.text_base).wrap_anywhere());
+        inner = inner.child(text(body).font(BODY).color(k.c.text_base).wrap_anywhere().shrink());
+    }
+    for (i, picture) in pictures.iter().enumerate() {
+        let shown = picture.clone();
+        let thumb = pictures::el(&picture.uri, picture.size, pictures::THUMB).radius(6.0).key(format!("user-picture-{i}")).on_press(move |s: &mut S| at(s).preview = Some(shown.clone()));
+        inner = inner.child(k.interactive(row().key(format!("user-thumb-{i}")).role("button").label("Show picture").radius(6.0).child(thumb)));
     }
     // The user's side: the bubble sits at the right, as wide as its words need up to a limit, and wraps.
     row().w_full().justify_end().child(col().min_w(0.0).max_w(600.0).shrink().px(16.0).py(12.0).radius(10.0).fill(k.c.layer_03).child(inner))
+}
+
+/// The picture of a pressed thumbnail, large over the window; a press anywhere puts it away.
+pub fn lightbox<S: 'static>(k: &Kit, state: &State, at: At<S>, layer: &mut Vec<El>) {
+    let Some(picture) = &state.preview else { return };
+    let big = pictures::el(&picture.uri, picture.size, pictures::PREVIEW).key("preview-picture");
+    layer.push(rune::el().key("preview").role("dialog").label("Picture").absolute(0.0, 0.0).w_full().h_full().fill(k.c.scrim).center().child(big).on_press(move |s: &mut S| at(s).preview = None));
 }
 
 fn thought<S: 'static>(k: &Kit, message: usize, at: usize, body: &str, open: bool) -> El {
@@ -324,7 +332,7 @@ fn transcript<S: 'static>(k: &Kit, snapshot: &Snapshot, state: &State, at: At<S>
     let kit = k.clone();
     let stack = col().key("transcript").w_full().growth(GrowthSpec::default()).virtual_rows::<S>(count, 96.0, |_: &S, i| format!("item-{i}").into(), move |_: &S, i| {
         let inner = match items.get(i) {
-            Some(Item::User { text, pictures }) => user_row(&kit, text, pictures),
+            Some(Item::User { text, pictures }) => user_row::<S>(&kit, text, pictures, at),
             Some(Item::Agent { index, blocks }) => agent::<S>(&kit, *index, blocks),
             _ => col(),
         };
