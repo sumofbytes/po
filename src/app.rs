@@ -80,10 +80,15 @@ impl Host for State {
     }
 }
 
+/// The kit for the theme the environment or the settings name.
+fn theme_kit(settings: &serde_json::Value) -> Kit {
+    let name = std::env::var("PO_THEME").ok().or_else(|| settings["theme"].as_str().map(String::from)).unwrap_or_else(|| rune_ui::theme::DEFAULT.into());
+    rune_ui::theme::kit(&rune_ui::theme::load(&name)).0
+}
+
 fn init() -> State {
     let settings = config::load();
-    let name = std::env::var("PO_THEME").ok().or_else(|| settings["theme"].as_str().map(String::from)).unwrap_or_else(|| rune_ui::theme::DEFAULT.into());
-    let (kit, _) = rune_ui::theme::kit(&rune_ui::theme::load(&name));
+    let kit = theme_kit(&settings);
     State { kit, shell: Shell::default(), live: None, viewer_left: config::viewer_left(&settings).unwrap_or(false), terminal_was_shown: false, widths_applied: false, bench_filled: false }
 }
 
@@ -145,8 +150,14 @@ fn poll(s: &mut State, now: f64, tx: &mut Tx) -> bool {
     let mut stale = inbox.run(core);
     let mut cx = Context::new(host.clone());
     while let Some(cmd) = commands.as_mut().and_then(|commands| commands.try_recv().ok()) {
+        let saved = matches!(cmd, bus::Cmd::SettingsSaved);
         core.reader.run(cmd, &mut core.window, &mut cx);
         stale = true;
+        // Saving the settings page applies its theme at once, as it does its other settings.
+        if saved {
+            s.kit = theme_kit(&config::load());
+            core.reader.term_theme = terminal_colors(&s.kit);
+        }
     }
     core.reader.reap_terminals(&mut cx);
     core.reader.flush_save();
