@@ -393,6 +393,7 @@ impl Reader {
                 }
             }
             Cmd::StartThread(pid) => self.start_thread_in(pid, window, cx),
+            Cmd::CloseProject(pid) => self.close_project(pid, window, cx),
             Cmd::ToggleMore(pid) => {
                 if !self.threads_expanded.insert(pid) {
                     self.threads_expanded.remove(&pid);

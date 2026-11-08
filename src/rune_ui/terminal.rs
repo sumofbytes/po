@@ -215,5 +215,5 @@ pub fn view<S: 'static>(term: &Term, kit: &Kit, at: At<S>) -> El {
     for y in 0..term.size.1 as usize {
         grid = grid.child(row(&term.frame, kit, y));
     }
-    col().w_full().h_full().min_h(0.0).fill(kit.c.bg_base).padding(12.0).child(grid)
+    col().w_full().h_full().min_h(0.0).fill(kit.c.bg_base).px(12.0).py(8.0).child(grid)
 }
