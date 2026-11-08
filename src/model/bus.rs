@@ -22,6 +22,8 @@ pub enum Cmd {
     /// A project row was pressed: fold or unfold its threads, and show it.
     ToggleProject(u64),
     StartThread(u64),
+    /// The close button on a project's header.
+    CloseProject(u64),
     /// "N more" or "Show less" under a project.
     ToggleMore(u64),
     OpenThread(u64, u64),

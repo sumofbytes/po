@@ -89,6 +89,8 @@ fn thread_row<S: 'static>(k: &Kit, t: &Thread, subtitle: Option<&str>) -> El {
 fn project_section<S: 'static>(k: &Kit, p: &Project) -> El {
     let pid = p.id;
     let new_thread = plus::<S>(k, "New thread", move |_| send(Cmd::StartThread(pid)));
+    // Out of sight until the pointer is on the header, as a thread row's close button is.
+    let close = icon_slot::<S>(k, k.glyph.close, "Close project", move |_| send(Cmd::CloseProject(pid))).group_opacity(0.0, 1.0).focusable(false);
     let title = text(p.name.clone()).font(TextStyle { weight: 500.0, ..k.ty.ui }).color(k.c.text_base).truncate().shrink();
     let header = row()
         .key("section-header")
@@ -101,7 +103,9 @@ fn project_section<S: 'static>(k: &Kit, p: &Project) -> El {
         .radius(k.radius.md)
         .child(row().key("section-title").center_y().shrink().child(title).a11y_hidden())
         .child(el().key("spacer").grow(1.0).a11y_hidden())
+        .child(close)
         .child(new_thread)
+        .hover_group()
         .on_press_tx(move |_: &mut S, _: &mut Tx| send(Cmd::ToggleProject(pid)));
     let header = k.interactive(header).role("button").expanded(!p.collapsed).hover_motion(Anim::INSTANT, Anim::INSTANT).focusable(false);
     let mut section = col().key(format!("project-{pid}")).role("group").label(p.name.clone()).w_full().pt(4.0).gap(0.0).motion(k.motion.disclosure).child(header);
