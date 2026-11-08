@@ -66,14 +66,12 @@ pub fn view<S: 'static>(k: &Kit, state: &State, current: &str, width: f32, at: A
         .child(row().grow(1.0).min_w(0.0).child(text(label).font(SMALL).color(k.c.text_base)))
         .child(icon(&CHEVRON, 14.0).color(k.c.text_muted));
     let press_at = at.clone();
-    let current_name = current.to_string();
     let trigger = k.interactive(face).on_press(move |s: &mut S| {
         let state = press_at(s);
         state.open = !state.open;
         state.search = TextEdit::new("");
         state.search.focused = state.open;
-        // Start on the theme in use, so the list opens scrolled to it.
-        state.active = matching("").iter().position(|scheme| scheme.0.eq_ignore_ascii_case(current_name.trim())).unwrap_or(0);
+        state.active = 0;
     });
     let close_at = at.clone();
     let popover = Popover::new("theme-list").trigger(trigger).label("Theme").placement(Placement::BottomStart).padding(0.0).open(state.open).on_close(move |s: &mut S| close_at(s).close());
