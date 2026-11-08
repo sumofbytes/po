@@ -8,7 +8,6 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use base64::{Engine, engine::general_purpose::STANDARD};
-use gpui::ImageFormat;
 use image::{DynamicImage, ImageFormat as Codec, ImageReader, imageops::FilterType};
 use serde_json::{Value, json};
 
@@ -29,9 +28,45 @@ pub const MAX_PER_MESSAGE: usize = 8;
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
+/// The formats a picture is kept in.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ImageFormat {
+    Png,
+    Jpeg,
+    Webp,
+    Gif,
+}
+
+impl ImageFormat {
+    pub fn mime_type(self) -> &'static str {
+        match self {
+            Self::Png => "image/png",
+            Self::Jpeg => "image/jpeg",
+            Self::Webp => "image/webp",
+            Self::Gif => "image/gif",
+        }
+    }
+
+    pub fn extension(self) -> &'static str {
+        match self {
+            Self::Png => "png",
+            Self::Jpeg => "jpg",
+            Self::Webp => "webp",
+            Self::Gif => "gif",
+        }
+    }
+}
+
+/// A picture's bytes, with a number to tell it by.
+pub struct Image {
+    pub format: ImageFormat,
+    pub bytes: Vec<u8>,
+    pub id: u64,
+}
+
 /// A picture ready to send, and to show.
 pub struct Attachment {
-    pub image: Arc<gpui::Image>,
+    pub image: Arc<Image>,
     /// Its width and height in pixels.
     pub size: (u32, u32),
     /// Where dex is told to find it, once saved.
@@ -48,7 +83,7 @@ impl Attachment {
         let size = size
             .or_else(|| ImageReader::new(Cursor::new(&bytes)).with_guessed_format().ok().and_then(|reader| reader.into_dimensions().ok()))
             .unwrap_or((MAX_SIDE, MAX_SIDE));
-        Self { image: Arc::new(gpui::Image { format, bytes, id }), size, saved: OnceLock::new(), uri: OnceLock::new() }
+        Self { image: Arc::new(Image { format, bytes, id }), size, saved: OnceLock::new(), uri: OnceLock::new() }
     }
 
     /// Takes the bytes of an image file or clipboard image, shrinking it if an agent would refuse it.

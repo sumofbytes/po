@@ -3,35 +3,6 @@
 //! is selected); the screen draws the [`Row`]s it works out.
 use std::collections::{BTreeMap, HashSet};
 
-/// A colour family per file kind, drawn as a small square rather than a glyph so it
-/// looks the same whatever fonts are installed.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum FileKind {
-    Code,
-    Data,
-    Doc,
-    Web,
-    Image,
-    Other,
-}
-
-pub fn file_kind(name: &str) -> FileKind {
-    let Some((stem, ext)) = name.rsplit_once('.') else { return FileKind::Other };
-    if stem.is_empty() {
-        return FileKind::Other;
-    }
-    match ext.to_ascii_lowercase().as_str() {
-        "rs" | "go" | "js" | "mjs" | "cjs" | "ts" | "tsx" | "jsx" | "py" | "rb" | "java" | "kt" | "c" | "h" | "cc"
-        | "cpp" | "hpp" | "cs" | "php" | "swift" | "lua" | "ex" | "exs" | "scala" | "dart" | "sh" | "bash" | "zsh"
-        | "sql" => FileKind::Code,
-        "json" | "yaml" | "yml" | "toml" | "ini" | "xml" | "csv" | "env" | "lock" | "mod" | "sum" => FileKind::Data,
-        "md" | "markdown" | "txt" | "rst" | "adoc" => FileKind::Doc,
-        "html" | "htm" | "css" | "scss" | "less" | "svg" | "vue" => FileKind::Web,
-        "png" | "jpg" | "jpeg" | "gif" | "webp" | "ico" | "avif" => FileKind::Image,
-        _ => FileKind::Other,
-    }
-}
-
 /// A sort key that puts `path` where the tree lists it: folders before files at every level.
 pub fn order(path: &str) -> Vec<(bool, String)> {
     let last = path.matches('/').count();

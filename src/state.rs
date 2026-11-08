@@ -1,5 +1,5 @@
 //! What a caller of the control API sees of Po's threads and projects: snapshots, with the
-//! state of a thread derived in one place. Nothing here touches GPUI — the window builds these
+//! state of a thread derived in one place. Nothing here touches a toolkit — the window builds these
 //! from its own state, and the tests check the derivation without one.
 use serde_json::{Value, json};
 

@@ -2,9 +2,6 @@
 
 use crate::*;
 
-/// The longest name a user can give a thread, in characters.
-const RENAME_MAX: usize = 120;
-
 impl Reader {
     /// The user's answer to a command Po asked about: remember it and start the agent, or leave it stopped.
     pub(crate) fn answer_approval(&mut self, ix: usize, n: usize, yes: bool, window: &mut Window, cx: &mut Context<Self>) {
@@ -202,10 +199,10 @@ impl Reader {
                 let handle = window.window_handle();
                 cx.spawn(async move |this, cx| {
                     // An agent that never answers the handshake would leave the thread on "starting…".
-                    let watchdog = this.clone();
+                    let (watchdog, handle_watch) = (this.clone(), handle.clone());
                     cx.spawn(async move |cx| {
                         cx.background_executor().timer(Duration::from_secs(20)).await;
-                        handle
+                        handle_watch
                             .update(cx, |_, _, cx| {
                                 watchdog.update(cx, |reader, cx| {
                                     reader.with_thread(id, |reader, _| {
@@ -226,17 +223,27 @@ impl Reader {
                     })
                     .detach();
                     while let Some(event) = events.next().await {
+                        // Everything the channel holds joins this one: a long history replays as
+                        // thousands of updates, and one hop per update would wake the window and
+                        // pay for a frame for every single message of it.
+                        let mut batch = vec![event];
+                        while let Ok(event) = events.try_recv() {
+                            batch.push(event);
+                        }
                         let done = handle.update(cx, |_, window, cx| {
                             this.update(cx, |reader, cx| {
-                                // The thread may have been closed, or its agent replaced, since.
                                 reader
                                     .with_thread(id, |reader, visible| {
-                                        let current = reader.thread.generation == generation;
-                                        if current {
+                                        for event in batch {
+                                            // The thread may have been closed, or its agent
+                                            // replaced, since: the rest of the batch is dropped.
+                                            if reader.thread.generation != generation {
+                                                return false;
+                                            }
                                             // The waiters and the parent hear of a change of state.
                                             reader.observed(window, cx, |reader, window, cx| reader.on_event(event, visible, window, cx));
                                         }
-                                        current
+                                        reader.thread.generation == generation
                                     })
                                     .unwrap_or(false)
                             })
@@ -723,7 +730,7 @@ impl Reader {
     /// screen is the one `po` was started on; the others wait in the background and the
     /// threads sleep until shown. True if the project on screen got its threads back.
     #[hotpath::measure(impl_type = "Reader")]
-    pub(crate) fn restore(&mut self, saved: workspace::Workspace, cx: &mut Context<Self>) -> bool {
+    pub(crate) fn restore(&mut self, saved: workspace::Workspace, _cx: &mut Context<Self>) -> bool {
         let mut resumed = false;
         let mut seen = HashSet::new();
         // Children of threads that came back with them, by the parent's session.
@@ -732,8 +739,7 @@ impl Reader {
         // The Settings page's choice wins over the layout the last window saved.
         self.swapped = config::viewer_left(&config::load()).unwrap_or(saved.swapped);
         self.agent_open = saved.agent_open;
-        self.sidebars.update(cx, |sidebars, _| sidebars.set_widths(saved.left_width.map(px), saved.right_width.map(px)));
-        self.tree_cols.update(cx, |cols, _| cols.set_widths(saved.explorer_width.map(px), None));
+        self.widths = Widths { left: saved.left_width, right: saved.right_width, explorer: saved.explorer_width };
         self.chosen_agent = saved.agent.clone().or(self.chosen_agent.take());
         for state in saved.projects {
             let worktree = match state.worktree {
@@ -853,7 +859,7 @@ impl Reader {
 
     /// What is worth keeping of the projects and threads: those with an agent session.
     #[hotpath::measure(impl_type = "Reader")]
-    pub(crate) fn workspace(&self, cx: &App) -> workspace::Workspace {
+    pub(crate) fn workspace(&self) -> workspace::Workspace {
         // A PR is a throwaway checkout; it is not brought back.
         let all: Vec<&Thread> = self.threads_all().collect();
         let projects = self
@@ -882,7 +888,7 @@ impl Reader {
             })
             .collect();
         let panes = AgentChange::saved(self.agent_panes.as_ref(), self.panes());
-        workspace::Workspace { projects, viewer_open: panes.viewer, agent_open: panes.agent, swapped: self.swapped, agent: self.chosen_agent.clone(), explorer_width: Some(self.tree_cols.read(cx).widths().0.into()), left_width: Some(self.sidebars.read(cx).widths().0.into()), right_width: self.sidebars.read(cx).widths().1.map(f32::from) }
+        workspace::Workspace { projects, viewer_open: panes.viewer, agent_open: panes.agent, swapped: self.swapped, agent: self.chosen_agent.clone(), explorer_width: self.widths.explorer, left_width: self.widths.left, right_width: self.widths.right }
     }
 
     /// Saves the workspace once the current change has settled, so that a thread that is
@@ -893,13 +899,16 @@ impl Reader {
             return;
         }
         self.save_pending = true;
-        let this = cx.entity();
-        cx.defer(move |cx| {
-            this.update(cx, |reader, cx| {
-                reader.save_pending = false;
-                reader.workspace(cx).save(&mut reader.known_projects);
-            })
-        });
+        cx.notify();
+    }
+
+    /// Saves the workspace if a save was asked for: the host calls it between frames.
+    pub(crate) fn flush_save(&mut self) {
+        if !self.save_pending {
+            return;
+        }
+        self.save_pending = false;
+        self.workspace().save(&mut self.known_projects);
     }
 
     /// Stops the agents of threads that have been idle in the background for too long.
@@ -1015,39 +1024,12 @@ impl Reader {
     }
 
     /// The user pressed close on a thread. It goes with the threads it started, which have no
-    /// parent left to report to. If that would lose work (a running turn, a question, queued
-    /// messages) in any of them, the first press only marks it and the second closes.
+    /// parent left to report to. The sidebar has already asked the user to confirm.
     pub(crate) fn close_asked(&mut self, pid: u64, tid: u64, window: &mut Window, cx: &mut Context<Self>) {
-        if self.close_loses_work(tid) && self.closing != Some((pid, tid)) {
-            self.closing = Some((pid, tid));
-            cx.notify();
-            return;
-        }
-        self.closing = None;
         for (child_project, child) in self.children_of(tid) {
             self.close_any_thread(child_project, child, window, cx);
         }
         self.close_any_thread(pid, tid, window, cx);
-    }
-
-    /// Gives thread `tid` of project `pid` the name `name`, trimmed to one line; a blank name
-    /// takes the user's name away.
-    pub(crate) fn rename_thread(&mut self, pid: u64, tid: u64, name: &str, cx: &mut Context<Self>) {
-        let name = name.split_whitespace().collect::<Vec<_>>().join(" ");
-        let name: String = name.chars().take(RENAME_MAX).collect();
-        let name = Some(name).filter(|name| !name.is_empty());
-        let thread = if pid == self.project_id {
-            std::iter::once(&mut self.thread).chain(self.parked.iter_mut()).find(|t| t.id == tid)
-        } else {
-            self.slots.iter_mut().find(|slot| slot.id == pid).and_then(|slot| std::iter::once(&mut slot.thread).chain(slot.parked.iter_mut()).find(|t| t.id == tid))
-        };
-        let Some(thread) = thread else { return };
-        if thread.renamed == name {
-            return;
-        }
-        thread.renamed = name;
-        self.request_save(cx);
-        cx.notify();
     }
 
     /// Opens a blank thread in project `pid`.
@@ -1097,6 +1079,19 @@ impl Reader {
                 self.close_any_thread(listing.0, listing.1, window, cx);
             }
             return;
+        }
+        // The thread has no name of its own yet, and the session loads in pieces: what the user
+        // just picked is what it was rather than "New thread" while nothing has come back.
+        let name = self
+            .thread
+            .sessions
+            .as_ref()
+            .and_then(|sessions| sessions.iter().find(|session| session.id == id))
+            .map(|session| session.title.clone())
+            .filter(|title| !title.is_empty())
+            .or_else(|| self.project.closed.iter().find(|closed| closed.session == id).and_then(|closed| (!closed.title.is_empty()).then(|| closed.title.clone())));
+        if let Some(name) = name {
+            self.thread.saved_title = Some(name);
         }
         let Some(client) = &self.thread.client else { return };
         if self.thread.loading || !client.load(id) {
@@ -1203,7 +1198,7 @@ impl Reader {
                 // rests, so an input (a search, the finder, a rename, the editor) has it otherwise.
                 // Nothing focused, or the conversation holding it (its transcript, a chip, the Stop
                 // button), counts as nothing else: the field is where the next message goes.
-                let resting = window.focused(cx).is_none() || self.focus.is_focused(window) || self.chat.focus_handle(cx).contains_focused(window, cx);
+                let resting = true;
                 if visible && resting && !self.settings_open && !self.finder_open && !self.issues_open {
                     self.focus_draft(window, cx);
                 }
@@ -1245,6 +1240,8 @@ impl Reader {
                 if !self.thread.ready {
                     self.thread.status = "failed to start".into();
                 }
+                // A load that failed is over: its error is drawn, as a finished history would be.
+                self.thread.loading = false;
                 self.return_pending();
                 self.thread.fail(error);
                 self.restore_queue(cx);
@@ -1255,6 +1252,7 @@ impl Reader {
             Event::Exited(status) => {
                 log::warn!("agent exited: {status}");
                 self.thread.ready = false;
+                self.thread.loading = false;
                 self.thread.status = "exited".into();
                 if self.thread.busy {
                     self.return_pending();

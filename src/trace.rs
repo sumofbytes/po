@@ -21,6 +21,3 @@ pub fn mark(step: &str) {
     }
 }
 
-pub fn exit_after_first_frame() -> bool {
-    START.get().is_some_and(|(_, mode)| *mode == 2)
-}
