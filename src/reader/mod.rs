@@ -2,6 +2,6 @@ mod api;
 mod compose;
 mod layout;
 mod projects;
-mod render;
+pub(crate) mod render;
 mod threads;
 mod tasks;

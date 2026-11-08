@@ -1,5 +1,6 @@
 #![recursion_limit = "1024"]
 mod acp;
+mod app;
 mod agent;
 mod alert;
 mod attach;
@@ -14,30 +15,29 @@ mod diff;
 mod explorer;
 mod fonts;
 mod handoff;
+#[allow(dead_code)]
+mod host;
 mod issues;
 mod mcp;
-mod nsh;
+mod model;
 mod plugin;
 mod pr;
 mod profile;
 mod reader;
+mod rt;
+mod rune_ui;
 mod schemes;
 mod settings;
 mod terminal;
-mod terminal_view;
-mod theme;
 mod state;
 mod date;
 mod trace;
-mod ui;
 mod update;
 mod workspace;
 mod worktree;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::cell::Cell;
-use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -46,20 +46,11 @@ use agent::Client;
 use attach::Attachment;
 use dex::Queue;
 use diff::{Change, Kind, Row};
-use theme::Palette;
-use ui::resizable::{SidebarsState, sidebars};
 use explorer::FileTree;
 use futures::StreamExt;
 use serde_json::Value;
 
-use gpui::{
-    Focusable as _,
-    AnyElement, App, Pixels, TitlebarOptions, WindowControlArea, point, Bounds, Context, Entity, IntoElement, ParentElement,
-    Render, Styled, Subscription, Task, Window, WindowBackgroundAppearance, WindowBounds, WindowOptions, div,
-    prelude::*, px, rems, size, KeyBinding,
-};
-
-gpui::actions!(po, [ToggleTools, ToggleThoughts, ToggleLeft, ToggleRight, ShowSource, ShowChanges, ShowChat, SwapPanes, ShowHistory, ToggleSplit, ToggleRendered, NewThread, OpenProject, ShowFinder, ToggleFocus, ShowSettings, CloseSettings, CloseWindow, ToggleTerminal]);
+use rt::{Context, Task, Window};
 
 const SKIP: [&str; 5] = ["target", "node_modules", "dist", "build", "__pycache__"];
 const MAX_FILES: usize = 5000;
@@ -518,18 +509,6 @@ fn tool_result(update: &Value) -> String {
     out.join("\n")
 }
 
-/// The width, in pixels, the viewer's file tree starts with, and the range it is dragged within.
-const TREE_WIDTH: f32 = 240.0;
-const TREE_RANGE: std::ops::Range<gpui::Pixels> = px(160.)..px(340.);
-/// A viewer pane narrower than this, in pixels, has no room for the file tree beside the file:
-/// the widest tree leaves the file this much less than that.
-const TREE_MIN_PANE: f32 = 560.0;
-
-/// Whether a viewer pane `width` pixels wide has room for the file tree beside the file.
-fn tree_fits(width: f32) -> bool {
-    width >= TREE_MIN_PANE
-}
-
 /// What an empty viewer says to do: pick from the tree, or how to get it back.
 fn pick_hint(what: &str, tree_visible: bool) -> String {
     if tree_visible {
@@ -560,25 +539,25 @@ struct Project {
     files: Vec<String>,
     changes: Vec<Change>,
     /// Change marks for the explorer, by path.
-    marks: Rc<HashMap<String, char>>,
+    marks: Arc<HashMap<String, char>>,
     /// The latest `git diff` for the picked file and `git status`, run off the UI thread;
     /// replacing one drops the stale run.
     diffing: Option<Task<()>>,
     listing: Option<Task<()>>,
     scanning: Option<Task<()>>,
-    watching: Option<gpui::Task<()>>,
+    watching: Option<Task<()>>,
     /// The changed files, folders open until the user closes them.
     changes_tree: FileTree,
     picked: Option<String>,
     /// The picked file's diff as rows, which say whether it has textual changes and how many lines
     /// it adds and removes.
-    rows: Rc<Vec<Row>>,
+    rows: Arc<Vec<Row>>,
     counts: (usize, usize),
     /// The picked file's old and new versions, which the diff view compares.
-    versions: Option<(nsh::source::Shared, nsh::source::Shared)>,
+    versions: Option<(model::source::Shared, model::source::Shared)>,
     current: Option<String>,
     stamp: Option<Stamp>,
-    code: Option<nsh::source::Shared>,
+    code: Option<model::source::Shared>,
     /// What the current file is: the markdown flag of it, loaded elsewhere.
     is_markdown: bool,
     notice: Option<String>,
@@ -588,7 +567,7 @@ struct Project {
     worktree: Option<worktree::Worktree>,
     /// The project's shell, started the first time the terminal is opened, and whether the viewer
     /// shows it.
-    terminal: Option<Entity<terminal_view::TerminalView>>,
+    terminal: Option<rune_ui::terminal::Term>,
     terminal_shown: bool,
     /// Threads closed here, newest first, offered back by the session picker.
     closed: Vec<workspace::ThreadState>,
@@ -956,7 +935,7 @@ fn capitalized(title: String) -> String {
     ];
     let plain = !word.is_empty() && word.chars().all(|c| c.is_lowercase()) && prose && !tools.contains(&word);
     match title.chars().next() {
-        Some(_) if plain => crate::nsh::sentence(&title),
+        Some(_) if plain => crate::sentence(&title),
         _ => title,
     }
 }
@@ -1430,9 +1409,6 @@ struct Reader {
     notices: HashMap<u64, Notice>,
     notice_scheduled: HashSet<u64>,
     notice_sent_at: HashMap<u64, Instant>,
-    /// This window's own handle, for telling a parent about a child from where there is no
-    /// `window` in hand (the idle sweep).
-    window: gpui::AnyWindowHandle,
     /// When the user last pressed a key or scrolled; an agent waits for a pause to show something.
     last_input: Instant,
     /// A viewer move the thread on screen asked for while the user was busy, waiting for a pause.
@@ -1456,35 +1432,12 @@ struct Reader {
     next_thread: u64,
     /// The directory `po` was started in: where PRs are checked out from and where Close returns to.
     home: PathBuf,
-    /// The strips above the file tree (a PR review's field, a worktree's finish line), drawn by
-    /// NSH, and what keeps it in Po's theme.
-    explorer_pane: Entity<nsh_platform_gpui::AppView>,
-    tabs: Entity<nsh_platform_gpui::AppView>,
-    _tabs_theme: Subscription,
-    _explorer_theme: Subscription,
     /// The sidebar's filter: threads and projects that don't match it are left out of its lists.
     /// What the sidebar's filter holds.
     side_query: String,
-    /// The viewer's source pane, drawn by NSH, and what keeps it in Po's theme.
-    source: Entity<nsh_platform_gpui::AppView>,
-    _source_theme: Subscription,
-    /// The viewer's diff pane, drawn by NSH, and what keeps it in Po's theme.
-    diff: Entity<nsh_platform_gpui::AppView>,
-    _diff_theme: Subscription,
-    /// The agent's own view or form shown in the viewer, drawn by NSH.
-    agent_pane: Entity<nsh_platform_gpui::AppView>,
-    _agent_pane_theme: Subscription,
-    /// The window's controls the pane being built carries: its lead, then its trail.
-    pane_controls: std::cell::RefCell<(Vec<nsh::header::Control>, Vec<nsh::header::Control>)>,
     /// A line the viewer was asked to scroll to, and a number that changes with each ask.
     reveal: Option<(u32, u64)>,
     reveal_serial: u64,
-    /// The sidebar, drawn by NSH, and what keeps it in Po's theme.
-    sidebar: Entity<nsh_platform_gpui::AppView>,
-    _sidebar_theme: Subscription,
-    /// The conversation pane, drawn by NSH from [`Self::chat_snapshot`], and what keeps it in Po's theme.
-    chat: Entity<nsh_platform_gpui::AppView>,
-    _chat_theme: Subscription,
     /// What the conversation was last published as, one row for how many messages the transcript
     /// showed and whether a turn went on the thread it shows; a change bumps [`Self::chat_follow`].
     chat_marks: std::cell::Cell<ChatMarks>,
@@ -1497,16 +1450,12 @@ struct Reader {
     chat_follow_soft: std::cell::Cell<u64>,
     /// What [`Snapshot::draft_reset`] carries next, bumped whenever the app writes the draft itself.
     chat_reset: std::cell::Cell<u64>,
-    /// What [`nsh::chat::Snapshot::focus`] carries next.
+    /// What [`model::chat::Snapshot::focus`] carries next.
     chat_focus: std::cell::Cell<u64>,
     /// The thread (project, thread) whose close was pressed once and waits for a second press,
     /// because closing it would lose work. Any other command puts it away.
     closing: Option<(u64, u64)>,
-    /// The issues page, shown in place of the conversation while `issues_open`; the sidebar has a row for it.
-    issues: Entity<nsh::overlay::Overlay>,
     issues_open: bool,
-    /// The Home page, where Po opens, shown in place of the conversation while `home_open`.
-    landing: Entity<nsh::overlay::Overlay>,
     home_open: bool,
     /// An issue "Work on this" is making a worktree for, to link its branch once it exists.
     issue_for_worktree: Option<(PathBuf, u64)>,
@@ -1525,15 +1474,10 @@ struct Reader {
     finishing: bool,
     /// Discard was asked for once and waits for a second click, since it can't be undone.
     confirm_discard: bool,
-    /// The Ctrl+P finder, drawn by NSH: what its field holds, and the files that match it.
-    finder: Entity<nsh::overlay::Overlay>,
     finder_query: String,
     finder_matches: Vec<String>,
     finder_open: bool,
-    /// The settings page (Ctrl+,), while it is open.
-    settings: Entity<nsh::overlay::Overlay>,
     settings_open: bool,
-    painted: bool,
     agents: Vec<config::Agent>,
     /// Tell the desktop when a thread finishes or asks while it isn't being looked at.
     notifications: bool,
@@ -1541,19 +1485,17 @@ struct Reader {
     idle_after: Option<Duration>,
     /// Agents that may run at once; beyond it the longest idle in the background are stopped.
     max_live: usize,
-    /// Widths of the left side and the viewer pane.
-    sidebars: Entity<SidebarsState>,
     left_open: bool,
+    /// The widths the panes were last dragged to, in points, for the workspace to save.
+    widths: Widths,
+    /// What the shell and the background of the terminal are told the window's colours are.
+    term_theme: (terminal::Rgb, terminal::Rgb),
     /// Projects whose thread list is shown in full rather than cut to the active ones.
     threads_expanded: HashSet<u64>,
     /// Projects whose threads are folded away in the sidebar.
     projects_collapsed: HashSet<u64>,
     /// Each project's checked-out branch, read off the UI thread now and then.
     heads: HashMap<PathBuf, worktree::Head>,
-    /// The width of the file tree inside the viewer pane.
-    tree_cols: Entity<SidebarsState>,
-    /// The viewer pane is too narrow for the file tree, as of the last frame it was drawn.
-    viewer_narrow: Rc<Cell<bool>>,
     /// In a pane too narrow for the tree beside the file, the explorer is what the pane shows.
     browse: bool,
     /// The viewer pane (a file or a diff) on the right is shown.
@@ -1572,13 +1514,10 @@ struct Reader {
     split: bool,
     /// Markdown files show rendered rather than as source.
     rendered: bool,
-    /// Keeps the shortcuts routed to the reader when no input is focused.
-    focus: gpui::FocusHandle,
     /// The workspace is about to be saved, so asking again changes nothing.
     save_pending: bool,
     /// What this window last saved or restored, for saving beside other windows.
     known_projects: workspace::Known,
-    _subscriptions: Vec<Subscription>,
 }
 
 impl Reader {
@@ -1602,42 +1541,6 @@ impl Reader {
             }
         };
         trace::mark("walk");
-        let (diff_pane, diff_theme) = nsh::mount(nsh_platform_gpui::Root::of::<nsh::diff::Diff>(), window, cx);
-        let (agent_pane, agent_pane_theme) = nsh::mount(nsh_platform_gpui::Root::of::<nsh::agent::Agent>(), window, cx);
-        let (source, source_theme) = nsh::mount(nsh_platform_gpui::Root::of::<nsh::source::Source>(), window, cx);
-        let (sidebar, sidebar_theme) = nsh::mount(nsh_platform_gpui::Root::of::<nsh::sidebar::Sidebar>(), window, cx);
-        let (chat_pane, chat_theme) = nsh::mount(nsh_platform_gpui::Root::of::<nsh::chat::Chat>(), window, cx);
-        let (tabs, tabs_theme) = nsh::mount(nsh_platform_gpui::Root::of::<nsh::tabs::Tabs>(), window, cx);
-        let (explorer_pane, explorer_theme) = nsh::mount(nsh_platform_gpui::Root::of::<nsh::explorer::Explorer>(), window, cx);
-        let finder_window = cx.new(|cx| nsh::overlay::Overlay::new(560., 8., nsh_platform_gpui::Root::of::<nsh::finder::Finder>, &nsh::finder::HEIGHT, cx));
-        let settings_window = cx.new(|cx| nsh::overlay::Overlay::new(760., 24., nsh_platform_gpui::Root::of::<nsh::settings::Settings>, &nsh::settings::HEIGHT, cx));
-        let issues = cx.new(|cx| nsh::overlay::Overlay::page(1000., nsh_platform_gpui::Root::of::<nsh::issues::Issues>, &nsh::issues::HEIGHT, cx));
-        let landing = cx.new(|cx| nsh::overlay::Overlay::page(1000., nsh_platform_gpui::Root::of::<nsh::home::Home>, &nsh::home::HEIGHT, cx));
-        let sidebars = cx.new(|_| SidebarsState::new(px(280.0), px(560.0)));
-        let tree_cols = cx.new(|_| SidebarsState::new(px(TREE_WIDTH), px(0.0)));
-        let subscriptions = vec![
-            // Switching modes unmounts whatever was focused (the explorer, the viewer), which
-            // leaves nothing focused and the shortcuts unrouted, so take focus back.
-            cx.on_focus_lost(window, |reader, window, cx| reader.focus.focus(window, cx)),
-            // So are the column widths.
-            cx.observe(&sidebars, |reader, sidebars, cx| {
-                if !sidebars.read(cx).dragging() {
-                    reader.request_save(cx);
-                }
-            }),
-            cx.subscribe_in(&finder_window, window, |reader, _, event: &nsh::overlay::OverlayEvent, window, cx| match event {
-                nsh::overlay::OverlayEvent::Close => reader.hide_finder(window, cx),
-            }),
-            cx.subscribe_in(&settings_window, window, |reader, _, event: &nsh::overlay::OverlayEvent, window, cx| match event {
-                nsh::overlay::OverlayEvent::Close => reader.hide_settings(window, cx),
-            }),
-            cx.subscribe_in(&landing, window, |reader, _, event: &nsh::overlay::OverlayEvent, window, cx| match event {
-                nsh::overlay::OverlayEvent::Close => reader.hide_home(window, cx),
-            }),
-            cx.subscribe_in(&issues, window, |reader, _, event: &nsh::overlay::OverlayEvent, window, cx| match event {
-                nsh::overlay::OverlayEvent::Close => reader.hide_issues(window, cx),
-            }),
-        ];
         let settings = plugin::effective_config();
         let mut agents = config::agents(&settings);
         let idle_minutes = settings["idle_minutes"].as_u64().unwrap_or(15);
@@ -1662,7 +1565,6 @@ impl Reader {
             notices: HashMap::new(),
             notice_scheduled: HashSet::new(),
             notice_sent_at: HashMap::new(),
-            window: window.window_handle(),
             last_input: Instant::now().checked_sub(QUIET).unwrap_or_else(Instant::now),
             pending_move: None,
             agent_panes: None,
@@ -1676,34 +1578,17 @@ impl Reader {
             parked: vec![],
             next_thread: 1,
             home,
-            explorer_pane,
-            tabs,
-            _tabs_theme: tabs_theme,
-            _explorer_theme: explorer_theme,
             side_query: String::new(),
-            source,
-            _source_theme: source_theme,
-            diff: diff_pane,
-            _diff_theme: diff_theme,
-            agent_pane,
-            _agent_pane_theme: agent_pane_theme,
-            pane_controls: Default::default(),
             reveal: None,
             reveal_serial: 0,
             closing: None,
-            sidebar,
-            _sidebar_theme: sidebar_theme,
-            chat: chat_pane,
-            _chat_theme: chat_theme,
             chat_marks: std::cell::Cell::new(((0, 0), 0, 0, false, 0)),
             chat_shown: std::cell::Cell::new((u64::MAX, u64::MAX)),
             chat_follow: std::cell::Cell::new(0),
             chat_follow_soft: std::cell::Cell::new(0),
             chat_reset: std::cell::Cell::new(0),
             chat_focus: std::cell::Cell::new(0),
-            issues,
             issues_open: false,
-            landing,
             home_open: false,
             issue_for_worktree: None,
             issue_draft: None,
@@ -1712,25 +1597,21 @@ impl Reader {
             worktree_status: None,
             finishing: false,
             confirm_discard: false,
-            finder: finder_window,
             finder_query: String::new(),
             finder_matches: Vec::new(),
             finder_open: false,
             pr_serial: 0,
-            settings: settings_window,
             settings_open: false,
-            painted: false,
             agents,
             notifications: settings["notifications"].as_bool().unwrap_or(true),
             idle_after: (idle_minutes > 0).then(|| Duration::from_secs(idle_minutes * 60)),
             max_live: settings["max_live_agents"].as_u64().unwrap_or(8).max(1) as usize,
-            sidebars,
             left_open: true,
+            widths: Widths::default(),
+            term_theme: (terminal::Rgb(0xdd, 0xdd, 0xdd), terminal::Rgb(0x12, 0x12, 0x12)),
             threads_expanded: HashSet::new(),
             projects_collapsed: HashSet::new(),
             heads: HashMap::new(),
-            tree_cols,
-            viewer_narrow: Rc::default(),
             browse: true,
             side_open: false,
             swapped: config::viewer_left(&settings).unwrap_or(false),
@@ -1739,22 +1620,19 @@ impl Reader {
             chosen_agent: command.clone(),
             split: false,
             rendered: true,
-            focus: cx.focus_handle(),
             save_pending: false,
             known_projects: Default::default(),
-            _subscriptions: subscriptions,
         };
         if let Some(requests) = requests {
             Self::serve_control(requests, window, cx);
         }
         Self::serve_nsh(window, cx);
         Self::watch_issues(cx);
-        reader.focus.focus(window, cx);
         trace::mark("reader built");
         reader.refresh_tree();
         trace::mark("tree");
         let resumed = workspace::Workspace::load(&reader.home).is_some_and(|saved| reader.restore(saved, cx));
-        reader.known_projects = reader.workspace(cx).known();
+        reader.known_projects = reader.workspace().known();
         trace::mark("restore");
         let landing = command.is_none();
         match command.filter(|_| !resumed) {
@@ -1773,6 +1651,14 @@ impl Reader {
         Self::sweep_idle(window, cx);
         reader
     }
+}
+
+/// The widths of the left side, the viewer pane and the file tree, when they were set.
+#[derive(Clone, Copy, Default, PartialEq, Debug)]
+pub(crate) struct Widths {
+    pub left: Option<f32>,
+    pub right: Option<f32>,
+    pub explorer: Option<f32>,
 }
 
 /// The fewest tool calls in a row that fold to one line.
@@ -1960,24 +1846,6 @@ fn primary_option(options: &[PermissionOption]) -> Option<usize> {
 
 
 
-/// `pane` as a sheet of glass floating apart from its neighbours when the glass look is on,
-/// else as it is. Each pane keeps half the gap; the window's padding makes up the other half at
-/// its edges. gpui clips to rectangles, not rounded corners, so the pane leaves its bottom
-/// corners' height empty: a row tinted down there would poke square past the rim.
-fn floating(pane: impl IntoElement + Styled, cx: &App) -> AnyElement {
-    let colors = cx.global::<Palette>();
-    match colors.glass {
-        Some(glass) => div()
-            .size_full()
-            .p(glass.inset / 2.)
-            .child(pane.rounded(colors.radius_xl).pb(colors.radius_xl).border_1().border_color(glass.rim).shadow(glass.shadow()).overflow_hidden())
-            .into_any_element(),
-        None => pane.into_any_element(),
-    }
-}
-
-/// Where the file of a `file:` URL pasted in, dropped on it, is: the absolute path, its `%XX`
-/// escapes decoded.
 fn file_of(uri: &str) -> Option<String> {
     let rest = uri.strip_prefix("file://")?;
     // What follows the host (empty or `localhost`) is the path, with its leading slash.
@@ -2006,34 +1874,34 @@ fn file_of(uri: &str) -> Option<String> {
 
 /// The message of the conversation as the screen drawn by NSH shows it: the user's text with its
 /// pictures, or the agent's blocks. `busy` says the agent is at work, on the last message.
-fn chat_items(messages: &[Msg], busy: bool) -> Vec<nsh::chat::Item> {
+fn chat_items(messages: &[Msg], busy: bool) -> Vec<model::chat::Item> {
     // What the screen holds now: a message whose blocks would be built again exactly as they
     // stand keeps them, so a frame spends its rebuild on the message a chunk went into, not on
     // every message in the history (the engine compares each message's blocks itself, and the
     // pieces here are a byte-for-byte match, so nothing shows twice).
-    let now = nsh::chat::shown();
+    let now = model::chat::shown();
     messages.iter().enumerate().map(|(ix, msg)| match msg {
-        Msg::User(text, pictures) => nsh::chat::Item::User {
+        Msg::User(text, pictures) => model::chat::Item::User {
             text: text.clone(),
-            pictures: pictures.iter().map(|a| nsh::chat::Picture { uri: a.data_uri(), size: a.size }).collect(),
+            pictures: pictures.iter().map(|a| model::chat::Picture { uri: a.data_uri(), size: a.size }).collect(),
         },
         Msg::Agent(blocks) => {
             let held = match now.items.get(ix) {
-                Some(nsh::chat::Item::Agent { blocks, .. }) => &**blocks,
-                _ => &[] as &[nsh::chat::Block],
+                Some(model::chat::Item::Agent { blocks, .. }) => &**blocks,
+                _ => &[] as &[model::chat::Block],
             };
-            nsh::chat::Item::Agent { index: ix, blocks: std::sync::Arc::new(chat_blocks(blocks, busy && ix + 1 == messages.len(), held)) }
+            model::chat::Item::Agent { index: ix, blocks: std::sync::Arc::new(chat_blocks(blocks, busy && ix + 1 == messages.len(), held)) }
         }
     }).collect()
 }
 
 /// Whether the run's calls waited, were all told to go, all went well, or one failed.
-fn chat_phase(step: Step) -> nsh::chat::Phase {
+fn chat_phase(step: Step) -> model::chat::Phase {
     match step {
-        Step::Waiting => nsh::chat::Phase::Waiting,
-        Step::Working => nsh::chat::Phase::Working,
-        Step::Done => nsh::chat::Phase::Done,
-        Step::Failed => nsh::chat::Phase::Failed,
+        Step::Waiting => model::chat::Phase::Waiting,
+        Step::Working => model::chat::Phase::Working,
+        Step::Done => model::chat::Phase::Done,
+        Step::Failed => model::chat::Phase::Failed,
     }
 }
 
@@ -2057,8 +1925,8 @@ fn run_took(run: &[Block]) -> Option<Duration> {
 
 /// What a call does: by the kind the agent gave it, or by the first word of its title when it gave
 /// none (or only `other`).
-fn tool_kind(tool: &ToolBlock) -> nsh::chat::Kind {
-    use nsh::chat::Kind;
+fn tool_kind(tool: &ToolBlock) -> model::chat::Kind {
+    use crate::model::chat::Kind;
     match tool.kind.as_str() {
         "read" => return Kind::Read,
         "search" => return Kind::Search,
@@ -2078,8 +1946,8 @@ fn tool_kind(tool: &ToolBlock) -> nsh::chat::Kind {
 }
 
 /// How many calls of each kind a run made, and the files its edits touched, once each.
-fn run_kinds(run: &[Block]) -> (Vec<(nsh::chat::Kind, usize)>, Vec<String>) {
-    let mut kinds: Vec<(nsh::chat::Kind, usize)> = vec![];
+fn run_kinds(run: &[Block]) -> (Vec<(model::chat::Kind, usize)>, Vec<String>) {
+    let mut kinds: Vec<(model::chat::Kind, usize)> = vec![];
     let mut edits: Vec<String> = vec![];
     for tool in run.iter().filter_map(|b| if let Block::Tool(t) = b { Some(t) } else { None }) {
         let kind = tool_kind(tool);
@@ -2087,7 +1955,7 @@ fn run_kinds(run: &[Block]) -> (Vec<(nsh::chat::Kind, usize)>, Vec<String>) {
             Some((_, n)) => *n += 1,
             None => kinds.push((kind, 1)),
         }
-        if kind == nsh::chat::Kind::Edit
+        if kind == model::chat::Kind::Edit
             && let Some(path) = &tool.path
             && !edits.contains(path)
         {
@@ -2115,8 +1983,8 @@ fn run_task(run: &[Block]) -> Option<String> {
 /// One agent message's blocks for the conversation drawn by NSH. Runs of [`MIN_RUN`] or more steps
 /// (tool calls and thoughts) that hold a call also carry the row that folds them; the steps stay in place
 /// either way, so the indexes their answers are told by hold. `live` as in [`run_open`].
-fn chat_blocks(blocks: &[Block], live: bool, held: &[nsh::chat::Block]) -> Vec<nsh::chat::Block> {
-    let mut out: Vec<nsh::chat::Block> = Vec::with_capacity(blocks.len());
+fn chat_blocks(blocks: &[Block], live: bool, held: &[model::chat::Block]) -> Vec<model::chat::Block> {
+    let mut out: Vec<model::chat::Block> = Vec::with_capacity(blocks.len());
     let mut n = 0;
     while n < blocks.len() {
         // A step in the middle of a run too short to fold is not the start of another.
@@ -2130,11 +1998,11 @@ fn chat_blocks(blocks: &[Block], live: bool, held: &[nsh::chat::Block]) -> Vec<n
             let task = run_task(run);
             let calls = run.iter().filter(|b| matches!(b, Block::Tool(_))).count();
             let (kinds, edits) = run_kinds(run);
-            out.push(nsh::chat::Block::Run { index: n, count: len, calls, failed, phase: chat_phase(phase), folded: run_folded(run, open), task, took: run_took(run), latest: run_latest(run), kinds, edits });
+            out.push(model::chat::Block::Run { index: n, count: len, calls, failed, phase: chat_phase(phase), folded: run_folded(run, open), task, took: run_took(run), latest: run_latest(run), kinds, edits });
             for (k, block) in run.iter().enumerate() {
                 out.push(match block {
-                    Block::Tool(tool) => nsh::chat::Block::Tool(chat_tool(n + k, tool)),
-                    Block::Thought(text, open) => nsh::chat::Block::Thought { index: n + k, text: text.clone(), open: *open },
+                    Block::Tool(tool) => model::chat::Block::Tool(chat_tool(n + k, tool)),
+                    Block::Thought(text, open) => model::chat::Block::Thought { index: n + k, text: text.clone(), open: *open },
                     _ => continue,
                 });
             }
@@ -2148,22 +2016,22 @@ fn chat_blocks(blocks: &[Block], live: bool, held: &[nsh::chat::Block]) -> Vec<n
                 // that could be built again exactly as it is keeps `held`'s (see `chat_items`).
                 for (stitch, piece) in pieces_of(text).into_iter().enumerate() {
                     let piece_text = match held.get(out.len()) {
-                        Some(nsh::chat::Block::Markdown { text, .. }) if text.as_ref() == piece => text.clone(),
+                        Some(model::chat::Block::Markdown { text, .. }) if text.as_ref() == piece => text.clone(),
                         _ => piece.into(),
                     };
-                    out.push(nsh::chat::Block::Markdown { text: piece_text, stitch: stitch > 0 });
+                    out.push(model::chat::Block::Markdown { text: piece_text, stitch: stitch > 0 });
                 }
                 n += 1;
                 continue;
             }
-            Block::Thought(text, open) => nsh::chat::Block::Thought { index: n, text: text.clone(), open: *open },
-            Block::Tool(tool) => nsh::chat::Block::Tool(chat_tool(n, tool)),
+            Block::Thought(text, open) => model::chat::Block::Thought { index: n, text: text.clone(), open: *open },
+            Block::Tool(tool) => model::chat::Block::Tool(chat_tool(n, tool)),
             Block::Permission(ask) => {
                 let primary = primary_option(&ask.options);
-                nsh::chat::Block::Ask {
+                model::chat::Block::Ask {
                     index: n,
                     title: ask.title.clone(),
-                    options: ask.options.iter().enumerate().map(|(at, option)| nsh::chat::AskOption {
+                    options: ask.options.iter().enumerate().map(|(at, option)| model::chat::AskOption {
                         at,
                         label: option.name.clone(),
                         primary: primary == Some(at),
@@ -2171,10 +2039,10 @@ fn chat_blocks(blocks: &[Block], live: bool, held: &[nsh::chat::Block]) -> Vec<n
                     answered: ask.answered.clone(),
                 }
             }
-            Block::Plan(entries) => nsh::chat::Block::Plan(entries.iter().map(|(text, step)| nsh::chat::Entry { text: text.clone(), phase: chat_phase(*step) }).collect()),
+            Block::Plan(entries) => model::chat::Block::Plan(entries.iter().map(|(text, step)| model::chat::Entry { text: text.clone(), phase: chat_phase(*step) }).collect()),
             Block::Approve { agent, new_agent, mcp, resume: _, answered } => {
                 let (question, lines) = approval_text(agent, *new_agent, mcp);
-                nsh::chat::Block::Approve {
+                model::chat::Block::Approve {
                     index: n,
                     question,
                     lines,
@@ -2192,8 +2060,8 @@ fn chat_blocks(blocks: &[Block], live: bool, held: &[nsh::chat::Block]) -> Vec<n
 }
 
 /// One tool call for the conversation drawn by NSH.
-fn chat_tool(at: usize, tool: &ToolBlock) -> nsh::chat::Tool {
-    nsh::chat::Tool {
+fn chat_tool(at: usize, tool: &ToolBlock) -> model::chat::Tool {
+    model::chat::Tool {
         index: at,
         title: tool.title.clone(),
         phase: chat_phase(tool.status),
@@ -2223,144 +2091,6 @@ fn approval_text(agent: &config::Agent, new_agent: bool, mcp: &[config::McpServe
         (false, _) => "Your config or plugins list MCP servers for the agent to start, which run as you. Hand them over?".to_string(),
     };
     (question, lines)
-}
-
-impl Render for Reader {
-    #[hotpath::measure(impl_type = "Reader")]
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.settle_agent_changes();
-        // A terminal that is no longer drawn must not keep the keys: they would go to a shell nobody sees.
-        if !self.project.terminal_shown && self.project.terminal.as_ref().is_some_and(|terminal| terminal.focus_handle(cx).is_focused(window)) {
-            let focus = self.focus.clone();
-            cx.defer_in(window, move |_, window, cx| window.focus(&focus, cx));
-        }
-        if !self.painted {
-            self.painted = true;
-            trace::mark("first render");
-            if trace::exit_after_first_frame() {
-                cx.defer(|_| {
-                    profile::finish();
-                    std::process::exit(0)
-                });
-            }
-        }
-        let colors = cx.global::<Palette>();
-        let foreground = colors.foreground;
-        let glass = colors.glass;
-        let (left_open, side_open, swapped, agent_open) = (self.left_open, self.side_open, self.swapped, self.agent_open);
-        // The window's controls live in the headers of the panes at its edges. Each button is one
-        // pane and never changes what it means: the sidebar toggle at the left of the leftmost
-        // pane, the viewer toggle in the viewer's header (or, while it is closed, in the
-        // conversation's, on the side the viewer opens), and, with the viewer open, a button that
-        // gives it the room by hiding the conversation.
-        let focus = side_open && !agent_open;
-        use nsh::header::Control;
-        let controls = |lead: Vec<Control>, trail: Vec<Control>| *self.pane_controls.borrow_mut() = (lead, trail);
-        let viewer = |on: bool| if swapped { Control::ViewerLeft(on) } else { Control::Viewer(on) };
-        let trail_all = vec![Control::Focus(focus), viewer(side_open)];
-        // The conversation's header has the buttons for the files, the changes and the terminal;
-        // with the conversation hidden the viewer's carry them.
-        let trail_focus = {
-            use nsh::chat::Place;
-            let place = self.place();
-            [vec![Control::Files(place == Place::Files), Control::Changes(place == Place::Changes), Control::Terminal(place == Place::Terminal)], trail_all.clone()].concat()
-        };
-        // The viewer pane is only built where it shows: a pane nobody sees would publish over the
-        // one that is.
-        let hidden = || div().size_full().into_any_element();
-        let (middle, side) = if self.home_open {
-            (self.landing.clone().into_any_element(), hidden())
-        } else if self.issues_open {
-            (self.issues.clone().into_any_element(), hidden())
-        } else if !side_open {
-            // Only the conversation shows, and the viewer's button waits on the side it opens.
-            let chat_lead = vec![Control::Sidebar(left_open), viewer(side_open)];
-            let chat_trail = vec![viewer(side_open)];
-            let mut chat = |lead: Vec<Control>, trail: Vec<Control>| floating(self.chat_pane(lead, trail, cx), cx);
-            if swapped {
-                (chat(chat_lead, vec![]), hidden())
-            } else {
-                (chat(vec![Control::Sidebar(left_open)], chat_trail), hidden())
-            }
-        } else if focus {
-            controls(vec![Control::Sidebar(left_open)], trail_focus);
-            (self.pane(cx), hidden())
-        } else if swapped {
-            controls(vec![Control::Sidebar(left_open)], trail_all);
-            (self.pane(cx), floating(self.chat_pane(vec![], vec![], cx), cx))
-        } else {
-            controls(vec![], trail_all);
-            (floating(self.chat_pane(vec![Control::Sidebar(left_open)], vec![], cx), cx), self.pane(cx))
-        };
-        let right_open = side_open && !focus && !self.issues_open && !self.home_open;
-        div()
-            .size_full()
-            .flex()
-            .flex_col()
-            // No background of its own: the `Shell` around it paints the window's.
-            .text_color(foreground)
-            .relative()
-            .track_focus(&self.focus)
-            .on_key_down(cx.listener(|reader, _, _, _| reader.last_input = Instant::now()))
-            .on_scroll(cx.listener(|reader, _, _, _| reader.last_input = Instant::now()))
-            .on_mouse_down(gpui::MouseButton::Left, cx.listener(|reader, _, _, _| reader.last_input = Instant::now()))
-            .on_action(cx.listener(|reader, _: &ShowFinder, window, cx| {
-                reader.hide_issues(window, cx);
-                reader.show_finder(window, cx)
-            }))
-            .on_action(cx.listener(|reader, _: &ShowSettings, window, cx| {
-                reader.hide_issues(window, cx);
-                reader.toggle_settings(window, cx)
-            }))
-            .on_action(cx.listener(|reader, _: &CloseSettings, window, cx| reader.hide_settings(window, cx)))
-            .on_action(cx.listener(|reader, _: &ToggleTools, _, cx| reader.toggle_tools(cx)))
-            .on_action(cx.listener(|reader, _: &ToggleThoughts, _, cx| reader.toggle_thoughts(cx)))
-            .on_action(cx.listener(|reader, _: &ToggleLeft, _, cx| reader.toggle_left(cx)))
-            .on_action(cx.listener(|reader, _: &ToggleRight, _, cx| reader.toggle_right(cx)))
-            .on_action(cx.listener(|reader, _: &ShowSource, _, cx| reader.show_viewer(Mode::Source, cx)))
-            .on_action(cx.listener(|reader, _: &ShowChanges, _, cx| reader.show_viewer(Mode::Diff, cx)))
-            .on_action(cx.listener(|reader, _: &ShowChat, _, cx| reader.show_chat(cx)))
-            .on_action(cx.listener(|reader, _: &SwapPanes, _, cx| reader.swap_panes(cx)))
-            .on_action(cx.listener(|reader, _: &ToggleFocus, _, cx| reader.toggle_focus(cx)))
-            .on_action(cx.listener(|reader, _: &ToggleTerminal, window, cx| reader.toggle_terminal(window, cx)))
-            .on_action(cx.listener(|reader, _: &ShowHistory, window, cx| reader.resume_thread(window, cx)))
-            .on_action(cx.listener(|reader, _: &ToggleSplit, _, cx| reader.set_split(!reader.split, cx)))
-            .on_action(cx.listener(|reader, _: &ToggleRendered, _, cx| reader.toggle_rendered(cx)))
-            .on_action(cx.listener(|reader, _: &OpenProject, window, cx| {
-                reader.hide_issues(window, cx);
-                reader.pick_project(window, cx)
-            }))
-            .on_action(cx.listener(|reader, _: &NewThread, window, cx| {
-                reader.hide_issues(window, cx);
-                reader.new_blank_thread(window, cx);
-            }))
-            // macOS draws no titlebar of its own (see `main`): this strip clears the traffic lights
-            // and, like the titlebar it replaces, drags the window.
-            .when(cfg!(target_os = "macos"), |this| {
-                this.child(
-                    div().id("titlebar")
-                        .h(TITLEBAR_HEIGHT)
-                        .flex_none()
-                        .window_control_area(WindowControlArea::Drag)
-                        // A native titlebar zooms (or minimizes, per System Settings) on double click.
-                        .on_click(|event, window, _| {
-                            if event.click_count() == 2 && !window.is_fullscreen() {
-                                window.titlebar_double_click();
-                            }
-                        }),
-                )
-            })
-            .child(
-                div().flex_1().min_h_0().when_some(glass, |this, glass| this.p(glass.inset / 2.)).child(
-                    sidebars(&self.sidebars)
-                        .left(left_open, px(220.0)..px(520.0), self.left_sidebar(cx))
-                        .center(middle)
-                        .right(right_open, px(320.0)..px(900.0), side),
-                ),
-            )
-            .when(self.finder_open, |this| this.child(self.finder.clone()))
-            .when(self.settings_open, |this| this.child(self.settings.clone()))
-    }
 }
 
 /// Relaunch ourselves in its own process group with output going to a log file,
@@ -2412,86 +2142,6 @@ fn detach(root: &Path, command: &Option<String>, pr: &Option<pr::Pr>) -> std::io
     Ok(())
 }
 
-/// The window's root: sets the base font, size and colors everything inside inherits.
-struct Shell {
-    child: Entity<Reader>,
-    /// What the window was last told to show behind its contents.
-    appearance: WindowBackgroundAppearance,
-}
-
-impl Render for Shell {
-    #[hotpath::measure(impl_type = "Shell")]
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let palette = cx.global::<Palette>();
-        window.set_rem_size(palette.font_size);
-        // Glass shows the desktop through the window, blurred where the platform can.
-        let appearance =
-            if palette.glass.is_some() { WindowBackgroundAppearance::Blurred } else { WindowBackgroundAppearance::Opaque };
-        if appearance != self.appearance {
-            self.appearance = appearance;
-            window.set_background_appearance(appearance);
-        }
-        div()
-            .id("root")
-            .relative()
-            .size_full()
-            .font_family(palette.font_family.clone())
-            .bg(palette.window)
-            .text_color(palette.foreground)
-            // Without a native frame the window's edges would otherwise have no line. macOS still
-            // draws the sides and bottom; only its transparent titlebar leaves the top bare. Windows
-            // keeps its own frame, and a maximized or fullscreen window has no edge to mark.
-            .when(cfg!(target_os = "macos") && !window.is_fullscreen(), |this| this.border_t_1())
-            .when(cfg!(target_os = "linux") && !window.is_fullscreen() && !window.is_maximized(), |this| this.border_1())
-            .border_color(palette.border)
-            .child(self.child.clone())
-    }
-}
-
-/// Height of the strip standing in for macOS's titlebar, which holds the traffic lights.
-const TITLEBAR_HEIGHT: Pixels = px(32.0);
-
-/// Height of the row holding the viewer's tabs.
-const TABS_HEIGHT: gpui::Rems = rems(2.5);
-/// The height of a pane's header, as [`nsh::header_height`] says it.
-const HEADER_HEIGHT: gpui::Rems = rems(2.75);
-
-/// A shortcut on the platform's main modifier: Cmd on macOS, Ctrl elsewhere. gpui's
-/// `KeyBinding::new` no longer reads `secondary-` (it panics, since only `KeyBinding::load` knows
-/// the host OS), and a panic there, inside the app's launch callback, aborts Po at startup.
-macro_rules! secondary {
-    ($key:literal) => {
-        if cfg!(target_os = "macos") { concat!("cmd-", $key) } else { concat!("ctrl-", $key) }
-    };
-}
-
-/// The window's shortcuts. Built at launch, where a keystroke gpui can't parse panics and so
-/// aborts Po before its window opens; the test below builds them too.
-fn key_bindings() -> Vec<KeyBinding> {
-    vec![
-        KeyBinding::new("ctrl-o", ToggleTools, None),
-        KeyBinding::new("ctrl-t", ToggleThoughts, None),
-        KeyBinding::new(secondary!("b"), ToggleLeft, None),
-        KeyBinding::new(secondary!("shift-b"), ToggleRight, None),
-        KeyBinding::new(secondary!("1"), ShowSource, None),
-        KeyBinding::new(secondary!("2"), ShowChanges, None),
-        KeyBinding::new(secondary!("3"), ShowChat, None),
-        KeyBinding::new(secondary!("shift-s"), SwapPanes, None),
-        KeyBinding::new(secondary!("shift-f"), ToggleFocus, None),
-        KeyBinding::new(secondary!("shift-h"), ShowHistory, None),
-        KeyBinding::new(secondary!("\\"), ToggleSplit, None),
-        KeyBinding::new(secondary!("shift-m"), ToggleRendered, None),
-        KeyBinding::new(secondary!("n"), NewThread, None),
-        KeyBinding::new(secondary!("shift-o"), OpenProject, None),
-        KeyBinding::new(secondary!("p"), ShowFinder, None),
-        KeyBinding::new(secondary!(","), ShowSettings, None),
-        KeyBinding::new(secondary!("w"), CloseWindow, None),
-        KeyBinding::new(secondary!("`"), ToggleTerminal, None),
-        KeyBinding::new("escape", CloseSettings, Some("Settings")),
-        // The Input binds up/down itself and swallows them when single-line, so these name it.
-    ]
-}
-
 fn main() {
     // `po update` is a terminal command, not a window: it runs to completion and
     // exits before any GUI is set up (like `dex update`).
@@ -2524,7 +2174,8 @@ fn main() {
         return;
     }
     trace::init();
-    let mut args = std::env::args().skip(1);
+    // What Rune did not take (`--snap`, `--script` and its other flags are its own).
+    let mut args = rune::extra_args().to_vec().into_iter();
     let mut path = None;
     let mut foreground = false;
     let mut command = std::env::var("PO_AGENT").ok();
@@ -2576,60 +2227,7 @@ fn main() {
         .init();
     trace::mark("args parsed");
     let prefetch = Prefetch::start(pr.as_ref().map_or_else(|| root.clone(), |pr| pr.worktree.clone()));
-    gpui_platform::application().run(move |cx: &mut App| {
-        trace::mark("app running");
-        cx.on_app_quit(|_| {
-            profile::finish();
-            async {}
-        })
-        .detach();
-        cx.bind_keys(key_bindings());
-        // Ctrl+O, T, B, N, P, W and \ are keys of readline, fzf and tmux: while the terminal has the
-        // focus they go to the shell and not to the window. (Where the window's keys are Cmd's, only
-        // the first two are Ctrl's.)
-        let shell_keys: &[&str] = if cfg!(target_os = "macos") { &["ctrl-o", "ctrl-t"] } else { &["ctrl-o", "ctrl-t", "ctrl-b", "ctrl-n", "ctrl-p", "ctrl-w", "ctrl-\\"] };
-        cx.bind_keys(shell_keys.iter().map(|key| KeyBinding::new(key, gpui::NoAction, Some("Terminal"))));
-        cx.on_action(|_: &CloseWindow, cx| {
-            if let Some(window) = cx.active_window() {
-                window.update(cx, |_, window, _| window.remove_window()).ok();
-            }
-        });
-        // macOS keeps an app running after its last window closes; this one has nothing left to show.
-        cx.on_window_closed(|cx, _| {
-            if cx.windows().is_empty() {
-                cx.quit();
-            }
-        })
-        .detach();
-        let bounds = Bounds::centered(None, size(px(1360.0), px(840.0)), cx);
-        nsh::init();
-        cx.open_window(
-            WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                // On macOS, hide the titlebar but keep the traffic lights, centred in our own strip.
-                titlebar: cfg!(target_os = "macos").then(|| TitlebarOptions {
-                    title: Some("po".into()),
-                    appears_transparent: true,
-                    traffic_light_position: Some(point(px(12.0), (TITLEBAR_HEIGHT - px(14.0)) / 2.0)),
-                }),
-                ..Default::default()
-            },
-            |window, cx| {
-                // Applied here rather than before the window opens: the first text lookup waits
-                // for the system fonts, and until the window exists the GPU setup can run alongside.
-                trace::mark("window created");
-                theme::apply(cx);
-                trace::mark("theme applied");
-                theme::watch(cx);
-                let reader = cx.new(|cx| Reader::new(root, pr, command, prefetch, window, cx));
-                #[cfg(feature = "hotpath")]
-                bench::start(&reader, window, cx);
-                cx.new(|_| Shell { child: reader, appearance: WindowBackgroundAppearance::Opaque })
-            },
-        )
-        .expect("window");
-        cx.activate(true);
-    });
+    app::run(root, pr, command, prefetch);
     // Where the event loop returns rather than ending the process; the app's quit already did it.
     profile::finish();
 }
@@ -2673,13 +2271,6 @@ fn preview_of(messages: &[Msg], busy: bool) -> String {
 #[cfg(test)]
 mod tests {
     use crate::Thread;
-
-    /// Every shortcut parses: one gpui rejects panics at launch and Po never opens.
-    #[test]
-    fn the_window_shortcuts_all_parse() {
-        let bindings = crate::key_bindings();
-        assert!(!bindings.is_empty());
-    }
 
     #[test]
     fn a_thread_keeps_its_sidebar_row_while_its_agent_works() {
@@ -2959,13 +2550,6 @@ mod tests {
     }
 
     #[test]
-    fn the_file_tree_needs_a_pane_of_at_least_the_minimum_width() {
-        use super::{TREE_MIN_PANE, tree_fits};
-        assert!(tree_fits(TREE_MIN_PANE));
-        assert!(!tree_fits(TREE_MIN_PANE - 1.0));
-    }
-
-    #[test]
     fn an_empty_viewer_says_how_to_get_the_tree_back() {
         use super::pick_hint;
         assert_eq!(pick_hint("a file", true), "Pick a file in the tree");
@@ -3173,15 +2757,15 @@ mod tests {
         let blocks = vec![thought(), tool("a", Step::Done), thought(), tool("b", Step::Done), Block::Text("x".into()), thought(), thought(), thought()];
         assert_eq!(folded_runs(&blocks, false), vec![0]);
         let out = super::chat_blocks(&blocks, false, &[]);
-        assert!(matches!(out[0], crate::nsh::chat::Block::Run { index: 0, count: 4, calls: 2, .. }));
-        assert_eq!(out.iter().filter(|b| matches!(b, crate::nsh::chat::Block::Run { .. })).count(), 1);
+        assert!(matches!(out[0], crate::model::chat::Block::Run { index: 0, count: 4, calls: 2, .. }));
+        assert_eq!(out.iter().filter(|b| matches!(b, crate::model::chat::Block::Run { .. })).count(), 1);
         // Thoughts alone have no call to keep the fold, so they stay as they are.
-        assert_eq!(out.iter().filter(|b| matches!(b, crate::nsh::chat::Block::Thought { .. })).count(), 5);
+        assert_eq!(out.iter().filter(|b| matches!(b, crate::model::chat::Block::Thought { .. })).count(), 5);
     }
 
     #[test]
     fn calls_are_counted_by_the_kind_the_agent_gave_or_their_title() {
-        use crate::nsh::chat::Kind;
+        use crate::model::chat::Kind;
         let call = |title: &str, kind: &str, path: Option<&str>| {
             let Block::Tool(mut t) = tool(title, Step::Done) else { unreachable!() };
             t.kind = kind.into();
@@ -3203,16 +2787,16 @@ mod tests {
     }
 
     /// The phase and fold of the one run in `blocks`.
-    fn run_row(blocks: &[Block], live: bool) -> (crate::nsh::chat::Phase, bool) {
+    fn run_row(blocks: &[Block], live: bool) -> (crate::model::chat::Phase, bool) {
         super::chat_blocks(blocks, live, &[]).iter().find_map(|b| match b {
-            crate::nsh::chat::Block::Run { phase, folded, .. } => Some((*phase, *folded)),
+            crate::model::chat::Block::Run { phase, folded, .. } => Some((*phase, *folded)),
             _ => None,
         }).expect("the blocks hold a run")
     }
 
     #[test]
     fn a_run_is_still_working_between_its_calls() {
-        use crate::nsh::chat::Phase;
+        use crate::model::chat::Phase;
         let blocks = vec![tool("a", Step::Done), tool("b", Step::Done)];
         assert_eq!(run_row(&blocks, true).0, Phase::Working);
         // The turn over, it is done, with no call having changed.
@@ -3221,14 +2805,14 @@ mod tests {
 
     #[test]
     fn text_after_a_run_ends_it_while_the_turn_goes_on() {
-        use crate::nsh::chat::Phase;
+        use crate::model::chat::Phase;
         let blocks = vec![tool("a", Step::Done), tool("b", Step::Done), Block::Text("x".into())];
         assert_eq!(run_row(&blocks, true).0, Phase::Done);
     }
 
     #[test]
     fn a_failure_moves_no_rows_until_the_run_ends_in_it() {
-        use crate::nsh::chat::Phase;
+        use crate::model::chat::Phase;
         let blocks = vec![tool("a", Step::Done), tool("b", Step::Failed)];
         assert_eq!(run_row(&blocks, true), (Phase::Working, true));
         assert_eq!(folded_runs(&blocks, true), vec![0]);
@@ -3246,12 +2830,12 @@ mod tests {
 
     #[test]
     fn only_the_last_message_of_a_busy_thread_has_a_run_going() {
-        use crate::nsh::chat::{Item, Phase};
+        use crate::model::chat::{Item, Phase};
         let run = || Msg::Agent(vec![tool("a", Step::Done), tool("b", Step::Done)]);
         let phases = |busy| -> Vec<Phase> {
             super::chat_items(&[run(), run()], busy).iter().map(|item| {
                 let Item::Agent { blocks, .. } = item else { unreachable!() };
-                let crate::nsh::chat::Block::Run { phase, .. } = blocks[0] else { unreachable!() };
+                let crate::model::chat::Block::Run { phase, .. } = blocks[0] else { unreachable!() };
                 phase
             }).collect()
         };
@@ -3301,4 +2885,10 @@ mod file_url_tests {
         assert_eq!(file_of("file://other/tmp/a.png"), None);
         assert_eq!(file_of("https://example.com/a.png"), None);
     }
+}
+
+/// `text` with its first letter in capitals, as a sentence starts.
+pub(crate) fn sentence(text: &str) -> String {
+    let mut chars = text.chars();
+    chars.next().map_or_else(String::new, |first| first.to_uppercase().chain(chars).collect())
 }

@@ -96,8 +96,6 @@ enum Msg {
     Paste(String),
     Resize { cols: u16, rows: u16, cell: (u32, u32) },
     Scroll(isize),
-    /// The default foreground and background.
-    Theme(Rgb, Rgb),
     Exited(i32),
     Stop,
 }
@@ -192,10 +190,6 @@ impl Session {
         let _ = self.tx.send(Msg::Scroll(lines));
     }
 
-    pub fn theme(&self, foreground: Rgb, background: Rgb) {
-        let _ = self.tx.send(Msg::Theme(foreground, background));
-    }
-
     /// The window is now `cols` by `rows` cells of `cell` pixels.
     pub fn resize(&self, cols: u16, rows: u16, cell: (u32, u32)) {
         let (cols, rows) = (cols.max(1), rows.max(1));
@@ -243,6 +237,9 @@ fn emulate(rx: watched::Receiver<Msg>, to_shell: Sender<Vec<u8>>, backlog: Arc<A
         let _ = terminal.set_default_bg_color(Some(RgbColor { r: bg.0, g: bg.1, b: bg.2 }));
     };
     colors(&mut terminal, theme);
+    // What a shell's cursor reset (CSI 0 q) returns to: a steady block, whatever the library's own default.
+    let _ = terminal.set_default_cursor_style(Some(libghostty_vt::terminal::CursorStyle::Block));
+    let _ = terminal.set_default_cursor_blink(Some(false));
     let (Ok(mut render), Ok(mut encoder), Ok(mut event)) = (RenderState::new(), Encoder::new(), Event::new()) else {
         log::error!("terminal: libghostty could not start");
         return;
@@ -307,7 +304,6 @@ fn emulate(rx: watched::Receiver<Msg>, to_shell: Sender<Vec<u8>>, backlog: Arc<A
                     let _ = terminal.resize(cols, rows, cell.0, cell.1);
                 }
                 Msg::Scroll(lines) => terminal.scroll_viewport(ScrollViewport::Delta(lines)),
-                Msg::Theme(fg, bg) => colors(&mut terminal, (fg, bg)),
                 Msg::Exited(status) => exited = Some(status),
                 Msg::Stop => break,
             }

@@ -84,28 +84,6 @@ fn valid_id(id: &str) -> bool {
     !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
 }
 
-/// Each plugin's `themes` folder, in the order they are searched.
-pub fn theme_dirs(config_dir: &Path) -> Vec<PathBuf> {
-    discover(config_dir).into_iter().map(|plugin| plugin.dir.join("themes")).filter(|dir| dir.is_dir()).collect()
-}
-
-/// Whether a change at `path` can change the theme. The config folder is watched whole, but in
-/// a plugin only its manifest and themes count: not a build's output or its `node_modules`.
-pub fn affects_theme(config_dir: &Path, path: &Path) -> bool {
-    if path.extension().is_none_or(|ext| ext != "json") {
-        return false;
-    }
-    let Ok(inside) = path.strip_prefix(config_dir.join("plugins")) else {
-        return true;
-    };
-    let mut parts = inside.components().skip(1);
-    match parts.next().and_then(|part| part.as_os_str().to_str()) {
-        Some("plugin.json") => parts.next().is_none(),
-        Some("themes") => true,
-        _ => false,
-    }
-}
-
 /// `config.json` with what the plugins provide folded in: for what starts agents and lists
 /// them. Everything else reads [`config::load`], which needs no plugin folder read.
 pub fn effective_config() -> Value {
@@ -309,7 +287,6 @@ mod tests {
         assert_eq!(config["agents"][0]["command"], "a-agent");
         assert_eq!(config["mcp_servers"].as_array().unwrap().len(), 1);
         assert_eq!(config["mcp_servers"][0]["command"], "a-mcp");
-        assert!(theme_dirs(&dir)[0].starts_with(dir.join("plugins/a")));
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -366,19 +343,6 @@ mod tests {
         // A server's command is one program, whatever is in it.
         assert_eq!(config["mcp_servers"].as_array().unwrap().len(), 1);
         std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn only_a_plugins_manifest_and_themes_affect_the_theme() {
-        let dir = Path::new("/config/po");
-        assert!(affects_theme(dir, &dir.join("config.json")));
-        assert!(affects_theme(dir, &dir.join("themes/mine.json")));
-        assert!(affects_theme(dir, &dir.join("plugins/p/plugin.json")));
-        assert!(affects_theme(dir, &dir.join("plugins/p/themes/solar.json")));
-        assert!(!affects_theme(dir, &dir.join("plugins/p/package.json")));
-        assert!(!affects_theme(dir, &dir.join("plugins/p/node_modules/x/plugin.json")));
-        assert!(!affects_theme(dir, &dir.join("plugins/p/dist/themes/a.json")));
-        assert!(!affects_theme(dir, &dir.join("plugins/p/themes/notes.txt")));
     }
 
     #[test]

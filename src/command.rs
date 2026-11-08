@@ -1,5 +1,5 @@
 //! What can be asked of Po from outside the UI: the one vocabulary agents and scripts use.
-//! Nothing here touches GPUI, so a request is parsed and checked without a window.
+//! Nothing here touches a toolkit, so a request is parsed and checked without a window.
 use serde_json::{Value, json};
 
 /// Who is asking. Decides what a command may do.
