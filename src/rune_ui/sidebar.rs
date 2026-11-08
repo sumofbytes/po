@@ -44,7 +44,7 @@ fn icon_slot<S: 'static>(k: &Kit, glyph: &'static Icon, help: &'static str, on_p
     let b = IconButton::new(glyph).control_size(ControlSize::Small).variant(IconButtonVariant::GhostMuted).label(help).help(help).on_press(move |s: &mut S| on_press(s)).build(k);
     // The kit's hover wash, kept on at rest so the button reads as one; the hover and press overlays
     // the kit draws go over it, so they still show.
-    row().size(20.0, 20.0).center().child(b.fill(k.c.hover))
+    row().size(20.0, 20.0).center().child(b.size(20.0, 20.0).fill(k.c.hover))
 }
 
 /// What a thread's state looks like at the start of its row: a ring when nothing is going on, a
@@ -78,7 +78,9 @@ fn thread_row<S: 'static>(k: &Kit, t: &Thread, subtitle: Option<&str>) -> El {
     if t.closing {
         row = row.badge("Close again to lose its work");
     }
-    row.build(k).key(format!("thread-{pid}-{tid}"))
+    let built = row.build(k).key(format!("thread-{pid}-{tid}"));
+    // The selected row carries the accent as a solid bar at its left edge; its fill stays neutral.
+    if t.selected { built.child(el().pin(Some(0.0), Some(7.0), None, Some(7.0)).w(2.0).radius(1.0).fill(k.c.bg_accent)) } else { built }
 }
 
 /// A project: a header that toggles it (larger title, no disclosure glyph, the kit's header
@@ -92,7 +94,6 @@ fn project_section<S: 'static>(k: &Kit, p: &Project) -> El {
         .label(p.name.clone())
         .w_full()
         .h(ROW)
-        .pt(4.0)
         .px(8.0)
         .center_y()
         .radius(k.radius.md)
@@ -101,7 +102,7 @@ fn project_section<S: 'static>(k: &Kit, p: &Project) -> El {
         .child(new_thread)
         .on_press_tx(move |_: &mut S, _: &mut Tx| send(Cmd::ToggleProject(pid)));
     let header = k.interactive(header).role("button").expanded(!p.collapsed).hover_motion(Anim::INSTANT, Anim::INSTANT).focusable(false);
-    let mut section = col().key(format!("project-{pid}")).role("group").label(p.name.clone()).w_full().gap(0.0).motion(k.motion.disclosure).child(header);
+    let mut section = col().key(format!("project-{pid}")).role("group").label(p.name.clone()).w_full().pt(4.0).gap(0.0).motion(k.motion.disclosure).child(header);
     if !p.collapsed {
         for t in &p.threads {
             section = section.child(thread_row::<S>(k, t, None));

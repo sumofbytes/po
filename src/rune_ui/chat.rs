@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use rune::tok::{Family, TextStyle};
-use rune::{Color, El, GrowthSpec, Icon, Span, Key, KeyEvent, ScrollSpec, TextEdit, Tx, col, row, text};
+use rune::{Color, El, el, GrowthSpec, Icon, Span, Key, KeyEvent, ScrollSpec, TextEdit, Tx, col, row, text};
 use rune_kit::markdown::Markdown;
 use rune_kit::{Button, ButtonVariant, Kit, Spinner};
 
@@ -138,7 +138,7 @@ fn user_row(k: &Kit, body: &str, pictures: &[crate::model::chat::Picture]) -> El
         inner = inner.child(text(body).font(BODY).color(k.c.text_base).wrap_anywhere());
     }
     // The user's side: the bubble sits at the right, as wide as its words need up to a limit, and wraps.
-    row().w_full().justify_end().child(col().min_w(0.0).max_w(600.0).shrink().px(16.0).py(12.0).radius(10.0).fill(k.c.layer_03).child(inner))
+    row().w_full().justify_end().child(col().min_w(0.0).max_w(600.0).shrink().px(16.0).py(12.0).radius(10.0).fill(k.c.layer_03).child(inner).child(el().pin(Some(0.0), Some(10.0), None, Some(10.0)).w(2.0).radius(1.0).fill(k.c.bg_accent)))
 }
 
 fn thought<S: 'static>(k: &Kit, message: usize, at: usize, body: &str, open: bool) -> El {
@@ -513,7 +513,7 @@ fn chips<S: 'static>(k: &Kit, snapshot: &Snapshot, at: At<S>) -> El {
     {
         // A pill that is on while the thread gets a worktree of its own: a branch and its name, outlined
         // when off and filled, with the text at full ink, when on.
-        let (ink, fill, line) = if on { (k.c.text_base, k.c.layer_03, k.c.border_strong) } else { (k.c.text_muted, Color::TRANSPARENT, k.c.border_base) };
+        let (ink, fill, line) = if on { (k.c.text_accent, k.c.layer_03, k.c.bg_accent) } else { (k.c.text_muted, Color::TRANSPARENT, k.c.border_base) };
         let face = row().key("worktree").px(8.0).py(1.0).radius(10.0).gap(4.0).items_center().fill(fill).border(1.0, line).child(rune::icon(&BRANCH, 12.0).color(ink)).child(text("Worktree").font(SMALL).color(ink));
         bar = bar.child(k.interactive(face.on_press(move |_: &mut S| tell(Cmd::Isolate(!on)))));
     }

@@ -64,7 +64,7 @@ fn entry_row<S: 'static>(k: &Kit, e: &Entry) -> El {
         .pl(8.0 + INDENT * e.row.depth as f32)
         .pr(8.0)
         .radius(6.0)
-        .child(text(glyph).font(NAME).color(k.c.text_muted).w(10.0))
+        .child(text(glyph).font(NAME).color(if e.row.folder { k.c.warning.fg } else { k.c.text_muted }).w(10.0))
         .child(row().grow(1.0).min_w(0.0).child(text(e.row.name.clone()).font(NAME).color(if e.row.selected { k.c.text_base } else { k.c.text_muted })))
         .on_press(move |_: &mut S| send(Cmd::TreeClick(id.clone())));
     if let Some(mark) = e.mark {
