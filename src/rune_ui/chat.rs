@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use rune::tok::{Family, TextStyle};
-use rune::{Color, El, el, GrowthSpec, Icon, Span, Key, KeyEvent, ScrollSpec, TextEdit, Tx, col, row, text};
+use rune::{Color, El, GrowthSpec, Icon, Span, Key, KeyEvent, ScrollSpec, TextEdit, Tx, col, row, text};
 use rune_kit::markdown::Markdown;
 use rune_kit::{Button, ButtonVariant, Kit, Spinner};
 
@@ -138,7 +138,7 @@ fn user_row(k: &Kit, body: &str, pictures: &[crate::model::chat::Picture]) -> El
         inner = inner.child(text(body).font(BODY).color(k.c.text_base).wrap_anywhere());
     }
     // The user's side: the bubble sits at the right, as wide as its words need up to a limit, and wraps.
-    row().w_full().justify_end().child(col().min_w(0.0).max_w(600.0).shrink().px(16.0).py(12.0).radius(10.0).fill(k.c.layer_03).child(inner).child(el().pin(Some(0.0), Some(10.0), None, Some(10.0)).w(2.0).radius(1.0).fill(k.c.bg_accent)))
+    row().w_full().justify_end().child(col().min_w(0.0).max_w(600.0).shrink().px(16.0).py(12.0).radius(10.0).fill(k.c.layer_03).child(inner))
 }
 
 fn thought<S: 'static>(k: &Kit, message: usize, at: usize, body: &str, open: bool) -> El {
@@ -486,7 +486,9 @@ fn control_chip<S: 'static>(k: &Kit, snapshot: &Snapshot, at: At<S>) -> El {
     let Some(grant) = snapshot.grant else { return col() };
     let label = format!("{}{}", scope_name(grant.scope), if snapshot.grant_pending { " · restart to apply" } else { "" });
     let (lines, rules) = control_lines(grant, snapshot.grant_pending);
-    dropdown::chip::<S>(k, "control", label, lines, rules, menu_of(at))
+    // Full reach is the one setting worth a second look, so its name takes the scheme's warning colour.
+    let ink = if grant.scope == Scope::Global { k.c.warning.fg } else { k.c.text_base };
+    dropdown::chip_inked::<S>(k, "control", label, ink, lines, rules, menu_of(at))
 }
 
 fn chips<S: 'static>(k: &Kit, snapshot: &Snapshot, at: At<S>) -> El {

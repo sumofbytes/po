@@ -78,9 +78,7 @@ fn thread_row<S: 'static>(k: &Kit, t: &Thread, subtitle: Option<&str>) -> El {
     if t.closing {
         row = row.badge("Close again to lose its work");
     }
-    let built = row.build(k).key(format!("thread-{pid}-{tid}"));
-    // The selected row carries the accent as a solid bar at its left edge; its fill stays neutral.
-    if t.selected { built.child(el().pin(Some(0.0), Some(7.0), None, Some(7.0)).w(2.0).radius(1.0).fill(k.c.bg_accent)) } else { built }
+    row.build(k).key(format!("thread-{pid}-{tid}"))
 }
 
 /// A project: a header that toggles it (larger title, no disclosure glyph, the kit's header
