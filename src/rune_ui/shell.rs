@@ -355,6 +355,7 @@ pub fn view<S: Host>(host: &S, k: &Kit) -> El {
         stack = stack.child(pane);
     }
     chat::lightbox::<S>(k, &shell.chat, |s: &mut S| &mut s.shell().chat, &mut layer);
+    sidebar::confirm_dialog::<S>(k, &shell.side, side_of::<S>, &mut layer);
     let root = rune_kit::root(stack, layer);
     // What is pasted while no field has the keyboard: files and images attach to the message being
     // written; plain text goes to the terminal, where it is showing.

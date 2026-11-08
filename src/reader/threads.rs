@@ -1024,15 +1024,8 @@ impl Reader {
     }
 
     /// The user pressed close on a thread. It goes with the threads it started, which have no
-    /// parent left to report to. If that would lose work (a running turn, a question, queued
-    /// messages) in any of them, the first press only marks it and the second closes.
+    /// parent left to report to. The sidebar has already asked the user to confirm.
     pub(crate) fn close_asked(&mut self, pid: u64, tid: u64, window: &mut Window, cx: &mut Context<Self>) {
-        if self.close_loses_work(tid) && self.closing != Some((pid, tid)) {
-            self.closing = Some((pid, tid));
-            cx.notify();
-            return;
-        }
-        self.closing = None;
         for (child_project, child) in self.children_of(tid) {
             self.close_any_thread(child_project, child, window, cx);
         }

@@ -24,11 +24,24 @@ const CAPTION: rune::tok::TextStyle = rune::tok::TextStyle::new(12.0, 400.0);
 /// What the sidebar keeps between frames: the filter field.
 pub struct State {
     pub query: TextEdit,
+    /// A close the user pressed and has not yet confirmed in the dialog.
+    pub confirm: Option<Confirm>,
+}
+
+/// What the confirmation dialog asks about.
+#[derive(Clone, Debug)]
+pub struct Confirm {
+    /// The thread to close, within the project; none when the whole project is.
+    pub thread: Option<u64>,
+    pub project: u64,
+    pub name: String,
+    /// Closing it would lose work: a running turn, a question, queued messages.
+    pub loses_work: bool,
 }
 
 impl Default for State {
     fn default() -> Self {
-        Self { query: TextEdit::new("") }
+        Self { query: TextEdit::new(""), confirm: None }
     }
 }
 
@@ -62,12 +75,13 @@ fn mark(k: &Kit, mark: Mark) -> El {
     row().size(14.0, 14.0).center().child(shown)
 }
 
-fn thread_row<S: 'static>(k: &Kit, t: &Thread, subtitle: Option<&str>) -> El {
+fn thread_row<S: 'static>(k: &Kit, t: &Thread, subtitle: Option<&str>, at: At<S>) -> El {
     let (pid, tid) = (t.project, t.id);
+    let (name, t_loses) = (t.name.clone(), t.closing);
     let mut row = SidebarRow::new(t.label.clone())
         .selected(t.selected)
         .on_select(move |_: &mut S, _: &mut Tx| send(Cmd::OpenThread(pid, tid)))
-        .on_close(move |_: &mut S, _: &mut Tx| send(Cmd::CloseThread(pid, tid)));
+        .on_close(move |s: &mut S, _: &mut Tx| at(s).confirm = Some(Confirm { thread: Some(tid), project: pid, name: name.clone(), loses_work: t_loses }));
     row = row.avatar(mark(k, t.mark));
     if let Some(ago) = &t.ago {
         // In the slot the close button takes over on hover, so it stands where the section's plus does.
@@ -78,19 +92,17 @@ fn thread_row<S: 'static>(k: &Kit, t: &Thread, subtitle: Option<&str>) -> El {
     } else {
         row = row.height(ROW);
     }
-    if t.closing {
-        row = row.badge("Close again to lose its work");
-    }
     row.build(k).key(format!("thread-{pid}-{tid}"))
 }
 
 /// A project: a header that toggles it (larger title, no disclosure glyph, the kit's header
 /// hardcodes both) over its thread rows.
-fn project_section<S: 'static>(k: &Kit, p: &Project) -> El {
+fn project_section<S: 'static>(k: &Kit, p: &Project, at: At<S>) -> El {
     let pid = p.id;
+    let pname = p.name.clone();
     let new_thread = plus::<S>(k, "New thread", move |_| send(Cmd::StartThread(pid)));
     // Out of sight until the pointer is on the header, as a thread row's close button is.
-    let close = icon_slot::<S>(k, k.glyph.close, "Close project", move |_| send(Cmd::CloseProject(pid))).group_opacity(0.0, 1.0).focusable(false);
+    let close = icon_slot::<S>(k, k.glyph.close, "Close project", move |s| at(s).confirm = Some(Confirm { thread: None, project: pid, name: pname.clone(), loses_work: false })).group_opacity(0.0, 1.0).focusable(false);
     let title = text(p.name.clone()).font(TextStyle { weight: 500.0, ..k.ty.ui }).color(k.c.text_base).truncate().shrink();
     let header = row()
         .key("section-header")
@@ -111,7 +123,7 @@ fn project_section<S: 'static>(k: &Kit, p: &Project) -> El {
     let mut section = col().key(format!("project-{pid}")).role("group").label(p.name.clone()).w_full().pt(4.0).gap(0.0).motion(k.motion.disclosure).child(header);
     if !p.collapsed {
         for t in &p.threads {
-            section = section.child(thread_row::<S>(k, t, None));
+            section = section.child(thread_row::<S>(k, t, None, at));
         }
         if let Some((expanded, hidden)) = p.fold {
             let label = if expanded { "Show less".to_string() } else { format!("{hidden} more") };
@@ -187,12 +199,12 @@ pub fn view<S: 'static>(snapshot: &Snapshot, state: &State, k: &Kit, at: At<S>, 
     if !snapshot.waiting.is_empty() {
         let mut needs = SidebarSection::new("Needs you").key("needs-you").count(snapshot.waiting.len());
         for w in &snapshot.waiting {
-            needs = needs.row(thread_row::<S>(k, &w.thread, Some(&w.project)));
+            needs = needs.row(thread_row::<S>(k, &w.thread, Some(&w.project), at));
         }
         bar = bar.section(needs);
     }
     for p in &snapshot.projects {
-        bar = bar.child(project_section::<S>(k, p));
+        bar = bar.child(project_section::<S>(k, p, at));
     }
 
     let mut footer = vec![];
@@ -217,4 +229,46 @@ pub fn view<S: 'static>(snapshot: &Snapshot, state: &State, k: &Kit, at: At<S>, 
     // The divider beside the sidebar, band and all, at the pane's right edge.
     let edge = rune::el().pin(None, Some(-BAND), Some(0.0), Some(0.0)).w(1.0).fill(k.c.border_base);
     col().w_full().h_full().min_h(0.0).child(band).child(edge).child(bar.build(k))
+}
+
+/// The dialog that asks before a project or a thread is closed, over the whole window.
+pub fn confirm_dialog<S: 'static>(k: &Kit, state: &State, at: At<S>, layer: &mut Vec<El>) {
+    let Some(c) = &state.confirm else { return };
+    let (title, detail) = match c.thread {
+        Some(_) => (format!("Close \u{201c}{}\u{201d}?", c.name), if c.loses_work { "It is still working or waiting on you, and the threads it started go with it. What it is doing will be lost." } else { "The thread and any it started will be closed." }),
+        None => (format!("Close project \u{201c}{}\u{201d}?", c.name), "Its threads are closed and their agents stop."),
+    };
+    let (project, thread) = (c.project, c.thread);
+    let cancel = Button::new("Cancel").on_press(move |s: &mut S| at(s).confirm = None).build(k);
+    let ok = Button::new("Close").variant(ButtonVariant::Danger).on_press(move |s: &mut S| {
+        at(s).confirm = None;
+        send(match thread {
+            Some(tid) => Cmd::CloseThread(project, tid),
+            None => Cmd::CloseProject(project),
+        });
+    });
+    let card = col()
+        .key("confirm-card")
+        .w(360.0)
+        .px(20.0)
+        .py(20.0)
+        .gap(8.0)
+        .radius(k.radius.lg)
+        .fill(k.c.layer_03)
+        .child(text(title).font(k.ty.ui).color(k.c.text_base).wrap_anywhere())
+        .child(text(detail.to_string()).font(CAPTION).color(k.c.text_muted))
+        .child(row().gap(8.0).justify_end().pt(8.0).child(cancel).child(ok.build(k)));
+    layer.push(
+        rune::el()
+            .key("confirm")
+            .role("dialog")
+            .label("Confirm close")
+            .absolute(0.0, 0.0)
+            .w_full()
+            .h_full()
+            .fill(k.c.scrim)
+            .center()
+            .child(card)
+            .on_press(move |s: &mut S| at(s).confirm = None),
+    );
 }

@@ -59,7 +59,7 @@ impl Reader {
             selected: (pid, thread.id) == (active_project, active_thread),
             controlled: self.grants.get(&thread.id).is_some_and(|grant| *grant != command::Grant::initial() && *grant != command::Grant::default()),
             ago: ago(now, thread.active_at),
-            closing: self.closing == Some((pid, thread.id)) && self.close_loses_work(thread.id),
+            closing: self.close_loses_work(thread.id),
         };
         // Filtering keeps a project whose name matches, with all its threads, and any project with a
         // thread that does. A thread waiting on the user is in Needs you instead.
@@ -355,9 +355,6 @@ impl Reader {
     #[hotpath::measure(impl_type = "Reader")]
     pub(crate) fn run(&mut self, cmd: model::bus::Cmd, window: &mut Window, cx: &mut Context<Self>) {
         use model::bus::Cmd;
-        if !matches!(cmd, Cmd::CloseThread(..)) && self.closing.take().is_some() {
-            cx.notify();
-        }
         // The settings page is drawn over whatever is open, so going anywhere else puts it away. Home and
         // Issues may already be open beneath it: pressing theirs then only uncovers them.
         if self.settings_open {
