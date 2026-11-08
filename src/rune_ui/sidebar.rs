@@ -9,7 +9,7 @@ use rune_kit::{Button, ButtonVariant, ControlSize, IconButton, IconButtonVariant
 use crate::model::bus::{Cmd, send};
 use crate::model::sidebar::{Mark, Project, Snapshot, Thread};
 
-static FOLDER_PLUS: Icon = Icon { name: "po-folder-plus", view: 16.0, body: r#"<path d="M1.5 3.5V12.5H14.5V5.5H8.2L6.8 3.5Z" stroke="currentColor" stroke-linejoin="round"/><path d="M8 7.5V10.5M6.5 9H9.5" stroke="currentColor" stroke-linecap="round"/>"# };
+static FOLDER_PLUS: Icon = Icon { name: "po-folder-plus", view: 16.0, body: r#"<path d="M2 4.5C2 3.67 2.67 3 3.5 3H6.2C6.55 3 6.88 3.16 7.1 3.43L8 4.5H12.5C13.33 4.5 14 5.17 14 6V11.5C14 12.33 13.33 13 12.5 13H3.5C2.67 13 2 12.33 2 11.5Z" stroke="currentColor" stroke-linejoin="round"/><path d="M8 7V11M6 9H10" stroke="currentColor" stroke-linecap="round"/>"# };
 static CHEVRON_DOWN: Icon = Icon { name: "po-chevron-down", view: 16.0, body: r#"<path d="M4.5 6.5L8 10L11.5 6.5" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"/>"# };
 static CHEVRON_UP: Icon = Icon { name: "po-chevron-up", view: 16.0, body: r#"<path d="M4.5 9.5L8 6L11.5 9.5" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"/>"# };
 static HOME: Icon = Icon { name: "po-home", view: 16.0, body: r#"<path d="M2.5 7L8 2.5L13.5 7V13H9.5V9.5H6.5V13H2.5Z" stroke="currentColor" stroke-linejoin="round"/>"# };
@@ -42,7 +42,9 @@ fn plus<S: 'static>(k: &Kit, help: &'static str, on_press: impl Fn(&mut S) + 'st
 /// A small icon button in that 20 point slot.
 fn icon_slot<S: 'static>(k: &Kit, glyph: &'static Icon, help: &'static str, on_press: impl Fn(&mut S) + 'static) -> El {
     let b = IconButton::new(glyph).control_size(ControlSize::Small).variant(IconButtonVariant::GhostMuted).label(help).help(help).on_press(move |s: &mut S| on_press(s)).build(k);
-    row().size(20.0, 20.0).center().child(b)
+    // The kit's hover wash, kept on at rest so the button reads as one; the hover and press overlays
+    // the kit draws go over it, so they still show.
+    row().size(20.0, 20.0).center().child(b.fill(k.c.hover))
 }
 
 /// What a thread's state looks like at the start of its row: a ring when nothing is going on, a

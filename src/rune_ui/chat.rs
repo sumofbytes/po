@@ -3,10 +3,9 @@
 use std::time::Duration;
 
 use rune::tok::{Family, TextStyle};
-use rune::{Color, El, GrowthSpec, Span, Key, KeyEvent, ScrollSpec, TextEdit, Tx, col, row, text};
+use rune::{Color, El, GrowthSpec, Icon, Span, Key, KeyEvent, ScrollSpec, TextEdit, Tx, col, row, text};
 use rune_kit::markdown::Markdown;
 use rune_kit::{Button, ButtonVariant, Kit, Spinner};
-use rune_kit::{TextArea};
 
 use super::dropdown::{self, Line};
 use super::pictures;
@@ -23,7 +22,7 @@ const COLUMN: f32 = 760.0;
 /// How far in from the composer's edge its text starts (its border, its padding and its field's):
 /// the composer is this much wider than the transcript's column at each side, so the two texts
 /// start and end on the same lines.
-const COMPOSER_INSET: f32 = 20.0;
+const COMPOSER_INSET: f32 = 16.0;
 /// The room the composer keeps at the stage's sides.
 const COMPOSER_MARGIN: f32 = 12.0;
 /// How many of a stretch's edited files get a chip of their own.
@@ -70,11 +69,18 @@ impl State {
     }
 }
 
+/// A small, thin check: a drawn mark in place of the font's "✓", which is heavy and takes the colour of success.
+static CHECK: Icon = Icon { name: "po-check", view: 16.0, body: r#"<path d="M4 8.5L7 11.5L12 5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>"# };
+
+/// A branch: a line down to a node, and a node it forks to.
+static BRANCH: Icon = Icon { name: "po-branch", view: 16.0, body: r#"<path d="M4 2.5V10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/><circle cx="12" cy="4" r="1.75" stroke="currentColor" stroke-width="1.5"/><circle cx="4" cy="12" r="1.75" stroke="currentColor" stroke-width="1.5"/><path d="M12 5.75C12 9 9.5 12 5.75 12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>"# };
+
 fn tint(k: &Kit, phase: Phase) -> Color {
     match phase {
         Phase::Waiting => k.c.text_muted,
         Phase::Working => k.c.warning.fg,
-        Phase::Done => k.c.success.fg,
+        // A finished step recedes: the thing worth the eye is the one still working or failed.
+        Phase::Done => k.c.icon_faint,
         Phase::Failed => k.c.danger.fg,
     }
 }
@@ -82,6 +88,9 @@ fn tint(k: &Kit, phase: Phase) -> Color {
 fn glyph(k: &Kit, phase: Phase) -> El {
     if phase == Phase::Working {
         return row().w(14.0).h(14.0).center().child(Spinner::new().size(12.0).color(k.c.icon_accent).build(k));
+    }
+    if phase == Phase::Done {
+        return row().w(14.0).h(14.0).center().child(rune::icon(&CHECK, 12.0).color(tint(k, phase)));
     }
     let mark = match phase {
         Phase::Waiting => "○",
@@ -172,8 +181,10 @@ fn chip<S: 'static>(k: &Kit, key: String, label: String, press: impl Fn() + 'sta
 
 #[allow(clippy::too_many_arguments)]
 fn run<S: 'static>(k: &Kit, message: usize, at: usize, thoughts: usize, calls: usize, failed: usize, phase: Phase, folded: bool, task: Option<&str>, spent: Option<Duration>, latest: Option<&str>, kinds: &[(Kind, usize)], edits: &[String]) -> El {
-    let label = task.map(str::to_string).unwrap_or_else(|| match (phase, latest, spent) {
-        (Phase::Working, Some(latest), _) => format!("Working · {latest}"),
+    // One line, whatever the call's title holds (a heredoc runs over many); `truncate` cuts it with an ellipsis.
+    let one_line = |s: &str| s.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or_default().to_string();
+    let label = task.map(one_line).unwrap_or_else(|| match (phase, latest, spent) {
+        (Phase::Working, Some(latest), _) => format!("Working · {}", one_line(latest)),
         (Phase::Working, None, _) => "Working…".into(),
         (_, _, Some(d)) => format!("Worked for {}", took(d)),
         _ => "Worked".into(),
@@ -482,7 +493,7 @@ fn chips<S: 'static>(k: &Kit, snapshot: &Snapshot, at: At<S>) -> El {
     let menu = menu_of(at);
     let mut bar = row().grow(1.0).min_w(0.0).items_center().gap(6.0).flex_wrap();
     let chosen = snapshot.chosen.as_ref().and_then(|c| snapshot.agents.iter().find(|(_, id)| id == c)).map(|(n, _)| n.clone());
-    if snapshot.blank && !snapshot.agents.is_empty() {
+    if (snapshot.blank || snapshot.switchable) && !snapshot.agents.is_empty() {
         let lines = snapshot.agents.iter().map(|(name, id)| Line::choice(name.as_str(), snapshot.chosen.as_ref() == Some(id), Bus::Chat(Cmd::PickAgent(id.clone())))).collect();
         bar = bar.child(dropdown::chip::<S>(k, "agent-pick", chosen.unwrap_or_else(|| "Agent".to_string()), lines, vec![], menu.clone()));
     } else if let Some(name) = chosen {
@@ -500,26 +511,32 @@ fn chips<S: 'static>(k: &Kit, snapshot: &Snapshot, at: At<S>) -> El {
     if snapshot.blank
         && let Some(on) = snapshot.isolate
     {
-        // A chip that is on while the thread gets a worktree of its own.
-        let fill = if on { k.c.layer_03 } else { k.c.layer_02 };
-        let mark = if on { "✓ Worktree" } else { "Worktree" };
-        bar = bar.child(k.interactive(row().key("worktree").px(8.0).py(2.0).radius(6.0).fill(fill).child(text(mark).font(SMALL).color(if on { k.c.text_base } else { k.c.text_muted })).on_press(move |_: &mut S| tell(Cmd::Isolate(!on)))));
+        // A pill that is on while the thread gets a worktree of its own: a branch and its name, outlined
+        // when off and filled, with the text at full ink, when on.
+        let (ink, fill, line) = if on { (k.c.text_base, k.c.layer_03, k.c.border_strong) } else { (k.c.text_muted, Color::TRANSPARENT, k.c.border_base) };
+        let face = row().key("worktree").px(8.0).py(1.0).radius(10.0).gap(4.0).items_center().fill(fill).border(1.0, line).child(rune::icon(&BRANCH, 12.0).color(ink)).child(text("Worktree").font(SMALL).color(ink));
+        bar = bar.child(k.interactive(face.on_press(move |_: &mut S| tell(Cmd::Isolate(!on)))));
     }
     bar.child(control_chip::<S>(k, snapshot, at))
 }
 
 fn composer<S: 'static>(k: &Kit, snapshot: &Snapshot, state: &State, at: At<S>) -> El {
     let steer = snapshot.steer;
-    let field = TextArea::new(&state.draft)
+    // The field is built here, not by the kit's `TextArea`: that has no paste hook, and `on_input_paste`
+    // only takes on the El that holds the input (the kit's is a wrapper around it), so an image never arrived.
+    let placeholder = if snapshot.blank { "Message the agent" } else { "Ask for follow-up changes" };
+    let style = TextStyle { line_height: (13.0f32 * 1.35 * 2.0).round() / 2.0, ..k.ty.ui };
+    let input = rune::text_input(&state.draft, style)
+        .key("input")
+        .w_full()
+        .color(k.c.text_base)
+        .placeholder(placeholder, k.c.text_faint)
+        .caret(k.c.text_base, k.selection())
         .label("Message")
-        .placeholder(if snapshot.blank { "Message the agent" } else { "Ask for follow-up changes" })
-        .auto_grow(2, 8)
-        // The focused look has no shadow; the ring it draws is cleared below.
-        .state(rune_kit::State::Focus)
-        .width(None)
+        .description("")
         .on_edit(move |s: &mut S| &mut at(s).draft)
-        .on_change(move |s: &mut S, _: &mut Tx| tell(Cmd::Draft(at(s).draft.text.clone())))
-        .on_key(move |_: &mut S, event: &KeyEvent, _: &mut Tx| {
+        .on_input_change(move |s: &mut S, _: &mut Tx| tell(Cmd::Draft(at(s).draft.text.clone())))
+        .on_input_key(move |_: &mut S, event: &KeyEvent, _: &mut Tx| {
             // Enter sends; Shift+Enter is a new line; Ctrl+Enter queues behind the turn.
             if event.key == Key::Enter && !event.mods.shift {
                 tell(Cmd::Send { later: event.mods.ctrl });
@@ -527,10 +544,6 @@ fn composer<S: 'static>(k: &Kit, snapshot: &Snapshot, state: &State, at: At<S>) 
             }
             false
         })
-        .build(k)
-        // The card around the composer is the frame: the field itself has no fill or ring.
-        .fill(Color::TRANSPARENT)
-        .outline(0.0, 0.0, Color::TRANSPARENT)
         // What the clipboard held beyond text goes to the draft: files attach, an image pastes
         // (the clipboard offers it as PNG). Plain text pastes as the field always does.
         .on_input_paste(|_: &mut S, content: &rune::ClipboardContent, _: &mut Tx| {
@@ -547,6 +560,8 @@ fn composer<S: 'static>(k: &Kit, snapshot: &Snapshot, state: &State, at: At<S>) 
                 _ => false,
             }
         });
+    // One row at rest; it grows with the text (and the pictures strip and note add their own room only when present).
+    let field = col().role("textbox").padding(8.0).child(rune::auto_grow(input, 1, 8));
     let mut actions = row().gap(6.0);
     if snapshot.busy {
         actions = actions.child(Button::new(if steer { "Steer" } else { "Queue" }).variant(ButtonVariant::Ghost).on_press(|_: &mut S| tell(Cmd::Send { later: true })).build(k));
@@ -554,22 +569,24 @@ fn composer<S: 'static>(k: &Kit, snapshot: &Snapshot, state: &State, at: At<S>) 
     } else {
         actions = actions.child(Button::new("↑").help("Send").variant(ButtonVariant::Submit).on_press(|_: &mut S| tell(Cmd::Send { later: false })).build(k));
     }
-    let mut core = col().w_full().max_w(COLUMN + 2.0 * COMPOSER_INSET).gap(8.0).padding(12.0).radius(16.0).fill(k.c.bg_base).border(1.0, k.c.border_base);
+    let mut core = col().w_full().max_w(COLUMN + 2.0 * COMPOSER_INSET).gap(4.0).padding(8.0).radius(14.0).fill(k.c.bg_base).border(1.0, k.c.border_strong);
     if let Some(note) = &snapshot.note {
         core = core.child(row().w_full().items_center().gap(8.0).child(row().grow(1.0).child(muted(k, note.clone()))).child(Button::new("Dismiss").variant(ButtonVariant::Ghost).on_press(|_: &mut S| tell(Cmd::DismissNote)).build(k)));
     }
     if !snapshot.pictures.is_empty() {
-        let mut strip = row().w_full().flex_wrap().gap(8.0);
+        // Inset as the field is (its box pads 8): the pictures start where the text does, and as far from the top.
+        let mut strip = row().w_full().px(8.0).pt(8.0).flex_wrap().gap(8.0);
         for (i, picture) in snapshot.pictures.iter().enumerate() {
-            // A thumbnail with its own way off: the strip as a whole is not one button.
-            let thumbs = k.interactive(row().key(format!("detach-{i}")).px(4.0).py(1.0).radius(6.0).fill(k.c.layer_02).child(text("×").font(SMALL).color(k.c.text_muted)).on_press(move |_: &mut S| tell(Cmd::Detach(i))));
+            // A thumbnail with its own way off: a cross over its top right corner, not the strip as a
+            // whole being one button.
             let thumb = pictures::el(&picture.uri, picture.size, pictures::SMALL).key(format!("draft-picture-{i}"));
-            strip = strip.child(col().gap(2.0).child(thumb).child(thumbs));
+            let cross = k.interactive(row().key(format!("detach-{i}")).pin(None, Some(4.0), Some(4.0), None).px(6.0).py(1.0).radius(6.0).fill(k.c.layer_03).child(text("×").font(SMALL).color(k.c.text_base)).on_press(move |_: &mut S| tell(Cmd::Detach(i))));
+            strip = strip.child(col().child(thumb).child(cross));
         }
         core = core.child(strip);
     }
     core = core.child(field).child(row().w_full().items_end().gap(8.0).child(chips::<S>(k, snapshot, at)).child(actions));
-    let mut column = col().w_full().items_center().gap(6.0).px(COMPOSER_MARGIN).pt(8.0).pb(12.0);
+    let mut column = col().w_full().items_center().gap(6.0).px(COMPOSER_MARGIN).pt(6.0).pb(10.0);
     if let Some(picking) = snapshot.picking.as_ref().filter(|p| **p != Picking::Loading) {
         column = column.child(col().w_full().max_w(COLUMN + 2.0 * COMPOSER_INSET).child(picker::<S>(k, picking)));
     }

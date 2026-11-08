@@ -9,7 +9,7 @@ repository = "https://github.com/sumofbytes/po"
 
 [dependencies]
 # The UI: Rune. Pin a `dev` rev; `dev` is never rewritten.
-rune = { git = "https://github.com/anomalyco/rune", rev = "b99c7b04e75c0b7587fe8d09ba6a679e11ede9c9" }
+rune = { features = ["native-file-dialog"], git = "https://github.com/anomalyco/rune", rev = "b99c7b04e75c0b7587fe8d09ba6a679e11ede9c9" }
 rune-kit = { features = ["mermaid"], git = "https://github.com/anomalyco/rune", rev = "b99c7b04e75c0b7587fe8d09ba6a679e11ede9c9" }
 env_logger = "0.11"
 log = "0.4"

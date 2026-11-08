@@ -3,7 +3,7 @@
 //! Rune counterpart of `src/nsh/settings.rs`.
 use rune::tok::{TextStyle, type_};
 use rune::{El, TextEdit, Tx, col, el, row, text};
-use rune_kit::{Button, ButtonVariant, Kit, SegmentedControl, Switch, TextInput};
+use rune_kit::{Button, ButtonVariant, ControlSize, IconButton, IconButtonVariant, Kit, SegmentedControl, Switch, TextInput};
 
 use crate::schemes;
 use crate::settings::{AgentForm, Form};
@@ -204,13 +204,15 @@ pub fn view<S: 'static>(p: &Page, k: &Kit, page: At<S>) -> El {
     }
     let add = Button::new("Add agent").on_press(move |s: &mut S| page(s).add_agent()).build(k);
 
-    let header = col()
+    let close = IconButton::new(k.glyph.close).control_size(ControlSize::Regular).variant(IconButtonVariant::GhostMuted).label("Close settings").help("Close (Esc)").on_press(move |s: &mut S| page(s).outcome = Some(Outcome::Close)).build(k);
+    let header = row()
         .px(PAD)
         .pt(24.0)
         .pb(16.0)
-        .gap(2.0)
-        .child(text("Settings").font(TITLE).color(k.c.text_base))
-        .child(text("How Po looks and behaves").font(CAPTION).color(k.c.text_muted));
+        .gap(8.0)
+        .items_start()
+        .child(col().grow(1.0).min_w(0.0).gap(2.0).child(text("Settings").font(TITLE).color(k.c.text_base)).child(text("How Po looks and behaves").font(CAPTION).color(k.c.text_muted)))
+        .child(close);
 
     let body = col()
         .px(PAD)

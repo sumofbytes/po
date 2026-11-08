@@ -358,6 +358,22 @@ impl Reader {
         if !matches!(cmd, Cmd::CloseThread(..)) && self.closing.take().is_some() {
             cx.notify();
         }
+        // The settings page is drawn over whatever is open, so going anywhere else puts it away. Home and
+        // Issues may already be open beneath it: pressing theirs then only uncovers them.
+        if self.settings_open {
+            let uncovers = (matches!(cmd, Cmd::ToggleHome) && self.home_open) || (matches!(cmd, Cmd::ToggleIssues) && self.issues_open);
+            let leaves = matches!(
+                cmd,
+                Cmd::ToggleProject(_) | Cmd::StartThread(_) | Cmd::OpenThread(..) | Cmd::AddProject | Cmd::NewThread | Cmd::ToggleHome | Cmd::ToggleIssues | Cmd::OpenIssue(..) | Cmd::WorkOnIssue(..) | Cmd::OpenPr(_) | Cmd::FinderPick(_)
+            );
+            if leaves {
+                self.settings_open = false;
+                cx.notify();
+            }
+            if uncovers {
+                return;
+            }
+        }
         match cmd {
             Cmd::SideQuery(query) => {
                 self.side_query = query;

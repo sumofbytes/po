@@ -237,6 +237,9 @@ fn emulate(rx: watched::Receiver<Msg>, to_shell: Sender<Vec<u8>>, backlog: Arc<A
         let _ = terminal.set_default_bg_color(Some(RgbColor { r: bg.0, g: bg.1, b: bg.2 }));
     };
     colors(&mut terminal, theme);
+    // What a shell's cursor reset (CSI 0 q) returns to: a steady block, whatever the library's own default.
+    let _ = terminal.set_default_cursor_style(Some(libghostty_vt::terminal::CursorStyle::Block));
+    let _ = terminal.set_default_cursor_blink(Some(false));
     let (Ok(mut render), Ok(mut encoder), Ok(mut event)) = (RenderState::new(), Encoder::new(), Event::new()) else {
         log::error!("terminal: libghostty could not start");
         return;
