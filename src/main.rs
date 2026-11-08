@@ -1452,9 +1452,6 @@ struct Reader {
     chat_reset: std::cell::Cell<u64>,
     /// What [`model::chat::Snapshot::focus`] carries next.
     chat_focus: std::cell::Cell<u64>,
-    /// The thread (project, thread) whose close was pressed once and waits for a second press,
-    /// because closing it would lose work. Any other command puts it away.
-    closing: Option<(u64, u64)>,
     issues_open: bool,
     home_open: bool,
     /// An issue "Work on this" is making a worktree for, to link its branch once it exists.
@@ -1581,7 +1578,6 @@ impl Reader {
             side_query: String::new(),
             reveal: None,
             reveal_serial: 0,
-            closing: None,
             chat_marks: std::cell::Cell::new(((0, 0), 0, 0, false, 0)),
             chat_shown: std::cell::Cell::new((u64::MAX, u64::MAX)),
             chat_follow: std::cell::Cell::new(0),

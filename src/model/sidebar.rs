@@ -35,7 +35,7 @@ pub struct Thread {
     pub controlled: bool,
     /// How long ago it was last active (`5m`, `3h`, `2d`), if that is known.
     pub ago: Option<String>,
-    /// Its close was pressed and closing it would lose work: pressing again closes it.
+    /// Closing it would lose work: the dialog that asks first says so.
     pub closing: bool,
 }
 
