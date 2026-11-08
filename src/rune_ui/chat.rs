@@ -233,8 +233,7 @@ fn plan(k: &Kit, entries: &[Entry]) -> El {
 }
 
 fn card(k: &Kit, waiting: bool) -> El {
-    let c = col().w_full().gap(8.0).padding(12.0).radius(10.0).border(1.0, if waiting { k.c.warning.border } else { k.c.border_base });
-    c
+    col().w_full().gap(8.0).padding(12.0).radius(10.0).border(1.0, if waiting { k.c.warning.border } else { k.c.border_base })
 }
 
 fn ask<S: 'static>(k: &Kit, message: usize, at: usize, title: &str, options: &[AskOption], answered: &Option<String>) -> El {

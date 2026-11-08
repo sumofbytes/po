@@ -16,11 +16,14 @@ pub struct Line {
     act: Option<Act>,
 }
 
+/// A change to the host's own state, run when a line is picked.
+type Call = std::rc::Rc<dyn Fn(&mut dyn std::any::Any)>;
+
 /// What picking a line does: tell the Reader, or change the host's own state.
 #[derive(Clone)]
 enum Act {
     Send(Cmd),
-    Call(std::rc::Rc<dyn Fn(&mut dyn std::any::Any)>),
+    Call(Call),
 }
 
 impl Line {

@@ -70,10 +70,7 @@ impl Reader {
         })
         .detach();
         cx.spawn(async move |this, cx| {
-            loop {
-                let Ok(open) = this.update(cx, |reader, _| reader.views().iter().map(|view| view.project.root.clone()).collect::<Vec<_>>()) else {
-                    break;
-                };
+            while let Ok(open) = this.update(cx, |reader, _| reader.views().iter().map(|view| view.project.root.clone()).collect::<Vec<_>>()) {
                 issues::shared::track(open);
                 cx.background_executor().timer(Duration::from_secs(1)).await;
             }
@@ -84,12 +81,9 @@ impl Reader {
     /// The branch beside each project's name follows checkouts made outside po too.
     pub(crate) fn poll_heads(cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
-            loop {
-                let Ok(roots) = this.update(cx, |reader, _| {
-                    reader.views().iter().filter(|view| view.project.shows_branch()).map(|view| view.project.root.clone()).collect::<Vec<_>>()
-                }) else {
-                    break;
-                };
+            while let Ok(roots) = this.update(cx, |reader, _| {
+                reader.views().iter().filter(|view| view.project.shows_branch()).map(|view| view.project.root.clone()).collect::<Vec<_>>()
+            }) {
                 // Each in its own run, so one slow repository doesn't hold up the rest. One
                 // that takes too long keeps what it showed before.
                 let runs = roots.into_iter().map(|root| {

@@ -161,7 +161,7 @@ impl Form {
             put(&mut font, "size", font_size.map(json_number));
             put(&mut font, "mono_family", mono_family);
             put(&mut font, "mono_size", mono_size.map(json_number));
-            put(config, "font", (!font.is_empty()).then(|| Value::Object(font)));
+            put(config, "font", (!font.is_empty()).then_some(Value::Object(font)));
             put(config, "idle_minutes", idle.map(json_number));
             put(config, "max_live_agents", max_live.map(json_number));
             // Notifications default on, so only turning them off is written.
@@ -170,7 +170,7 @@ impl Form {
             let kept = config.get("glass").filter(|value| value.is_number()).cloned();
             put(config, "glass", if glass { Some(kept.unwrap_or(Value::Bool(true))) } else { config.contains_key("glass").then_some(Value::Bool(false)) });
             put(config, "viewer_position", Some((if viewer_left { "left" } else { "right" }).into()));
-            put(config, "agents", (!agents.is_empty()).then(|| Value::Array(agents)));
+            put(config, "agents", (!agents.is_empty()).then_some(Value::Array(agents)));
         })
     }
 }

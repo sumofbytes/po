@@ -2,8 +2,6 @@
 
 use crate::*;
 
-/// The longest name a user can give a thread, in characters.
-
 impl Reader {
     /// The user's answer to a command Po asked about: remember it and start the agent, or leave it stopped.
     pub(crate) fn answer_approval(&mut self, ix: usize, n: usize, yes: bool, window: &mut Window, cx: &mut Context<Self>) {

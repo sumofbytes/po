@@ -124,10 +124,10 @@ impl Shell {
             self.finder.at = 0;
         }
         self.finder_was_open = layout.finder_open;
-        if layout.issues_open {
-            if let Some(nav) = shared::take_nav() {
-                self.issues.go_to(nav, &self.overview_feed.value);
-            }
+        if layout.issues_open
+            && let Some(nav) = shared::take_nav()
+        {
+            self.issues.go_to(nav, &self.overview_feed.value);
         }
     }
 
