@@ -19,7 +19,7 @@ const LABEL: TextStyle = TextStyle::new(12.0, 500.0);
 const MONO: TextStyle = TextStyle { family: Family::SystemMono, line_height: 17.0, ..TextStyle::new(12.0, 400.0) };
 /// The column the conversation and the composer share.
 const COLUMN: f32 = 760.0;
-/// How far in from the composer's edge its text starts (its border, its padding and its field's):
+/// How far in from the composer's edge its text starts (its padding and its field's, which is where the chips' labels start too):
 /// the composer is this much wider than the transcript's column at each side, so the two texts
 /// start and end on the same lines.
 const COMPOSER_INSET: f32 = 16.0;
@@ -570,6 +570,7 @@ fn composer<S: 'static>(k: &Kit, snapshot: &Snapshot, state: &State, at: At<S>) 
             }
         });
     // One row at rest; it grows with the text (and the pictures strip and note add their own room only when present).
+    // Padded so the text starts where the chips' labels do (their boxes pad 8 too) and as far from the top.
     let field = col().role("textbox").padding(8.0).child(rune::auto_grow(input, 1, 8));
     let mut actions = row().gap(6.0);
     if snapshot.busy {
@@ -578,12 +579,12 @@ fn composer<S: 'static>(k: &Kit, snapshot: &Snapshot, state: &State, at: At<S>) 
     } else {
         actions = actions.child(Button::new("↑").help("Send").variant(ButtonVariant::Submit).on_press(|_: &mut S| tell(Cmd::Send { later: false })).build(k));
     }
-    let mut core = col().w_full().max_w(COLUMN + 2.0 * COMPOSER_INSET).gap(4.0).padding(8.0).radius(14.0).fill(k.c.bg_base).border(1.0, k.c.border_strong);
+    let mut core = col().w_full().max_w(COLUMN + 2.0 * COMPOSER_INSET).gap(4.0).padding(8.0).pb(16.0).radius(14.0).fill(k.c.bg_base).border(1.0, k.c.border_strong);
     if let Some(note) = &snapshot.note {
         core = core.child(row().w_full().items_center().gap(8.0).child(row().grow(1.0).child(muted(k, note.clone()))).child(Button::new("Dismiss").variant(ButtonVariant::Ghost).on_press(|_: &mut S| tell(Cmd::DismissNote)).build(k)));
     }
     if !snapshot.pictures.is_empty() {
-        // Inset as the field is (its box pads 8): the pictures start where the text does, and as far from the top.
+        // Inset as the field is: the pictures start where the text does, and as far from the top.
         let mut strip = row().w_full().px(8.0).pt(8.0).flex_wrap().gap(8.0);
         for (i, picture) in snapshot.pictures.iter().enumerate() {
             // A thumbnail with its own way off: a cross over its top right corner, not the strip as a
@@ -594,7 +595,7 @@ fn composer<S: 'static>(k: &Kit, snapshot: &Snapshot, state: &State, at: At<S>) 
         }
         core = core.child(strip);
     }
-    core = core.child(field).child(row().w_full().items_end().gap(8.0).child(chips::<S>(k, snapshot, at)).child(actions));
+    core = core.child(field).child(row().w_full().items_end().gap(8.0).pr(8.0).child(chips::<S>(k, snapshot, at)).child(actions));
     let mut column = col().w_full().items_center().gap(6.0).px(COMPOSER_MARGIN).pt(6.0).pb(10.0);
     if let Some(picking) = snapshot.picking.as_ref().filter(|p| **p != Picking::Loading) {
         column = column.child(col().w_full().max_w(COLUMN + 2.0 * COMPOSER_INSET).child(picker::<S>(k, picking)));
