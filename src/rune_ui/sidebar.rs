@@ -4,6 +4,7 @@
 //!
 //! Not ported yet: renaming a thread from its menu, and the right-click menu.
 use rune::{Anim, El, Icon, TextEdit, TextStyle, Tx, col, el, row, text};
+use rune_kit::shell::RowStatus;
 use rune_kit::{Button, ButtonVariant, ControlSize, IconButton, IconButtonVariant, Kit, Sidebar, SidebarRow, SidebarSection, Spinner};
 
 use crate::model::bus::{Cmd, send};
@@ -42,22 +43,23 @@ fn plus<S: 'static>(k: &Kit, help: &'static str, on_press: impl Fn(&mut S) + 'st
 /// A small icon button in that 20 point slot.
 fn icon_slot<S: 'static>(k: &Kit, glyph: &'static Icon, help: &'static str, on_press: impl Fn(&mut S) + 'static) -> El {
     let b = IconButton::new(glyph).control_size(ControlSize::Small).variant(IconButtonVariant::GhostMuted).label(help).help(help).on_press(move |s: &mut S| on_press(s)).build(k);
-    // The kit's hover wash, kept on at rest so the button reads as one; the hover and press overlays
-    // the kit draws go over it, so they still show.
-    row().size(20.0, 20.0).center().child(b.size(20.0, 20.0).fill(k.c.hover))
+    // No wash at rest, so the glyph stays quiet beside the title; the kit's hover and press overlays still show.
+    row().size(20.0, 20.0).center().child(b.size(20.0, 20.0))
 }
 
-/// What a thread's state looks like at the start of its row: a ring when nothing is going on, a
-/// dot when it has something to say, and the spinner while its agent works.
+/// What a thread's state looks like at the start of its row: a faint ring when it is idle, a dot when
+/// it has something to say, and the spinner while its agent works. Each sits in a slot as wide as
+/// the spinner, so titles line up whatever the state.
 fn mark(k: &Kit, mark: Mark) -> El {
     let dot = |color| el().size(8.0, 8.0).radius(4.0).fill(color);
-    match mark {
-        Mark::Idle => el().size(10.0, 10.0).radius(5.0).border(1.0, k.c.icon_faint),
+    let shown = match mark {
+        Mark::Idle => el().size(8.0, 8.0).radius(4.0).border(1.0, k.c.icon_faint),
         Mark::Unread => dot(k.c.bg_accent),
         Mark::Running => Spinner::new().size(14.0).color(k.c.icon_accent).build(k),
         Mark::Asking => dot(k.c.warning.icon),
         Mark::Failed => text("×").font(rune::tok::TextStyle::new(14.0, 500.0)).color(k.c.danger.fg),
-    }
+    };
+    row().size(14.0, 14.0).center().child(shown)
 }
 
 fn thread_row<S: 'static>(k: &Kit, t: &Thread, subtitle: Option<&str>) -> El {
@@ -68,7 +70,8 @@ fn thread_row<S: 'static>(k: &Kit, t: &Thread, subtitle: Option<&str>) -> El {
         .on_close(move |_: &mut S, _: &mut Tx| send(Cmd::CloseThread(pid, tid)));
     row = row.avatar(mark(k, t.mark));
     if let Some(ago) = &t.ago {
-        row = row.detail(ago.clone());
+        // In the slot the close button takes over on hover, so it stands where the section's plus does.
+        row = row.status(RowStatus::Other(text(ago.clone()).font(k.ty.small).color(k.c.text_faint)));
     }
     if let Some(project) = subtitle {
         row = row.subtitle(project.to_string());
@@ -93,7 +96,7 @@ fn project_section<S: 'static>(k: &Kit, p: &Project) -> El {
         .w_full()
         .h(ROW)
         .pl(11.0)
-        .pr(10.0)
+        .pr(8.0)
         .center_y()
         .radius(k.radius.md)
         .child(row().key("section-title").center_y().shrink().child(title).a11y_hidden())

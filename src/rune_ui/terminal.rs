@@ -197,6 +197,7 @@ pub fn view<S: 'static>(term: &Term, kit: &Kit, at: At<S>) -> El {
         .h_full()
         .min_h(0.0)
         .focusable(true)
+        .no_focus_ring()
         .selection_group(true)
         .on_key(move |s: &mut S, event: &KeyEvent, tx: &mut Tx| {
             // The selection goes to the clipboard on the window's copy chord, where Ctrl+C is the

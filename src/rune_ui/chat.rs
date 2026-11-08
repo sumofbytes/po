@@ -107,7 +107,7 @@ fn muted(k: &Kit, s: impl Into<String>) -> El {
 
 /// A pressable row of the transcript.
 fn pressable<S: 'static>(k: &Kit, key: String, content: El, press: impl Fn() + 'static) -> El {
-    k.interactive(row().key(key).w_full().items_center().gap(8.0).px(8.0).py(4.0).radius(6.0).child(content).on_press(move |_: &mut S| press()))
+    k.interactive(row().key(key).w_full().items_center().gap(8.0).py(4.0).radius(6.0).child(content).on_press(move |_: &mut S| press()))
 }
 
 fn took(d: Duration) -> String {
@@ -137,14 +137,14 @@ fn user_row(k: &Kit, body: &str, pictures: &[crate::model::chat::Picture]) -> El
     if !body.is_empty() {
         inner = inner.child(text(body).font(BODY).color(k.c.text_base).wrap_anywhere());
     }
-    // The user's side: the bubble sits at the right, as wide as its words need up to a limit, and wraps.
-    row().w_full().justify_end().child(col().min_w(0.0).max_w(600.0).shrink().px(16.0).py(12.0).radius(10.0).fill(k.c.layer_03).child(inner))
+    // The bubble spans the column, so its edges line up with every other block's.
+    row().w_full().child(col().w_full().min_w(0.0).px(16.0).py(12.0).radius(10.0).fill(k.c.layer_03).child(inner))
 }
 
 fn thought<S: 'static>(k: &Kit, message: usize, at: usize, body: &str, open: bool) -> El {
     let head = row().grow(1.0).min_w(0.0).child(text(if open { "Thought".to_string() } else { gist(body) }).font(SMALL).color(k.c.text_muted));
     let line = pressable::<S>(k, format!("thought-{message}-{at}"), head, move || tell(Cmd::ToggleThought { message, block: at }));
-    if open { col().w_full().child(line).child(col().px(8.0).child(text(body.to_string()).font(SMALL).color(k.c.text_muted).spans(vec![Span::new(0, body.len()).italic()]))) } else { line }
+    if open { col().w_full().child(line).child(col().child(text(body.to_string()).font(SMALL).color(k.c.text_muted).spans(vec![Span::new(0, body.len()).italic()]))) } else { line }
 }
 
 fn tool<S: 'static>(k: &Kit, message: usize, at: usize, t: &Tool) -> El {
@@ -156,7 +156,7 @@ fn tool<S: 'static>(k: &Kit, message: usize, at: usize, t: &Tool) -> El {
         // Expanded, all of it shows and wraps to the column.
         let rest = t.title.split_once('\n').map(|(_, rest)| rest.trim().to_string()).filter(|rest| !rest.is_empty());
         let wrapped = |s: String, color| text(s).font(MONO).color(color).wrap_anywhere().w_full();
-        let mut detail = col().w_full().min_w(0.0).px(30.0).gap(4.0);
+        let mut detail = col().w_full().min_w(0.0).px(22.0).gap(4.0);
         if let Some(rest) = rest {
             detail = detail.child(wrapped(rest, k.c.text_muted));
         }
@@ -170,7 +170,7 @@ fn tool<S: 'static>(k: &Kit, message: usize, at: usize, t: &Tool) -> El {
     }
     if let Some(path) = &t.path {
         let (name, path) = (path.rsplit('/').next().unwrap_or(path).to_string(), path.clone());
-        card = card.child(row().px(30.0).child(chip::<S>(k, format!("open-{message}-{at}"), name, move || tell(Cmd::Open(path.clone())))));
+        card = card.child(row().px(22.0).child(chip::<S>(k, format!("open-{message}-{at}"), name, move || tell(Cmd::Open(path.clone())))));
     }
     card
 }
@@ -210,7 +210,7 @@ fn run<S: 'static>(k: &Kit, message: usize, at: usize, thoughts: usize, calls: u
     head = head.child(row().grow(1.0)).child(muted(k, if folded { "›" } else { "⌄" }));
     let mut card = col().w_full().child(pressable::<S>(k, format!("run-{message}-{at}"), head, move || tell(Cmd::Fold { message, block: at, folded: !folded })));
     if !edits.is_empty() {
-        let mut chips = row().px(30.0).gap(6.0).pb(4.0);
+        let mut chips = row().px(22.0).gap(6.0).pb(4.0);
         for (i, path) in edits.iter().take(MAX_CHIPS).enumerate() {
             let (name, path) = (path.rsplit('/').next().unwrap_or(path).to_string(), path.clone());
             chips = chips.child(chip::<S>(k, format!("edit-{message}-{at}-{i}"), name, move || tell(Cmd::Open(path.clone()))));
