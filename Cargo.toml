@@ -39,5 +39,11 @@ hotpath-alloc = ["hotpath", "hotpath/hotpath-alloc"]
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }
 
+# wgpu-hal 30 needs gpu-allocator on windows 0.62, but crates.io's 0.28.0 pins windows 0.57, which
+# breaks the DX12 build. Upstream main accepts 0.62 (still version 0.28.0), so build from it.
+# Drop this once a gpu-allocator release supports windows 0.62.
+[patch.crates-io]
+gpu-allocator = { git = "https://github.com/Traverse-Research/gpu-allocator", rev = "5d8be6b0b68376d12c392a822fcee89ec22e995b" }
+
 [profile.dev]
 debug = "line-tables-only"
