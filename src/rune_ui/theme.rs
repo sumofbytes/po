@@ -1,5 +1,5 @@
-//! Po's colour schemes as a Rune kit. The schemes are the ones the gpui theme reads
-//! ([`crate::schemes`]), so both UIs start from the same colours.
+//! Po's colour schemes as a Rune kit. The schemes are in
+//! [`crate::schemes`].
 use rune::{Color, color};
 use rune_kit::{Kit, PaletteFocus, PaletteSeed};
 use rune_kit::kit::StateColors;

@@ -1,8 +1,7 @@
 //! What the [`crate::Reader`] needs from a toolkit, with none of its types: wake the window, run
-//! something on the window's thread, and wait for work or time off it. gpui gave this as `cx.notify`,
-//! `cx.spawn` and `cx.background_executor`; Rune has no executor, so a [`Host`] runs each task on a
-//! thread of its own and hands every "update the state" back through a channel the window drains in
-//! its `poll` ([`Inbox::run`]).
+//! something on the window's thread, and wait for work or time off it. Rune has no executor, so a
+//! [`Host`] runs each task on a thread of its own and hands every "update the state" back through
+//! a channel the window drains in its `poll` ([`Inbox::run`]).
 //!
 //! A task is a future that talks to the state only through [`Host::update`] and [`Host::query`],
 //! which run on the window's thread, so the state needs no locks and no `Send`.

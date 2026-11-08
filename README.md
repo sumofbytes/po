@@ -1,6 +1,6 @@
 # po
 
-A native desktop GUI (built on [GPUI](https://crates.io/crates/gpui-fast)) for
+A native desktop GUI (built on [Rune](https://github.com/anomalyco/rune)) for
 coding agents that speak the [Agent Client Protocol](https://agentclientprotocol.com).
 Chat with an agent, browse the project's files with a syntax-highlighted viewer,
 and review the agent's plans and edit diffs side by side.
@@ -39,11 +39,6 @@ don't have them.
 ```sh
 cargo run --release
 ```
-
-Screens are moving to [NSH](https://nsh.dev): each runs as an NSH app (a Rust
-root, no JavaScript) inside Po's window through `nsh-platform-gpui`, which draws
-with the same GPUI. The chat, sidebar, settings and issues page are drawn this
-way (`src/nsh/`); their headless tests run with `cargo test`.
 
 ## Issues
 
@@ -352,14 +347,13 @@ and Wayland compositors with KDE's blur protocol. Other Wayland compositors, and
 X11 with a compositor running, show the window see-through without blur.
 
 Markdown, in the agent's replies and in `.md` files (which open rendered; the
-**Source** button or Ctrl+Shift+M switches to the text), is drawn by NSH in the
-theme's colours. Code is coloured by NSH's own fixed palette.
+**Source** button or Ctrl+Shift+M switches to the text), is drawn in the
+theme's colours.
 
 ## License
 
 Dual-licensed under [MIT](LICENSE) or [Apache-2.0](LICENSE-APACHE), at your
-option. Bundled third-party material keeps its own license: `vendor/gpui-fast-wgpu`,
-`vendor/gpui-fast-apple`, `vendor/gpui-fast-macos`, and `vendor/gpui-fast-windows`
-(Apache-2.0), and the Lucide icons in `assets/icons` (ISC).
+option. Bundled third-party material keeps its own license: the Lucide icons in
+`assets/icons` (ISC).
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md).

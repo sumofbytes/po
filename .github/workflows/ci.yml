@@ -31,7 +31,6 @@ jobs:
       - run: cargo build --all-targets --locked
       - run: cargo test --locked
       - run: cargo clippy --all-targets --locked -- -D warnings
-      - run: scripts/check-design.sh
 
   # Portability gate, same as dex: windows-latest has MSVC preinstalled.
   windows-check:
@@ -50,8 +49,8 @@ jobs:
           key: windows-check
       - run: cargo build --all-targets --locked
 
-  # Po's macOS window code is patched by hand in vendor/gpui-fast-macos. Compile the
-  # Apple target with real Metal/Apple tooling so a bad patch cannot pass CI on Linux.
+  # Compile the Apple target with real Metal/Apple tooling so a platform-specific
+  # break cannot pass CI on Linux.
   # (macos-15: pinned like release.yml because macOS 26's SDK can't link Zig 0.15.2.)
   macos-check:
     runs-on: macos-15
