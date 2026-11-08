@@ -137,8 +137,8 @@ fn user_row(k: &Kit, body: &str, pictures: &[crate::model::chat::Picture]) -> El
     if !body.is_empty() {
         inner = inner.child(text(body).font(BODY).color(k.c.text_base).wrap_anywhere());
     }
-    // The bubble spans the column, so its edges line up with every other block's.
-    row().w_full().child(col().w_full().min_w(0.0).px(16.0).py(12.0).radius(10.0).fill(k.c.layer_03).child(inner))
+    // The user's side: the bubble sits at the right, as wide as its words need up to a limit, and wraps.
+    row().w_full().justify_end().child(col().min_w(0.0).max_w(600.0).shrink().px(16.0).py(12.0).radius(10.0).fill(k.c.layer_03).child(inner))
 }
 
 fn thought<S: 'static>(k: &Kit, message: usize, at: usize, body: &str, open: bool) -> El {
