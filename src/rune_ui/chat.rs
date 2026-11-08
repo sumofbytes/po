@@ -87,10 +87,10 @@ fn tint(k: &Kit, phase: Phase) -> Color {
 
 fn glyph(k: &Kit, phase: Phase) -> El {
     if phase == Phase::Working {
-        return row().w(14.0).h(14.0).center().child(Spinner::new().size(12.0).color(k.c.icon_accent).build(k));
+        return row().w(12.0).h(12.0).center().child(Spinner::new().size(12.0).color(k.c.icon_accent).build(k));
     }
     if phase == Phase::Done {
-        return row().w(14.0).h(14.0).center().child(rune::icon(&CHECK, 12.0).color(tint(k, phase)));
+        return row().w(12.0).h(12.0).center().child(rune::icon(&CHECK, 12.0).color(tint(k, phase)));
     }
     let mark = match phase {
         Phase::Waiting => "○",
@@ -98,7 +98,7 @@ fn glyph(k: &Kit, phase: Phase) -> El {
         Phase::Done => "✓",
         Phase::Failed => "×",
     };
-    text(mark).font(SMALL).color(tint(k, phase)).w(14.0)
+    text(mark).font(SMALL).color(tint(k, phase)).w(12.0)
 }
 
 fn muted(k: &Kit, s: impl Into<String>) -> El {
@@ -150,13 +150,13 @@ fn thought<S: 'static>(k: &Kit, message: usize, at: usize, body: &str, open: boo
 fn tool<S: 'static>(k: &Kit, message: usize, at: usize, t: &Tool) -> El {
     // Collapsed, a call is one line: the first of its title, cut off where it runs out of room.
     let first = t.title.lines().next().unwrap_or_default().trim().to_string();
-    let head = row().grow(1.0).min_w(0.0).items_center().gap(8.0).child(glyph(k, t.phase)).child(row().grow(1.0).min_w(0.0).child(text(first).font(SMALL).color(k.c.text_muted).truncate()));
+    let head = row().grow(1.0).min_w(0.0).items_center().gap(4.0).child(glyph(k, t.phase)).child(row().grow(1.0).min_w(0.0).child(text(first).font(SMALL).color(k.c.text_muted).truncate()));
     let mut card = col().w_full().child(pressable::<S>(k, format!("tool-{message}-{at}"), head, move || tell(Cmd::ToggleTool { message, block: at })));
     if t.open {
         // Expanded, all of it shows and wraps to the column.
         let rest = t.title.split_once('\n').map(|(_, rest)| rest.trim().to_string()).filter(|rest| !rest.is_empty());
         let wrapped = |s: String, color| text(s).font(MONO).color(color).wrap_anywhere().w_full();
-        let mut detail = col().w_full().min_w(0.0).px(22.0).gap(4.0);
+        let mut detail = col().w_full().min_w(0.0).px(16.0).gap(4.0);
         if let Some(rest) = rest {
             detail = detail.child(wrapped(rest, k.c.text_muted));
         }
@@ -170,7 +170,7 @@ fn tool<S: 'static>(k: &Kit, message: usize, at: usize, t: &Tool) -> El {
     }
     if let Some(path) = &t.path {
         let (name, path) = (path.rsplit('/').next().unwrap_or(path).to_string(), path.clone());
-        card = card.child(row().px(22.0).child(chip::<S>(k, format!("open-{message}-{at}"), name, move || tell(Cmd::Open(path.clone())))));
+        card = card.child(row().px(16.0).child(chip::<S>(k, format!("open-{message}-{at}"), name, move || tell(Cmd::Open(path.clone())))));
     }
     card
 }
@@ -203,14 +203,14 @@ fn run<S: 'static>(k: &Kit, message: usize, at: usize, thoughts: usize, calls: u
     if failed > 0 && phase != Phase::Failed {
         aside.push(format!("{failed} failed"));
     }
-    let mut head = row().grow(1.0).min_w(0.0).items_center().gap(8.0).child(glyph(k, phase)).child(muted(k, label).truncate().shrink());
+    let mut head = row().grow(1.0).min_w(0.0).items_center().gap(4.0).child(glyph(k, phase)).child(muted(k, label).truncate().shrink());
     if !aside.is_empty() {
         head = head.child(muted(k, format!("· {}", aside.join(" · "))));
     }
     head = head.child(row().grow(1.0)).child(muted(k, if folded { "›" } else { "⌄" }));
     let mut card = col().w_full().child(pressable::<S>(k, format!("run-{message}-{at}"), head, move || tell(Cmd::Fold { message, block: at, folded: !folded })));
     if !edits.is_empty() {
-        let mut chips = row().px(22.0).gap(6.0).pb(4.0);
+        let mut chips = row().px(16.0).gap(6.0).pb(4.0);
         for (i, path) in edits.iter().take(MAX_CHIPS).enumerate() {
             let (name, path) = (path.rsplit('/').next().unwrap_or(path).to_string(), path.clone());
             chips = chips.child(chip::<S>(k, format!("edit-{message}-{at}-{i}"), name, move || tell(Cmd::Open(path.clone()))));
@@ -227,7 +227,7 @@ fn plan(k: &Kit, entries: &[Entry]) -> El {
     let mut list = col().w_full().gap(6.0).py(4.0);
     for entry in entries {
         let color = if entry.phase == Phase::Done { k.c.text_muted } else { k.c.text_base };
-        list = list.child(row().items_center().gap(8.0).child(glyph(k, entry.phase)).child(text(entry.text.clone()).font(BODY).color(color)));
+        list = list.child(row().items_center().gap(4.0).child(glyph(k, entry.phase)).child(text(entry.text.clone()).font(BODY).color(color)));
     }
     list
 }
