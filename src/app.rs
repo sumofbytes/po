@@ -83,7 +83,11 @@ impl Host for State {
 /// The kit for the theme the environment or the settings name.
 fn theme_kit(settings: &serde_json::Value) -> Kit {
     let name = std::env::var("PO_THEME").ok().or_else(|| settings["theme"].as_str().map(String::from)).unwrap_or_else(|| rune_ui::theme::DEFAULT.into());
-    rune_ui::theme::kit(&rune_ui::theme::load(&name)).0
+    named_kit(&name)
+}
+
+fn named_kit(name: &str) -> Kit {
+    rune_ui::theme::kit(&rune_ui::theme::load(name)).0
 }
 
 fn init() -> State {
@@ -147,17 +151,27 @@ fn bench_fill(reader: &mut crate::Reader) -> Option<usize> {
 fn poll(s: &mut State, now: f64, tx: &mut Tx) -> bool {
     let Some(live) = s.live.as_mut() else { return false };
     let Live { core, host, inbox, commands } = live;
-    let mut stale = inbox.run(core);
+    // Before the commands are taken, so what a page asks (a save, say) is run in this tick, not
+    // left until something else wakes the window.
+    // A theme picked in the settings shows at once; saving keeps it, closing without saving
+    // puts back the one on disk.
+    let picked = s.shell.settings.as_mut().and_then(|page| page.preview.take());
+    let settled = s.shell.settle();
+    let recolored = picked.is_some() || settled;
+    if let Some(name) = picked {
+        s.kit = named_kit(&name);
+    }
+    if settled {
+        s.kit = theme_kit(&config::load());
+    }
+    if recolored {
+        core.reader.term_theme = terminal_colors(&s.kit);
+    }
+    let mut stale = inbox.run(core) | recolored;
     let mut cx = Context::new(host.clone());
     while let Some(cmd) = commands.as_mut().and_then(|commands| commands.try_recv().ok()) {
-        let saved = matches!(cmd, bus::Cmd::SettingsSaved);
         core.reader.run(cmd, &mut core.window, &mut cx);
         stale = true;
-        // Saving the settings page applies its theme at once, as it does its other settings.
-        if saved {
-            s.kit = theme_kit(&config::load());
-            core.reader.term_theme = terminal_colors(&s.kit);
-        }
     }
     core.reader.reap_terminals(&mut cx);
     core.reader.flush_save();
@@ -211,7 +225,6 @@ fn poll(s: &mut State, now: f64, tx: &mut Tx) -> bool {
             core.reader.request_save(&mut cx);
         }
     }
-    s.shell.settle();
     stale | s.shell.poll()
 }
 

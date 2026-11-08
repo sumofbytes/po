@@ -166,13 +166,18 @@ impl Shell {
 
     /// Takes what a screen asked of the shell: a settings page that saved or closed says so to the
     /// `Reader`, which puts it away.
-    pub fn settle(&mut self) {
+    /// True when the page was saved or closed, so the theme on screen may need to go back to the
+    /// one on disk.
+    pub fn settle(&mut self) -> bool {
+        let mut settled = false;
         if let Some(outcome) = self.settings.as_mut().and_then(|page| page.outcome.take()) {
             if outcome == settings::Outcome::Saved {
                 send(Cmd::SettingsSaved);
             }
             send(Cmd::CloseSettings);
+            settled = true;
         }
+        settled
     }
 }
 
@@ -274,11 +279,13 @@ fn viewer_content<S: Host>(shell: &Shell, host: &S, layout: &Layout, k: &Kit) ->
 pub fn view<S: Host>(host: &S, k: &Kit) -> El {
     let shell = host.shell_ref();
     let layout = host.layout();
+    // What floats over the window: the menus the chips open, the theme list.
+    let mut layer = vec![];
     let chat = |framed: bool| chat::view::<S>(&shell.chat_feed.value, &shell.chat, k, chat_of::<S>, framed);
     let page = if layout.finder_open {
         Some(finder::view::<S>(&shell.finder_feed.value, &shell.finder, k, finder_of::<S>))
     } else if let (true, Some(page)) = (layout.settings_open, &shell.settings) {
-        Some(settings::view::<S>(page, k, settings_of::<S>))
+        Some(settings::view::<S>(page, k, settings_of::<S>, &mut layer))
     } else if layout.home_open {
         Some(home::view::<S>(&shell.home_model, &shell.home, k, home_of::<S>))
     } else if layout.issues_open {
@@ -321,8 +328,6 @@ pub fn view<S: Host>(host: &S, k: &Kit) -> El {
         Some(right) => split.inspector::<S>(&shell.viewer, viewer_of::<S>, right).build(&flat),
         None => split.build(&flat),
     };
-    // What floats over the window: the menus the chips open.
-    let mut layer = vec![];
     let menu: dropdown::At<S> = std::rc::Rc::new(|s: &mut S| &mut s.shell().chat.menu);
     dropdown::overlay::<S>(k, &shell.chat.menu, &menu, &mut layer);
     let issue_menu: dropdown::At<S> = std::rc::Rc::new(|s: &mut S| &mut s.shell().issues.menu);

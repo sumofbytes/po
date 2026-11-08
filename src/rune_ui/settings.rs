@@ -5,7 +5,7 @@ use rune::tok::{TextStyle, type_};
 use rune::{El, TextEdit, Tx, col, el, row, text};
 use rune_kit::{Button, ButtonVariant, ControlSize, IconButton, IconButtonVariant, Kit, SegmentedControl, Switch, TextInput};
 
-use crate::schemes;
+use super::theme_pick;
 use crate::settings::{AgentForm, Form};
 
 /// Where the host keeps the page: handlers reach it through this.
@@ -30,6 +30,8 @@ pub struct AgentRow {
 
 pub struct Page {
     pub theme: TextEdit,
+    /// The theme list: whether it is open, what is typed in it.
+    pub pick: theme_pick::State,
     pub font_family: TextEdit,
     pub font_size: TextEdit,
     pub mono_family: TextEdit,
@@ -41,6 +43,8 @@ pub struct Page {
     pub viewer_left: bool,
     pub agents: Vec<AgentRow>,
     pub error: Option<String>,
+    /// A theme just picked, for the host to show at once, before anything is saved.
+    pub preview: Option<String>,
     /// Set by Save and Close, for the host to take.
     pub outcome: Option<Outcome>,
 }
@@ -52,6 +56,7 @@ impl Page {
         let edit = |text: &str| TextEdit::new(text);
         Self {
             theme: edit(&form.theme),
+            pick: Default::default(),
             font_family: edit(&form.font_family),
             font_size: edit(&form.font_size),
             mono_family: edit(&form.mono_family),
@@ -63,6 +68,7 @@ impl Page {
             viewer_left: form.viewer_left,
             agents: form.agents.into_iter().map(|a| AgentRow { name: edit(&a.name), id: edit(&a.id), command: edit(&a.command), extra: a.extra }).collect(),
             error: None,
+            preview: None,
             outcome: None,
         }
     }
@@ -96,16 +102,6 @@ impl Page {
 
     fn add_agent(&mut self) {
         self.agents.push(AgentRow { name: TextEdit::new(""), id: TextEdit::new(""), command: TextEdit::new(""), extra: Default::default() });
-    }
-
-    /// The bundled schemes the typed theme is part of, unless it already names one.
-    fn theme_matches(&self) -> Vec<&'static str> {
-        let typed = self.theme.text.trim();
-        if typed.is_empty() || schemes::names().any(|name| name.eq_ignore_ascii_case(typed)) {
-            return vec![];
-        }
-        let needle = typed.to_lowercase();
-        schemes::names().filter(|name| name.to_lowercase().contains(&needle)).take(6).collect()
     }
 }
 
@@ -144,19 +140,8 @@ fn switch<S: 'static>(k: &Kit, label: &str, on: bool, flip: fn(&mut Page), page:
 }
 
 /// The page, with its state reached through `page`.
-pub fn view<S: 'static>(p: &Page, k: &Kit, page: At<S>) -> El {
-    let matches = p.theme_matches();
-    let mut theme = col().w_full().child(setting(k, "Theme", "A colour scheme name or theme file", input(k, "Theme", "Rose Pine", &p.theme, |p| &mut p.theme, page)));
-    if !matches.is_empty() {
-        let mut list = col().pb(4.0).items_end();
-        for name in matches {
-            let pick = Button::new(name).variant(ButtonVariant::Ghost).on_press(move |s: &mut S| {
-                page(s).theme = TextEdit::new(name);
-            });
-            list = list.child(pick.build(k));
-        }
-        theme = theme.child(list);
-    }
+pub fn view<S: 'static>(p: &Page, k: &Kit, page: At<S>, layer: &mut Vec<El>) -> El {
+    let theme = setting(k, "Theme", "A colour scheme", theme_pick::view::<S>(k, &p.pick, p.theme.text.trim(), CONTROL_WIDTH, std::rc::Rc::new(move |s: &mut S| &mut page(s).pick), std::rc::Rc::new(move |s: &mut S, name: &str| { let page = page(s); page.theme = TextEdit::new(name); page.preview = Some(name.to_string()); }), layer));
 
     let appearance = col()
         .w_full()

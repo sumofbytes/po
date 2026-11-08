@@ -14,9 +14,39 @@ pub fn load(name: &str) -> Option<Value> {
     convert(name, bundled(name)?)
 }
 
-/// The names of the bundled schemes.
-pub fn names() -> impl Iterator<Item = &'static str> {
+#[cfg(test)]
+fn names() -> impl Iterator<Item = &'static str> {
     BUNDLE.lines().filter_map(|line| line.strip_prefix("@@ "))
+}
+
+/// The bundled schemes with the colours that stand for each: its background, then the red,
+/// green, yellow, blue, magenta and cyan of its palette, as hex. Built once.
+pub fn previews() -> &'static [(&'static str, Vec<String>)] {
+    static CACHE: std::sync::OnceLock<Vec<(&'static str, Vec<String>)>> = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| {
+        BUNDLE
+            .split("@@ ")
+            .skip(1)
+            .filter_map(|section| {
+                let (title, body) = section.split_once('\n')?;
+                let mut colors: Vec<Option<String>> = vec![None; 7];
+                for line in body.lines() {
+                    let Some((key, value)) = line.split_once('=') else { continue };
+                    let (key, value) = (key.trim(), value.trim());
+                    if key == "background" {
+                        colors[0] = parse_hex(value).map(hex);
+                    } else if key == "palette"
+                        && let Some((index, color)) = value.split_once('=')
+                        && let Ok(index) = index.trim().parse::<usize>()
+                        && (1..=6).contains(&index)
+                    {
+                        colors[index] = parse_hex(color).map(hex);
+                    }
+                }
+                Some((title, colors.into_iter().flatten().collect()))
+            })
+            .collect()
+    })
 }
 
 fn bundled(name: &str) -> Option<&'static str> {
