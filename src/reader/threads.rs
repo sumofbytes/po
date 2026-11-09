@@ -1198,13 +1198,9 @@ impl Reader {
                 }
             }
             Event::Update(update) => {
-                if let Some(usage) = state::Usage::from_update(&update) {
-                    self.thread.usage = Some(usage);
-                }
-                if let Some(ix) = self.thread.tool_message(&update) {
+                if let Some(ix) = crate::record(&mut self.thread, &update) {
                     changed = changed.min(ix);
                 }
-                self.thread.update(&update);
             }
             Event::Permission { request, title, options } => {
                 self.alert(window, visible, &format!("Needs your approval: {title}"));
