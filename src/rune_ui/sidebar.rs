@@ -162,17 +162,22 @@ pub fn view<S: 'static>(snapshot: &Snapshot, state: &State, k: &Kit, at: At<S>, 
         .on_input_change(move |s: &mut S, _: &mut Tx| send(Cmd::SideQuery(at(s).query.text.clone())));
     let search = row().w_full().h(ROW).px(7.0).gap(5.0).items_center().child(el().child(rune::icon(&SEARCH, 16.0).color(k.c.icon_muted)).a11y_hidden()).child(field);
 
-    let issues_detail = match snapshot.issues {
-        (0, _) => String::new(),
-        (open, 0) => open.to_string(),
-        (open, late) => format!("{open} · {late} late"),
-    };
+    // The open count is a pill in the 20 point slot every row ends with, so it stands where their icons and times do.
+    let (issues_open, issues_late) = snapshot.issues;
+    let mut issues = SidebarRow::new("Issues").height(ROW).icon(&ISSUES).selected(snapshot.issues_open && !settings_open);
+    if issues_late > 0 {
+        issues = issues.detail(format!("{issues_late} late"));
+    }
+    if issues_open > 0 {
+        let pill = row().h(16.0).min_w(16.0).px(5.0).center().radius(8.0).fill(k.c.layer_03).child(text(issues_open.to_string()).font(k.ty.small_medium).color(k.c.text_muted));
+        issues = issues.status(RowStatus::Other(pill));
+    }
     let pages = col()
         .w_full()
         .child(SidebarRow::new("Home").height(ROW).icon(&HOME).selected(snapshot.home_open && !settings_open).on_select(|_: &mut S, _: &mut Tx| send(Cmd::ToggleHome)).build(k).key("home"))
         .child(SidebarRow::new("New").height(ROW).icon(&NEW).on_select(|_: &mut S, _: &mut Tx| send(Cmd::NewThread)).build(k).key("new-thread"))
         .child(col().w_full().py(4.0).child(search))
-        .child(SidebarRow::new("Issues").height(ROW).icon(&ISSUES).selected(snapshot.issues_open && !settings_open).detail(issues_detail).on_select(|_: &mut S, _: &mut Tx| send(Cmd::ToggleIssues)).build(k).key("issues"));
+        .child(issues.on_select(|_: &mut S, _: &mut Tx| send(Cmd::ToggleIssues)).build(k).key("issues"));
 
     let mut bar = Sidebar::new().label("Projects").inset(12.0).header_gap(4.0).header_padding(12.0, 8.0).row_gap(4.0).header(pages);
 
