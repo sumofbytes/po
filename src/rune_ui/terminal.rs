@@ -180,7 +180,7 @@ fn row(frame: &Frame, kit: &Kit, y: usize) -> El {
             spans.push(Span::new(start, start + ch.len_utf8()).bg(kit.c.text_base, 0.0).color(kit.c.bg_base).mono());
         }
     }
-    text(line).font(FONT).color(c(frame.foreground)).spans(spans).selectable(true)
+    text(line).font(FONT).color(c(frame.foreground)).spans(spans).selectable(true).h(FONT.line_height).min_h(FONT.line_height)
 }
 
 /// The window's copy chord: the modifier key, or Ctrl+Shift+C elsewhere. Paste is handled by the
@@ -194,7 +194,7 @@ pub fn view<S: 'static>(term: &Term, kit: &Kit, at: At<S>) -> El {
     let mut grid = col()
         .key("terminal")
         .w_full()
-        .h_full()
+        .grow(1.0)
         .min_h(0.0)
         .focusable(true)
         .no_focus_ring()
@@ -215,5 +215,5 @@ pub fn view<S: 'static>(term: &Term, kit: &Kit, at: At<S>) -> El {
     for y in 0..term.size.1 as usize {
         grid = grid.child(row(&term.frame, kit, y));
     }
-    col().w_full().h_full().min_h(0.0).fill(kit.c.bg_base).px(12.0).py(8.0).child(grid)
+    col().w_full().h_full().min_h(0.0).fill(kit.c.bg_base).px(12.0).py(8.0).clip_soft(0.0).child(grid)
 }
