@@ -28,6 +28,9 @@ pub enum Cmd {
     ToggleMore(u64),
     OpenThread(u64, u64),
     CloseThread(u64, u64),
+    /// A thread is given a name of the user's own; an empty one gives it back the name made
+    /// from what it was first asked.
+    RenameThread(u64, u64, String),
     AddProject,
     NewThread,
     OpenSettings,

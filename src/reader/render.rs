@@ -399,6 +399,7 @@ impl Reader {
             }
             Cmd::OpenThread(pid, tid) => self.open_thread(pid, tid, window, cx),
             Cmd::CloseThread(pid, tid) => self.close_asked(pid, tid, window, cx),
+            Cmd::RenameThread(pid, tid, name) => self.rename_thread(pid, tid, &name, cx),
             Cmd::AddProject => self.pick_project(window, cx),
             Cmd::NewThread => self.new_blank_thread(window, cx),
             Cmd::OpenSettings => self.toggle_settings(window, cx),
