@@ -1205,8 +1205,8 @@ impl Reader {
                     changed = changed.min(ix);
                 }
                 // A replayed history would otherwise open every file it ever touched.
-                if let Some((path, finished)) = self.thread.update(&update).filter(|_| !self.thread.loading && visible) {
-                    self.follow(&path, finished, window, cx);
+                if !self.thread.loading && visible {
+                    self.thread.update(&update);
                 }
             }
             Event::Permission { request, title, options } => {
@@ -1301,26 +1301,6 @@ impl Reader {
         let thread = &mut self.thread;
         if thread.blank || thread.unstarted() || thread.session.is_none() && !thread.ready && !thread.picking && !thread.loading {
             thread.drop_agent();
-        }
-    }
-
-    /// Shows the file a tool call touches; a finished call reloads it to show the change.
-    pub(crate) fn follow(&mut self, path: &str, finished: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let path = Path::new(path);
-        let relative = path.strip_prefix(&self.project.root).unwrap_or(path);
-        if relative.is_absolute() || !self.project.root.join(relative).is_file() {
-            return;
-        }
-        let relative = relative.to_string_lossy().replace('\\', "/");
-        if !self.project.files.contains(&relative) {
-            self.rescan(cx);
-        }
-        if self.project.current.as_deref() != Some(&relative) || finished {
-            log::info!("agent: showing {relative}");
-            self.open(&relative, window, cx);
-        }
-        if self.mode == Mode::Diff {
-            self.refresh_changes(false, Some(relative), cx);
         }
     }
 

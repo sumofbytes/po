@@ -749,9 +749,8 @@ impl Thread {
         })
     }
 
-    fn update(&mut self, update: &Value) -> Option<(String, bool)> {
+    fn update(&mut self, update: &Value) {
         let text = update["content"]["text"].as_str().unwrap_or_default();
-        let mut known: Option<String> = None;
         match update["sessionUpdate"].as_str() {
             Some("agent_message_chunk") => match self.blocks().last_mut() {
                 Some(Block::Text(body)) => body.push_str(text),
@@ -847,19 +846,12 @@ impl Thread {
                         if let Some(path) = touched(update) {
                             tool.path = Some(path);
                         }
-                        known = tool.path.clone();
                         break;
                     }
                 }
             }
             _ => {}
         }
-        let kind = update["sessionUpdate"].as_str()?;
-        if kind != "tool_call" && kind != "tool_call_update" {
-            return None;
-        }
-        let path = touched(update).or(known)?;
-        Some((path, update["status"].as_str() == Some("completed")))
     }
 }
 
