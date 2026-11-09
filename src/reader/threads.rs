@@ -1194,12 +1194,10 @@ impl Reader {
                     self.thread.status = "ready".into();
                 }
                 self.thread.unread = !visible;
-                // Only when nothing else holds the keyboard: the reader's own focus is where it
-                // rests, so an input (a search, the finder, a rename, the editor) has it otherwise.
-                // Nothing focused, or the conversation holding it (its transcript, a chip, the Stop
-                // button), counts as nothing else: the field is where the next message goes.
-                let resting = true;
-                if visible && resting && !self.settings_open && !self.finder_open && !self.issues_open {
+                // Not while the terminal is shown: it keeps the keyboard it was given, so a finished
+                // turn doesn't pull typing away from the shell. Nor over another input (a search, the
+                // finder, the issues page or settings).
+                if visible && !self.project.terminal_shown && !self.settings_open && !self.finder_open && !self.issues_open {
                     self.focus_draft(window, cx);
                 }
                 // A child's parent is told instead; the desktop hears of it only when nobody
