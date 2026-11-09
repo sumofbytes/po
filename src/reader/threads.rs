@@ -1204,10 +1204,7 @@ impl Reader {
                 if let Some(ix) = self.thread.tool_message(&update) {
                     changed = changed.min(ix);
                 }
-                // A replayed history would otherwise open every file it ever touched.
-                if !self.thread.loading && visible {
-                    self.thread.update(&update);
-                }
+                self.thread.update(&update);
             }
             Event::Permission { request, title, options } => {
                 self.alert(window, visible, &format!("Needs your approval: {title}"));

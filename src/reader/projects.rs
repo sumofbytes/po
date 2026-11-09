@@ -75,20 +75,14 @@ impl Reader {
         cx.notify();
     }
 
-    /// Lists the changed files with `git` off the UI thread, then applies them as
-    /// [`Self::apply_changes`] does and picks `then`, if given.
+    /// Lists the changed files with `git` off the UI thread, then applies them as [`Self::apply_changes`]
+    /// does.
     #[hotpath::measure(impl_type = "Reader")]
-    pub(crate) fn refresh_changes(&mut self, rebuild: bool, then: Option<String>, cx: &mut Context<Self>) {
+    pub(crate) fn refresh_changes(&mut self, rebuild: bool, cx: &mut Context<Self>) {
         let (root, base) = (self.project.root.clone(), self.project.base.clone());
         self.project.listing = Some(cx.spawn(async move |this, cx| {
             let changes = cx.background_executor().spawn(async move { diff::changes(&root, &base) }).await;
-            this.update(cx, |reader, cx| {
-                reader.apply_changes(changes, rebuild, true, cx);
-                if let Some(path) = then.filter(|_| reader.mode == Mode::Diff) {
-                    reader.pick(&path, cx);
-                }
-            })
-            .ok();
+            this.update(cx, |reader, cx| reader.apply_changes(changes, rebuild, true, cx)).ok();
         }));
     }
 
@@ -256,7 +250,7 @@ impl Reader {
         self.watch(None, window, cx);
         if self.mode == Mode::Diff {
             self.apply_changes(self.project.changes.clone(), true, false, cx);
-            self.refresh_changes(true, None, cx);
+            self.refresh_changes(true, cx);
         }
         if let Some(path) = self.project.current.clone() {
             self.open(&path, window, cx);
