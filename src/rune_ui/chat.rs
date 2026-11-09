@@ -288,7 +288,15 @@ fn approve<S: 'static>(k: &Kit, message: usize, at: usize, question: &str, lines
 
 fn block<S: 'static>(k: &Kit, message: usize, at: usize, b: &Block) -> El {
     match b {
-        Block::Markdown { text, .. } => Markdown::new(text.to_string()).selectable(true).build(k),
+        Block::Markdown { text, .. } => Markdown::new(text.to_string())
+            .selectable(true)
+            // Only web and mail links go to the system; a message must not open arbitrary schemes.
+            .on_link_tx(|_: &mut S, url: &str, tx: &mut Tx| {
+                if ["https://", "http://", "mailto:"].iter().any(|p| url.starts_with(p)) {
+                    tx.open_url(url).ok();
+                }
+            })
+            .build(k),
         Block::Thought { index, text, open } => thought::<S>(k, message, *index, text, *open),
         Block::Tool(t) => tool::<S>(k, message, t.index, t),
         Block::Run { index, count: _, calls, failed, phase, folded, task, took, latest, kinds, edits } => {
