@@ -610,23 +610,22 @@ impl Reader {
         let focus = side_open && !agent_open;
         let viewer = |on: bool| if swapped { Control::ViewerLeft(on) } else { Control::Viewer(on) };
         let trail_all = vec![Control::Focus(focus), viewer(side_open)];
-        let trail_focus = {
+        let places = {
             use model::chat::Place;
             let place = self.place();
-            [vec![Control::Files(place == Place::Files), Control::Changes(place == Place::Changes), Control::Terminal(place == Place::Terminal)], trail_all.clone()].concat()
+            vec![Control::Files(place == Place::Files), Control::Changes(place == Place::Changes), Control::Terminal(place == Place::Terminal)]
         };
+        let trail_places = [places.clone(), trail_all.clone()].concat();
         let none = || (vec![], vec![]);
         // (the conversation's controls, the viewer's)
         let (chat, pane) = if self.home_open || self.issues_open {
             (none(), none())
         } else if !side_open {
             if swapped { ((vec![Control::Sidebar(left_open), viewer(side_open)], vec![]), none()) } else { ((vec![Control::Sidebar(left_open)], vec![Control::Files(false), Control::Changes(false), Control::Terminal(false), viewer(side_open)]), none()) }
-        } else if focus {
-            (none(), (vec![Control::Sidebar(left_open)], trail_focus))
-        } else if swapped {
-            (none(), (vec![Control::Sidebar(left_open)], trail_all))
+        } else if focus || swapped {
+            (none(), (vec![Control::Sidebar(left_open)], trail_places))
         } else {
-            ((vec![Control::Sidebar(left_open)], vec![]), (vec![], trail_all))
+            ((vec![Control::Sidebar(left_open)], places), (vec![], trail_all))
         };
         model::sidebar::publish(self.sidebar_snapshot());
         model::chat::publish(self.chat_snapshot().with_chrome(Chrome { glass: false, lead: chat.0, trail: chat.1 }));
