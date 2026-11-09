@@ -13,7 +13,7 @@ pub const TASKS: usize = 8;
 /// The most threads the card of threads lists.
 const THREADS: usize = 5;
 
-/// An open issue that is due today or before, or is being worked on.
+/// An open issue that is due today or before, is being worked on, or is a todo with no due date.
 #[derive(Clone, PartialEq, Debug)]
 pub struct Task {
     pub repo: PathBuf,
@@ -46,7 +46,8 @@ pub struct Pickup {
 /// What the page shows, worked out from the issues and the sidebar.
 #[derive(Clone, PartialEq, Debug, Default)]
 pub struct Model {
-    /// Late first, then due today, then in progress; most urgent first within each.
+    /// Late first, then due today, then in progress, then todos with no due date; most urgent
+    /// first within each.
     pub tasks: Vec<Task>,
     pub due_today: usize,
     pub late: usize,
@@ -79,7 +80,9 @@ pub fn model(overview: &Overview, snapshot: &Snapshot, today: Date) -> Model {
                 day.1 += 1;
             }
             let due_now = issue.due.is_some_and(|due| due <= today);
-            if due_now || issue.status == Status::InProgress {
+            // A todo with no date is waiting on nothing, so it counts as work to pick up.
+            let undated = issue.status == Status::Todo && issue.due.is_none();
+            if due_now || undated || issue.status == Status::InProgress {
                 tasks.push(Task {
                     repo: repo.root.clone(),
                     project: repo.name.clone(),
@@ -93,7 +96,7 @@ pub fn model(overview: &Overview, snapshot: &Snapshot, today: Date) -> Model {
             }
         }
     }
-    let bucket = |task: &Task| if task.late(today) { 0 } else if task.due == Some(today) { 1 } else { 2 };
+    let bucket = |task: &Task| if task.late(today) { 0 } else if task.due == Some(today) { 1 } else if task.status == Status::InProgress { 2 } else { 3 };
     tasks.sort_by(|a, b| (bucket(a), rank(a.priority), a.due, &a.project, a.number).cmp(&(bucket(b), rank(b.priority), b.due, &b.project, b.number)));
     let due_today = tasks.iter().filter(|task| task.due == Some(today)).count();
     let late = tasks.iter().filter(|task| task.late(today)).count();
@@ -164,10 +167,12 @@ mod tests {
         add("due", Status::Todo, Priority::Low, Some(day));
         add("late", Status::Todo, Priority::None, Some(day.plus(-2)));
         add("done", Status::Done, Priority::High, Some(day));
+        add("undated", Status::Todo, Priority::Urgent, None);
+        add("shelved", Status::Backlog, Priority::Urgent, None);
         let overview = Overview { checkouts: Default::default(), repos: vec![RepoView { root: "/r/po".into(), name: "po".into(), tracker, problems: vec![] }] };
         let model = model(&overview, &Snapshot::default(), day);
         let titles: Vec<&str> = model.tasks.iter().map(|task| task.title.as_str()).collect();
-        assert_eq!(titles, ["late", "due", "started"]);
+        assert_eq!(titles, ["late", "due", "started", "undated"]);
         assert_eq!((model.due_today, model.late, model.in_progress), (1, 1, 1));
         // The week of Monday Nov 2: today is its fourth day.
         assert_eq!(model.week.len(), 7);

@@ -1,5 +1,5 @@
-//! The Home page, where Po opens: what is due today and what is late across every open project,
-//! and the threads to pick up. Counterpart of `src/nsh/home.rs`; the data is
+//! The Home page, where Po opens: what is due today, what is late and what is ready to pick up
+//! across every open project, and the threads to pick up. Counterpart of `src/nsh/home.rs`; the data is
 //! [`crate::model::home`]'s.
 use rune::{El, ScrollSpec, col, row, text};
 use rune_kit::{Button, ButtonVariant, ControlSize, Kit};
