@@ -26,6 +26,8 @@ pub struct State {
     pub query: TextEdit,
     /// A close the user pressed and has not yet confirmed in the dialog.
     pub confirm: Option<Confirm>,
+    /// A thread's name being typed.
+    pub rename: super::rename::Rename,
 }
 
 /// What the confirmation dialog asks about.
@@ -41,7 +43,7 @@ pub struct Confirm {
 
 impl Default for State {
     fn default() -> Self {
-        Self { query: TextEdit::new(""), confirm: None }
+        Self { query: TextEdit::new(""), confirm: None, rename: Default::default() }
     }
 }
 
@@ -75,12 +77,18 @@ fn mark(k: &Kit, mark: Mark) -> El {
     row().size(14.0, 14.0).center().child(shown)
 }
 
-fn thread_row<S: 'static>(k: &Kit, t: &Thread, subtitle: Option<&str>, at: At<S>) -> El {
+fn thread_row<S: 'static>(k: &Kit, t: &Thread, subtitle: Option<&str>, at: At<S>, rename: &super::rename::Rename, rename_at: super::rename::At<S>) -> El {
     let (pid, tid) = (t.project, t.id);
+    if rename.open_at((pid, tid), super::rename::Place::Sidebar) {
+        let line = row().key(format!("thread-{pid}-{tid}")).w_full().h(ROW).pl(11.0).pr(8.0).gap(8.0).items_center().radius(k.radius.md).fill(k.c.layer_02).child(mark(k, t.mark)).child(super::rename::input::<S>(k, rename, rename_at, k.ty.ui));
+        return line;
+    }
     let (name, t_loses) = (t.name.clone(), t.closing);
+    let rename_name = t.name.clone();
     let mut row = SidebarRow::new(t.label.clone())
         .selected(t.selected)
         .on_select(move |_: &mut S, _: &mut Tx| send(Cmd::OpenThread(pid, tid)))
+        .on_double_click(move |s: &mut S, _: &mut Tx| rename_at(s).start((pid, tid), &rename_name, super::rename::Place::Sidebar))
         .on_close(move |s: &mut S, _: &mut Tx| at(s).confirm = Some(Confirm { thread: Some(tid), project: pid, name: name.clone(), loses_work: t_loses }));
     row = row.avatar(mark(k, t.mark));
     if let Some(ago) = &t.ago {
@@ -97,7 +105,7 @@ fn thread_row<S: 'static>(k: &Kit, t: &Thread, subtitle: Option<&str>, at: At<S>
 
 /// A project: a header that toggles it (larger title, no disclosure glyph, the kit's header
 /// hardcodes both) over its thread rows.
-fn project_section<S: 'static>(k: &Kit, p: &Project, at: At<S>) -> El {
+fn project_section<S: 'static>(k: &Kit, p: &Project, at: At<S>, rename: &super::rename::Rename, rename_at: super::rename::At<S>) -> El {
     let pid = p.id;
     let pname = p.name.clone();
     let new_thread = plus::<S>(k, "New thread", move |_| send(Cmd::StartThread(pid)));
@@ -123,7 +131,7 @@ fn project_section<S: 'static>(k: &Kit, p: &Project, at: At<S>) -> El {
     let mut section = col().key(format!("project-{pid}")).role("group").label(p.name.clone()).w_full().pt(4.0).gap(0.0).motion(k.motion.disclosure).child(header);
     if !p.collapsed {
         for t in &p.threads {
-            section = section.child(thread_row::<S>(k, t, None, at));
+            section = section.child(thread_row::<S>(k, t, None, at, rename, rename_at));
         }
         if let Some((expanded, hidden)) = p.fold {
             let label = if expanded { "Show less".to_string() } else { format!("{hidden} more") };
@@ -147,7 +155,7 @@ const BAND: f32 = super::header::BAND;
 pub const GUTTER: f32 = 20.0;
 
 /// The sidebar for `snapshot`, with its filter in the host's state through `at`.
-pub fn view<S: 'static>(snapshot: &Snapshot, state: &State, k: &Kit, at: At<S>, settings_open: bool) -> El {
+pub fn view<S: 'static>(snapshot: &Snapshot, state: &State, k: &Kit, at: At<S>, rename_at: super::rename::At<S>, settings_open: bool) -> El {
     // The kit's field hardcodes a faint placeholder; the rows' own ink is what this one wants.
     let field = rune::text_input(&state.query, k.ty.ui_compact)
         .single_line()
@@ -204,12 +212,12 @@ pub fn view<S: 'static>(snapshot: &Snapshot, state: &State, k: &Kit, at: At<S>, 
     if !snapshot.waiting.is_empty() {
         let mut needs = SidebarSection::new("Needs you").key("needs-you").count(snapshot.waiting.len());
         for w in &snapshot.waiting {
-            needs = needs.row(thread_row::<S>(k, &w.thread, Some(&w.project), at));
+            needs = needs.row(thread_row::<S>(k, &w.thread, Some(&w.project), at, &state.rename, rename_at));
         }
         bar = bar.section(needs);
     }
     for p in &snapshot.projects {
-        bar = bar.child(project_section::<S>(k, p, at));
+        bar = bar.child(project_section::<S>(k, p, at, &state.rename, rename_at));
     }
 
     let mut footer = vec![];
@@ -276,4 +284,42 @@ pub fn confirm_dialog<S: 'static>(k: &Kit, state: &State, at: At<S>, layer: &mut
             .child(card)
             .on_press(move |s: &mut S| at(s).confirm = None),
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rune::{Cx, Env, Runtime};
+
+    struct App {
+        side: State,
+        snap: Snapshot,
+    }
+    fn view(s: &App, _: &mut Cx<App>) -> El {
+        let kit = Kit::neutral(true);
+        rune_kit::root(super::view::<App>(&s.snap, &s.side, &kit, |s| &mut s.side, |s| &mut s.side.rename, false), vec![])
+    }
+
+    #[test]
+    fn a_double_press_on_a_thread_keeps_its_line_open() {
+        let thread = Thread { project: 1, id: 2, label: "Fix it".into(), name: "Fix it".into(), mark: Mark::Idle, selected: false, controlled: false, ago: None, closing: false };
+        let project = Project { id: 1, name: "po".into(), active: true, collapsed: false, closable: false, threads: vec![thread], fold: None };
+        let snap = Snapshot { projects: vec![project], ..Default::default() };
+        let mut rt = Runtime::new(App { side: State::default(), snap }, view, (300.0, 600.0), Env::new(true, 1.0));
+        rt.frame(0.0);
+        let (x, y) = rt.find("thread-1-2").expect("row");
+        for _ in 0..2 {
+            rt.pointer_down(x, y);
+            rt.pointer_up(x, y);
+            rt.frame(1.0 / 60.0);
+        }
+        assert!(rt.state.side.rename.editing.is_some(), "the line opened");
+        for _ in 0..5 {
+            rt.update(|s, _| {
+                s.side.rename.settle();
+            });
+            rt.frame(1.0 / 60.0);
+        }
+        assert!(rt.state.side.rename.editing.is_some(), "and stayed");
+    }
 }
