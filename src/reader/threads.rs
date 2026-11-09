@@ -952,7 +952,12 @@ impl Reader {
     /// Tells the desktop about `what` the thread on screen did, unless that is already in view.
     pub(crate) fn alert(&self, window: &Window, visible: bool, what: &str) {
         if self.notifications && !(visible && window.is_window_active()) {
-            alert::send(&format!("{} · {}", self.project.name(), self.thread.title()), what);
+            let (project, thread) = (self.project_id, self.thread.id);
+            alert::send(&format!("{} · {}", self.project.name(), self.thread.title()), what, move |token| {
+                // In this order: raising the window is what wakes it to run the command.
+                model::bus::send(model::bus::Cmd::OpenThread(project, thread));
+                crate::app::raise(token);
+            });
         }
     }
 
