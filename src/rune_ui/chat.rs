@@ -153,9 +153,9 @@ pub fn lightbox<S: 'static>(k: &Kit, state: &State, at: At<S>, layer: &mut Vec<E
 }
 
 fn thought<S: 'static>(k: &Kit, message: usize, at: usize, body: &str, open: bool) -> El {
-    let head = row().grow(1.0).min_w(0.0).child(text(if open { "Thought".to_string() } else { gist(body) }).font(SMALL).color(k.c.text_muted));
+    let head = row().grow(1.0).min_w(0.0).child(text(if open { "Thought".to_string() } else { gist(body) }).font(SMALL).color(k.c.text_muted).truncate());
     let line = pressable::<S>(k, format!("thought-{message}-{at}"), head, move || tell(Cmd::ToggleThought { message, block: at }));
-    if open { col().w_full().child(line).child(col().child(text(body.to_string()).font(SMALL).color(k.c.text_muted).spans(vec![Span::new(0, body.len()).italic()]))) } else { line }
+    if open { col().w_full().child(line).child(col().w_full().min_w(0.0).child(text(body.to_string()).font(SMALL).color(k.c.text_muted).spans(vec![Span::new(0, body.len()).italic()]).wrap())) } else { line }
 }
 
 fn tool<S: 'static>(k: &Kit, message: usize, at: usize, t: &Tool) -> El {
@@ -238,7 +238,7 @@ fn plan(k: &Kit, entries: &[Entry]) -> El {
     let mut list = col().w_full().gap(6.0).py(4.0);
     for entry in entries {
         let color = if entry.phase == Phase::Done { k.c.text_muted } else { k.c.text_base };
-        list = list.child(row().items_center().gap(4.0).child(glyph(k, entry.phase)).child(text(entry.text.clone()).font(BODY).color(color)));
+        list = list.child(row().items_center().gap(4.0).child(glyph(k, entry.phase)).child(row().grow(1.0).min_w(0.0).child(text(entry.text.clone()).font(BODY).color(color).wrap())));
     }
     list
 }
@@ -271,7 +271,7 @@ fn approve<S: 'static>(k: &Kit, message: usize, at: usize, question: &str, lines
     if !lines.is_empty() {
         let mut body = col().w_full().min_w(0.0).px(12.0).gap(2.0);
         for line in lines {
-            body = body.child(text(line.clone()).font(MONO).color(k.c.text_base));
+            body = body.child(text(line.clone()).font(MONO).color(k.c.text_base).wrap_anywhere());
         }
         c = c.child(body);
     }
