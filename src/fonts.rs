@@ -25,6 +25,7 @@ pub const BUNDLED: [&[u8]; 10] = [
 ];
 pub const BUNDLED_UI_FAMILY: &str = "Geist";
 pub const BUNDLED_MONO_FAMILY: &str = "Geist Mono";
+
 /// The UI size the type scale is measured from: a `font.size` of this leaves every style as drawn.
 pub const BASE_UI_SIZE: f32 = 14.0;
 /// The same for `font.mono_size`.
