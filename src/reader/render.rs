@@ -140,7 +140,6 @@ impl Reader {
             .collect();
 
         side::Snapshot {
-            glass: false,
             waiting,
             projects,
             suggestions,
@@ -223,7 +222,6 @@ impl Reader {
         });
         let grant = self.grants.get(&thread.id).copied().unwrap_or_else(command::Grant::initial);
         chat::Snapshot {
-            glass: false,
             title: capitalized(thread.title()),
             thread: (self.project_id, thread.id),
             lead: vec![],
@@ -498,7 +496,7 @@ impl Reader {
             (Some(path), None) => (path.clone(), Body::NoChanges),
             (Some(path), Some((old, new))) => (path.clone(), Body::Versions { path: path.clone(), old: old.clone(), new: new.clone() }),
         };
-        Snapshot { glass: false, title, lead: vec![], trail: vec![], split: self.split, counts: project.counts, body }
+        Snapshot { title, lead: vec![], trail: vec![], split: self.split, counts: project.counts, body }
     }
 
     /// The open file in the viewer, drawn by NSH from what [`Self::source_snapshot`] publishes.
@@ -515,7 +513,6 @@ impl Reader {
             (None, None) => Body::Hint(self.pick_hint("a file")),
         };
         Snapshot {
-            glass: false,
             title: current.map_or_else(|| "No file open".to_string(), str::to_string),
             lead: vec![],
             trail: vec![],
@@ -628,11 +625,11 @@ impl Reader {
             ((vec![Control::Sidebar(left_open)], places), (vec![], trail_all))
         };
         model::sidebar::publish(self.sidebar_snapshot());
-        model::chat::publish(self.chat_snapshot().with_chrome(Chrome { glass: false, lead: chat.0, trail: chat.1 }));
+        model::chat::publish(self.chat_snapshot().with_chrome(Chrome { lead: chat.0, trail: chat.1 }));
         if self.home_open || self.issues_open || !side_open {
             return;
         }
-        let chrome = |(lead, trail): (Vec<Control>, Vec<Control>)| Chrome { glass: false, lead, trail };
+        let chrome = |(lead, trail): (Vec<Control>, Vec<Control>)| Chrome { lead, trail };
         let has_tabs = self.publish_tabs(pane.clone());
         // The window's own controls go on the tabs while there are any, and on the pane otherwise.
         let controls = if has_tabs { none() } else { pane.clone() };

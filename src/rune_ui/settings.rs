@@ -39,7 +39,6 @@ pub struct Page {
     pub idle_minutes: TextEdit,
     pub max_live: TextEdit,
     pub notifications: bool,
-    pub glass: bool,
     pub viewer_left: bool,
     pub agents: Vec<AgentRow>,
     pub error: Option<String>,
@@ -64,7 +63,6 @@ impl Page {
             idle_minutes: edit(&form.idle_minutes),
             max_live: edit(&form.max_live),
             notifications: form.notifications,
-            glass: form.glass,
             viewer_left: form.viewer_left,
             agents: form.agents.into_iter().map(|a| AgentRow { name: edit(&a.name), id: edit(&a.id), command: edit(&a.command), extra: a.extra }).collect(),
             error: None,
@@ -83,7 +81,6 @@ impl Page {
             idle_minutes: self.idle_minutes.text.clone(),
             max_live: self.max_live.text.clone(),
             notifications: self.notifications,
-            glass: self.glass,
             viewer_left: self.viewer_left,
             agents: self.agents.iter().map(|a| AgentForm { id: a.id.text.clone(), name: a.name.text.clone(), command: a.command.text.clone(), extra: a.extra.clone() }).collect(),
         }
@@ -146,8 +143,6 @@ pub fn view<S: 'static>(p: &Page, k: &Kit, page: At<S>, layer: &mut Vec<El>) -> 
     let appearance = col()
         .w_full()
         .child(theme)
-        .child(divider(k))
-        .child(setting(k, "Glass", "Translucent panes over the desktop", switch(k, "Glass", p.glass, |p| p.glass = !p.glass, page)))
         .child(divider(k))
         .child(setting(k, "UI font", "Names tried in order, comma separated", input(k, "UI font", crate::fonts::BUNDLED_UI_FAMILY, &p.font_family, |p| &mut p.font_family, page)))
         .child(divider(k))
