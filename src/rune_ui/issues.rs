@@ -6,12 +6,11 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use rune::tok::TextStyle;
 use rune::{El, Icon, Key, KeyEvent, ScrollSpec, TextEdit, Tx, col, icon, row, text};
 use rune_kit::{Button, ButtonVariant, IconButton, IconButtonVariant, Kit, TextArea, TextInput};
 
 use super::dropdown::{self, Line};
-use super::work::{BODY, HEADING, SMALL, muted, priority_tint, status_glyph, status_tint};
+use super::work::{body_style, heading_style, small_style, muted, priority_tint, status_glyph, status_tint};
 use crate::date::{Date, due_label, parse_due, today};
 use crate::issues::query::{Filter, Group, Scope, parse_quick, sections_across};
 use crate::issues::shared::{self, Nav, Overview, Target};
@@ -321,7 +320,7 @@ static SEARCH_ICON: Icon = Icon { name: "po-issue-search", view: 16.0, body: r#"
 /// A choice of a field on an issue's page: a pill that is filled while it is the one set.
 fn chip<S: 'static>(k: &Kit, key: String, label: String, on: bool, f: impl Fn(&mut S) + 'static) -> El {
     let c = if on { k.c.text_base } else { k.c.text_muted };
-    let pill = row().key(key).px(10.0).py(4.0).radius(12.0).child(text(label).font(SMALL).color(c)).on_press(f);
+    let pill = row().key(key).px(10.0).py(4.0).radius(12.0).child(text(label).font(small_style()).color(c)).on_press(f);
     k.interactive(if on { pill.fill(k.c.layer_03) } else { pill })
 }
 
@@ -357,19 +356,19 @@ fn menu_face(k: &Kit, lead: Option<&'static Icon>, label: String) -> El {
         .border(1.0, k.c.border_base)
         .fill(k.c.layer_01)
         .children(lead.map(|i| icon(i, 14.0).color(k.c.icon_muted)))
-        .child(text(label).font(BODY).color(k.c.text_base))
+        .child(text(label).font(body_style()).color(k.c.text_base))
         .child(icon(&dropdown::CHEVRON, 12.0).color(k.c.text_muted))
 }
 
 /// A thing the page is narrowed by, with a cross to take it off.
 fn set_pill<S: 'static>(k: &Kit, key: String, what: String, remove: impl Fn(&mut S) + 'static) -> El {
-    k.interactive(row().key(key).items_center().gap(4.0).pl(10.0).pr(6.0).py(2.0).radius(10.0).fill(k.c.layer_03).child(text(what).font(SMALL).color(k.c.text_base)).child(icon(k.glyph.close, 12.0).color(k.c.text_muted)).on_press(remove))
+    k.interactive(row().key(key).items_center().gap(4.0).pl(10.0).pr(6.0).py(2.0).radius(10.0).fill(k.c.layer_03).child(text(what).font(small_style()).color(k.c.text_base)).child(icon(k.glyph.close, 12.0).color(k.c.text_muted)).on_press(remove))
 }
 
 /// One of the page's views, as a pill with its icon.
 fn tab<S: 'static>(k: &Kit, label: &'static str, lead: &'static Icon, on: bool, go: impl Fn(&mut S) + 'static) -> El {
     let ink = if on { k.c.text_base } else { k.c.text_muted };
-    let pill = row().key(format!("tab-{label}")).items_center().gap(6.0).px(12.0).py(4.0).radius(14.0).child(icon(lead, 14.0).color(k.c.icon_muted)).child(text(label).font(BODY).color(ink)).on_press(go);
+    let pill = row().key(format!("tab-{label}")).items_center().gap(6.0).px(12.0).py(4.0).radius(14.0).child(icon(lead, 14.0).color(k.c.icon_muted)).child(text(label).font(body_style()).color(ink)).on_press(go);
     k.interactive(if on { pill.fill(k.c.layer_03) } else { pill })
 }
 
@@ -387,7 +386,7 @@ fn header<S: 'static>(k: &Kit, state: &State, at: At<S>) -> El {
         .gap(4.0)
         .px(24.0)
         .py(12.0)
-        .child(text("Issues").font(TextStyle::new(20.0, 600.0)).color(k.c.text_base).mr(16.0))
+        .child(text("Issues").font(crate::fonts::ui(20.0, 600.0)).color(k.c.text_base).mr(16.0))
         .child(tab::<S>(k, "List", &LIST_ICON, list, go(Page::List)))
         .child(tab::<S>(k, "Board", &BOARD_ICON, board, go(Page::Board)))
         .child(tab::<S>(k, "Epics", &EPICS_ICON, epics, go(Page::Epics)))
@@ -571,10 +570,10 @@ fn epic_detail<S: 'static>(k: &Kit, state: &State, overview: &Overview, root: &P
         let p = view.tracker.milestone_progress(id, &milestone.id);
         let key = format!("milestone-{id}-{}", milestone.id);
         let (r2, id2, mid) = (root.clone(), id.to_string(), milestone.id.clone());
-        let remove = k.interactive(row().key(key).px(6.0).radius(6.0).child(text("×").font(SMALL).color(k.c.text_muted)).on_press(move |_: &mut S| {
+        let remove = k.interactive(row().key(key).px(6.0).radius(6.0).child(text("×").font(small_style()).color(k.c.text_muted)).on_press(move |_: &mut S| {
             shared::change_repo(&r2, |tracker, now| tracker.update_epic(&id2, now, |epic| epic.milestones.retain(|m| m.id != *mid.as_str())));
         }));
-        milestones = milestones.child(row().w_full().items_center().gap(8.0).child(text(milestone.name.clone()).font(BODY).color(k.c.text_base).grow(1.0)).child(progress(p)).child(muted(k, format!("{}/{}", p.done, p.all))).child(muted(k, milestone.target.map(|t| due_label(t, today())).unwrap_or_default())).child(remove));
+        milestones = milestones.child(row().w_full().items_center().gap(8.0).child(text(milestone.name.clone()).font(body_style()).color(k.c.text_base).grow(1.0)).child(progress(p)).child(muted(k, format!("{}/{}", p.done, p.all))).child(muted(k, milestone.target.map(|t| due_label(t, today())).unwrap_or_default())).child(remove));
     }
     let milestone_name = TextInput::new(&state.milestone_name).label("New milestone").placeholder("New milestone").width(None).on_edit(move |s: &mut S| &mut at(s).milestone_name).on_change(dirty).build(k);
     let milestone_due = TextInput::new(&state.milestone_due).label("Done by").placeholder("Due: fri, nov 2...").width(Some(220.0)).on_edit(move |s: &mut S| &mut at(s).milestone_due).on_change(dirty).build(k);
@@ -645,7 +644,7 @@ fn add_box<S: 'static>(k: &Kit, state: &State, at: At<S>, overview: &Overview) -
                 Line::call::<S>(repo.name.clone(), Some(&repo.root) == target.as_ref(), move |s| at(s).add_to = Some(root.clone()))
             })
             .collect();
-        let face = row().items_center().gap(6.0).px(8.0).py(2.0).radius(10.0).fill(k.c.layer_02).child(row().w(8.0).h(8.0).radius(4.0).fill(k.c.icon_accent)).child(text(name).font(SMALL).color(k.c.text_base)).child(icon(&dropdown::CHEVRON, 12.0).color(k.c.text_muted));
+        let face = row().items_center().gap(6.0).px(8.0).py(2.0).radius(10.0).fill(k.c.layer_02).child(row().w(8.0).h(8.0).radius(4.0).fill(k.c.icon_accent)).child(text(name).font(small_style()).color(k.c.text_base)).child(icon(&dropdown::CHEVRON, 12.0).color(k.c.text_muted));
         foot = foot.child(dropdown::opens::<S>(k, "issues-target", face, lines, vec![], menu_at::<S>(at)));
     }
     let said = parse_due(&state.new_due.text, today());
@@ -663,7 +662,7 @@ fn add_box<S: 'static>(k: &Kit, state: &State, at: At<S>, overview: &Overview) -
         .fill(k.c.layer_02)
         .child(icon(&CALENDAR_ICON, 12.0).color(k.c.icon_muted))
         .child(row().w(150.0).child(bare::<S>(k, &state.new_due, "Due", "Due: tomorrow, fri, nov 2", at, |s| &mut s.new_due).on_submit(move |s: &mut S, _: &mut Tx| at(s).add(&for_button))))
-        .children(hint.map(|(note, tint)| text(note).font(SMALL).color(tint)));
+        .children(hint.map(|(note, tint)| text(note).font(small_style()).color(tint)));
     foot = foot.child(due);
     col().w_full().radius(10.0).border(1.0, k.c.border_base).fill(k.c.layer_01).child(top).child(foot)
 }
@@ -687,15 +686,15 @@ fn issue_line<S: 'static>(k: &Kit, overview: &Overview, repo: usize, number: u64
         .gap(12.0)
         .px(16.0)
         .h(40.0)
-        .child(k.interactive(row().key(format!("st-{repo}-{number}")).w(20.0).child(text(status_glyph(status)).font(BODY).color(status_tint(k, status))).on_press(move |_: &mut S| set_status(&root, number, next_status(status)))))
+        .child(k.interactive(row().key(format!("st-{repo}-{number}")).w(20.0).child(text(status_glyph(status)).font(body_style()).color(status_tint(k, status))).on_press(move |_: &mut S| set_status(&root, number, next_status(status)))))
         .child(row().w(3.0).h(14.0).radius(2.0).fill(priority_tint(k, issue.priority)))
         .child(row().w(56.0).child(muted(k, key)))
-        .child(row().grow(1.0).min_w(0.0).child(text(issue.title.clone()).font(BODY).color(if closed { k.c.text_muted } else { k.c.text_base }).truncate()));
+        .child(row().grow(1.0).min_w(0.0).child(text(issue.title.clone()).font(body_style()).color(if closed { k.c.text_muted } else { k.c.text_base }).truncate()));
     for label in &issue.labels {
         line = line.child(muted(k, format!("#{label}")));
     }
     if let Some(due) = issue.due {
-        line = line.child(text(due_label(due, today())).font(SMALL).color(due_tint));
+        line = line.child(text(due_label(due, today())).font(small_style()).color(due_tint));
     }
     if show_repo {
         line = line.child(muted(k, view.name.clone()));
@@ -725,7 +724,7 @@ fn list<S: 'static>(k: &Kit, state: &State, overview: &Overview, at: At<S>) -> E
     }
     for section in sections {
         if !section.title.is_empty() {
-            out = out.child(row().items_center().gap(8.0).mt(12.0).px(8.0).child(text(section.title.clone()).font(HEADING).color(k.c.text_base)).child(muted(k, section.issues.len().to_string())));
+            out = out.child(row().items_center().gap(8.0).mt(12.0).px(8.0).child(text(section.title.clone()).font(heading_style()).color(k.c.text_base)).child(muted(k, section.issues.len().to_string())));
         }
         // One card for the section, its issues divided by rules.
         let mut block = col().w_full().radius(10.0).border(1.0, k.c.border_muted).fill(k.c.layer_01);
@@ -761,7 +760,7 @@ fn board<S: 'static>(k: &Kit, state: &State, overview: &Overview, at: At<S>) -> 
             .padding(8.0)
             .radius(8.0)
             .fill(k.c.layer_02)
-            .child(text(format!("{}  {}", status.name(), issues.len())).font(HEADING).color(status_tint(k, status)));
+            .child(text(format!("{}  {}", status.name(), issues.len())).font(heading_style()).color(status_tint(k, status)));
         for (repo, number) in issues {
             let Some(view) = overview.repos.get(repo) else { continue };
             let Some(issue) = view.tracker.issue(number) else { continue };
@@ -779,7 +778,7 @@ fn board<S: 'static>(k: &Kit, state: &State, overview: &Overview, at: At<S>) -> 
                             .key(format!("card-{repo}-{number}"))
                             .w_full()
                             .child(muted(k, view.tracker.key(number)))
-                            .child(text(issue.title.clone()).font(BODY).color(k.c.text_base).wrap())
+                            .child(text(issue.title.clone()).font(body_style()).color(k.c.text_base).wrap())
                             .on_press(move |s: &mut S| {
                                 let _ = at(s);
                                 send(Cmd::OpenIssue(open.clone(), number));
@@ -817,7 +816,7 @@ fn epics<S: 'static>(k: &Kit, overview: &Overview, at: At<S>) -> El {
                     .padding(12.0)
                     .radius(8.0)
                     .border(1.0, k.c.border_base)
-                    .child(row().w_full().items_center().gap(8.0).child(row().grow(1.0).child(text(epic.name.clone()).font(HEADING).color(k.c.text_base))).child(muted(k, name.clone())).child(muted(k, epic.status.name())))
+                    .child(row().w_full().items_center().gap(8.0).child(row().grow(1.0).child(text(epic.name.clone()).font(heading_style()).color(k.c.text_base))).child(muted(k, name.clone())).child(muted(k, epic.status.name())))
                     .child(bar)
                     .child(muted(k, format!("{} of {} done · {} in progress", p.done, p.all, p.started)))
                     .on_press(move |s: &mut S| {
@@ -936,7 +935,7 @@ fn detail<S: 'static>(k: &Kit, state: &State, overview: &Overview, root: &PathBu
     if !children.is_empty() {
         let mut subs = col().gap(4.0);
         for c in children {
-            subs = subs.child(row().gap(8.0).child(text(status_glyph(c.status)).font(SMALL).color(status_tint(k, c.status))).child(muted(k, view.tracker.key(c.number))).child(text(c.title.clone()).font(BODY).color(k.c.text_base)));
+            subs = subs.child(row().gap(8.0).child(text(status_glyph(c.status)).font(small_style()).color(status_tint(k, c.status))).child(muted(k, view.tracker.key(c.number))).child(text(c.title.clone()).font(body_style()).color(k.c.text_base)));
         }
         page = page.child(property("Sub-issues", subs));
     }
@@ -960,7 +959,7 @@ pub fn view<S: 'static>(overview: &Overview, state: &State, k: &Kit, at: At<S>) 
             out = out.child(toolbar::<S>(k, state, at, overview));
             for repo in &overview.repos {
                 for problem in &repo.problems {
-                    out = out.child(text(format!("{}: {problem}", repo.name)).font(SMALL).color(k.c.warning.fg));
+                    out = out.child(text(format!("{}: {problem}", repo.name)).font(small_style()).color(k.c.warning.fg));
                 }
             }
             if overview.repos.is_empty() {

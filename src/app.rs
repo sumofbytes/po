@@ -101,6 +101,7 @@ fn named_kit(name: &str) -> Kit {
 
 fn init() -> State {
     let settings = config::load();
+    crate::fonts::set_sizes(&settings);
     let kit = theme_kit(&settings);
     State { kit, shell: Shell::default(), live: None, terminal_was_shown: false, widths_applied: false, bench_filled: false }
 }
@@ -171,7 +172,10 @@ fn poll(s: &mut State, now: f64, tx: &mut Tx) -> bool {
         s.kit = named_kit(&name);
     }
     if settled {
-        s.kit = theme_kit(&config::load());
+        // What is on disk now: a save's sizes and theme, or, after a close, the ones from before.
+        let settings = config::load();
+        crate::fonts::set_sizes(&settings);
+        s.kit = theme_kit(&settings);
     }
     if recolored {
         core.reader.term_theme = terminal_colors(&s.kit);

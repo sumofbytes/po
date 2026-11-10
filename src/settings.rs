@@ -192,4 +192,41 @@ mod tests {
         assert_eq!(json_number(14.), json!(14));
         assert_eq!(json_number(13.5), json!(13.5));
     }
+
+    fn blank() -> Form {
+        Form { theme: String::new(), font_family: String::new(), font_size: String::new(), mono_family: String::new(), mono_size: String::new(), idle_minutes: String::new(), max_live: String::new(), notifications: true, viewer_left: false, agents: vec![] }
+    }
+
+    fn saved(form: &Form, mut config: Map<String, Value>) -> Map<String, Value> {
+        form.collect().expect("the fields are valid")(&mut config);
+        config
+    }
+
+    #[test]
+    fn saving_writes_the_sizes_and_keeps_what_the_page_has_no_field_for() {
+        let mut form = blank();
+        (form.font_size, form.mono_size, form.font_family) = ("15".into(), "12.5".into(), "A, B".into());
+        let before = json!({ "glass": true, "font": { "transcript_size": 12 }, "mcp_servers": { "x": {} } });
+        let config = saved(&form, before.as_object().unwrap().clone());
+        assert_eq!(config["font"], json!({ "transcript_size": 12, "size": 15, "mono_size": 12.5, "family": ["A", "B"] }));
+        assert_eq!(config["glass"], json!(true), "an option the page doesn't have is left as it was");
+        assert!(config.contains_key("mcp_servers"));
+        assert_eq!(config["viewer_position"], "right");
+    }
+
+    #[test]
+    fn an_empty_field_puts_an_option_back_to_its_default() {
+        let before = json!({ "font": { "size": 15 }, "idle_minutes": 5 });
+        let config = saved(&blank(), before.as_object().unwrap().clone());
+        assert!(!config.contains_key("font") && !config.contains_key("idle_minutes"));
+    }
+
+    #[test]
+    fn sizes_outside_the_range_are_refused() {
+        let mut form = blank();
+        form.font_size = "7".into();
+        assert!(form.collect().is_err());
+        form.font_size = "49".into();
+        assert!(form.collect().is_err());
+    }
 }

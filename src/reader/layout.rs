@@ -520,7 +520,8 @@ impl Reader {
     }
 
     /// Takes up the options of `config.json` that are read once, after the settings page saved
-    /// them. The theme and fonts are reapplied by the config watcher.
+    /// them. The theme and the font sizes are reapplied by the app's `poll`; font names are read at
+    /// start.
     pub(crate) fn apply_settings(&mut self, cx: &mut Context<Self>) {
         let settings = config::load();
         self.notifications = settings["notifications"].as_bool().unwrap_or(true);

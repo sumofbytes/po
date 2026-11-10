@@ -1,7 +1,7 @@
 //! The settings page on Rune: the options of `config.json` as fields, written back on Save. What
 //! the fields hold and how they are written is [`crate::settings`]; this is the screen, and the
 //! Rune counterpart of `src/nsh/settings.rs`.
-use rune::tok::{TextStyle, type_};
+use rune::tok::TextStyle;
 use rune::{El, TextEdit, Tx, col, el, row, text};
 use rune_kit::{Button, ButtonVariant, ControlSize, IconButton, IconButtonVariant, Kit, SegmentedControl, Switch, TextInput};
 
@@ -102,15 +102,15 @@ impl Page {
     }
 }
 
-const TITLE: TextStyle = TextStyle::new(18.0, 600.0);
-const BODY: TextStyle = TextStyle::new(13.0, 400.0);
-const CAPTION: TextStyle = TextStyle::new(12.0, 400.0);
-const EYEBROW: TextStyle = TextStyle::new(11.0, 500.0);
+fn title_style() -> TextStyle { crate::fonts::ui(18.0, 600.0) }
+fn body_style() -> TextStyle { crate::fonts::ui(13.0, 400.0) }
+fn caption_style() -> TextStyle { crate::fonts::ui(12.0, 400.0) }
+fn eyebrow_style() -> TextStyle { crate::fonts::ui(11.0, 500.0) }
 const PAD: f32 = 32.0;
 const CONTROL_WIDTH: f32 = 260.0;
 
 fn section(k: &Kit, title: &str) -> El {
-    col().pt(32.0).pb(4.0).child(text(title.to_uppercase()).font(EYEBROW).color(k.c.text_muted))
+    col().pt(32.0).pb(4.0).child(text(title.to_uppercase()).font(eyebrow_style()).color(k.c.text_muted))
 }
 
 fn divider(k: &Kit) -> El {
@@ -124,7 +124,7 @@ fn setting(k: &Kit, label: &str, hint: &str, control: El) -> El {
         .items_center()
         .gap(24.0)
         .py(12.0)
-        .child(col().grow(1.0).min_w(0.0).gap(2.0).child(text(label).font(BODY).color(k.c.text_base)).child(text(hint).font(CAPTION).color(k.c.text_muted)))
+        .child(col().grow(1.0).min_w(0.0).gap(2.0).child(text(label).font(body_style()).color(k.c.text_base)).child(text(hint).font(caption_style()).color(k.c.text_muted)))
         .child(row().w(CONTROL_WIDTH).justify_end().child(control))
 }
 
@@ -144,13 +144,13 @@ pub fn view<S: 'static>(p: &Page, k: &Kit, page: At<S>, layer: &mut Vec<El>) -> 
         .w_full()
         .child(theme)
         .child(divider(k))
-        .child(setting(k, "UI font", "Names tried in order, comma separated", input(k, "UI font", crate::fonts::BUNDLED_UI_FAMILY, &p.font_family, |p| &mut p.font_family, page)))
+        .child(setting(k, "UI font", "Names tried in order, comma separated; read when po starts", input(k, "UI font", crate::fonts::BUNDLED_UI_FAMILY, &p.font_family, |p| &mut p.font_family, page)))
         .child(divider(k))
-        .child(setting(k, "UI font size", "Also scales spacing", input(k, "UI font size", "14", &p.font_size, |p| &mut p.font_size, page)))
+        .child(setting(k, "UI font size", "Scales all text; applies on Save", input(k, "UI font size", "14", &p.font_size, |p| &mut p.font_size, page)))
         .child(divider(k))
-        .child(setting(k, "Monospace font", "Names tried in order, comma separated", input(k, "Monospace font", crate::fonts::BUNDLED_MONO_FAMILY, &p.mono_family, |p| &mut p.mono_family, page)))
+        .child(setting(k, "Monospace font", "Names tried in order, comma separated; read when po starts", input(k, "Monospace font", crate::fonts::BUNDLED_MONO_FAMILY, &p.mono_family, |p| &mut p.mono_family, page)))
         .child(divider(k))
-        .child(setting(k, "Monospace font size", "Code and diffs", input(k, "Monospace font size", "13", &p.mono_size, |p| &mut p.mono_size, page)));
+        .child(setting(k, "Monospace font size", "Code, diffs and the terminal; applies on Save", input(k, "Monospace font size", "13", &p.mono_size, |p| &mut p.mono_size, page)));
 
     let picked = SegmentedControl::new(&["Left", "Right"], Some(if p.viewer_left { 0 } else { 1 }))
         .label("Viewer position")
@@ -191,7 +191,7 @@ pub fn view<S: 'static>(p: &Page, k: &Kit, page: At<S>, layer: &mut Vec<El>) -> 
         .pb(16.0)
         .gap(8.0)
         .items_start()
-        .child(col().grow(1.0).min_w(0.0).gap(2.0).child(text("Settings").font(TITLE).color(k.c.text_base)).child(text("How Po looks and behaves").font(CAPTION).color(k.c.text_muted)))
+        .child(col().grow(1.0).min_w(0.0).gap(2.0).child(text("Settings").font(title_style()).color(k.c.text_base)).child(text("How Po looks and behaves").font(caption_style()).color(k.c.text_muted)))
         .child(close);
 
     let body = col()
@@ -204,13 +204,13 @@ pub fn view<S: 'static>(p: &Page, k: &Kit, page: At<S>, layer: &mut Vec<El>) -> 
         .child(section(k, "Behavior"))
         .child(behavior)
         .child(section(k, "Agents"))
-        .child(text("Added to the bundled agents; the same id replaces one. A new command asks before it first runs.").font(CAPTION).color(k.c.text_muted).pb(8.0))
+        .child(text("Added to the bundled agents; the same id replaces one. A new command asks before it first runs.").font(caption_style()).color(k.c.text_muted).pb(8.0))
         .child(agents)
         .child(row().pt(8.0).child(add));
 
     let status = match &p.error {
-        Some(message) => text(message.clone()).font(CAPTION).color(k.c.danger.fg),
-        None => text("Saved to config.json; other keys in it are kept. MCP servers are edited there.").font(CAPTION).color(k.c.text_muted),
+        Some(message) => text(message.clone()).font(caption_style()).color(k.c.danger.fg),
+        None => text("Saved to config.json; other keys in it are kept. MCP servers are edited there.").font(caption_style()).color(k.c.text_muted),
     };
     let footer = row()
         .px(PAD)
@@ -231,6 +231,3 @@ pub fn view<S: 'static>(p: &Page, k: &Kit, page: At<S>, layer: &mut Vec<El>) -> 
         .child(divider(k))
         .child(footer)
 }
-
-#[allow(dead_code)]
-const _: TextStyle = type_::BODY;

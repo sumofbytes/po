@@ -19,7 +19,7 @@ static ISSUES: Icon = Icon { name: "po-issues", view: 16.0, body: r#"<circle cx=
 static SEARCH: Icon = Icon { name: "po-search", view: 16.0, body: r#"<circle cx="7" cy="7" r="4.5" stroke="currentColor"/><path d="M10.5 10.5L13.5 13.5" stroke="currentColor" stroke-linecap="round"/>"# };
 static SETTINGS: Icon = Icon { name: "po-settings", view: 16.0, body: r#"<circle cx="8" cy="8" r="2" stroke="currentColor"/><path d="M8 2V3.5M8 12.5V14M2 8H3.5M12.5 8H14M3.8 3.8L4.9 4.9M11.1 11.1L12.2 12.2M12.2 3.8L11.1 4.9M4.9 11.1L3.8 12.2" stroke="currentColor" stroke-linecap="round"/>"# };
 
-const CAPTION: rune::tok::TextStyle = rune::tok::TextStyle::new(12.0, 400.0);
+fn caption_style() -> rune::tok::TextStyle { crate::fonts::ui(12.0, 400.0) }
 
 /// What the sidebar keeps between frames: the filter field.
 pub struct State {
@@ -72,7 +72,7 @@ fn mark(k: &Kit, mark: Mark) -> El {
         Mark::Unread => dot(k.c.bg_accent),
         Mark::Running => Spinner::new().size(14.0).color(k.c.icon_accent).build(k),
         Mark::Asking => dot(k.c.warning.icon),
-        Mark::Failed => text("×").font(rune::tok::TextStyle::new(14.0, 500.0)).color(k.c.danger.fg),
+        Mark::Failed => text("×").font(crate::fonts::ui(14.0, 500.0)).color(k.c.danger.fg),
     };
     row().size(14.0, 14.0).center().child(shown)
 }
@@ -137,7 +137,7 @@ fn project_section<S: 'static>(k: &Kit, p: &Project, at: At<S>, rename: &super::
             let label = if expanded { "Show less".to_string() } else { format!("{hidden} more") };
             // As the threads' rows are: a glyph where their marks are, so the words start where the titles do, and quieter than they are.
             let chevron = rune::icon(if expanded { &CHEVRON_UP } else { &CHEVRON_DOWN }, 14.0).color(k.c.icon_muted);
-            section = section.child(SidebarRow::new(label).height(MORE_ROW).avatar(chevron).title_style(rune::tok::TextStyle::new(13.0, 400.0)).select_only().on_select(move |_: &mut S, _: &mut Tx| send(Cmd::ToggleMore(pid))).build(k));
+            section = section.child(SidebarRow::new(label).height(MORE_ROW).avatar(chevron).title_style(crate::fonts::ui(13.0, 400.0)).select_only().on_select(move |_: &mut S, _: &mut Tx| send(Cmd::ToggleMore(pid))).build(k));
         }
     }
     section
@@ -197,7 +197,7 @@ pub fn view<S: 'static>(snapshot: &Snapshot, state: &State, k: &Kit, at: At<S>, 
                 col()
                     .w_full()
                     .gap(6.0)
-                    .child(text(s.text.clone()).font(CAPTION).color(k.c.text_base))
+                    .child(text(s.text.clone()).font(caption_style()).color(k.c.text_base))
                     .child(
                         row()
                             .gap(6.0)
@@ -227,7 +227,7 @@ pub fn view<S: 'static>(snapshot: &Snapshot, state: &State, k: &Kit, at: At<S>, 
                 .w_full()
                 .items_center()
                 .gap(6.0)
-                .child(row().grow(1.0).min_w(0.0).child(text(status.clone()).font(CAPTION).color(k.c.text_muted)))
+                .child(row().grow(1.0).min_w(0.0).child(text(status.clone()).font(caption_style()).color(k.c.text_muted)))
                 .child(Button::new("Dismiss").variant(ButtonVariant::Ghost).on_press(|_: &mut S| send(Cmd::DismissStatus)).build(k)),
         );
     }
@@ -238,7 +238,7 @@ pub fn view<S: 'static>(snapshot: &Snapshot, state: &State, k: &Kit, at: At<S>, 
     }
     // "Po" sits in the window's top band, over the strip the shell keeps empty above the sidebar;
     // the shell draws the rule under the band.
-    let band = row().absolute(0.0, -BAND).w_full().h(BAND).px(20.0).items_center().child(text("Po").font(rune::tok::TextStyle::new(18.0, 600.0)).color(k.c.text_base));
+    let band = row().absolute(0.0, -BAND).w_full().h(BAND).px(20.0).items_center().child(text("Po").font(crate::fonts::ui(18.0, 600.0)).color(k.c.text_base));
     // The divider beside the sidebar, band and all, at the pane's right edge.
     let edge = rune::el().pin(None, Some(-BAND), Some(0.0), Some(0.0)).w(1.0).fill(k.c.border_base);
     col().w_full().h_full().min_h(0.0).child(band).child(edge).child(bar.build(k))
@@ -269,7 +269,7 @@ pub fn confirm_dialog<S: 'static>(k: &Kit, state: &State, at: At<S>, layer: &mut
         .radius(k.radius.lg)
         .fill(k.c.layer_03)
         .child(text(title).font(k.ty.ui).color(k.c.text_base).wrap_anywhere())
-        .child(text(detail.to_string()).font(CAPTION).color(k.c.text_muted))
+        .child(text(detail.to_string()).font(caption_style()).color(k.c.text_muted))
         .child(row().gap(8.0).justify_end().pt(8.0).child(cancel).child(ok.build(k)));
     layer.push(
         rune::el()
