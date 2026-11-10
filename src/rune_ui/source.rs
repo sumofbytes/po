@@ -112,7 +112,7 @@ pub fn view<S: 'static>(snapshot: &Snapshot, state: &State, k: &Kit) -> El {
             .w_full()
             .grow(1.0)
             .min_h(0.0)
-            .child(k.scroll_bar(col().w_full().grow(1.0).min_h(0.0).scroll(ScrollSpec { stick_bottom: false }).padding(16.0).child(Markdown::new(source.0.to_string()).selectable(true).build(k)))),
+            .child(k.scroll_bar(col().w_full().grow(1.0).min_h(0.0).scroll(ScrollSpec { stick_bottom: false }).padding(16.0).child(Markdown::new(source.0.to_string()).style(super::book_style(k)).selectable(true).build(k)))),
         (Body::Code { .. }, Some((_, lines))) => {
             let lines = lines.clone();
             let width = lines.len().to_string().len() as f32 * 8.0 + 16.0;
