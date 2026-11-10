@@ -359,8 +359,8 @@ pub fn run(root: std::path::PathBuf, pr: Option<pr::Pr>, command: Option<String>
     *LAUNCH.lock().expect("launch") = Some(Launch { root, pr, command, prefetch });
     let settings = config::load();
     // The fonts the settings name, as a list the text system tries in order, over the bundled ones.
-    let ui: &'static str = Box::leak(settings["font"]["family"].as_str().map_or_else(|| format!("{}, system-ui", crate::fonts::BUNDLED_UI_FAMILY), |f| format!("{f}, {}, system-ui", crate::fonts::BUNDLED_UI_FAMILY)).into_boxed_str());
-    let mono: &'static str = Box::leak(settings["font"]["mono_family"].as_str().map_or_else(|| format!("{}, ui-monospace", crate::fonts::BUNDLED_MONO_FAMILY), |f| format!("{f}, {}, ui-monospace", crate::fonts::BUNDLED_MONO_FAMILY)).into_boxed_str());
+    let ui: &'static str = Box::leak(crate::fonts::family_list(&settings["font"]["family"], crate::fonts::BUNDLED_UI_FAMILY, "system-ui").into_boxed_str());
+    let mono: &'static str = Box::leak(crate::fonts::family_list(&settings["font"]["mono_family"], crate::fonts::BUNDLED_MONO_FAMILY, "ui-monospace").into_boxed_str());
     rune::set_app_id("po");
     let app = rune::App::new(AppSpec::<State> {
         fonts: &crate::fonts::BUNDLED,
