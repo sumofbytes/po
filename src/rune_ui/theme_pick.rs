@@ -100,7 +100,7 @@ pub fn view<S: 'static>(k: &Kit, state: &State, current: &str, width: f32, at: A
         })
         .on_key(move |s: &mut S, event, tx| {
             let state = key_at(s);
-            if state.search.preedit.is_some() {
+            if state.search.preedit().is_some() {
                 return false;
             }
             let shown = matching(&state.search.text);
