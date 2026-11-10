@@ -70,8 +70,6 @@ pub struct Suggestion {
 
 #[derive(Clone, PartialEq, Debug, Default)]
 pub struct Snapshot {
-    /// The glass look is on: headers have no line under them.
-    pub glass: bool,
     pub waiting: Vec<Waiting>,
     pub projects: Vec<Project>,
     pub suggestions: Vec<Suggestion>,

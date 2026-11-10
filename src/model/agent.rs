@@ -38,7 +38,6 @@ impl Default for Body {
 
 #[derive(Clone, PartialEq, Debug, Default)]
 pub struct Snapshot {
-    pub glass: bool,
     pub title: String,
     pub lead: Vec<Control>,
     pub trail: Vec<Control>,
@@ -61,7 +60,7 @@ pub fn publish(snapshot: Snapshot) {
 impl Snapshot {
     /// The snapshot with the shell's chrome: what the core builds has none.
     pub fn with_chrome(mut self, chrome: super::header::Chrome) -> Self {
-        (self.glass, self.lead, self.trail) = (chrome.glass, chrome.lead, chrome.trail);
+        (self.lead, self.trail) = (chrome.lead, chrome.trail);
         self
     }
 }

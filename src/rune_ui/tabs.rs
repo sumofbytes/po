@@ -7,7 +7,7 @@ use rune_kit::{Button, ButtonVariant, Kit};
 use crate::model::bus::{Cmd, send};
 use crate::model::tabs::Snapshot;
 
-const CAPTION: TextStyle = TextStyle::new(12.0, 400.0);
+fn caption_style() -> TextStyle { crate::fonts::ui(12.0, 400.0) }
 
 /// The strip of the agent's views, in the band; nothing while there are none to show.
 pub fn view<S: 'static>(snapshot: &Snapshot, k: &Kit) -> Option<El> {
@@ -26,7 +26,7 @@ pub fn view<S: 'static>(snapshot: &Snapshot, k: &Kit) -> Option<El> {
     if let Some(offer) = &snapshot.offer {
         let id = offer.id.clone();
         strip = strip
-            .child(text(format!("The agent wants to show “{}”", offer.title)).font(CAPTION).color(k.c.text_muted))
+            .child(text(format!("The agent wants to show “{}”", offer.title)).font(caption_style()).color(k.c.text_muted))
             .child(Button::new("Show").variant(ButtonVariant::Submit).on_press(move |_: &mut S| send(Cmd::ShowView(id.clone()))).build(k).key("offer"));
     }
     Some(super::header::ruled(k, strip.child(row().grow(1.0)).child(super::header::controls::<S>(k, &snapshot.controls.1))))

@@ -2,7 +2,7 @@
 //! of a frame is one mono text with a span per styled run, so Rune draws it like any text.
 use std::sync::Arc;
 
-use rune::tok::{Family, TextStyle};
+use rune::tok::TextStyle;
 use rune::{WheelEvent, Color, El, Key as RuneKey, KeyEvent, Span, Tx, col, color, text};
 use rune_kit::Kit;
 
@@ -10,7 +10,12 @@ use crate::terminal::{self, Frame, Key, KeyInput, Rgb, Session};
 
 const COLS: u16 = 100;
 const ROWS: u16 = 30;
-const FONT: TextStyle = TextStyle { family: Family::SystemMono, line_height: 17.0, ..TextStyle::new(13.0, 400.0) };
+/// The grid's font at the configured monospace size, on a line of whole points: the shell is told
+/// its cells in whole pixels.
+fn font_style() -> TextStyle {
+    let style = crate::fonts::mono(13.0, 17.0);
+    TextStyle { line_height: style.line_height.round(), ..style }
+}
 
 /// Where the host keeps the terminal: handlers reach it through this.
 pub type At<S> = fn(&mut S) -> &mut Term;
@@ -18,13 +23,14 @@ pub type At<S> = fn(&mut S) -> &mut Term;
 pub struct Term {
     session: Option<Session>,
     frame: Arc<Frame>,
-    /// The grid the shell was last told it has.
+    /// The grid the shell was last told it has, and the cell it is in pixels.
     size: (u16, u16),
+    cell: (u32, u32),
 }
 
 impl Default for Term {
     fn default() -> Self {
-        Self { session: None, frame: Arc::default(), size: (COLS, ROWS) }
+        Self { session: None, frame: Arc::default(), size: (COLS, ROWS), cell: (0, 0) }
     }
 }
 
@@ -54,21 +60,24 @@ impl Term {
 
     /// The area for the grid is now `width` by `height` points: the shell gets as many cells as fit.
     pub fn fit(&mut self, width: f32, height: f32) {
-        let cell = rune::text::advance("M", FONT).max(1.0);
-        let size = (((width / cell).floor() as u16).clamp(10, 500), ((height / FONT.line_height).floor() as u16).clamp(3, 200));
-        if size == self.size || width < 1.0 {
+        let font = font_style();
+        let cell = rune::text::advance("M", font).max(1.0);
+        let size = (((width / cell).floor() as u16).clamp(10, 500), ((height / font.line_height).floor() as u16).clamp(3, 200));
+        let pixels = (cell as u32, font.line_height as u32);
+        // A new font size changes the cell, and the shell is told, though the grid may stay as it is.
+        if (size == self.size && pixels == self.cell) || width < 1.0 {
             return;
         }
-        self.size = size;
+        (self.size, self.cell) = (size, pixels);
         if let Some(session) = &self.session {
-            session.resize(size.0, size.1, (cell as u32, FONT.line_height as u32));
+            session.resize(size.0, size.1, pixels);
         }
     }
 
     /// The history moves by the wheel: `dy` points, positive showing earlier lines.
     pub fn wheel(&self, dy: f32) -> bool {
         let Some(session) = &self.session else { return false };
-        let lines = (dy / FONT.line_height).round() as isize;
+        let lines = (dy / font_style().line_height).round() as isize;
         if lines != 0 {
             session.scroll(-lines);
         }
@@ -180,7 +189,7 @@ fn row(frame: &Frame, kit: &Kit, y: usize) -> El {
             spans.push(Span::new(start, start + ch.len_utf8()).bg(kit.c.text_base, 0.0).color(kit.c.bg_base).mono());
         }
     }
-    text(line).font(FONT).color(c(frame.foreground)).spans(spans).selectable(true).h(FONT.line_height).min_h(FONT.line_height)
+    text(line).font(font_style()).color(c(frame.foreground)).spans(spans).selectable(true).h(font_style().line_height).min_h(font_style().line_height)
 }
 
 /// The window's copy chord: the modifier key, or Ctrl+Shift+C elsewhere. Paste is handled by the

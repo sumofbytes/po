@@ -230,12 +230,18 @@ impl Reader {
     /// A shell that ends (Ctrl+D, `exit`) takes its tab with it, in whichever project it was.
     pub(crate) fn reap_terminals(&mut self, cx: &mut Context<Self>) {
         let mut ended = false;
+        // The shell was what the viewer pane was showing: close the pane with it instead of
+        // dropping to the file browser.
+        let was_showing = self.project.terminal_shown && self.project.terminal.as_ref().is_some_and(|term| term.exited());
         for project in std::iter::once(&mut self.project).chain(self.slots.iter_mut().map(|slot| &mut slot.project)) {
             if project.terminal.as_ref().is_some_and(|term| term.exited()) {
                 project.terminal = None;
                 project.terminal_shown = false;
                 ended = true;
             }
+        }
+        if was_showing {
+            self.show_chat(cx);
         }
         if ended {
             cx.notify();
@@ -520,7 +526,8 @@ impl Reader {
     }
 
     /// Takes up the options of `config.json` that are read once, after the settings page saved
-    /// them. The theme and fonts are reapplied by the config watcher.
+    /// them. The theme and the font sizes are reapplied by the app's `poll`; font names are read at
+    /// start.
     pub(crate) fn apply_settings(&mut self, cx: &mut Context<Self>) {
         let settings = config::load();
         self.notifications = settings["notifications"].as_bool().unwrap_or(true);

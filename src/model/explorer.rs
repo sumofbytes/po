@@ -25,7 +25,6 @@ pub enum Body {
 
 #[derive(Clone, PartialEq, Debug)]
 pub struct Snapshot {
-    pub glass: bool,
     /// Changes mode (true) or the files.
     pub changes: bool,
     pub lead: Vec<Control>,
@@ -35,7 +34,7 @@ pub struct Snapshot {
 
 impl Default for Snapshot {
     fn default() -> Self {
-        Self { glass: false, changes: false, lead: vec![], trail: vec![], body: Body::Rows(vec![]) }
+        Self { changes: false, lead: vec![], trail: vec![], body: Body::Rows(vec![]) }
     }
 }
 
@@ -56,7 +55,7 @@ pub fn publish(snapshot: Snapshot) {
 impl Snapshot {
     /// The snapshot with the shell's chrome: what the core builds has none.
     pub fn with_chrome(mut self, chrome: super::header::Chrome) -> Self {
-        (self.glass, self.lead, self.trail) = (chrome.glass, chrome.lead, chrome.trail);
+        (self.lead, self.trail) = (chrome.lead, chrome.trail);
         self
     }
 }
