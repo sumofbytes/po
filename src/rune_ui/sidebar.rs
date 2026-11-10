@@ -3,7 +3,9 @@
 //! [`Snapshot`] and sends [`Cmd`]s, so it needs nothing of the `Reader`.
 //!
 //! Not ported yet: renaming a thread from its menu, and the right-click menu.
-use rune::{Anim, El, Icon, TextEdit, TextStyle, Tx, col, el, row, text};
+use std::rc::Rc;
+
+use rune::{Anim, El, Icon, Phase, TextEdit, TextStyle, Tx, col, el, row, text};
 use rune_kit::shell::RowStatus;
 use rune_kit::{Button, ButtonVariant, ControlSize, IconButton, IconButtonVariant, Kit, Sidebar, SidebarRow, SidebarSection, Spinner};
 
@@ -28,6 +30,68 @@ pub struct State {
     pub confirm: Option<Confirm>,
     /// A thread's name being typed.
     pub rename: super::rename::Rename,
+    /// A project's header being dragged to a new place in the list.
+    pub drag: Option<ProjectDrag>,
+}
+
+/// A project dragged by its header: its place in the list, where it would land if dropped now,
+/// and how far the pointer has travelled since the press.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ProjectDrag {
+    pub from: usize,
+    pub to: usize,
+    pub dy: f32,
+}
+
+/// Points the pointer travels before a press on a project's header becomes a drag.
+const SLOP: f32 = 4.0;
+/// The space the sidebar leaves between sections.
+const SECTION_GAP: f32 = 4.0;
+
+/// How tall a project's section is: its top padding, header, thread rows and fold row.
+fn section_height(p: &Project) -> f32 {
+    let threads = if p.collapsed { 0.0 } else { p.threads.len() as f32 * ROW + p.fold.map_or(0.0, |_| MORE_ROW) };
+    4.0 + ROW + threads
+}
+
+/// Where the section `from` would land if dropped after the pointer travelled `dy`: the index of
+/// the section whose place it takes, once its middle passes that section's middle.
+fn drop_index(heights: &[f32], from: usize, dy: f32) -> usize {
+    let mut tops = Vec::with_capacity(heights.len());
+    let mut y = 0.0;
+    for h in heights {
+        tops.push(y);
+        y += h + SECTION_GAP;
+    }
+    let middle = |i: usize| tops[i] + heights[i] / 2.0;
+    let at = middle(from) + dy;
+    let mut to = from;
+    for j in from + 1..heights.len() {
+        if at > middle(j) {
+            to = j;
+        }
+    }
+    for j in (0..from).rev() {
+        if at < middle(j) {
+            to = j;
+        }
+    }
+    to
+}
+
+/// How far the section `index` sits from its place while `drag` is on: the dragged one with the
+/// pointer, and those it passes a step toward the gap it left.
+fn shift(drag: &ProjectDrag, index: usize, heights: &[f32]) -> f32 {
+    let step = heights[drag.from] + SECTION_GAP;
+    if index == drag.from {
+        drag.dy
+    } else if drag.from < index && index <= drag.to {
+        -step
+    } else if drag.to <= index && index < drag.from {
+        step
+    } else {
+        0.0
+    }
 }
 
 /// What the confirmation dialog asks about.
@@ -43,7 +107,7 @@ pub struct Confirm {
 
 impl Default for State {
     fn default() -> Self {
-        Self { query: TextEdit::new(""), confirm: None, rename: Default::default() }
+        Self { query: TextEdit::new(""), confirm: None, rename: Default::default(), drag: None }
     }
 }
 
@@ -105,7 +169,17 @@ fn thread_row<S: 'static>(k: &Kit, t: &Thread, subtitle: Option<&str>, at: At<S>
 
 /// A project: a header that toggles it (larger title, no disclosure glyph, the kit's header
 /// hardcodes both) over its thread rows.
-fn project_section<S: 'static>(k: &Kit, p: &Project, at: At<S>, rename: &super::rename::Rename, rename_at: super::rename::At<S>) -> El {
+/// What a project's header needs to be dragged: where it is in the list and the list's shape.
+struct Place {
+    index: usize,
+    ids: Rc<Vec<u64>>,
+    heights: Rc<Vec<f32>>,
+    /// How far it sits from its place, and whether it is the one being carried.
+    shift: f32,
+    lifted: bool,
+}
+
+fn project_section<S: 'static>(k: &Kit, p: &Project, place: Option<Place>, at: At<S>, rename: &super::rename::Rename, rename_at: super::rename::At<S>) -> El {
     let pid = p.id;
     let pname = p.name.clone();
     let new_thread = plus::<S>(k, "New thread", move |_| send(Cmd::StartThread(pid)));
@@ -127,6 +201,31 @@ fn project_section<S: 'static>(k: &Kit, p: &Project, at: At<S>, rename: &super::
         .child(new_thread)
         .hover_group()
         .on_press_tx(move |_: &mut S, _: &mut Tx| send(Cmd::ToggleProject(pid)));
+    let header = match &place {
+        Some(place) => {
+            let (index, ids, heights) = (place.index, place.ids.clone(), place.heights.clone());
+            header.on_drag(move |s: &mut S, d: &mut rune::Drag, tx: &mut Tx| match d.phase {
+                Phase::Down => {}
+                Phase::Move => {
+                    if at(s).drag.is_none() && d.dy.abs() < SLOP {
+                        return;
+                    }
+                    // The sections it passes spring aside; it follows the pointer exactly.
+                    tx.animated();
+                    at(s).drag = Some(ProjectDrag { from: index, to: drop_index(&heights, index, d.dy), dy: d.dy });
+                }
+                Phase::Up => {
+                    if let Some(drag) = at(s).drag.take()
+                        && !d.cancelled()
+                        && drag.to != drag.from
+                    {
+                        send(Cmd::MoveProject(ids[drag.from], ids[drag.to]));
+                    }
+                }
+            })
+        }
+        None => header,
+    };
     let header = k.interactive(header).role("button").expanded(!p.collapsed).hover_motion(Anim::INSTANT, Anim::INSTANT).focusable(false);
     let mut section = col().key(format!("project-{pid}")).role("group").label(p.name.clone()).w_full().pt(4.0).gap(0.0).motion(k.motion.disclosure).child(header);
     if !p.collapsed {
@@ -138,6 +237,13 @@ fn project_section<S: 'static>(k: &Kit, p: &Project, at: At<S>, rename: &super::
             // As the threads' rows are: a glyph where their marks are, so the words start where the titles do, and quieter than they are.
             let chevron = rune::icon(if expanded { &CHEVRON_UP } else { &CHEVRON_DOWN }, 14.0).color(k.c.icon_muted);
             section = section.child(SidebarRow::new(label).height(MORE_ROW).avatar(chevron).title_style(rune::tok::TextStyle::new(13.0, 400.0)).select_only().on_select(move |_: &mut S, _: &mut Tx| send(Cmd::ToggleMore(pid))).build(k));
+        }
+    }
+    if let Some(place) = place {
+        section = section.offset(0.0, place.shift);
+        if place.lifted {
+            // Follows the pointer exactly, opaque so the sections it passes don't show through.
+            section = k.elevate(section.raise().offset_motion(Anim::INSTANT).fill(k.c.layer_02).radius(k.radius.md), &k.elevation.raised);
         }
     }
     section
@@ -216,8 +322,16 @@ pub fn view<S: 'static>(snapshot: &Snapshot, state: &State, k: &Kit, at: At<S>, 
         }
         bar = bar.section(needs);
     }
-    for p in &snapshot.projects {
-        bar = bar.child(project_section::<S>(k, p, at, &state.rename, rename_at));
+    // Projects are dragged to reorder them, unless a search hides some of them.
+    let ids: Rc<Vec<u64>> = Rc::new(snapshot.projects.iter().map(|p| p.id).collect());
+    let heights: Rc<Vec<f32>> = Rc::new(snapshot.projects.iter().map(section_height).collect());
+    let draggable = !snapshot.searching && snapshot.projects.len() > 1;
+    for (index, p) in snapshot.projects.iter().enumerate() {
+        let place = draggable.then(|| {
+            let drag = state.drag.filter(|d| d.from < heights.len() && d.to < heights.len());
+            Place { index, ids: ids.clone(), heights: heights.clone(), shift: drag.map_or(0.0, |d| shift(&d, index, &heights)), lifted: drag.is_some_and(|d| d.from == index) }
+        });
+        bar = bar.child(project_section::<S>(k, p, place, at, &state.rename, rename_at));
     }
 
     let mut footer = vec![];
@@ -321,5 +435,51 @@ mod tests {
             rt.frame(1.0 / 60.0);
         }
         assert!(rt.state.side.rename.editing.is_some(), "and stayed");
+    }
+
+    fn two_projects() -> Snapshot {
+        let thread = |project, id| Thread { project, id, label: "Fix it".into(), name: "Fix it".into(), mark: Mark::Idle, selected: false, controlled: false, ago: None, closing: false };
+        let project = |id, threads| Project { id, name: format!("p{id}"), active: id == 1, collapsed: false, closable: true, threads, fold: None };
+        Snapshot { projects: vec![project(1, vec![thread(1, 1), thread(1, 2)]), project(2, vec![thread(2, 1)])], ..Default::default() }
+    }
+
+    #[test]
+    fn sections_are_as_tall_as_the_drag_reckons() {
+        let snap = two_projects();
+        let mut rt = Runtime::new(App { side: State::default(), snap: snap.clone() }, view, (300.0, 600.0), Env::new(true, 1.0));
+        rt.frame(0.0);
+        let (_, first) = rt.find("project-1").expect("first");
+        let (_, second) = rt.find("project-2").expect("second");
+        let (h1, h2) = (section_height(&snap.projects[0]), section_height(&snap.projects[1]));
+        // `find` gives a middle: the two middles are half of each section and the gap apart.
+        assert!((second - first - (h1 / 2.0 + SECTION_GAP + h2 / 2.0)).abs() < 1.0, "{first} {second}");
+    }
+
+    #[test]
+    fn dragging_a_header_past_the_next_section_takes_its_place() {
+        let heights = [100.0, 40.0, 70.0];
+        assert_eq!(drop_index(&heights, 0, 10.0), 0);
+        assert_eq!(drop_index(&heights, 0, 100.0), 1);
+        assert_eq!(drop_index(&heights, 0, 400.0), 2);
+        assert_eq!(drop_index(&heights, 2, -70.0), 1);
+        assert_eq!(drop_index(&heights, 2, -400.0), 0);
+        let drag = ProjectDrag { from: 0, to: 2, dy: 150.0 };
+        assert_eq!([0, 1, 2].map(|i| shift(&drag, i, &heights)), [150.0, -104.0, -104.0]);
+    }
+
+    #[test]
+    fn a_drag_on_a_header_lifts_it() {
+        let mut rt = Runtime::new(App { side: State::default(), snap: two_projects() }, view, (300.0, 600.0), Env::new(true, 1.0));
+        rt.frame(0.0);
+        let (x, y) = rt.find("project-1").expect("first");
+        // The middle of the section is on a thread row, so reach for its header.
+        let y = y - section_height(&rt.state.snap.projects[0]) / 2.0 + 4.0 + ROW / 2.0;
+        rt.pointer_down(x, y);
+        rt.pointer_move(x, y + 100.0);
+        rt.frame(1.0 / 60.0);
+        assert_eq!(rt.state.side.drag.map(|d| (d.from, d.to)), Some((0, 1)));
+        rt.pointer_up(x, y + 100.0);
+        rt.frame(1.0 / 60.0);
+        assert_eq!(rt.state.side.drag, None);
     }
 }

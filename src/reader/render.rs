@@ -389,6 +389,16 @@ impl Reader {
                     cx.notify();
                 }
             }
+            Cmd::MoveProject(pid, onto) => {
+                let mut order: Vec<u64> = self.views().iter().map(|view| view.id).collect();
+                if let (Some(from), Some(to)) = (order.iter().position(|id| *id == pid), order.iter().position(|id| *id == onto)) {
+                    let moved = order.remove(from);
+                    order.insert(to, moved);
+                    self.project_order = order;
+                    self.request_save(cx);
+                    cx.notify();
+                }
+            }
             Cmd::StartThread(pid) => self.start_thread_in(pid, window, cx),
             Cmd::CloseProject(pid) => self.close_project(pid, window, cx),
             Cmd::ToggleMore(pid) => {
