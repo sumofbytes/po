@@ -749,9 +749,8 @@ impl Thread {
         })
     }
 
-    fn update(&mut self, update: &Value) -> Option<(String, bool)> {
+    fn update(&mut self, update: &Value) {
         let text = update["content"]["text"].as_str().unwrap_or_default();
-        let mut known: Option<String> = None;
         match update["sessionUpdate"].as_str() {
             Some("agent_message_chunk") => match self.blocks().last_mut() {
                 Some(Block::Text(body)) => body.push_str(text),
@@ -847,20 +846,26 @@ impl Thread {
                         if let Some(path) = touched(update) {
                             tool.path = Some(path);
                         }
-                        known = tool.path.clone();
                         break;
                     }
                 }
             }
             _ => {}
         }
-        let kind = update["sessionUpdate"].as_str()?;
-        if kind != "tool_call" && kind != "tool_call_update" {
-            return None;
-        }
-        let path = touched(update).or(known)?;
-        Some((path, update["status"].as_str() == Some("completed")))
     }
+}
+
+/// What an agent's session update changes in its thread: the usage, the earlier message a late
+/// tool-call update touches (the tell of what to relist), and the message itself. The caller
+/// records every update whoever owns the screen: a resumed session replays its history as updates
+/// while it loads, and a turn on a background thread records while nothing of it shows.
+fn record(thread: &mut Thread, update: &Value) -> Option<usize> {
+    if let Some(usage) = state::Usage::from_update(update) {
+        thread.usage = Some(usage);
+    }
+    let earlier = thread.tool_message(update);
+    thread.update(update);
+    earlier
 }
 
 /// What a thread is up to, for the thread list.
@@ -2424,6 +2429,42 @@ mod tests {
         thread.messages.push(super::Msg::User("fix it".into(), vec![]));
         thread.messages.push(super::Msg::Agent(vec![super::Block::Text("fixed".into())]));
         thread
+    }
+
+    // A resumed session replays its history as updates while `loading`, and a turn on a parked
+    // thread records while nothing shows: an update is recorded either way.
+    #[test]
+    fn an_update_is_recorded_while_the_history_replays_or_off_screen() {
+        let mut thread = started_thread();
+        thread.loading = true;
+        let earlier = super::record(
+            &mut thread,
+            &serde_json::json!({
+                "sessionUpdate": "tool_call",
+                "toolCallId": "t1",
+                "title": "Edit src/a.rs",
+                "status": "in_progress",
+                "rawInput": { "path": "src/a.rs" }
+            }),
+        );
+        assert_eq!(earlier, None, "a tool call starts its own message");
+        let mut thread = thread;
+        super::record(
+            &mut thread,
+            &serde_json::json!({
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "t1",
+                "status": "failed"
+            }),
+        );
+        let Some(super::Msg::Agent(blocks)) = thread.messages.last() else { unreachable!("agent work") };
+        let Some(super::Block::Tool(tool)) = blocks.iter().find(|b| matches!(b, super::Block::Tool(t) if t.id == "t1")) else {
+            unreachable!("the call was recorded")
+        };
+        assert!(matches!(tool.status, super::Step::Failed), "the settled status was taken in");
+        assert_eq!(tool.path.as_deref(), Some("src/a.rs"), "the file the call touches is known for the chip");
+        super::record(&mut thread, &serde_json::json!({ "sessionUpdate": "usage_update", "used": 100, "size": 1000 }));
+        assert_eq!(thread.usage, Some(crate::state::Usage { used: 100, size: 1000 }));
     }
 
     #[test]

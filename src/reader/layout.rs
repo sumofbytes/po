@@ -336,7 +336,7 @@ impl Reader {
         if mode == Mode::Diff {
             // Show the last known changes at once; `git` confirms them in the background.
             self.apply_changes(self.project.changes.clone(), true, false, cx);
-            self.refresh_changes(true, None, cx);
+            self.refresh_changes(true, cx);
         }
         cx.notify();
     }

@@ -72,11 +72,11 @@ pub fn view<S: 'static>(snapshot: &Snapshot, state: &State, k: &Kit, at: At<S>) 
     let body = match &snapshot.body {
         // Only the header: what is below it is the shell's.
         Body::Bare => return title,
-        Body::Markdown(source) => page(k, col().w_full().max_w(820.0).padding(16.0).child(Markdown::new(source.0.to_string()).selectable(true).build(k))),
+        Body::Markdown(source) => page(k, col().w_full().max_w(820.0).padding(16.0).child(Markdown::new(source.0.to_string()).style(super::book_style(k)).selectable(true).build(k))),
         Body::Form { id, fields, submit, answered, doc } => {
             let mut form = col().w_full().max_w(640.0).gap(12.0).padding(16.0);
             if let Some(doc) = doc {
-                form = form.child(Markdown::new(doc.0.to_string()).build(k));
+                form = form.child(Markdown::new(doc.0.to_string()).style(super::book_style(k)).build(k));
             }
             // Until `follow` has seeded the state for this form there is nothing to bind to.
             let seeded = state.seeded.as_ref().is_some_and(|(seeded, _)| seeded == id) && state.edits.len() == fields.len();

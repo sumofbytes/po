@@ -292,6 +292,7 @@ fn approve<S: 'static>(k: &Kit, message: usize, at: usize, question: &str, lines
 fn block<S: 'static>(k: &Kit, message: usize, at: usize, b: &Block) -> El {
     match b {
         Block::Markdown { text, .. } => Markdown::new(text.to_string())
+            .style(super::book_style(k))
             .selectable(true)
             // Only web and mail links go to the system; a message must not open arbitrary schemes.
             .on_link_tx(|_: &mut S, url: &str, tx: &mut Tx| {
