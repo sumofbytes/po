@@ -736,6 +736,8 @@ impl Reader {
     pub(crate) fn restore(&mut self, saved: workspace::Workspace, _cx: &mut Context<Self>) -> bool {
         let mut resumed = false;
         let mut seen = HashSet::new();
+        // The projects as they were saved, which the ids they get here may not be in the order of.
+        let mut order: Vec<u64> = vec![];
         // Children of threads that came back with them, by the parent's session.
         let mut linked: Vec<(u64, String)> = vec![];
         self.side_open = saved.viewer_open;
@@ -780,6 +782,7 @@ impl Reader {
                 .collect();
             let shown = (!threads.is_empty()).then(|| threads.remove(state.active.min(threads.len() - 1)));
             if start {
+                order.push(self.project_id);
                 self.project.closed = state.closed;
                 if let Some(shown) = shown {
                     self.thread = shown;
@@ -800,9 +803,11 @@ impl Reader {
             };
             let id = self.next_project;
             self.next_project += 1;
+            order.push(id);
             let mode = if state.review { Mode::Diff } else { Mode::Source };
             self.slots.push(Slot { id, mode, project, thread, parked: threads });
         }
+        self.project_order = order;
         self.relink_children(linked);
         resumed
     }
