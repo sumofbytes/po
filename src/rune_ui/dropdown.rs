@@ -63,7 +63,7 @@ pub type At<S> = std::rc::Rc<dyn for<'a> Fn(&'a mut S) -> &'a mut State>;
 
 pub static CHEVRON: Icon = Icon { name: "po-chevron-down", view: 16.0, body: r#"<path d="M4.5 6.5L8 10L11.5 6.5" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"/>"# };
 
-const SMALL: TextStyle = TextStyle::new(12.0, 400.0);
+fn small_style() -> TextStyle { crate::fonts::ui(12.0, 400.0) }
 
 /// A chip that opens `lines` below it (above, when there is no room). `key` names it; it must be
 /// unique in the window.
@@ -73,7 +73,7 @@ pub fn chip<S: 'static>(k: &Kit, key: &str, label: String, lines: Vec<Line>, rul
 
 /// [`chip`] with its label in `ink`: a chip that should stand out, such as one naming a risky setting.
 pub fn chip_inked<S: 'static>(k: &Kit, key: &str, label: String, ink: rune::Color, lines: Vec<Line>, rules: Vec<usize>, at: At<S>) -> El {
-    let face = row().px(8.0).py(2.0).radius(6.0).gap(2.0).items_center().child(text(label).font(SMALL).color(ink)).child(icon(&CHEVRON, 12.0).color(k.c.text_muted));
+    let face = row().px(8.0).py(2.0).radius(6.0).gap(2.0).items_center().child(text(label).font(small_style()).color(ink)).child(icon(&CHEVRON, 12.0).color(k.c.text_muted));
     opens(k, key, face, lines, rules, at)
 }
 

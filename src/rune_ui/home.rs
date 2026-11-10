@@ -4,7 +4,7 @@
 use rune::{El, ScrollSpec, col, row, text};
 use rune_kit::{Button, ButtonVariant, ControlSize, Kit};
 
-use super::work::{BODY, SMALL, TITLE, card, metric, muted, priority_tint, status_glyph, status_tint};
+use super::work::{body_style, small_style, title_style, card, metric, muted, priority_tint, status_glyph, status_tint};
 use crate::date::{Date, due_label};
 use crate::model::bus::{Cmd, send};
 use crate::model::home::{Model, Pickup, TASKS, Task, complete, greeting};
@@ -32,7 +32,7 @@ fn task_row<S: 'static>(k: &Kit, task: &Task, today: Date, armed: bool, at: At<S
         .px(8.0)
         .h(36.0)
         .radius(6.0)
-        .child(k.interactive(row().key(format!("done-{}", task.key)).child(text(mark).font(SMALL).color(tint)).on_press(move |s: &mut S| {
+        .child(k.interactive(row().key(format!("done-{}", task.key)).child(text(mark).font(small_style()).color(tint)).on_press(move |s: &mut S| {
             let state = at(s);
             if state.armed.as_ref() == Some(&(done.clone(), number)) {
                 complete(&done, number);
@@ -42,10 +42,10 @@ fn task_row<S: 'static>(k: &Kit, task: &Task, today: Date, armed: bool, at: At<S
             }
         })))
         .child(row().w(3.0).h(18.0).radius(2.0).fill(priority_tint(k, task.priority)))
-        .child(k.interactive(row().key(format!("task-{}", task.key)).grow(1.0).min_w(0.0).child(text(task.title.clone()).font(BODY).color(k.c.text_base).truncate()).on_press(move |_: &mut S| send(Cmd::OpenIssue(open.clone(), number)))))
+        .child(k.interactive(row().key(format!("task-{}", task.key)).grow(1.0).min_w(0.0).child(text(task.title.clone()).font(body_style()).color(k.c.text_base).truncate()).on_press(move |_: &mut S| send(Cmd::OpenIssue(open.clone(), number)))))
         .child(Button::new("Work on this").variant(ButtonVariant::Ghost).on_press(move |_: &mut S| send(Cmd::WorkOnIssue(work.clone(), number))).build(k))
         .child(muted(k, task.project.clone()))
-        .child(row().w(64.0).justify_end().child(text(due).font(SMALL).color(if late { k.c.danger.fg } else { k.c.text_muted })))
+        .child(row().w(64.0).justify_end().child(text(due).font(small_style()).color(if late { k.c.danger.fg } else { k.c.text_muted })))
 }
 
 fn mark_note(k: &Kit, mark: Mark) -> (&'static str, rune::Color) {
@@ -67,7 +67,7 @@ fn thread_row<S: 'static>(k: &Kit, thread: &Pickup) -> El {
         .items_center()
         .gap(8.0)
         .py(6.0)
-        .child(col().grow(1.0).min_w(0.0).child(text(thread.label.clone()).font(BODY).color(k.c.text_base).truncate()).child(text(meta).font(SMALL).color(tint).truncate()))
+        .child(col().grow(1.0).min_w(0.0).child(text(thread.label.clone()).font(body_style()).color(k.c.text_base).truncate()).child(text(meta).font(small_style()).color(tint).truncate()))
         .child(row().w(72.0).justify_end().items_center().child(Button::new("Resume").variant(ButtonVariant::Outline).control_size(ControlSize::Small).on_press(move |_: &mut S| send(Cmd::OpenThread(project, id))).build(k)))
 }
 
@@ -114,7 +114,7 @@ pub fn view<S: 'static>(model: &Model, state: &State, k: &Kit, at: At<S>) -> El 
         .max_w(1000.0)
         .gap(20.0)
         .padding(28.0)
-        .child(col().gap(4.0).child(muted(k, today.long())).child(text(greeting(crate::date::hour())).font(TITLE).color(k.c.text_base)).child(muted(k, "A clear view of what matters today.")))
+        .child(col().gap(4.0).child(muted(k, today.long())).child(text(greeting(crate::date::hour())).font(title_style()).color(k.c.text_base)).child(muted(k, "A clear view of what matters today.")))
         .child(metrics)
         .child(row().w_full().gap(16.0).items_start().child(col().grow(1.0).min_w(0.0).child(tasks)).child(side));
     col().w_full().h_full().min_h(0.0).child(k.scroll_bar(col().w_full().grow(1.0).min_h(0.0).items_center().scroll(ScrollSpec { stick_bottom: false }).child(page)))

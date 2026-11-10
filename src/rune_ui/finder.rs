@@ -6,8 +6,8 @@ use rune_kit::{Kit, TextInput};
 use crate::model::bus::{Cmd, send};
 use crate::model::finder::Snapshot;
 
-const NAME: TextStyle = TextStyle::new(13.0, 400.0);
-const CAPTION: TextStyle = TextStyle::new(12.0, 400.0);
+fn name_style() -> TextStyle { crate::fonts::ui(13.0, 400.0) }
+fn caption_style() -> TextStyle { crate::fonts::ui(12.0, 400.0) }
 /// The most matches drawn: the list is as long as the repository.
 const SHOWN: usize = 12;
 
@@ -72,13 +72,13 @@ pub fn view<S: 'static>(snapshot: &Snapshot, state: &State, k: &Kit, at: At<S>) 
             .h(28.0)
             .px(8.0)
             .radius(6.0)
-            .child(text(name.to_string()).font(NAME).color(k.c.text_base))
-            .child(text(format!("  {folder}")).font(CAPTION).color(k.c.text_muted))
+            .child(text(name.to_string()).font(name_style()).color(k.c.text_base))
+            .child(text(format!("  {folder}")).font(caption_style()).color(k.c.text_muted))
             .on_press(move |_: &mut S| send(Cmd::FinderPick(pick.clone())));
         list = list.child(if i == state.at { k.interactive(line.fill(k.c.layer_03)) } else { k.interactive(line) });
     }
     if let Some(cap) = snapshot.capped {
-        list = list.child(text(format!("Only the first {cap} files are searched")).font(CAPTION).color(k.c.text_muted).px(8.0).pt(4.0));
+        list = list.child(text(format!("Only the first {cap} files are searched")).font(caption_style()).color(k.c.text_muted).px(8.0).pt(4.0));
     }
     col().w_full().gap(8.0).padding(8.0).child(field).child(list)
 }

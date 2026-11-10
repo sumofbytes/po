@@ -9,8 +9,8 @@ use serde_json::{Map, Value};
 use crate::model::agent::{Body, Field, Snapshot};
 use crate::model::bus::{Cmd, send};
 
-const LABEL: TextStyle = TextStyle::new(12.0, 500.0);
-const NAME: TextStyle = TextStyle::new(13.0, 400.0);
+fn label_style() -> TextStyle { crate::fonts::ui(12.0, 500.0) }
+fn name_style() -> TextStyle { crate::fonts::ui(13.0, 400.0) }
 
 /// What the user has put in the form on screen. Seeded anew when the form's id or fields change,
 /// which is what a replaced form means; kept as the pane redraws.
@@ -63,12 +63,12 @@ fn field<S: 'static>(k: &Kit, i: usize, field: &Field, state: &State, at: At<S>)
         let names: Vec<&str> = field.options.iter().map(String::as_str).collect();
         SegmentedControl::new(&names, state.picks[i]).label(field.label.clone()).on_pick(move |s: &mut S, n: usize, _: &mut rune::Tx| at(s).picks[i] = Some(n)).build(k)
     };
-    col().w_full().gap(4.0).child(text(field.label.clone()).font(LABEL).color(k.c.text_muted)).child(control)
+    col().w_full().gap(4.0).child(text(field.label.clone()).font(label_style()).color(k.c.text_muted)).child(control)
 }
 
 /// The pane's body, below the header the shell draws. The terminal (`Bare`) is the shell's.
 pub fn view<S: 'static>(snapshot: &Snapshot, state: &State, k: &Kit, at: At<S>) -> El {
-    let title = super::header::ruled(k, row().w_full().h(super::header::BAND).items_center().gap(8.0).px(12.0).child(super::header::controls::<S>(k, &snapshot.lead)).child(row().grow(1.0).child(text(snapshot.title.clone()).font(NAME).color(k.c.text_base))).child(super::header::controls::<S>(k, &snapshot.trail)));
+    let title = super::header::ruled(k, row().w_full().h(super::header::BAND).items_center().gap(8.0).px(12.0).child(super::header::controls::<S>(k, &snapshot.lead)).child(row().grow(1.0).child(text(snapshot.title.clone()).font(name_style()).color(k.c.text_base))).child(super::header::controls::<S>(k, &snapshot.trail)));
     let body = match &snapshot.body {
         // Only the header: what is below it is the shell's.
         Body::Bare => return title,

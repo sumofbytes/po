@@ -32,6 +32,7 @@ pub fn kit(theme: &Value) -> (Kit, bool) {
     kit.c.submit_fg = on_accent;
     kit.c.submit_icon = on_accent;
     kit.c.bg_accent = accent;
+    crate::fonts::scale_type(&mut kit.ty);
     let dark = kit.dark;
     (kit, dark)
 }
