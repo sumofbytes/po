@@ -2,6 +2,9 @@
 
 use crate::*;
 
+/// The longest name a user can give a thread, in characters.
+const RENAME_MAX: usize = 120;
+
 impl Reader {
     /// The user's answer to a command Po asked about: remember it and start the agent, or leave it stopped.
     pub(crate) fn answer_approval(&mut self, ix: usize, n: usize, yes: bool, window: &mut Window, cx: &mut Context<Self>) {
@@ -949,7 +952,12 @@ impl Reader {
     /// Tells the desktop about `what` the thread on screen did, unless that is already in view.
     pub(crate) fn alert(&self, window: &Window, visible: bool, what: &str) {
         if self.notifications && !(visible && window.is_window_active()) {
-            alert::send(&format!("{} · {}", self.project.name(), self.thread.title()), what);
+            let (project, thread) = (self.project_id, self.thread.id);
+            alert::send(&format!("{} · {}", self.project.name(), self.thread.title()), what, move |token| {
+                // In this order: raising the window is what wakes it to run the command.
+                model::bus::send(model::bus::Cmd::OpenThread(project, thread));
+                crate::app::raise(token);
+            });
         }
     }
 
@@ -1030,6 +1038,26 @@ impl Reader {
             self.close_any_thread(child_project, child, window, cx);
         }
         self.close_any_thread(pid, tid, window, cx);
+    }
+
+    /// Gives thread `tid` of project `pid` the name `name`, trimmed to one line; a blank name
+    /// takes the user's name away.
+    pub(crate) fn rename_thread(&mut self, pid: u64, tid: u64, name: &str, cx: &mut Context<Self>) {
+        let name = name.split_whitespace().collect::<Vec<_>>().join(" ");
+        let name: String = name.chars().take(RENAME_MAX).collect();
+        let name = Some(name).filter(|name| !name.is_empty());
+        let thread = if pid == self.project_id {
+            std::iter::once(&mut self.thread).chain(self.parked.iter_mut()).find(|t| t.id == tid)
+        } else {
+            self.slots.iter_mut().find(|slot| slot.id == pid).and_then(|slot| std::iter::once(&mut slot.thread).chain(slot.parked.iter_mut()).find(|t| t.id == tid))
+        };
+        let Some(thread) = thread else { return };
+        if thread.renamed == name {
+            return;
+        }
+        thread.renamed = name;
+        self.request_save(cx);
+        cx.notify();
     }
 
     /// Opens a blank thread in project `pid`.
@@ -1194,12 +1222,10 @@ impl Reader {
                     self.thread.status = "ready".into();
                 }
                 self.thread.unread = !visible;
-                // Only when nothing else holds the keyboard: the reader's own focus is where it
-                // rests, so an input (a search, the finder, a rename, the editor) has it otherwise.
-                // Nothing focused, or the conversation holding it (its transcript, a chip, the Stop
-                // button), counts as nothing else: the field is where the next message goes.
-                let resting = true;
-                if visible && resting && !self.settings_open && !self.finder_open && !self.issues_open {
+                // Not while the terminal is shown: it keeps the keyboard it was given, so a finished
+                // turn doesn't pull typing away from the shell. Nor over another input (a search, the
+                // finder, the issues page or settings).
+                if visible && !self.project.terminal_shown && !self.settings_open && !self.finder_open && !self.issues_open {
                     self.focus_draft(window, cx);
                 }
                 // A child's parent is told instead; the desktop hears of it only when nobody

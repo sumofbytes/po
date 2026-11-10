@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use rune::tok::TextStyle;
-use rune::{El, Icon, ScrollSpec, TextEdit, Tx, col, icon, row, text};
+use rune::{El, Icon, Key, KeyEvent, ScrollSpec, TextEdit, Tx, col, icon, row, text};
 use rune_kit::{Button, ButtonVariant, IconButton, IconButtonVariant, Kit, TextArea, TextInput};
 
 use super::dropdown::{self, Line};
@@ -332,11 +332,13 @@ fn menu_at<S: 'static>(at: At<S>) -> dropdown::At<S> {
 
 /// A field with no box of its own, to sit inside one: the box around it is the frame.
 fn bare<S: 'static>(k: &Kit, edit: &TextEdit, label: &'static str, placeholder: &'static str, at: At<S>, field: fn(&mut State) -> &mut TextEdit) -> El {
+    wrapping::<S>(k, edit, label, placeholder, at, field).single_line().grow(1.0).shrink()
+}
+
+/// A [`bare`] field whose long text wraps instead of scrolling sideways.
+fn wrapping<S: 'static>(k: &Kit, edit: &TextEdit, label: &'static str, placeholder: &'static str, at: At<S>, field: fn(&mut State) -> &mut TextEdit) -> El {
     rune::text_input(edit, k.ty.ui_compact)
-        .single_line()
         .key(label)
-        .grow(1.0)
-        .shrink()
         .color(k.c.text_base)
         .placeholder(placeholder, k.c.text_muted)
         .caret(k.c.text_base, k.selection())
@@ -617,8 +619,19 @@ fn epic_detail<S: 'static>(k: &Kit, state: &State, overview: &Overview, root: &P
 /// there are several, and when it is due.
 fn add_box<S: 'static>(k: &Kit, state: &State, at: At<S>, overview: &Overview) -> El {
     let (for_enter, for_button) = (overview.clone(), overview.clone());
-    let input = bare::<S>(k, &state.new_title, "New issue", "New issue — try: Fix login !high #bug @epic", at, |s| &mut s.new_title).on_submit(move |s: &mut S, _: &mut Tx| at(s).add(&for_enter));
-    let top = row().w_full().items_center().gap(8.0).px(12.0).h(40.0).child(icon(&PLUS_ICON, 14.0).color(k.c.icon_muted)).child(input);
+    // A title is one line however it is wrapped, so Enter adds it even where a multi-line field would break the line.
+    let input = wrapping::<S>(k, &state.new_title, "New issue", "New issue — try: Fix login !high #bug @epic", at, |s| &mut s.new_title).w_full().on_input_key(move |s: &mut S, event: &KeyEvent, _: &mut Tx| {
+        if event.key == Key::Enter {
+            at(s).add(&for_enter);
+            return true;
+        }
+        false
+    });
+    // One row at rest, as tall as before; wrapped text grows the box downward, the plus staying by the first line.
+    let line = k.ty.ui_compact.line_px();
+    let pad = ((40.0 - line) / 2.0).max(0.0);
+    let plus = row().h(line).items_center().child(icon(&PLUS_ICON, 14.0).color(k.c.icon_muted));
+    let top = row().w_full().items_start().gap(8.0).px(12.0).py(pad).child(plus).child(col().grow(1.0).shrink().min_w(0.0).child(rune::auto_grow(input, 1, 8)));
 
     let mut foot = row().w_full().flex_wrap().items_center().gap(6.0).pl(34.0).pr(12.0).pb(8.0);
     if overview.repos.len() > 1 {

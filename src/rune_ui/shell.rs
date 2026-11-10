@@ -124,6 +124,9 @@ impl Shell {
             self.finder.at = 0;
         }
         self.finder_was_open = layout.finder_open;
+        let page = layout.finder_open || layout.settings_open || layout.home_open || layout.issues_open;
+        let chat_shown = !page && (!layout.side_open || layout.agent_open);
+        self.side.rename.follow(layout.left_open, chat_shown.then_some(self.chat_feed.value.thread));
         if layout.issues_open
             && let Some(nav) = shared::take_nav()
         {
@@ -139,6 +142,8 @@ impl Shell {
             self.home_model = model::home::model(&self.overview_feed.value, &self.sidebar_feed.value, crate::date::today());
         }
         stale |= overview;
+        // A name typed in place is kept when its line loses the keyboard.
+        stale |= self.side.rename.settle();
         stale |= self.issues.tick(&self.overview_feed.value);
         stale |= self.explorer_feed.poll();
         stale |= self.strip_feed.poll();
@@ -157,7 +162,7 @@ impl Shell {
             stale = true;
         }
         if self.chat_feed.poll() {
-            self.chat.follow(&self.chat_feed.value);
+            self.chat.follow(&self.chat_feed.value, self.side.rename.editing.is_some());
             stale = true;
         }
         self.explorer.follow(&self.strip_feed.value);
@@ -216,6 +221,9 @@ fn side_of<S: Host>(s: &mut S) -> &mut sidebar::State {
     &mut s.shell().side
 }
 
+fn rename_of<S: Host>(s: &mut S) -> &mut super::rename::Rename {
+    &mut s.shell().side.rename
+}
 fn explorer_of<S: Host>(s: &mut S) -> &mut explorer::State {
     &mut s.shell().explorer
 }
@@ -281,7 +289,7 @@ pub fn view<S: Host>(host: &S, k: &Kit) -> El {
     let layout = host.layout();
     // What floats over the window: the menus the chips open, the theme list.
     let mut layer = vec![];
-    let chat = |framed: bool| chat::view::<S>(&shell.chat_feed.value, &shell.chat, k, chat_of::<S>, framed);
+    let chat = |framed: bool| chat::view::<S>(&shell.chat_feed.value, &shell.chat, k, chat_of::<S>, framed, &shell.side.rename, rename_of::<S>);
     let page = if layout.finder_open {
         Some(finder::view::<S>(&shell.finder_feed.value, &shell.finder, k, finder_of::<S>))
     } else if let (true, Some(page)) = (layout.settings_open, &shell.settings) {
@@ -310,7 +318,7 @@ pub fn view<S: Host>(host: &S, k: &Kit) -> El {
     let beside = no_page && layout.side_open && !focus && !layout.swapped;
     let right = if beside { Some(rune::el().w_full().h_full()) } else { right };
     // The conversation in the middle pane puts its header in the window's toolbar.
-    let toolbar = (!layout.finder_open && !layout.settings_open && !layout.home_open && !layout.issues_open && !focus && (!layout.side_open || !layout.swapped)).then(|| chat::toolbar::<S>(k, &shell.chat_feed.value));
+    let toolbar = (!layout.finder_open && !layout.settings_open && !layout.home_open && !layout.issues_open && !focus && (!layout.side_open || !layout.swapped)).then(|| chat::toolbar::<S>(k, &shell.chat_feed.value, &shell.side.rename, rename_of::<S>));
     let mut split = SplitView::new(middle).frame_inset(0.0);
     if let Some(toolbar) = toolbar {
         split = split.toolbar(toolbar);
@@ -318,7 +326,7 @@ pub fn view<S: Host>(host: &S, k: &Kit) -> El {
     // The panes' own headers carry the sidebar's toggle (at the left of the title, as they did
     // before); the pages, which have none, take the kit's, at the end of the sidebar's band.
     let split = if no_page { split.hide_sidebar_toggle() } else { split.sidebar_padding(0.0, sidebar::GUTTER).sidebar_toggle(SidebarToggle::new().in_header()) };
-    let split = split.sidebar::<S>(&shell.sidebar, sidebar_of::<S>, col().w(shell.sidebar.width()).min_w(shell.sidebar.width()).h_full().child(sidebar::view::<S>(&shell.sidebar_feed.value, &shell.side, k, side_of::<S>, layout.settings_open)));
+    let split = split.sidebar::<S>(&shell.sidebar, sidebar_of::<S>, col().w(shell.sidebar.width()).min_w(shell.sidebar.width()).h_full().child(sidebar::view::<S>(&shell.sidebar_feed.value, &shell.side, k, side_of::<S>, rename_of::<S>, layout.settings_open)));
     // The kit draws the main pane as a bordered, rounded card; Po's panes sit flush, told apart by
     // their backgrounds, so the shell is built with a kit that has neither.
     let mut flat = k.clone();
@@ -370,4 +378,175 @@ pub fn view<S: Host>(host: &S, k: &Kit) -> El {
             term.paste(content.text());
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::sidebar::{Mark, Project, Snapshot, Thread};
+    use rune::{Cx, Env, Runtime};
+
+    struct App {
+        shell: Shell,
+        kit: Kit,
+        layout: Layout,
+    }
+    impl Host for App {
+        fn shell(&mut self) -> &mut Shell {
+            &mut self.shell
+        }
+        fn shell_ref(&self) -> &Shell {
+            &self.shell
+        }
+        fn layout(&self) -> Layout {
+            self.layout
+        }
+        fn terminal(&self) -> Option<&terminal::Term> {
+            None
+        }
+        fn terminal_mut(&mut self) -> Option<&mut terminal::Term> {
+            None
+        }
+        fn set_active(&mut self, _: bool) {}
+        fn attach(&mut self, _: Vec<crate::Source>) {}
+    }
+    fn view(s: &App, _: &mut Cx<App>) -> El {
+        super::view::<App>(s, &s.kit)
+    }
+
+    fn app() -> Runtime<App> {
+        let mut shell = Shell::default();
+        let thread = Thread { project: 1, id: 2, label: "Fix it".into(), name: "Fix it".into(), mark: Mark::Idle, selected: true, controlled: false, ago: None, closing: false };
+        shell.sidebar_feed.value = Snapshot { projects: vec![Project { id: 1, name: "po".into(), active: true, collapsed: false, closable: false, threads: vec![thread], fold: None }], ..Default::default() };
+        shell.chat_feed.value.title = "Fix it".into();
+        shell.chat_feed.value.thread = (1, 2);
+        shell.chat.draft.focused = true;
+        let layout = Layout { left_open: true, agent_open: true, ..Default::default() };
+        let mut rt = Runtime::new(App { shell, kit: Kit::neutral(true), layout }, view, (1000.0, 700.0), Env::new(true, 1.0));
+        rt.frame(0.0);
+        rt.frame(1.0);
+        rt
+    }
+
+    fn double(rt: &mut Runtime<App>, at: (f32, f32)) {
+        for _ in 0..2 {
+            rt.pointer_down(at.0, at.1);
+            rt.pointer_up(at.0, at.1);
+            rt.frame(1.0 / 60.0);
+        }
+    }
+
+    fn fields(rt: &Runtime<App>) -> Vec<[f32; 4]> {
+        rt.elements().into_iter().filter(|e| e.key.as_deref() == Some("rename")).map(|e| e.rect).collect()
+    }
+
+    fn rect(rt: &Runtime<App>, key: &str) -> [f32; 4] {
+        rt.elements().into_iter().find(|e| e.key.as_deref() == Some(key)).expect(key).rect
+    }
+
+    /// As the window does: what `settle` changes is drawn again.
+    fn settle(rt: &mut Runtime<App>) {
+        for _ in 0..5 {
+            rt.update(|s, _| {
+                s.shell.side.rename.settle();
+            });
+            rt.frame(1.0 / 60.0);
+        }
+    }
+
+    fn stays(rt: &mut Runtime<App>) {
+        assert!(rt.state.shell.side.rename.editing.is_some(), "the line opened");
+        settle(rt);
+        assert!(rt.state.shell.side.rename.editing.is_some(), "and stayed");
+        assert_eq!(fields(rt).len(), 1, "in one place");
+        assert!(rt.state.shell.side.rename.edit.focused, "with the keyboard");
+        rt.key(rune::KeyEvent { key: rune::Key::Text("Z".into()), mods: Default::default() });
+        rt.frame(1.0 / 60.0);
+        assert_eq!(rt.state.shell.side.rename.edit.text, "Z", "what is typed replaces the name");
+    }
+
+    fn from_the_sidebar() -> Runtime<App> {
+        let mut rt = app();
+        let r = rect(&rt, "thread-1-2");
+        double(&mut rt, (r[0] + 50.0, r[1] + r[3] / 2.0));
+        rt
+    }
+
+    #[test]
+    fn renaming_from_the_sidebar_stays_open() {
+        stays(&mut from_the_sidebar());
+    }
+
+    #[test]
+    fn renaming_from_the_toolbar_stays_open() {
+        let mut rt = app();
+        let r = rect(&rt, "thread-title");
+        double(&mut rt, (r[0] + 8.0, r[1] + r[3] / 2.0));
+        stays(&mut rt);
+    }
+
+    #[test]
+    fn the_line_in_the_toolbar_has_room_to_type() {
+        let mut rt = app();
+        let r = rect(&rt, "thread-title");
+        double(&mut rt, (r[0] + 8.0, r[1] + r[3] / 2.0));
+        settle(&mut rt);
+        // Across the band between the sidebar and the window's edge, less the margins the kit keeps
+        // clear of the controls at its sides.
+        let band = rect(&rt, "toolbar");
+        assert!(fields(&rt)[0][2] > band[2] - 2.0 * 96.0 - 8.0, "{:?} in {band:?}", fields(&rt));
+    }
+
+    #[test]
+    fn renaming_from_the_sidebar_over_home_stays_open() {
+        let mut rt = app();
+        rt.update(|s, _| s.layout.home_open = true);
+        rt.frame(1.0);
+        let r = rect(&rt, "thread-1-2");
+        double(&mut rt, (r[0] + 50.0, r[1] + r[3] / 2.0));
+        // The press also opens the thread, which puts Home away and brings the title up.
+        rt.update(|s, _| s.layout.home_open = false);
+        rt.frame(1.0 / 60.0);
+        stays(&mut rt);
+    }
+
+    #[test]
+    fn a_click_in_the_line_keeps_it_open() {
+        let mut rt = from_the_sidebar();
+        settle(&mut rt);
+        let f = fields(&rt)[0];
+        let (x, y) = (f[0] + f[2] / 2.0, f[1] + f[3] / 2.0);
+        rt.pointer_down(x, y);
+        rt.pointer_up(x, y);
+        rt.frame(1.0 / 60.0);
+        settle(&mut rt);
+        assert!(rt.state.shell.side.rename.editing.is_some());
+    }
+
+    #[test]
+    fn a_click_elsewhere_ends_it() {
+        let mut rt = from_the_sidebar();
+        settle(&mut rt);
+        rt.pointer_down(700.0, 300.0);
+        rt.pointer_up(700.0, 300.0);
+        rt.frame(1.0 / 60.0);
+        settle(&mut rt);
+        assert!(rt.state.shell.side.rename.editing.is_none());
+    }
+
+    #[test]
+    fn the_composer_asking_for_the_keyboard_does_not_end_a_rename() {
+        let mut rt = from_the_sidebar();
+        settle(&mut rt);
+        // The agent finishing a turn asks for the keyboard, as the reader does.
+        rt.update(|s, _| {
+            let mut snapshot = s.shell.chat_feed.value.clone();
+            snapshot.focus += 1;
+            let typing = s.shell.side.rename.editing.is_some();
+            s.shell.chat.follow(&snapshot, typing);
+            s.shell.chat_feed.value = snapshot;
+        });
+        rt.frame(1.0 / 60.0);
+        stays(&mut rt);
+    }
 }

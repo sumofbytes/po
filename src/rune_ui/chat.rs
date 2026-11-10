@@ -59,14 +59,17 @@ pub type At<S> = fn(&mut S) -> &mut State;
 
 impl State {
     /// Follows a new snapshot: the app's own writes to the draft take over what was typed.
-    pub fn follow(&mut self, snapshot: &Snapshot) {
+    ///
+    /// `typing_elsewhere`: another field (a thread's name being typed) has the keyboard, and a
+    /// request to give it to the composer is let go rather than taking it from there.
+    pub fn follow(&mut self, snapshot: &Snapshot, typing_elsewhere: bool) {
         if snapshot.draft_reset != self.reset {
             self.reset = snapshot.draft_reset;
             self.draft = TextEdit::new(snapshot.draft.clone());
         }
         if snapshot.focus != self.focus {
             self.focus = snapshot.focus;
-            self.draft.focused = true;
+            self.draft.focused |= !typing_elsewhere;
         }
     }
 }
@@ -150,9 +153,9 @@ pub fn lightbox<S: 'static>(k: &Kit, state: &State, at: At<S>, layer: &mut Vec<E
 }
 
 fn thought<S: 'static>(k: &Kit, message: usize, at: usize, body: &str, open: bool) -> El {
-    let head = row().grow(1.0).min_w(0.0).child(text(if open { "Thought".to_string() } else { gist(body) }).font(SMALL).color(k.c.text_muted));
+    let head = row().grow(1.0).min_w(0.0).child(text(if open { "Thought".to_string() } else { gist(body) }).font(SMALL).color(k.c.text_muted).truncate());
     let line = pressable::<S>(k, format!("thought-{message}-{at}"), head, move || tell(Cmd::ToggleThought { message, block: at }));
-    if open { col().w_full().child(line).child(col().child(text(body.to_string()).font(SMALL).color(k.c.text_muted).spans(vec![Span::new(0, body.len()).italic()]))) } else { line }
+    if open { col().w_full().child(line).child(col().w_full().min_w(0.0).child(text(body.to_string()).font(SMALL).color(k.c.text_muted).spans(vec![Span::new(0, body.len()).italic()]).wrap())) } else { line }
 }
 
 fn tool<S: 'static>(k: &Kit, message: usize, at: usize, t: &Tool) -> El {
@@ -235,7 +238,7 @@ fn plan(k: &Kit, entries: &[Entry]) -> El {
     let mut list = col().w_full().gap(6.0).py(4.0);
     for entry in entries {
         let color = if entry.phase == Phase::Done { k.c.text_muted } else { k.c.text_base };
-        list = list.child(row().items_center().gap(4.0).child(glyph(k, entry.phase)).child(text(entry.text.clone()).font(BODY).color(color)));
+        list = list.child(row().items_center().gap(4.0).child(glyph(k, entry.phase)).child(row().grow(1.0).min_w(0.0).child(text(entry.text.clone()).font(BODY).color(color).wrap())));
     }
     list
 }
@@ -268,7 +271,7 @@ fn approve<S: 'static>(k: &Kit, message: usize, at: usize, question: &str, lines
     if !lines.is_empty() {
         let mut body = col().w_full().min_w(0.0).px(12.0).gap(2.0);
         for line in lines {
-            body = body.child(text(line.clone()).font(MONO).color(k.c.text_base));
+            body = body.child(text(line.clone()).font(MONO).color(k.c.text_base).wrap_anywhere());
         }
         c = c.child(body);
     }
@@ -288,7 +291,15 @@ fn approve<S: 'static>(k: &Kit, message: usize, at: usize, question: &str, lines
 
 fn block<S: 'static>(k: &Kit, message: usize, at: usize, b: &Block) -> El {
     match b {
-        Block::Markdown { text, .. } => Markdown::new(text.to_string()).selectable(true).build(k),
+        Block::Markdown { text, .. } => Markdown::new(text.to_string())
+            .selectable(true)
+            // Only web and mail links go to the system; a message must not open arbitrary schemes.
+            .on_link_tx(|_: &mut S, url: &str, tx: &mut Tx| {
+                if ["https://", "http://", "mailto:"].iter().any(|p| url.starts_with(p)) {
+                    tx.open_url(url).ok();
+                }
+            })
+            .build(k),
         Block::Thought { index, text, open } => thought::<S>(k, message, *index, text, *open),
         Block::Tool(t) => tool::<S>(k, message, t.index, t),
         Block::Run { index, count: _, calls, failed, phase, folded, task, took, latest, kinds, edits } => {
@@ -613,8 +624,14 @@ fn composer<S: 'static>(k: &Kit, snapshot: &Snapshot, state: &State, at: At<S>) 
 /// The thread's header as the window's toolbar: its leading controls and title, then its status
 /// lines and trailing controls. Where the conversation is not in the middle pane it keeps this
 /// band inside itself ([`view`] with `framed`).
-pub fn toolbar<S: 'static>(k: &Kit, snapshot: &Snapshot) -> rune_kit::shell::Toolbar {
-    let mut bar = rune_kit::shell::Toolbar::new().leading(super::header::controls::<S>(k, &snapshot.lead)).leading(text(snapshot.title.clone()).font(BODY).color(k.c.text_base).truncate());
+pub fn toolbar<S: 'static>(k: &Kit, snapshot: &Snapshot, rename: &super::rename::Rename, rename_at: super::rename::At<S>) -> rune_kit::shell::Toolbar {
+    let mut bar = rune_kit::shell::Toolbar::new().leading(super::header::controls::<S>(k, &snapshot.lead));
+    // The name being typed takes the middle of the band; the title's own slot would hold it to the
+    // width of the name.
+    bar = match super::rename::line::<S>(k, rename, rename_at, snapshot.thread, BODY) {
+        Some(line) => bar.center(line),
+        None => bar.leading(super::rename::title::<S>(k, rename, rename_at, snapshot.thread, &snapshot.title, BODY)),
+    };
     for status in &snapshot.statuses {
         bar = bar.trailing(muted(k, status.clone()));
     }
@@ -622,9 +639,9 @@ pub fn toolbar<S: 'static>(k: &Kit, snapshot: &Snapshot) -> rune_kit::shell::Too
 }
 
 /// The header's title and status lines, for a conversation that is not under the window's toolbar.
-fn header<S: 'static>(k: &Kit, snapshot: &Snapshot) -> El {
+fn header<S: 'static>(k: &Kit, snapshot: &Snapshot, rename: &super::rename::Rename, rename_at: super::rename::At<S>) -> El {
     let lead: Vec<_> = snapshot.lead.iter().copied().filter(|c| !matches!(c, crate::model::header::Control::Sidebar(_))).collect();
-    let mut bar = row().w_full().h(super::header::BAND).items_center().gap(12.0).px(16.0).child(super::header::controls::<S>(k, &lead)).child(row().grow(1.0).min_w(0.0).child(text(snapshot.title.clone()).font(BODY).color(k.c.text_base)));
+    let mut bar = row().w_full().h(super::header::BAND).items_center().gap(12.0).px(16.0).child(super::header::controls::<S>(k, &lead)).child(super::rename::title::<S>(k, rename, rename_at, snapshot.thread, &snapshot.title, BODY));
     for status in &snapshot.statuses {
         bar = bar.child(muted(k, status.clone()));
     }
@@ -632,6 +649,6 @@ fn header<S: 'static>(k: &Kit, snapshot: &Snapshot) -> El {
 }
 
 /// The conversation; `framed` keeps its own header, else the window's toolbar carries it.
-pub fn view<S: 'static>(snapshot: &Snapshot, state: &State, k: &Kit, at: At<S>, framed: bool) -> El {
-    col().w_full().h_full().min_h(0.0).children(framed.then(|| header::<S>(k, snapshot))).child(transcript::<S>(k, snapshot, state, at)).child(composer::<S>(k, snapshot, state, at))
+pub fn view<S: 'static>(snapshot: &Snapshot, state: &State, k: &Kit, at: At<S>, framed: bool, rename: &super::rename::Rename, rename_at: super::rename::At<S>) -> El {
+    col().w_full().h_full().min_h(0.0).children(framed.then(|| header::<S>(k, snapshot, rename, rename_at))).child(transcript::<S>(k, snapshot, state, at)).child(composer::<S>(k, snapshot, state, at))
 }

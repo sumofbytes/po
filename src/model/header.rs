@@ -9,8 +9,7 @@ pub enum Control {
     Viewer(bool),
     /// The same, with the viewer on the left of the conversation.
     ViewerLeft(bool),
-    /// The files, the changes and the terminal, selected while the viewer shows them: where the
-    /// conversation's header, which has these buttons, is hidden.
+    /// The files, the changes and the terminal, selected while the viewer shows them.
     Files(bool),
     Changes(bool),
     Terminal(bool),

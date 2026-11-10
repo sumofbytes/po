@@ -1,7 +1,7 @@
 //! The Rune host of the [`crate::Reader`]: the window, its panes, and the loop that gives the
 //! reader what happens (tasks finishing, commands the screens send, keys) and the screens what the
 //! reader publishes.
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
 use rune::{AppSpec, Cx, El, Key, KeyEvent, Tx, Waker};
@@ -23,6 +23,17 @@ struct Launch {
 }
 
 static LAUNCH: Mutex<Option<Launch>> = Mutex::new(None);
+
+/// The way to the window from any thread, set as it starts.
+static WINDOW: OnceLock<rune::AppHandle<State>> = OnceLock::new();
+
+/// Brings the window to the front, with the token that lets it take focus if there is one (without
+/// it, a Wayland compositor may only mark the window urgent).
+pub fn raise(token: Option<String>) {
+    if let Some(window) = WINDOW.get() {
+        window.activate(token.unwrap_or_default());
+    }
+}
 
 /// The reader and what drives it, once the window is there to wake.
 struct Live {
@@ -351,7 +362,7 @@ pub fn run(root: std::path::PathBuf, pr: Option<pr::Pr>, command: Option<String>
     let ui: &'static str = Box::leak(settings["font"]["family"].as_str().map_or_else(|| format!("{}, system-ui", crate::fonts::BUNDLED_UI_FAMILY), |f| format!("{f}, {}, system-ui", crate::fonts::BUNDLED_UI_FAMILY)).into_boxed_str());
     let mono: &'static str = Box::leak(settings["font"]["mono_family"].as_str().map_or_else(|| format!("{}, ui-monospace", crate::fonts::BUNDLED_MONO_FAMILY), |f| format!("{f}, {}, ui-monospace", crate::fonts::BUNDLED_MONO_FAMILY)).into_boxed_str());
     rune::set_app_id("po");
-    rune::run(AppSpec::<State> {
+    let app = rune::App::new(AppSpec::<State> {
         fonts: &crate::fonts::BUNDLED,
         families: (ui, mono),
         setup: Some(setup),
@@ -360,4 +371,6 @@ pub fn run(root: std::path::PathBuf, pr: Option<pr::Pr>, command: Option<String>
         min_size: Some((640.0, 420.0)),
         ..AppSpec::new("Po", (1360.0, 840.0), init, view)
     });
+    WINDOW.set(app.handle()).ok();
+    app.run();
 }

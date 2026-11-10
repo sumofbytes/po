@@ -4,6 +4,7 @@ pub mod shell;
 pub mod terminal;
 pub mod theme;
 pub mod sidebar;
+pub mod rename;
 pub mod explorer;
 pub mod finder;
 pub mod tabs;
