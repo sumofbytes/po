@@ -852,7 +852,7 @@ impl Reader {
             shown: slot.thread.id,
             threads: std::iter::once(&slot.thread).chain(&slot.parked).collect(),
         }));
-        views.sort_by_key(|view| view.id);
+        views.sort_by_key(|view| (self.project_order.iter().position(|id| *id == view.id).unwrap_or(usize::MAX), view.id));
         // The thread on screen is first among them; lists keep the order they were made in.
         for view in &mut views {
             view.threads.sort_by_key(|thread| thread.id);
