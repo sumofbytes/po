@@ -99,7 +99,7 @@ impl Default for Shell {
 
 impl Shell {
     /// Follows the layout the `Reader` has: the panes that are open, the settings page that is up.
-    pub fn follow(&mut self, layout: &Layout, viewer_left: bool) {
+    pub fn follow(&mut self, layout: &Layout) {
         // The toggle in the window's band flips the pane itself; the layout is the one truth, so the
         // flip is sent on as a command, and the pane is set from the layout once that has answered.
         if layout.left_open != self.left_seen {
@@ -113,7 +113,7 @@ impl Shell {
         // The viewer is the right pane unless it fills the middle or the conversation is.
         self.viewer.set_open(layout.side_open && layout.agent_open && !layout.home_open && !layout.issues_open);
         if layout.settings_open && self.settings.is_none() {
-            self.settings = Some(settings::Page::load(viewer_left));
+            self.settings = Some(settings::Page::load(layout.swapped));
         }
         if !layout.settings_open {
             self.settings = None;

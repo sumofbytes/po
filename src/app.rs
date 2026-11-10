@@ -47,8 +47,6 @@ struct State {
     kit: Kit,
     shell: Shell,
     live: Option<Live>,
-    /// The viewer is on the left in the settings, for the page that edits it.
-    viewer_left: bool,
     /// The terminal was what the viewer showed, as of the last poll: it takes the keyboard on opening.
     terminal_was_shown: bool,
     /// The saved pane widths were handed to the panes.
@@ -104,7 +102,7 @@ fn named_kit(name: &str) -> Kit {
 fn init() -> State {
     let settings = config::load();
     let kit = theme_kit(&settings);
-    State { kit, shell: Shell::default(), live: None, viewer_left: config::viewer_left(&settings).unwrap_or(false), terminal_was_shown: false, widths_applied: false, bench_filled: false }
+    State { kit, shell: Shell::default(), live: None, terminal_was_shown: false, widths_applied: false, bench_filled: false }
 }
 
 fn view(s: &State, _: &mut Cx<State>) -> El {
@@ -217,7 +215,7 @@ fn poll(s: &mut State, now: f64, tx: &mut Tx) -> bool {
         tx.blur();
     }
     s.terminal_was_shown = layout.terminal_shown;
-    s.shell.follow(&layout, s.viewer_left);
+    s.shell.follow(&layout);
     // The panes start as the workspace left them, and what they are dragged to is saved.
     let widths = &mut core.reader.widths;
     if !s.widths_applied {
