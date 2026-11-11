@@ -330,7 +330,7 @@ set `"theme"` to the absolute path of the file; a file there wins over a scheme
 of the same name. The `font` block overrides the theme's UI and monospace fonts
 and sizes. `family` and `mono_family` take a name or a list tried in order
 (`["JetBrains Mono", "Fira Code"]`); one that isn't installed is logged and
-skipped. Without one, po uses the bundled Geist and Geist Mono, not the system's fonts; set `mono_family` (say, to your fontconfig `monospace`) to use your own.
+skipped. Without one, po uses the bundled Geist and Geist Mono, not the system's fonts; set `mono_family` (say, to your fontconfig `monospace`) to use your own. Rendered markdown is set in the bundled Literata, a book serif, whatever `family` says; its code stays in the monospace font.
 `size` and `mono_size` scale the text: the UI's (14 is the size it is designed at) and the
 code's, the diffs' and the terminal's (13). Spacing and the height of controls don't follow, so
 a much larger size crowds them.

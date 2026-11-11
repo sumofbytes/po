@@ -11,7 +11,7 @@ use serde_json::Value;
 pub const SIZES: std::ops::RangeInclusive<f32> = 8.0..=48.0;
 
 /// The fonts in the binary.
-pub const BUNDLED: [&[u8]; 10] = [
+pub const BUNDLED: [&[u8]; 12] = [
     include_bytes!("../assets/fonts/Geist-Regular.ttf"),
     include_bytes!("../assets/fonts/Geist-Italic.ttf"),
     include_bytes!("../assets/fonts/Geist-Medium.ttf"),
@@ -22,9 +22,13 @@ pub const BUNDLED: [&[u8]; 10] = [
     include_bytes!("../assets/fonts/GeistMono-Medium.ttf"),
     include_bytes!("../assets/fonts/GeistMono-SemiBold.ttf"),
     include_bytes!("../assets/fonts/GeistMono-Bold.ttf"),
+    include_bytes!("../assets/fonts/Literata-Variable.ttf"),
+    include_bytes!("../assets/fonts/Literata-Italic-Variable.ttf"),
 ];
 pub const BUNDLED_UI_FAMILY: &str = "Geist";
 pub const BUNDLED_MONO_FAMILY: &str = "Geist Mono";
+/// The serif markdown is read in.
+pub const BUNDLED_BOOK_FAMILY: &str = "Literata";
 
 /// The UI size the type scale is measured from: a `font.size` of this leaves every style as drawn.
 pub const BASE_UI_SIZE: f32 = 14.0;
