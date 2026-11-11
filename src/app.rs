@@ -47,8 +47,6 @@ struct State {
     kit: Kit,
     shell: Shell,
     live: Option<Live>,
-    /// The viewer is on the left in the settings, for the page that edits it.
-    viewer_left: bool,
     /// The terminal was what the viewer showed, as of the last poll: it takes the keyboard on opening.
     terminal_was_shown: bool,
     /// The saved pane widths were handed to the panes.
@@ -103,12 +101,13 @@ fn named_kit(name: &str) -> Kit {
 
 fn init() -> State {
     let settings = config::load();
+    crate::fonts::set_sizes(&settings);
     let kit = theme_kit(&settings);
-    State { kit, shell: Shell::default(), live: None, viewer_left: config::viewer_left(&settings).unwrap_or(false), terminal_was_shown: false, widths_applied: false, bench_filled: false }
+    State { kit, shell: Shell::default(), live: None, terminal_was_shown: false, widths_applied: false, bench_filled: false }
 }
 
-fn view(s: &State, _: &mut Cx<State>) -> El {
-    rune_ui::shell::view::<State>(s, &s.kit)
+fn view(s: &State, cx: &mut Cx<State>) -> El {
+    rune_ui::shell::view::<State>(s, &s.kit, cx.titlebar_inset())
 }
 
 /// Builds the reader, now that the window can be woken from other threads.
@@ -173,7 +172,10 @@ fn poll(s: &mut State, now: f64, tx: &mut Tx) -> bool {
         s.kit = named_kit(&name);
     }
     if settled {
-        s.kit = theme_kit(&config::load());
+        // What is on disk now: a save's sizes and theme, or, after a close, the ones from before.
+        let settings = config::load();
+        crate::fonts::set_sizes(&settings);
+        s.kit = theme_kit(&settings);
     }
     if recolored {
         core.reader.term_theme = terminal_colors(&s.kit);
@@ -217,7 +219,7 @@ fn poll(s: &mut State, now: f64, tx: &mut Tx) -> bool {
         tx.blur();
     }
     s.terminal_was_shown = layout.terminal_shown;
-    s.shell.follow(&layout, s.viewer_left);
+    s.shell.follow(&layout);
     // The panes start as the workspace left them, and what they are dragged to is saved.
     let widths = &mut core.reader.widths;
     if !s.widths_applied {
@@ -359,8 +361,8 @@ pub fn run(root: std::path::PathBuf, pr: Option<pr::Pr>, command: Option<String>
     *LAUNCH.lock().expect("launch") = Some(Launch { root, pr, command, prefetch });
     let settings = config::load();
     // The fonts the settings name, as a list the text system tries in order, over the bundled ones.
-    let ui: &'static str = Box::leak(settings["font"]["family"].as_str().map_or_else(|| format!("{}, system-ui", crate::fonts::BUNDLED_UI_FAMILY), |f| format!("{f}, {}, system-ui", crate::fonts::BUNDLED_UI_FAMILY)).into_boxed_str());
-    let mono: &'static str = Box::leak(settings["font"]["mono_family"].as_str().map_or_else(|| format!("{}, ui-monospace", crate::fonts::BUNDLED_MONO_FAMILY), |f| format!("{f}, {}, ui-monospace", crate::fonts::BUNDLED_MONO_FAMILY)).into_boxed_str());
+    let ui: &'static str = Box::leak(crate::fonts::family_list(&settings["font"]["family"], crate::fonts::BUNDLED_UI_FAMILY, "system-ui").into_boxed_str());
+    let mono: &'static str = Box::leak(crate::fonts::family_list(&settings["font"]["mono_family"], crate::fonts::BUNDLED_MONO_FAMILY, "ui-monospace").into_boxed_str());
     rune::set_app_id("po");
     let app = rune::App::new(AppSpec::<State> {
         fonts: &crate::fonts::BUNDLED,

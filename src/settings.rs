@@ -1,5 +1,5 @@
 //! The settings page (Ctrl/Cmd+,): the options of `config.json` as fields, written back to it on
-//! Save. Theme, fonts and glass apply as soon as the file is written, since po watches it. The
+//! Save. The theme and the font sizes apply when it saves; the font names are read when po starts. The
 //! fields are NSH's ([`crate::nsh::settings`]); this is what they hold and how it is written.
 use serde_json::{Map, Value};
 
@@ -26,7 +26,6 @@ pub struct Form {
     pub idle_minutes: String,
     pub max_live: String,
     pub notifications: bool,
-    pub glass: bool,
     pub viewer_left: bool,
     pub agents: Vec<AgentForm>,
 }
@@ -104,11 +103,6 @@ impl Form {
                 AgentForm { id: get("id"), name: get("name"), command: get("command"), extra }
             })
             .collect();
-        let glass = match &config["glass"] {
-            Value::Bool(on) => *on,
-            Value::Number(_) => true,
-            _ => false,
-        };
         Self {
             theme: config["theme"].as_str().unwrap_or("").to_string(),
             font_family: names_line(&font["family"]),
@@ -118,7 +112,6 @@ impl Form {
             idle_minutes: text(&config["idle_minutes"]),
             max_live: text(&config["max_live_agents"]),
             notifications: config["notifications"].as_bool().unwrap_or(true),
-            glass,
             viewer_left,
             agents,
         }
@@ -138,7 +131,7 @@ impl Form {
         let idle = number("Idle minutes", &read(&self.idle_minutes), 0.0..=1_000_000., true)?;
         let max_live = number("Max live agents", &read(&self.max_live), 1.0..=1000., true)?;
         let (theme, font_family, mono_family) = (read(&self.theme), names_value(&read(&self.font_family)), names_value(&read(&self.mono_family)));
-        let (notifications, glass, viewer_left) = (self.notifications, self.glass, self.viewer_left);
+        let (notifications, viewer_left) = (self.notifications, self.viewer_left);
         let mut agents = Vec::new();
         for row in &self.agents {
             let (id, name, command) = (read(&row.id), read(&row.name), read(&row.command));
@@ -166,9 +159,6 @@ impl Form {
             put(config, "max_live_agents", max_live.map(json_number));
             // Notifications default on, so only turning them off is written.
             put(config, "notifications", (!notifications).then_some(Value::Bool(false)));
-            // A glass opacity set by hand stays while glass is on.
-            let kept = config.get("glass").filter(|value| value.is_number()).cloned();
-            put(config, "glass", if glass { Some(kept.unwrap_or(Value::Bool(true))) } else { config.contains_key("glass").then_some(Value::Bool(false)) });
             put(config, "viewer_position", Some((if viewer_left { "left" } else { "right" }).into()));
             put(config, "agents", (!agents.is_empty()).then_some(Value::Array(agents)));
         })
@@ -201,5 +191,42 @@ mod tests {
         assert_eq!(number("n", "1.5", any, false), Ok(Some(1.5)));
         assert_eq!(json_number(14.), json!(14));
         assert_eq!(json_number(13.5), json!(13.5));
+    }
+
+    fn blank() -> Form {
+        Form { theme: String::new(), font_family: String::new(), font_size: String::new(), mono_family: String::new(), mono_size: String::new(), idle_minutes: String::new(), max_live: String::new(), notifications: true, viewer_left: false, agents: vec![] }
+    }
+
+    fn saved(form: &Form, mut config: Map<String, Value>) -> Map<String, Value> {
+        form.collect().expect("the fields are valid")(&mut config);
+        config
+    }
+
+    #[test]
+    fn saving_writes_the_sizes_and_keeps_what_the_page_has_no_field_for() {
+        let mut form = blank();
+        (form.font_size, form.mono_size, form.font_family) = ("15".into(), "12.5".into(), "A, B".into());
+        let before = json!({ "glass": true, "font": { "transcript_size": 12 }, "mcp_servers": { "x": {} } });
+        let config = saved(&form, before.as_object().unwrap().clone());
+        assert_eq!(config["font"], json!({ "transcript_size": 12, "size": 15, "mono_size": 12.5, "family": ["A", "B"] }));
+        assert_eq!(config["glass"], json!(true), "an option the page doesn't have is left as it was");
+        assert!(config.contains_key("mcp_servers"));
+        assert_eq!(config["viewer_position"], "right");
+    }
+
+    #[test]
+    fn an_empty_field_puts_an_option_back_to_its_default() {
+        let before = json!({ "font": { "size": 15 }, "idle_minutes": 5 });
+        let config = saved(&blank(), before.as_object().unwrap().clone());
+        assert!(!config.contains_key("font") && !config.contains_key("idle_minutes"));
+    }
+
+    #[test]
+    fn sizes_outside_the_range_are_refused() {
+        let mut form = blank();
+        form.font_size = "7".into();
+        assert!(form.collect().is_err());
+        form.font_size = "49".into();
+        assert!(form.collect().is_err());
     }
 }

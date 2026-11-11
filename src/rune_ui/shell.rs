@@ -99,7 +99,7 @@ impl Default for Shell {
 
 impl Shell {
     /// Follows the layout the `Reader` has: the panes that are open, the settings page that is up.
-    pub fn follow(&mut self, layout: &Layout, viewer_left: bool) {
+    pub fn follow(&mut self, layout: &Layout) {
         // The toggle in the window's band flips the pane itself; the layout is the one truth, so the
         // flip is sent on as a command, and the pane is set from the layout once that has answered.
         if layout.left_open != self.left_seen {
@@ -113,7 +113,7 @@ impl Shell {
         // The viewer is the right pane unless it fills the middle or the conversation is.
         self.viewer.set_open(layout.side_open && layout.agent_open && !layout.home_open && !layout.issues_open);
         if layout.settings_open && self.settings.is_none() {
-            self.settings = Some(settings::Page::load(viewer_left));
+            self.settings = Some(settings::Page::load(layout.swapped));
         }
         if !layout.settings_open {
             self.settings = None;
@@ -284,7 +284,9 @@ fn viewer_content<S: Host>(shell: &Shell, host: &S, layout: &Layout, k: &Kit) ->
 /// The whole window, laid out as the `Reader` says: the sidebar, a middle pane and a right pane
 /// that are the conversation and the viewer, either way round, or a page (Home, the issues, the
 /// settings, the finder) in place of the conversation.
-pub fn view<S: Host>(host: &S, k: &Kit) -> El {
+/// `inset` is what the window's own buttons take at its leading edge (macOS traffic lights; 0 elsewhere and in full
+/// screen): the sidebar's title and the toolbar start past it.
+pub fn view<S: Host>(host: &S, k: &Kit, inset: f32) -> El {
     let shell = host.shell_ref();
     let layout = host.layout();
     // What floats over the window: the menus the chips open, the theme list.
@@ -319,14 +321,15 @@ pub fn view<S: Host>(host: &S, k: &Kit) -> El {
     let right = if beside { Some(rune::el().w_full().h_full()) } else { right };
     // The conversation in the middle pane puts its header in the window's toolbar.
     let toolbar = (!layout.finder_open && !layout.settings_open && !layout.home_open && !layout.issues_open && !focus && (!layout.side_open || !layout.swapped)).then(|| chat::toolbar::<S>(k, &shell.chat_feed.value, &shell.side.rename, rename_of::<S>));
-    let mut split = SplitView::new(middle).frame_inset(0.0);
+    // The toolbar, and the toggle that floats over it, start past the window's buttons.
+    let mut split = SplitView::new(middle).frame_inset(0.0).titlebar_inset(inset);
     if let Some(toolbar) = toolbar {
         split = split.toolbar(toolbar);
     }
     // The panes' own headers carry the sidebar's toggle (at the left of the title, as they did
     // before); the pages, which have none, take the kit's, at the end of the sidebar's band.
     let split = if no_page { split.hide_sidebar_toggle() } else { split.sidebar_padding(0.0, sidebar::GUTTER).sidebar_toggle(SidebarToggle::new().in_header()) };
-    let split = split.sidebar::<S>(&shell.sidebar, sidebar_of::<S>, col().w(shell.sidebar.width()).min_w(shell.sidebar.width()).h_full().child(sidebar::view::<S>(&shell.sidebar_feed.value, &shell.side, k, side_of::<S>, rename_of::<S>, layout.settings_open)));
+    let split = split.sidebar::<S>(&shell.sidebar, sidebar_of::<S>, col().w(shell.sidebar.width()).min_w(shell.sidebar.width()).h_full().child(sidebar::view::<S>(&shell.sidebar_feed.value, &shell.side, k, side_of::<S>, rename_of::<S>, layout.settings_open, inset)));
     // The kit draws the main pane as a bordered, rounded card; Po's panes sit flush, told apart by
     // their backgrounds, so the shell is built with a kit that has neither.
     let mut flat = k.clone();
@@ -352,7 +355,7 @@ pub fn view<S: Host>(host: &S, k: &Kit) -> El {
         let (left, edge, width) = if beside {
             (None, 0.0, Some((shell.viewer.shown_width() - 6.0).max(0.0)))
         } else {
-            (Some(if layout.left_open { shell.sidebar.shown_width() } else { 56.0 }), shell.viewer.shown_width(), None)
+            (Some(if layout.left_open { shell.sidebar.shown_width() } else { 56.0 + inset }), shell.viewer.shown_width(), None)
         };
         let divider = rune::el().absolute(-1.0, 0.0).w(1.0).h_full().fill(k.c.border_base);
         // The content fills the box the pins make; pinned itself, its full width would run past the window.
@@ -411,7 +414,7 @@ mod tests {
         fn attach(&mut self, _: Vec<crate::Source>) {}
     }
     fn view(s: &App, _: &mut Cx<App>) -> El {
-        super::view::<App>(s, &s.kit)
+        super::view::<App>(s, &s.kit, 0.0)
     }
 
     fn app() -> Runtime<App> {

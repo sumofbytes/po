@@ -21,7 +21,6 @@ pub enum Control {
 /// carries. Decided by the layout, so the core never builds it.
 #[derive(Clone, Default, PartialEq, Debug)]
 pub struct Chrome {
-    pub glass: bool,
     pub lead: Vec<Control>,
     pub trail: Vec<Control>,
 }

@@ -13,7 +13,7 @@ pub type Choose<S> = std::rc::Rc<dyn Fn(&mut S, &str)>;
 
 const ROW: f32 = 28.0;
 const SHOWN: f32 = 280.0;
-const SMALL: TextStyle = TextStyle::new(13.0, 400.0);
+fn small_style() -> TextStyle { crate::fonts::ui(13.0, 400.0) }
 
 #[derive(Default)]
 pub struct State {
@@ -63,7 +63,7 @@ pub fn view<S: 'static>(k: &Kit, state: &State, current: &str, width: f32, at: A
         .gap(6.0)
         .items_center()
         .fill(k.c.layer_02)
-        .child(row().grow(1.0).min_w(0.0).child(text(label).font(SMALL).color(k.c.text_base)))
+        .child(row().grow(1.0).min_w(0.0).child(text(label).font(small_style()).color(k.c.text_base)))
         .child(icon(&CHEVRON, 14.0).color(k.c.text_muted));
     let press_at = at.clone();
     let current_name = current.to_string();
@@ -100,7 +100,7 @@ pub fn view<S: 'static>(k: &Kit, state: &State, current: &str, width: f32, at: A
         })
         .on_key(move |s: &mut S, event, tx| {
             let state = key_at(s);
-            if state.search.preedit.is_some() {
+            if state.search.preedit().is_some() {
                 return false;
             }
             let shown = matching(&state.search.text);
@@ -154,7 +154,7 @@ pub fn view<S: 'static>(k: &Kit, state: &State, current: &str, width: f32, at: A
                 .items_center()
                 .radius(4.0)
                 .fill(if i == active { k.c.hover } else { rune::Color::TRANSPARENT })
-                .child(text(name).font(SMALL).color(k.c.text_base).grow(1.0).shrink().truncate().a11y_hidden())
+                .child(text(name).font(small_style()).color(k.c.text_base).grow(1.0).shrink().truncate().a11y_hidden())
                 .child(bars)
                 .child(el().w(14.0).h(14.0).child(check))
                 .on_hover(move |s: &mut S| hover_at(s).active = i)
@@ -165,7 +165,7 @@ pub fn view<S: 'static>(k: &Kit, state: &State, current: &str, width: f32, at: A
         );
     }
     let list = if shown.is_empty() {
-        row().h(ROW).px(8.0).items_center().child(text("No themes").font(SMALL).color(k.c.text_muted))
+        row().h(ROW).px(8.0).items_center().child(text("No themes").font(small_style()).color(k.c.text_muted))
     } else {
         k.scroll_bar(col().w_full().h((shown.len() as f32 * ROW).min(SHOWN)).scroll(ScrollSpec { stick_bottom: false }).child(rows))
     };

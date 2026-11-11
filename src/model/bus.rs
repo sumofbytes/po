@@ -21,6 +21,8 @@ pub enum Cmd {
     SideQuery(String),
     /// A project row was pressed: fold or unfold its threads, and show it.
     ToggleProject(u64),
+    /// A project header was dragged onto the place of another: the first goes where the second is.
+    MoveProject(u64, u64),
     StartThread(u64),
     /// The close button on a project's header.
     CloseProject(u64),

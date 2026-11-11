@@ -2,7 +2,7 @@
 //! composer under it. Counterpart of `src/nsh/chat.rs`.
 use std::time::Duration;
 
-use rune::tok::{Family, TextStyle};
+use rune::tok::TextStyle;
 use rune::{Color, El, GrowthSpec, Icon, Span, Key, KeyEvent, ScrollSpec, TextEdit, Tx, col, row, text};
 use rune_kit::markdown::Markdown;
 use rune_kit::{Button, ButtonVariant, Kit, Spinner};
@@ -13,10 +13,10 @@ use super::pictures;
 use crate::model::bus::{Cmd as Bus, send};
 use crate::model::chat::{AskOption, Block, Cmd, Entry, Grant, GrantChange, Item, Kind, Phase, Picking, Queued, Scope, Snapshot, Tool};
 
-const BODY: TextStyle = TextStyle::new(14.0, 400.0);
-const SMALL: TextStyle = TextStyle::new(12.0, 400.0);
-const LABEL: TextStyle = TextStyle::new(12.0, 500.0);
-const MONO: TextStyle = TextStyle { family: Family::SystemMono, line_height: 17.0, ..TextStyle::new(12.0, 400.0) };
+fn body_style() -> TextStyle { crate::fonts::ui(14.0, 400.0) }
+fn small_style() -> TextStyle { crate::fonts::ui(12.0, 400.0) }
+fn label_style() -> TextStyle { crate::fonts::ui(12.0, 500.0) }
+fn mono_style() -> TextStyle { crate::fonts::mono(12.0, 17.0) }
 /// The column the conversation and the composer share.
 const COLUMN: f32 = 760.0;
 /// How far in from the composer's edge its text starts (its padding and its field's, which is where the chips' labels start too):
@@ -103,11 +103,11 @@ fn glyph(k: &Kit, phase: Phase) -> El {
         Phase::Done => "✓",
         Phase::Failed => "×",
     };
-    text(mark).font(SMALL).color(tint(k, phase)).w(12.0)
+    text(mark).font(small_style()).color(tint(k, phase)).w(12.0)
 }
 
 fn muted(k: &Kit, s: impl Into<String>) -> El {
-    text(s.into()).font(SMALL).color(k.c.text_muted)
+    text(s.into()).font(small_style()).color(k.c.text_muted)
 }
 
 /// A pressable row of the transcript.
@@ -134,7 +134,7 @@ fn user_row<S: 'static>(k: &Kit, body: &str, pictures: &[crate::model::chat::Pic
     // The words, then a small thumbnail of each picture at the row's end: pressing one shows it large.
     let mut inner = row().gap(12.0).items_center();
     if !body.is_empty() {
-        inner = inner.child(text(body).font(BODY).color(k.c.text_base).wrap_anywhere().shrink());
+        inner = inner.child(text(body).font(body_style()).color(k.c.text_base).wrap_anywhere().shrink());
     }
     for (i, picture) in pictures.iter().enumerate() {
         let shown = picture.clone();
@@ -153,20 +153,20 @@ pub fn lightbox<S: 'static>(k: &Kit, state: &State, at: At<S>, layer: &mut Vec<E
 }
 
 fn thought<S: 'static>(k: &Kit, message: usize, at: usize, body: &str, open: bool) -> El {
-    let head = row().grow(1.0).min_w(0.0).child(text(if open { "Thought".to_string() } else { gist(body) }).font(SMALL).color(k.c.text_muted).truncate());
+    let head = row().grow(1.0).min_w(0.0).child(text(if open { "Thought".to_string() } else { gist(body) }).font(small_style()).color(k.c.text_muted).truncate());
     let line = pressable::<S>(k, format!("thought-{message}-{at}"), head, move || tell(Cmd::ToggleThought { message, block: at }));
-    if open { col().w_full().child(line).child(col().w_full().min_w(0.0).child(text(body.to_string()).font(SMALL).color(k.c.text_muted).spans(vec![Span::new(0, body.len()).italic()]).wrap())) } else { line }
+    if open { col().w_full().child(line).child(col().w_full().min_w(0.0).child(text(body.to_string()).font(small_style()).color(k.c.text_muted).spans(vec![Span::new(0, body.len()).italic()]).wrap())) } else { line }
 }
 
 fn tool<S: 'static>(k: &Kit, message: usize, at: usize, t: &Tool) -> El {
     // Collapsed, a call is one line: the first of its title, cut off where it runs out of room.
     let first = t.title.lines().next().unwrap_or_default().trim().to_string();
-    let head = row().grow(1.0).min_w(0.0).items_center().gap(4.0).child(glyph(k, t.phase)).child(row().grow(1.0).min_w(0.0).child(text(first).font(SMALL).color(k.c.text_muted).truncate()));
+    let head = row().grow(1.0).min_w(0.0).items_center().gap(4.0).child(glyph(k, t.phase)).child(row().grow(1.0).min_w(0.0).child(text(first).font(small_style()).color(k.c.text_muted).truncate()));
     let mut card = col().w_full().child(pressable::<S>(k, format!("tool-{message}-{at}"), head, move || tell(Cmd::ToggleTool { message, block: at })));
     if t.open {
         // Expanded, all of it shows and wraps to the column.
         let rest = t.title.split_once('\n').map(|(_, rest)| rest.trim().to_string()).filter(|rest| !rest.is_empty());
-        let wrapped = |s: String, color| text(s).font(MONO).color(color).wrap_anywhere().w_full();
+        let wrapped = |s: String, color| text(s).font(mono_style()).color(color).wrap_anywhere().w_full();
         let mut detail = col().w_full().min_w(0.0).px(16.0).gap(4.0);
         if let Some(rest) = rest {
             detail = detail.child(wrapped(rest, k.c.text_muted));
@@ -187,7 +187,7 @@ fn tool<S: 'static>(k: &Kit, message: usize, at: usize, t: &Tool) -> El {
 }
 
 fn chip<S: 'static>(k: &Kit, key: String, label: String, press: impl Fn() + 'static) -> El {
-    k.interactive(row().key(key).px(8.0).py(2.0).radius(6.0).fill(k.c.layer_02).child(text(label).font(SMALL).color(k.c.text_base)).on_press(move |_: &mut S| press()))
+    k.interactive(row().key(key).px(8.0).py(2.0).radius(6.0).fill(k.c.layer_02).child(text(label).font(small_style()).color(k.c.text_base)).on_press(move |_: &mut S| press()))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -238,7 +238,7 @@ fn plan(k: &Kit, entries: &[Entry]) -> El {
     let mut list = col().w_full().gap(6.0).py(4.0);
     for entry in entries {
         let color = if entry.phase == Phase::Done { k.c.text_muted } else { k.c.text_base };
-        list = list.child(row().items_center().gap(4.0).child(glyph(k, entry.phase)).child(row().grow(1.0).min_w(0.0).child(text(entry.text.clone()).font(BODY).color(color).wrap())));
+        list = list.child(row().items_center().gap(4.0).child(glyph(k, entry.phase)).child(row().grow(1.0).min_w(0.0).child(text(entry.text.clone()).font(body_style()).color(color).wrap())));
     }
     list
 }
@@ -248,7 +248,7 @@ fn card(k: &Kit, waiting: bool) -> El {
 }
 
 fn ask<S: 'static>(k: &Kit, message: usize, at: usize, title: &str, options: &[AskOption], answered: &Option<String>) -> El {
-    let head = row().gap(8.0).child(text("Permission").font(LABEL).color(k.c.text_muted)).child(row().grow(1.0).min_w(0.0).child(Markdown::new(title.to_string()).build(k)));
+    let head = row().gap(8.0).child(text("Permission").font(label_style()).color(k.c.text_muted)).child(row().grow(1.0).min_w(0.0).child(Markdown::new(title.to_string()).build(k)));
     let mut c = card(k, answered.is_none()).child(head);
     match answered {
         Some(given) => c = c.child(muted(k, format!("→ {given}"))),
@@ -266,12 +266,12 @@ fn ask<S: 'static>(k: &Kit, message: usize, at: usize, title: &str, options: &[A
 }
 
 fn approve<S: 'static>(k: &Kit, message: usize, at: usize, question: &str, lines: &[String], answered: &Option<String>) -> El {
-    let head = row().gap(8.0).child(text("Approve").font(LABEL).color(k.c.text_muted)).child(row().grow(1.0).min_w(0.0).child(Markdown::new(question.to_string()).build(k)));
+    let head = row().gap(8.0).child(text("Approve").font(label_style()).color(k.c.text_muted)).child(row().grow(1.0).min_w(0.0).child(Markdown::new(question.to_string()).build(k)));
     let mut c = card(k, answered.is_none()).child(head);
     if !lines.is_empty() {
         let mut body = col().w_full().min_w(0.0).px(12.0).gap(2.0);
         for line in lines {
-            body = body.child(text(line.clone()).font(MONO).color(k.c.text_base).wrap_anywhere());
+            body = body.child(text(line.clone()).font(mono_style()).color(k.c.text_base).wrap_anywhere());
         }
         c = c.child(body);
     }
@@ -438,13 +438,13 @@ fn queued<S: 'static>(k: &Kit, q: &Queued) -> El {
         .px(8.0)
         .py(2.0)
         .child(if q.kind.is_empty() { row() } else { row().child(muted(k, q.kind.clone())) })
-        .child(row().grow(1.0).min_w(0.0).child(text(preview).font(SMALL).color(k.c.text_base)))
+        .child(row().grow(1.0).min_w(0.0).child(text(preview).font(small_style()).color(k.c.text_base)))
         .child(Button::new("Edit").variant(ButtonVariant::Ghost).on_press(move |_: &mut S| tell(Cmd::Recall(at))).build(k))
 }
 
 fn picker<S: 'static>(k: &Kit, picking: &Picking) -> El {
     let mut c = col().w_full().gap(4.0).padding(8.0).radius(10.0).border(1.0, k.c.border_base);
-    c = c.child(row().w_full().items_center().child(row().grow(1.0).child(text("Resume a session").font(LABEL).color(k.c.text_muted))).child(Button::new("Close").variant(ButtonVariant::Ghost).on_press(|_: &mut S| tell(Cmd::ClosePicker)).build(k)));
+    c = c.child(row().w_full().items_center().child(row().grow(1.0).child(text("Resume a session").font(label_style()).color(k.c.text_muted))).child(Button::new("Close").variant(ButtonVariant::Ghost).on_press(|_: &mut S| tell(Cmd::ClosePicker)).build(k)));
     match picking {
         Picking::Note(note) => c = c.child(muted(k, note.clone())),
         Picking::Loading => {}
@@ -452,7 +452,7 @@ fn picker<S: 'static>(k: &Kit, picking: &Picking) -> El {
             for (i, s) in sessions.iter().enumerate() {
                 let id = s.id.clone();
                 let title = if s.title.is_empty() { "Untitled".to_string() } else { s.title.clone() };
-                let content = row().grow(1.0).items_center().gap(8.0).child(text(title).font(SMALL).color(k.c.text_base)).child(muted(k, s.when.clone()));
+                let content = row().grow(1.0).items_center().gap(8.0).child(text(title).font(small_style()).color(k.c.text_base)).child(muted(k, s.when.clone()));
                 c = c.child(pressable::<S>(k, format!("session-{i}"), content, move || tell(Cmd::Resume(id.clone()))));
             }
         }
@@ -497,7 +497,7 @@ fn menu_of<S: 'static>(at: At<S>) -> dropdown::At<S> {
 
 /// A chip that only says: a choice that is not the user's to change now.
 fn still_chip(k: &Kit, label: String) -> El {
-    row().px(8.0).py(2.0).radius(6.0).child(text(label).font(SMALL).color(k.c.text_muted))
+    row().px(8.0).py(2.0).radius(6.0).child(text(label).font(small_style()).color(k.c.text_muted))
 }
 
 /// The Control chip: names what the thread's agent may do, and opens the menu that changes it.
@@ -535,7 +535,7 @@ fn chips<S: 'static>(k: &Kit, snapshot: &Snapshot, at: At<S>) -> El {
         // A pill that is on while the thread gets a worktree of its own: a branch and its name, outlined
         // when off and filled, with the text at full ink, when on.
         let (ink, fill, line) = if on { (k.c.text_accent, k.c.layer_03, k.c.bg_accent) } else { (k.c.text_muted, Color::TRANSPARENT, k.c.border_base) };
-        let face = row().key("worktree").px(8.0).py(1.0).radius(10.0).gap(4.0).items_center().fill(fill).border(1.0, line).child(rune::icon(&BRANCH, 12.0).color(ink)).child(text("Worktree").font(SMALL).color(ink));
+        let face = row().key("worktree").px(8.0).py(1.0).radius(10.0).gap(4.0).items_center().fill(fill).border(1.0, line).child(rune::icon(&BRANCH, 12.0).color(ink)).child(text("Worktree").font(small_style()).color(ink));
         bar = bar.child(k.interactive(face.on_press(move |_: &mut S| tell(Cmd::Isolate(!on)))));
     }
     bar.child(control_chip::<S>(k, snapshot, at))
@@ -546,7 +546,7 @@ fn composer<S: 'static>(k: &Kit, snapshot: &Snapshot, state: &State, at: At<S>) 
     // The field is built here, not by the kit's `TextArea`: that has no paste hook, and `on_input_paste`
     // only takes on the El that holds the input (the kit's is a wrapper around it), so an image never arrived.
     let placeholder = if snapshot.blank { "Message the agent" } else { "Ask for follow-up changes" };
-    let style = TextStyle { line_height: (13.0f32 * 1.35 * 2.0).round() / 2.0, ..k.ty.ui };
+    let style = TextStyle { line_height: (k.ty.ui.size * 1.35 * 2.0).round() / 2.0, ..k.ty.ui };
     let input = rune::text_input(&state.draft, style)
         .key("input")
         .w_full()
@@ -602,7 +602,7 @@ fn composer<S: 'static>(k: &Kit, snapshot: &Snapshot, state: &State, at: At<S>) 
             // A thumbnail with its own way off: a cross over its top right corner, not the strip as a
             // whole being one button.
             let thumb = pictures::el(&picture.uri, picture.size, pictures::SMALL).key(format!("draft-picture-{i}"));
-            let cross = k.interactive(row().key(format!("detach-{i}")).pin(None, Some(4.0), Some(4.0), None).px(6.0).py(1.0).radius(6.0).fill(k.c.layer_03).child(text("×").font(SMALL).color(k.c.text_base)).on_press(move |_: &mut S| tell(Cmd::Detach(i))));
+            let cross = k.interactive(row().key(format!("detach-{i}")).pin(None, Some(4.0), Some(4.0), None).px(6.0).py(1.0).radius(6.0).fill(k.c.layer_03).child(text("×").font(small_style()).color(k.c.text_base)).on_press(move |_: &mut S| tell(Cmd::Detach(i))));
             strip = strip.child(col().child(thumb).child(cross));
         }
         core = core.child(strip);
@@ -629,9 +629,9 @@ pub fn toolbar<S: 'static>(k: &Kit, snapshot: &Snapshot, rename: &super::rename:
     let mut bar = rune_kit::shell::Toolbar::new().leading(super::header::controls::<S>(k, &snapshot.lead));
     // The name being typed takes the middle of the band; the title's own slot would hold it to the
     // width of the name.
-    bar = match super::rename::line::<S>(k, rename, rename_at, snapshot.thread, BODY) {
+    bar = match super::rename::line::<S>(k, rename, rename_at, snapshot.thread, body_style()) {
         Some(line) => bar.center(line),
-        None => bar.leading(super::rename::title::<S>(k, rename, rename_at, snapshot.thread, &snapshot.title, BODY)),
+        None => bar.leading(super::rename::title::<S>(k, rename, rename_at, snapshot.thread, &snapshot.title, body_style())),
     };
     for status in &snapshot.statuses {
         bar = bar.trailing(muted(k, status.clone()));
@@ -642,7 +642,7 @@ pub fn toolbar<S: 'static>(k: &Kit, snapshot: &Snapshot, rename: &super::rename:
 /// The header's title and status lines, for a conversation that is not under the window's toolbar.
 fn header<S: 'static>(k: &Kit, snapshot: &Snapshot, rename: &super::rename::Rename, rename_at: super::rename::At<S>) -> El {
     let lead: Vec<_> = snapshot.lead.iter().copied().filter(|c| !matches!(c, crate::model::header::Control::Sidebar(_))).collect();
-    let mut bar = row().w_full().h(super::header::BAND).items_center().gap(12.0).px(16.0).child(super::header::controls::<S>(k, &lead)).child(super::rename::title::<S>(k, rename, rename_at, snapshot.thread, &snapshot.title, BODY));
+    let mut bar = row().w_full().h(super::header::BAND).items_center().gap(12.0).px(16.0).child(super::header::controls::<S>(k, &lead)).child(super::rename::title::<S>(k, rename, rename_at, snapshot.thread, &snapshot.title, body_style()));
     for status in &snapshot.statuses {
         bar = bar.child(muted(k, status.clone()));
     }

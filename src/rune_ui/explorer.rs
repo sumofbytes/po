@@ -10,8 +10,8 @@ use crate::model::bus::{Cmd, send};
 use crate::model::explorer::{Body, Entry, Snapshot};
 use crate::model::strip::{Pr, Snapshot as Strips};
 
-const NAME: TextStyle = TextStyle::new(13.0, 400.0);
-const CAPTION: TextStyle = TextStyle::new(12.0, 400.0);
+fn name_style() -> TextStyle { crate::fonts::ui(13.0, 400.0) }
+fn caption_style() -> TextStyle { crate::fonts::ui(12.0, 400.0) }
 const INDENT: f32 = 14.0;
 
 /// What the explorer keeps between frames: the PR field.
@@ -64,11 +64,11 @@ fn entry_row<S: 'static>(k: &Kit, e: &Entry) -> El {
         .pl(8.0 + INDENT * e.row.depth as f32)
         .pr(8.0)
         .radius(6.0)
-        .child(text(glyph).font(NAME).color(if e.row.folder { k.c.warning.fg } else { k.c.text_muted }).w(10.0))
-        .child(row().grow(1.0).min_w(0.0).child(text(e.row.name.clone()).font(NAME).color(if e.row.selected { k.c.text_base } else { k.c.text_muted })))
+        .child(text(glyph).font(name_style()).color(if e.row.folder { k.c.warning.fg } else { k.c.text_muted }).w(10.0))
+        .child(row().grow(1.0).min_w(0.0).child(text(e.row.name.clone()).font(name_style()).color(if e.row.selected { k.c.text_base } else { k.c.text_muted })))
         .on_press(move |_: &mut S| send(Cmd::TreeClick(id.clone())));
     if let Some(mark) = e.mark {
-        line = line.child(text(mark.to_string()).font(CAPTION).color(mark_color(k, mark)));
+        line = line.child(text(mark.to_string()).font(caption_style()).color(mark_color(k, mark)));
     }
     if e.row.selected {
         line = line.fill(k.c.layer_03);
@@ -96,7 +96,7 @@ pub fn strips<S: 'static>(strips: &Strips, state: &State, k: &Kit, at: At<S>) ->
                 .w_full()
                 .items_center()
                 .gap(6.0)
-                .child(row().grow(1.0).min_w(0.0).child(text(wt.branch.clone()).font(CAPTION).color(k.c.text_muted)))
+                .child(row().grow(1.0).min_w(0.0).child(text(wt.branch.clone()).font(caption_style()).color(k.c.text_muted)))
                 .child(Button::new("Merge").variant(ButtonVariant::Submit).on_press(|_: &mut S| send(Cmd::MergeWorktree)).build(k))
                 .child(Button::new(discard).variant(ButtonVariant::Danger).on_press(|_: &mut S| send(Cmd::DiscardWorktree)).build(k)),
         );
@@ -108,7 +108,7 @@ pub fn strips<S: 'static>(strips: &Strips, state: &State, k: &Kit, at: At<S>) ->
                     .w_full()
                     .items_center()
                     .gap(6.0)
-                    .child(row().grow(1.0).min_w(0.0).child(text(label.clone()).font(CAPTION).color(k.c.text_muted)))
+                    .child(row().grow(1.0).min_w(0.0).child(text(label.clone()).font(caption_style()).color(k.c.text_muted)))
                     .child(Button::new("Close").variant(ButtonVariant::Ghost).on_press(|_: &mut S| send(Cmd::ClosePr)).build(k)),
             );
         }
@@ -129,7 +129,7 @@ pub fn strips<S: 'static>(strips: &Strips, state: &State, k: &Kit, at: At<S>) ->
             out = out.child(field);
             if let Some(status) = status {
                 let tone = if *opening { k.c.text_muted } else { k.c.danger.fg };
-                out = out.child(text(status.clone()).font(CAPTION).color(tone));
+                out = out.child(text(status.clone()).font(caption_style()).color(tone));
             }
         }
         None => {}
@@ -140,9 +140,9 @@ pub fn strips<S: 'static>(strips: &Strips, state: &State, k: &Kit, at: At<S>) ->
 /// The tree, or why there is none.
 pub fn tree<S: 'static>(snapshot: &Snapshot, k: &Kit, under_title: El) -> El {
     let title = if snapshot.changes { "Changes" } else { "Explorer" };
-    let header = super::header::ruled(k, row().w_full().h(super::header::BAND).items_center().gap(8.0).px(12.0).child(super::header::controls::<S>(k, &snapshot.lead)).child(row().grow(1.0).child(text(title).font(NAME).color(k.c.text_base))).child(super::header::controls::<S>(k, &snapshot.trail)));
+    let header = super::header::ruled(k, row().w_full().h(super::header::BAND).items_center().gap(8.0).px(12.0).child(super::header::controls::<S>(k, &snapshot.lead)).child(row().grow(1.0).child(text(title).font(name_style()).color(k.c.text_base))).child(super::header::controls::<S>(k, &snapshot.trail)));
     let body = match &snapshot.body {
-        Body::Empty(message) => col().w_full().grow(1.0).center().child(text(message.clone()).font(CAPTION).color(k.c.text_muted)),
+        Body::Empty(message) => col().w_full().grow(1.0).center().child(text(message.clone()).font(caption_style()).color(k.c.text_muted)),
         Body::Rows(rows) => {
             let mut list = col().key("tree").focusable(true).w_full().px(4.0).on_key(|_: &mut S, event: &KeyEvent, _: &mut Tx| match step_of(event) {
                 Some(step) => {

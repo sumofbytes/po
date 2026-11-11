@@ -214,7 +214,6 @@ pub enum Place {
 
 #[derive(Clone, PartialEq, Debug, Default)]
 pub struct Snapshot {
-    pub glass: bool,
     pub title: String,
     /// The project and id of the thread on screen, which its title can rename.
     pub thread: (u64, u64),
@@ -344,7 +343,7 @@ pub enum GrantChange {
 impl Snapshot {
     /// The snapshot with the shell's chrome: what the core builds has none.
     pub fn with_chrome(mut self, chrome: super::header::Chrome) -> Self {
-        (self.glass, self.lead, self.trail) = (chrome.glass, chrome.lead, chrome.trail);
+        (self.lead, self.trail) = (chrome.lead, chrome.trail);
         self
     }
 }

@@ -10,8 +10,8 @@ use rune_kit::diff::{DiffMode, DiffState, DiffView, FileDiff};
 use crate::model::bus::{Cmd, send};
 use crate::model::diff::{Body, Snapshot};
 
-const CAPTION: TextStyle = TextStyle::new(12.0, 400.0);
-const NAME: TextStyle = TextStyle::new(13.0, 400.0);
+fn caption_style() -> TextStyle { crate::fonts::ui(12.0, 400.0) }
+fn name_style() -> TextStyle { crate::fonts::ui(13.0, 400.0) }
 
 /// The diff the pane draws, and the two versions it was made from.
 #[derive(Default)]
@@ -38,7 +38,7 @@ impl State {
 }
 
 fn centered(k: &Kit, message: &str) -> El {
-    col().w_full().grow(1.0).center().padding(16.0).child(text(message.to_string()).font(CAPTION).color(k.c.text_muted))
+    col().w_full().grow(1.0).center().padding(16.0).child(text(message.to_string()).font(caption_style()).color(k.c.text_muted))
 }
 
 /// `get` and `get_mut` find the pane's [`State`] in the host's.
@@ -51,9 +51,9 @@ pub fn view<S: 'static>(snapshot: &Snapshot, host: &S, k: &Kit, get: fn(&S) -> &
         .px(12.0)
         .h(super::header::BAND)
         .child(super::header::controls::<S>(k, &snapshot.lead))
-        .child(row().grow(1.0).min_w(0.0).child(text(snapshot.title.clone()).font(NAME).color(k.c.text_base)))
-        .child(text(format!("+{added}")).font(CAPTION).color(k.c.success.fg))
-        .child(text(format!("-{removed}")).font(CAPTION).color(k.c.danger.fg))
+        .child(row().grow(1.0).min_w(0.0).child(text(snapshot.title.clone()).font(name_style()).color(k.c.text_base)))
+        .child(text(format!("+{added}")).font(caption_style()).color(k.c.success.fg))
+        .child(text(format!("-{removed}")).font(caption_style()).color(k.c.danger.fg))
         .child(SegmentedControl::new(&["Inline", "Split"], Some(usize::from(snapshot.split))).label("Diff layout").fit().on_pick(|_: &mut S, i: usize, _: &mut Tx| send(Cmd::SetSplit(i == 1))).build(k))
         .child(super::header::controls::<S>(k, &snapshot.trail)));
     let body = match &snapshot.body {

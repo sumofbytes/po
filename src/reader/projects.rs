@@ -651,7 +651,7 @@ impl Reader {
                 .or_else(|| diff.then(|| model::strip::Pr::Asking { status: self.pr_status.clone(), opening: self.opening })),
             pr_reset: self.pr_serial,
         });
-        model::explorer::publish(model::explorer::Snapshot { changes: diff, body, ..Default::default() }.with_chrome(model::header::Chrome { glass: false, lead, trail }));
+        model::explorer::publish(model::explorer::Snapshot { changes: diff, body, ..Default::default() }.with_chrome(model::header::Chrome { lead, trail }));
     }
 
     /// Opens, or shows the diff of, the file selected in the explorer's tree, as clicking it does.

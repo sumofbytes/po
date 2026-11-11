@@ -1496,6 +1496,8 @@ struct Reader {
     threads_expanded: HashSet<u64>,
     /// Projects whose threads are folded away in the sidebar.
     projects_collapsed: HashSet<u64>,
+    /// The order the user dragged the projects into, first to last; one not in it follows, by id.
+    project_order: Vec<u64>,
     /// Each project's checked-out branch, read off the UI thread now and then.
     heads: HashMap<PathBuf, worktree::Head>,
     /// In a pane too narrow for the tree beside the file, the explorer is what the pane shows.
@@ -1612,6 +1614,7 @@ impl Reader {
             term_theme: (terminal::Rgb(0xdd, 0xdd, 0xdd), terminal::Rgb(0x12, 0x12, 0x12)),
             threads_expanded: HashSet::new(),
             projects_collapsed: HashSet::new(),
+            project_order: vec![],
             heads: HashMap::new(),
             browse: true,
             side_open: false,
