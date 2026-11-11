@@ -284,7 +284,8 @@ fn viewer_content<S: Host>(shell: &Shell, host: &S, layout: &Layout, k: &Kit) ->
 /// The whole window, laid out as the `Reader` says: the sidebar, a middle pane and a right pane
 /// that are the conversation and the viewer, either way round, or a page (Home, the issues, the
 /// settings, the finder) in place of the conversation.
-/// `inset` is what the window's own buttons take at its leading edge, which the sidebar's band keeps clear of.
+/// `inset` is what the window's own buttons take at its leading edge (macOS traffic lights; 0 elsewhere and in full
+/// screen): the sidebar's title and the toolbar start past it.
 pub fn view<S: Host>(host: &S, k: &Kit, inset: f32) -> El {
     let shell = host.shell_ref();
     let layout = host.layout();
@@ -320,7 +321,8 @@ pub fn view<S: Host>(host: &S, k: &Kit, inset: f32) -> El {
     let right = if beside { Some(rune::el().w_full().h_full()) } else { right };
     // The conversation in the middle pane puts its header in the window's toolbar.
     let toolbar = (!layout.finder_open && !layout.settings_open && !layout.home_open && !layout.issues_open && !focus && (!layout.side_open || !layout.swapped)).then(|| chat::toolbar::<S>(k, &shell.chat_feed.value, &shell.side.rename, rename_of::<S>));
-    let mut split = SplitView::new(middle).frame_inset(0.0);
+    // The toolbar, and the toggle that floats over it, start past the window's buttons.
+    let mut split = SplitView::new(middle).frame_inset(0.0).titlebar_inset(inset);
     if let Some(toolbar) = toolbar {
         split = split.toolbar(toolbar);
     }
@@ -353,7 +355,7 @@ pub fn view<S: Host>(host: &S, k: &Kit, inset: f32) -> El {
         let (left, edge, width) = if beside {
             (None, 0.0, Some((shell.viewer.shown_width() - 6.0).max(0.0)))
         } else {
-            (Some(if layout.left_open { shell.sidebar.shown_width() } else { 56.0 }), shell.viewer.shown_width(), None)
+            (Some(if layout.left_open { shell.sidebar.shown_width() } else { 56.0 + inset }), shell.viewer.shown_width(), None)
         };
         let divider = rune::el().absolute(-1.0, 0.0).w(1.0).h_full().fill(k.c.border_base);
         // The content fills the box the pins make; pinned itself, its full width would run past the window.
