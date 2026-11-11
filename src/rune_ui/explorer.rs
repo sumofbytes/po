@@ -140,7 +140,7 @@ pub fn strips<S: 'static>(strips: &Strips, state: &State, k: &Kit, at: At<S>) ->
 /// The tree, or why there is none.
 pub fn tree<S: 'static>(snapshot: &Snapshot, k: &Kit, under_title: El) -> El {
     let title = if snapshot.changes { "Changes" } else { "Explorer" };
-    let header = super::header::ruled(k, row().w_full().h(super::header::BAND).items_center().gap(8.0).px(12.0).child(super::header::controls::<S>(k, &snapshot.lead)).child(row().grow(1.0).child(text(title).font(name_style()).color(k.c.text_base))).child(super::header::controls::<S>(k, &snapshot.trail)));
+    let header = super::header::ruled(k, row().w_full().h(super::header::BAND).items_center().gap(8.0).px(12.0).child(super::header::controls::<S>(k, &snapshot.lead)).child(row().grow(1.0).shrink().child(text(title).font(name_style()).color(k.c.text_base).truncate())).child(super::header::controls::<S>(k, &snapshot.trail)));
     let body = match &snapshot.body {
         Body::Empty(message) => col().w_full().grow(1.0).center().child(text(message.clone()).font(caption_style()).color(k.c.text_muted)),
         Body::Rows(rows) => {

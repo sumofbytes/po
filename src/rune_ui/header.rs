@@ -28,6 +28,11 @@ static FOLDER_TREE: Icon = Icon {
     view: 16.0,
     body: r#"<path d="M3 3V12.5H13M3 7H8M3 12.5H8" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"/>"#,
 };
+static TREE_PANEL: Icon = Icon {
+    name: "po-tree-panel",
+    view: 16.0,
+    body: r#"<rect x="2" y="3" width="12" height="10" rx="1.5" stroke="currentColor"/><path d="M6 3V13M3.8 6H4.6M3.8 8H4.6M3.8 10H4.6" stroke="currentColor" stroke-linecap="round"/>"#,
+};
 static DIFF: Icon = Icon {
     name: "po-diff",
     view: 16.0,
@@ -58,6 +63,7 @@ fn of(control: Control) -> (&'static Icon, &'static str, bool, Cmd) {
         Control::ViewerLeft(on) => (&PANEL_LEFT, "Viewer (Ctrl+Shift+B)", on, Cmd::ToggleRight),
         Control::Files(on) => (&FOLDER_TREE, "Files (Ctrl+1)", on, Cmd::Show(false)),
         Control::Changes(on) => (&DIFF, "Changes (Ctrl+2)", on, Cmd::Show(true)),
+        Control::Tree(on) => (&TREE_PANEL, "File tree", on, Cmd::ToggleTree),
         Control::Terminal(on) => (&TERMINAL, "Terminal (Ctrl+`)", on, Cmd::Terminal),
         Control::Focus(true) => (&MINIMIZE, "Show the conversation (Ctrl+Shift+F)", false, Cmd::ToggleFocus),
         Control::Focus(false) => (&MAXIMIZE, "Focus the viewer (Ctrl+Shift+F)", false, Cmd::ToggleFocus),

@@ -52,6 +52,8 @@ pub enum Cmd {
     ToggleFocus,
     /// The files, or the changes (true), in the viewer; or the terminal.
     Show(bool),
+    /// Hides the file tree beside the file, or shows it again.
+    ToggleTree,
     Terminal,
     /// Markdown shown rendered, or as its source.
     ToggleRendered,

@@ -423,6 +423,10 @@ impl Reader {
             Cmd::ToggleLeft => self.toggle_left(cx),
             Cmd::ToggleRight => self.toggle_right(cx),
             Cmd::ToggleFocus => self.toggle_focus(cx),
+            Cmd::ToggleTree => {
+                self.tree_hidden = !self.tree_hidden;
+                cx.notify();
+            }
             Cmd::Show(changes) => self.show_viewer(if changes { Mode::Diff } else { Mode::Source }, cx),
             Cmd::Terminal => self.toggle_terminal_on(window, cx),
             Cmd::ToggleRendered => self.toggle_rendered(cx),
@@ -571,6 +575,8 @@ impl Reader {
 #[derive(Clone, Copy, Default, PartialEq, Debug)]
 pub struct Layout {
     pub left_open: bool,
+    /// The file tree is hidden, leaving the file the viewer's width.
+    pub tree_hidden: bool,
     pub side_open: bool,
     pub swapped: bool,
     pub agent_open: bool,
@@ -591,6 +597,7 @@ impl Reader {
             || self.thread.shown.as_deref().is_some_and(|id| self.thread.forms.get(id).is_some() || self.thread.views.list().iter().any(|view| view.id == id));
         Layout {
             left_open: self.left_open,
+            tree_hidden: self.tree_hidden,
             side_open: self.side_open,
             swapped: self.swapped,
             agent_open: self.agent_open,
@@ -645,7 +652,15 @@ impl Reader {
         let controls = if has_tabs { none() } else { pane.clone() };
         // With the tree beside the file the tree's header takes the lead controls and the file's the trail.
         let with_tree = !self.layout().showing_agent;
-        let (tree_controls, controls) = if with_tree { ((controls.0.clone(), vec![]), (vec![], controls.1.clone())) } else { (none(), controls) };
+        let tree = || vec![Control::Tree(!self.tree_hidden)];
+        let (tree_controls, controls) = if with_tree && self.tree_hidden {
+            // No tree header to carry the lead controls: the file's header does.
+            (none(), (controls.0.clone(), [tree(), controls.1.clone()].concat()))
+        } else if with_tree {
+            ((controls.0.clone(), vec![]), (vec![], [tree(), controls.1.clone()].concat()))
+        } else {
+            (none(), controls)
+        };
         self.publish_explorer(tree_controls);
         let shown_form = self.thread.shown.as_deref().and_then(|id| self.thread.forms.get(id));
         let shown = self.thread.shown.as_deref().and_then(|id| self.thread.views.list().iter().find(|view| view.id == id));
