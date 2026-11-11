@@ -276,8 +276,16 @@ fn viewer_content<S: Host>(shell: &Shell, host: &S, layout: &Layout, k: &Kit) ->
     }
     let content = if layout.diff { diff::view::<S>(&shell.diff_feed.value, host, k, diff_ref::<S>, diff_mut::<S>) } else { source::view::<S>(&shell.source_feed.value, &shell.source, k) };
     // The files on the left, what is open on the right, as an editor lays them out.
-    let browser = col().w(220.0).h_full().min_h(0.0).child(explorer::tree::<S>(&shell.explorer_feed.value, k, explorer::strips::<S>(&shell.strip_feed.value, &shell.explorer, k, explorer_of::<S>)));
-    let split = row().w_full().grow(1.0).min_h(0.0).child(browser).child(rune::el().w(1.0).h_full().fill(k.c.border_muted)).child(col().grow(1.0).min_w(0.0).h_full().min_h(0.0).child(content));
+    // It takes a share of the viewer's width, within bounds, so a wide viewer (the sidebar closed)
+    // gives it more room instead of leaving it at a fixed width.
+    let pane = col().grow(1.0).min_w(0.0).h_full().min_h(0.0).child(content);
+    // The Files and Changes buttons hide the tree when pressed again; the file keeps the room.
+    let mut split = row().w_full().grow(1.0).min_h(0.0);
+    if !layout.tree_hidden {
+        let browser = col().w_frac(0.2).min_w(220.0).max_w(420.0).h_full().min_h(0.0).child(explorer::tree::<S>(&shell.explorer_feed.value, k, explorer::strips::<S>(&shell.strip_feed.value, &shell.explorer, k, explorer_of::<S>)));
+        split = split.child(browser).child(rune::el().w(1.0).h_full().fill(k.c.border_muted));
+    }
+    let split = split.child(pane);
     col().w_full().h_full().min_h(0.0).children(tabs_bar).child(split)
 }
 

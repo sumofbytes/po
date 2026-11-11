@@ -13,6 +13,8 @@ pub enum Control {
     Files(bool),
     Changes(bool),
     Terminal(bool),
+    /// Shows or hides the file tree beside the file; selected while it shows.
+    Tree(bool),
     /// Gives the viewer the room by hiding the conversation (or gives it back).
     Focus(bool),
 }

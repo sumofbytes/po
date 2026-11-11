@@ -1488,6 +1488,8 @@ struct Reader {
     /// Agents that may run at once; beyond it the longest idle in the background are stopped.
     max_live: usize,
     left_open: bool,
+    /// The file tree beside the file is hidden (a session choice).
+    tree_hidden: bool,
     /// The widths the panes were last dragged to, in points, for the workspace to save.
     widths: Widths,
     /// What the shell and the background of the terminal are told the window's colours are.
@@ -1610,6 +1612,7 @@ impl Reader {
             idle_after: (idle_minutes > 0).then(|| Duration::from_secs(idle_minutes * 60)),
             max_live: settings["max_live_agents"].as_u64().unwrap_or(8).max(1) as usize,
             left_open: true,
+            tree_hidden: false,
             widths: Widths::default(),
             term_theme: (terminal::Rgb(0xdd, 0xdd, 0xdd), terminal::Rgb(0x12, 0x12, 0x12)),
             threads_expanded: HashSet::new(),

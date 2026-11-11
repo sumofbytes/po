@@ -68,7 +68,7 @@ fn field<S: 'static>(k: &Kit, i: usize, field: &Field, state: &State, at: At<S>)
 
 /// The pane's body, below the header the shell draws. The terminal (`Bare`) is the shell's.
 pub fn view<S: 'static>(snapshot: &Snapshot, state: &State, k: &Kit, at: At<S>) -> El {
-    let title = super::header::ruled(k, row().w_full().h(super::header::BAND).items_center().gap(8.0).px(12.0).child(super::header::controls::<S>(k, &snapshot.lead)).child(row().grow(1.0).child(text(snapshot.title.clone()).font(name_style()).color(k.c.text_base))).child(super::header::controls::<S>(k, &snapshot.trail)));
+    let title = super::header::ruled(k, row().w_full().h(super::header::BAND).items_center().gap(8.0).px(12.0).child(super::header::controls::<S>(k, &snapshot.lead)).child(row().grow(1.0).shrink().child(text(snapshot.title.clone()).font(name_style()).color(k.c.text_base).truncate())).child(super::header::controls::<S>(k, &snapshot.trail)));
     let body = match &snapshot.body {
         // Only the header: what is below it is the shell's.
         Body::Bare => return title,

@@ -113,12 +113,12 @@ pub fn line<S: 'static>(k: &Kit, state: &Rename, at: At<S>, thread: (u64, u64), 
 /// `thread` is the one being renamed.
 pub fn title<S: 'static>(k: &Kit, state: &Rename, at: At<S>, thread: (u64, u64), name: &str, font: TextStyle) -> El {
     if let Some(line) = line::<S>(k, state, at, thread, font) {
-        return row().grow(1.0).min_w(0.0).items_center().child(line);
+        return row().grow(1.0).shrink().items_center().child(line);
     }
     let shown = name.to_string();
     let label = name.to_string();
     let body = text(label).font(font).color(k.c.text_base).truncate();
-    row().key("thread-title").grow(1.0).min_w(0.0).child(body).on_double_press(move |s: &mut S| at(s).start(thread, &shown, Place::Title))
+    row().key("thread-title").grow(1.0).shrink().child(body).on_double_press(move |s: &mut S| at(s).start(thread, &shown, Place::Title))
 }
 
 #[cfg(test)]

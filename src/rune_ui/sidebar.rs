@@ -21,6 +21,9 @@ static ISSUES: Icon = Icon { name: "po-issues", view: 16.0, body: r#"<circle cx=
 static SEARCH: Icon = Icon { name: "po-search", view: 16.0, body: r#"<circle cx="7" cy="7" r="4.5" stroke="currentColor"/><path d="M10.5 10.5L13.5 13.5" stroke="currentColor" stroke-linecap="round"/>"# };
 static SETTINGS: Icon = Icon { name: "po-settings", view: 16.0, body: r#"<circle cx="8" cy="8" r="2" stroke="currentColor"/><path d="M8 2V3.5M8 12.5V14M2 8H3.5M12.5 8H14M3.8 3.8L4.9 4.9M11.1 11.1L12.2 12.2M12.2 3.8L11.1 4.9M4.9 11.1L3.8 12.2" stroke="currentColor" stroke-linecap="round"/>"# };
 
+/// The tallest the pinned "Needs you" section grows before it scrolls on its own.
+const NEEDS_MAX: f32 = 220.0;
+
 fn caption_style() -> rune::tok::TextStyle { crate::fonts::ui(12.0, 400.0) }
 
 /// What the sidebar keeps between frames: the filter field.
@@ -320,7 +323,8 @@ pub fn view<S: 'static>(snapshot: &Snapshot, state: &State, k: &Kit, at: At<S>, 
         for w in &snapshot.waiting {
             needs = needs.row(thread_row::<S>(k, &w.thread, Some(&w.project), at, &state.rename, rename_at));
         }
-        bar = bar.section(needs);
+        // Pinned above the scrolling projects so it stays in view; a long list scrolls within its own cap.
+        bar = bar.header(col().w_full().max_h(NEEDS_MAX).scroll(rune::ScrollSpec { stick_bottom: false }).child(needs.build(k)));
     }
     // Projects are dragged to reorder them, unless a search hides some of them.
     let ids: Rc<Vec<u64>> = Rc::new(snapshot.projects.iter().map(|p| p.id).collect());
