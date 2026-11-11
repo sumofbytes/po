@@ -261,7 +261,7 @@ const BAND: f32 = super::header::BAND;
 pub const GUTTER: f32 = 20.0;
 
 /// The sidebar for `snapshot`, with its filter in the host's state through `at`.
-pub fn view<S: 'static>(snapshot: &Snapshot, state: &State, k: &Kit, at: At<S>, rename_at: super::rename::At<S>, settings_open: bool) -> El {
+pub fn view<S: 'static>(snapshot: &Snapshot, state: &State, k: &Kit, at: At<S>, rename_at: super::rename::At<S>, settings_open: bool, inset: f32) -> El {
     // The kit's field hardcodes a faint placeholder; the rows' own ink is what this one wants.
     let field = rune::text_input(&state.query, k.ty.ui_compact)
         .single_line()
@@ -352,7 +352,7 @@ pub fn view<S: 'static>(snapshot: &Snapshot, state: &State, k: &Kit, at: At<S>, 
     }
     // "Po" sits in the window's top band, over the strip the shell keeps empty above the sidebar;
     // the shell draws the rule under the band.
-    let band = row().absolute(0.0, -BAND).w_full().h(BAND).px(20.0).items_center().child(text("Po").font(crate::fonts::ui(18.0, 600.0)).color(k.c.text_base));
+    let band = row().absolute(0.0, -BAND).w_full().h(BAND).pl(20.0 + inset).pr(20.0).items_center().child(text("Po").font(crate::fonts::ui(18.0, 600.0)).color(k.c.text_base));
     // The divider beside the sidebar, band and all, at the pane's right edge.
     let edge = rune::el().pin(None, Some(-BAND), Some(0.0), Some(0.0)).w(1.0).fill(k.c.border_base);
     col().w_full().h_full().min_h(0.0).child(band).child(edge).child(bar.build(k))
@@ -411,7 +411,7 @@ mod tests {
     }
     fn view(s: &App, _: &mut Cx<App>) -> El {
         let kit = Kit::neutral(true);
-        rune_kit::root(super::view::<App>(&s.snap, &s.side, &kit, |s| &mut s.side, |s| &mut s.side.rename, false), vec![])
+        rune_kit::root(super::view::<App>(&s.snap, &s.side, &kit, |s| &mut s.side, |s| &mut s.side.rename, false, 0.0), vec![])
     }
 
     #[test]

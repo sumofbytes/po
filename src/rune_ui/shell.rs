@@ -284,7 +284,8 @@ fn viewer_content<S: Host>(shell: &Shell, host: &S, layout: &Layout, k: &Kit) ->
 /// The whole window, laid out as the `Reader` says: the sidebar, a middle pane and a right pane
 /// that are the conversation and the viewer, either way round, or a page (Home, the issues, the
 /// settings, the finder) in place of the conversation.
-pub fn view<S: Host>(host: &S, k: &Kit) -> El {
+/// `inset` is what the window's own buttons take at its leading edge, which the sidebar's band keeps clear of.
+pub fn view<S: Host>(host: &S, k: &Kit, inset: f32) -> El {
     let shell = host.shell_ref();
     let layout = host.layout();
     // What floats over the window: the menus the chips open, the theme list.
@@ -326,7 +327,7 @@ pub fn view<S: Host>(host: &S, k: &Kit) -> El {
     // The panes' own headers carry the sidebar's toggle (at the left of the title, as they did
     // before); the pages, which have none, take the kit's, at the end of the sidebar's band.
     let split = if no_page { split.hide_sidebar_toggle() } else { split.sidebar_padding(0.0, sidebar::GUTTER).sidebar_toggle(SidebarToggle::new().in_header()) };
-    let split = split.sidebar::<S>(&shell.sidebar, sidebar_of::<S>, col().w(shell.sidebar.width()).min_w(shell.sidebar.width()).h_full().child(sidebar::view::<S>(&shell.sidebar_feed.value, &shell.side, k, side_of::<S>, rename_of::<S>, layout.settings_open)));
+    let split = split.sidebar::<S>(&shell.sidebar, sidebar_of::<S>, col().w(shell.sidebar.width()).min_w(shell.sidebar.width()).h_full().child(sidebar::view::<S>(&shell.sidebar_feed.value, &shell.side, k, side_of::<S>, rename_of::<S>, layout.settings_open, inset)));
     // The kit draws the main pane as a bordered, rounded card; Po's panes sit flush, told apart by
     // their backgrounds, so the shell is built with a kit that has neither.
     let mut flat = k.clone();
@@ -411,7 +412,7 @@ mod tests {
         fn attach(&mut self, _: Vec<crate::Source>) {}
     }
     fn view(s: &App, _: &mut Cx<App>) -> El {
-        super::view::<App>(s, &s.kit)
+        super::view::<App>(s, &s.kit, 0.0)
     }
 
     fn app() -> Runtime<App> {

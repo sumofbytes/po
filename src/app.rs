@@ -106,8 +106,8 @@ fn init() -> State {
     State { kit, shell: Shell::default(), live: None, terminal_was_shown: false, widths_applied: false, bench_filled: false }
 }
 
-fn view(s: &State, _: &mut Cx<State>) -> El {
-    rune_ui::shell::view::<State>(s, &s.kit)
+fn view(s: &State, cx: &mut Cx<State>) -> El {
+    rune_ui::shell::view::<State>(s, &s.kit, cx.titlebar_inset())
 }
 
 /// Builds the reader, now that the window can be woken from other threads.
