@@ -261,7 +261,7 @@ const BAND: f32 = super::header::BAND;
 pub const GUTTER: f32 = 20.0;
 
 /// The sidebar for `snapshot`, with its filter in the host's state through `at`.
-pub fn view<S: 'static>(snapshot: &Snapshot, state: &State, k: &Kit, at: At<S>, rename_at: super::rename::At<S>, settings_open: bool) -> El {
+pub fn view<S: 'static>(snapshot: &Snapshot, state: &State, k: &Kit, at: At<S>, rename_at: super::rename::At<S>, settings_open: bool, inset: f32) -> El {
     // The kit's field hardcodes a faint placeholder; the rows' own ink is what this one wants.
     let field = rune::text_input(&state.query, k.ty.ui_compact)
         .single_line()
@@ -352,7 +352,7 @@ pub fn view<S: 'static>(snapshot: &Snapshot, state: &State, k: &Kit, at: At<S>, 
     }
     // "Po" sits in the window's top band, over the strip the shell keeps empty above the sidebar;
     // the shell draws the rule under the band.
-    let band = row().absolute(0.0, -BAND).w_full().h(BAND).px(20.0).items_center().child(text("Po").font(crate::fonts::ui(18.0, 600.0)).color(k.c.text_base));
+    let band = row().absolute(0.0, -BAND).w_full().h(BAND).pl(20.0 + inset).pr(20.0).items_center().child(text("Po").font(crate::fonts::ui(18.0, 600.0)).color(k.c.text_base).key("brand"));
     // The divider beside the sidebar, band and all, at the pane's right edge.
     let edge = rune::el().pin(None, Some(-BAND), Some(0.0), Some(0.0)).w(1.0).fill(k.c.border_base);
     col().w_full().h_full().min_h(0.0).child(band).child(edge).child(bar.build(k))
@@ -408,10 +408,21 @@ mod tests {
     struct App {
         side: State,
         snap: Snapshot,
+        inset: f32,
     }
     fn view(s: &App, _: &mut Cx<App>) -> El {
         let kit = Kit::neutral(true);
-        rune_kit::root(super::view::<App>(&s.snap, &s.side, &kit, |s| &mut s.side, |s| &mut s.side.rename, false), vec![])
+        rune_kit::root(super::view::<App>(&s.snap, &s.side, &kit, |s| &mut s.side, |s| &mut s.side.rename, false, s.inset), vec![])
+    }
+
+    #[test]
+    fn the_title_keeps_clear_of_the_window_buttons() {
+        let at = |inset| {
+            let mut rt = Runtime::new(App { side: State::default(), snap: Snapshot::default(), inset }, view, (300.0, 600.0), Env::new(true, 1.0));
+            rt.frame(0.0);
+            rt.elements().into_iter().find(|e| e.key.as_deref() == Some("brand")).expect("title").rect[0]
+        };
+        assert_eq!(at(70.0) - at(0.0), 70.0, "the title moves over by what the buttons take");
     }
 
     #[test]
@@ -419,7 +430,7 @@ mod tests {
         let thread = Thread { project: 1, id: 2, label: "Fix it".into(), name: "Fix it".into(), mark: Mark::Idle, selected: false, controlled: false, ago: None, closing: false };
         let project = Project { id: 1, name: "po".into(), active: true, collapsed: false, closable: false, threads: vec![thread], fold: None };
         let snap = Snapshot { projects: vec![project], ..Default::default() };
-        let mut rt = Runtime::new(App { side: State::default(), snap }, view, (300.0, 600.0), Env::new(true, 1.0));
+        let mut rt = Runtime::new(App { side: State::default(), snap, inset: 0.0 }, view, (300.0, 600.0), Env::new(true, 1.0));
         rt.frame(0.0);
         let (x, y) = rt.find("thread-1-2").expect("row");
         for _ in 0..2 {
@@ -446,7 +457,7 @@ mod tests {
     #[test]
     fn sections_are_as_tall_as_the_drag_reckons() {
         let snap = two_projects();
-        let mut rt = Runtime::new(App { side: State::default(), snap: snap.clone() }, view, (300.0, 600.0), Env::new(true, 1.0));
+        let mut rt = Runtime::new(App { side: State::default(), snap: snap.clone(), inset: 0.0 }, view, (300.0, 600.0), Env::new(true, 1.0));
         rt.frame(0.0);
         let (_, first) = rt.find("project-1").expect("first");
         let (_, second) = rt.find("project-2").expect("second");
@@ -469,7 +480,7 @@ mod tests {
 
     #[test]
     fn a_drag_on_a_header_lifts_it() {
-        let mut rt = Runtime::new(App { side: State::default(), snap: two_projects() }, view, (300.0, 600.0), Env::new(true, 1.0));
+        let mut rt = Runtime::new(App { side: State::default(), snap: two_projects(), inset: 0.0 }, view, (300.0, 600.0), Env::new(true, 1.0));
         rt.frame(0.0);
         let (x, y) = rt.find("project-1").expect("first");
         // The middle of the section is on a thread row, so reach for its header.
