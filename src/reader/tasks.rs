@@ -1,7 +1,12 @@
 //! The tasks a window runs for as long as it lives.
 
 use crate::reader::state::*;
-use crate::*;
+use std::collections::HashMap;
+use std::time::Duration;
+
+use crate::host::rt::{Context, Window};
+use crate::{issues, model};
+use futures::StreamExt;
 
 impl Reader {
     /// Answers what agents ask of this window through its control socket.

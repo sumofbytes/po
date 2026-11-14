@@ -1,5 +1,11 @@
 use crate::session::thread::*;
-use crate::*;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use crate::agent::acp::PermissionOption;
+use crate::agent::attach::Attachment;
+use crate::{config, model};
+use serde_json::Value;
 
 #[derive(Clone, Copy, PartialEq)]
 pub(crate) enum Step {

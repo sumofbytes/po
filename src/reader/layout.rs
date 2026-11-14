@@ -2,7 +2,12 @@
 
 use crate::reader::state::*;
 use crate::session::project::*;
-use crate::*;
+use std::collections::HashSet;
+use std::path::Path;
+use std::time::Duration;
+
+use crate::host::rt::{Context, Window};
+use crate::{config, issues, model, rune_ui};
 
 impl Reader {
     pub(crate) fn toggle_left(&mut self, cx: &mut Context<Self>) {

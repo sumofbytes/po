@@ -1,5 +1,12 @@
 use crate::files::watch::*;
-use crate::*;
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use crate::files::explorer::FileTree;
+use crate::host::rt::Task;
+use crate::vcs::diff::{Change, Row};
+use crate::{model, rune_ui};
 
 /// Files matching `query`: name hits first (shorter names first), then path hits, each in
 /// walk order; ASCII-case-insensitive substring, like the viewer's search.

@@ -4,7 +4,13 @@ use crate::files::watch::*;
 use crate::reader::state::*;
 use crate::session::project::*;
 use crate::session::thread::*;
-use crate::*;
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use crate::files::explorer::FileTree;
+use crate::host::rt::{Context, Window};
+use crate::vcs::diff::{Change, Kind, Row};
+use crate::{issues, model};
 
 impl Reader {
     /// A project over `root`, showing `files` in its explorer until the next walk.

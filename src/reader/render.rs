@@ -5,7 +5,14 @@ use crate::reader::state::*;
 use crate::session::chat::*;
 use crate::session::project::*;
 use crate::session::thread::*;
-use crate::*;
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use crate::agent::acp::SessionInfo;
+use crate::agent::dex::Queue;
+use crate::host::rt::{Context, Window};
+use crate::{issues, model};
+use serde_json::Value;
 
 /// An agent's view as the pane shows it, with no chrome.
 pub(crate) fn agent_view_snapshot(view: &crate::ipc::command::AgentView) -> model::agent::Snapshot {

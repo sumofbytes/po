@@ -12,7 +12,24 @@ use crate::reader::state::*;
 use crate::session::chat::*;
 use crate::session::project::*;
 use crate::session::thread::*;
-use crate::*;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::{Duration, Instant, SystemTime};
+
+use crate::agent::Client;
+use crate::agent::acp::{ConfigOption, Event, PermissionOption, SessionInfo};
+use crate::agent::attach::Attachment;
+use crate::agent::dex::Queue;
+use crate::files::explorer::FileTree;
+use crate::files::watch::Prefetch;
+use crate::host::rt::{Context, Task, Window};
+use crate::vcs::diff::{Change, Kind, Row};
+use crate::{
+    agent, config, dev, files, host, ipc, issues, model, reader, rune_ui, session, system, vcs,
+};
+use futures::StreamExt;
+use serde_json::Value;
 
 struct Scenario {
     history: usize,

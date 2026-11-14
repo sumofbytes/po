@@ -1,7 +1,14 @@
 use crate::files::watch::*;
 use crate::session::project::*;
 use crate::session::thread::*;
-use crate::*;
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
+use std::time::{Duration, Instant};
+
+use crate::agent::dex::Queue;
+use crate::config;
+use crate::files::watch::Prefetch;
+use crate::host::rt::{Context, Window};
 
 /// Where a message for the agent goes, judged by where its thread is: the decision
 /// [`Reader::submit`] carries out, pure, so every path is testable without a window.
