@@ -20,8 +20,8 @@
 //! [`Store::problems`], and moved aside as `.bak` only at the moment something has to be written
 //! in its place.
 use std::collections::BTreeSet;
-use std::collections::hash_map::DefaultHasher;
 use std::collections::HashSet;
+use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
@@ -35,9 +35,19 @@ use super::{Config, Epic, Issue, Tracker, default_prefix, is_id};
 pub fn primary_root(path: &Path) -> PathBuf {
     let own = || path.to_path_buf();
     // A worktree's `.git` is a file naming its own git dir, which names the shared one.
-    let Ok(text) = std::fs::read_to_string(path.join(".git")) else { return own() };
-    let Some(git_dir) = text.trim().strip_prefix("gitdir:").map(|dir| path.join(dir.trim())) else { return own() };
-    let Ok(common) = std::fs::read_to_string(git_dir.join("commondir")) else { return own() };
+    let Ok(text) = std::fs::read_to_string(path.join(".git")) else {
+        return own();
+    };
+    let Some(git_dir) = text
+        .trim()
+        .strip_prefix("gitdir:")
+        .map(|dir| path.join(dir.trim()))
+    else {
+        return own();
+    };
+    let Ok(common) = std::fs::read_to_string(git_dir.join("commondir")) else {
+        return own();
+    };
     let common = git_dir.join(common.trim());
     let common = std::fs::canonicalize(&common).unwrap_or(common);
     match common.file_name() {
@@ -49,7 +59,11 @@ pub fn primary_root(path: &Path) -> PathBuf {
 /// The folder all repos' issues are kept under. A test's repo keeps them in itself, so that tests
 /// stay in their own temp folders and out of the real one.
 fn home() -> Option<PathBuf> {
-    if cfg!(test) { None } else { Some(crate::config::data_dir().join("issues")) }
+    if cfg!(test) {
+        None
+    } else {
+        Some(crate::config::data_dir().join("issues"))
+    }
 }
 
 /// Where the issues of the repo at `root`, a primary checkout, are kept.
@@ -63,12 +77,24 @@ pub fn folder_of(root: &Path) -> PathBuf {
 /// The folder under `home` for the repo at `root`: named for its remote if it has one on a host,
 /// else for its path. One name, so no repo's folder can sit inside another's.
 fn central_dir(home: &Path, root: &Path) -> PathBuf {
-    let remote = std::fs::read_to_string(root.join(".git/config")).ok().and_then(|text| origin_url(&text)).and_then(|url| remote_parts(&url));
+    let remote = std::fs::read_to_string(root.join(".git/config"))
+        .ok()
+        .and_then(|text| origin_url(&text))
+        .and_then(|url| remote_parts(&url));
     // A remote that leaves nothing of a name would be the home folder itself.
-    let name = remote.map(|parts| folder_name(&parts)).filter(|name| !name.is_empty()).unwrap_or_else(|| {
-        let path = root.components().map(|part| part.as_os_str().to_string_lossy().into_owned());
-        folder_name(&std::iter::once("local".to_string()).chain(path).collect::<Vec<_>>())
-    });
+    let name = remote
+        .map(|parts| folder_name(&parts))
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| {
+            let path = root
+                .components()
+                .map(|part| part.as_os_str().to_string_lossy().into_owned());
+            folder_name(
+                &std::iter::once("local".to_string())
+                    .chain(path)
+                    .collect::<Vec<_>>(),
+            )
+        });
     home.join(name)
 }
 
@@ -78,7 +104,10 @@ fn origin_url(config: &str) -> Option<String> {
     for line in config.lines().map(str::trim) {
         if line.starts_with('[') {
             in_origin = line == r#"[remote "origin"]"#;
-        } else if in_origin && let Some((key, value)) = line.split_once('=') && key.trim() == "url" {
+        } else if in_origin
+            && let Some((key, value)) = line.split_once('=')
+            && key.trim() == "url"
+        {
             return Some(value.trim().trim_matches('"').to_string());
         }
     }
@@ -98,12 +127,17 @@ fn remote_parts(url: &str) -> Option<Vec<String>> {
         }
         // `host:path`, unless it is a path (`./x`, `/x`) or a Windows drive (`C:\x`).
         None => {
-            let (host, path) = url.split_once(':').filter(|(host, _)| !host.contains('/') && !host.contains('\\') && host.len() > 1)?;
+            let (host, path) = url.split_once(':').filter(|(host, _)| {
+                !host.contains('/') && !host.contains('\\') && host.len() > 1
+            })?;
             (None, host, path)
         }
     };
     let authority = authority.rsplit('@').next()?;
-    let (host, port) = authority.rsplit_once(':').filter(|(_, port)| !port.is_empty() && port.chars().all(|c| c.is_ascii_digit())).unwrap_or((authority, ""));
+    let (host, port) = authority
+        .rsplit_once(':')
+        .filter(|(_, port)| !port.is_empty() && port.chars().all(|c| c.is_ascii_digit()))
+        .unwrap_or((authority, ""));
     let mut parts = vec![host.to_lowercase()];
     let default_port = match scheme.map(str::to_ascii_lowercase).as_deref() {
         Some("http") => "80",
@@ -123,8 +157,23 @@ fn remote_parts(url: &str) -> Option<Vec<String>> {
 /// `parts` as one safe folder name. They come from a repo's own files, so whatever they say, the
 /// name can't lead out of the folder it is joined to.
 fn folder_name(parts: &[String]) -> String {
-    let safe = |part: &String| part.chars().map(|c| if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') { c } else { '_' }).collect::<String>();
-    parts.iter().map(safe).filter(|part| !part.chars().all(|c| matches!(c, '.' | '_'))).collect::<Vec<_>>().join("~")
+    let safe = |part: &String| {
+        part.chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect::<String>()
+    };
+    parts
+        .iter()
+        .map(safe)
+        .filter(|part| !part.chars().all(|c| matches!(c, '.' | '_')))
+        .collect::<Vec<_>>()
+        .join("~")
 }
 
 /// Copies the issues in `old` to `dir`, if there is nothing at `dir` yet. All or nothing: they are
@@ -135,7 +184,9 @@ fn adopt(old: &Path, dir: &Path) -> io::Result<()> {
     if dir.exists() || !old.is_dir() {
         return Ok(());
     }
-    let parent = dir.parent().ok_or_else(|| io::Error::other("no folder to put them in"))?;
+    let parent = dir
+        .parent()
+        .ok_or_else(|| io::Error::other("no folder to put them in"))?;
     std::fs::create_dir_all(parent)?;
     let temp = parent.join(format!(".adopting-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&temp);
@@ -151,7 +202,9 @@ fn copy_issue_files(from: &Path, to: &Path) -> io::Result<()> {
     for folder in ["", "issues", "epics"] {
         let target = to.join(folder);
         std::fs::create_dir_all(&target)?;
-        let Ok(entries) = std::fs::read_dir(from.join(folder)) else { continue };
+        let Ok(entries) = std::fs::read_dir(from.join(folder)) else {
+            continue;
+        };
         for entry in entries {
             let entry = entry?;
             if entry.file_type()?.is_file() {
@@ -198,11 +251,21 @@ pub fn load(dir: &Path, fallback_prefix: &str) -> (Loaded, u64) {
 pub fn fingerprint(dir: &Path) -> u64 {
     let mut hasher = DefaultHasher::new();
     for folder in ["", "issues", "epics"] {
-        let mut entries: Vec<_> = std::fs::read_dir(dir.join(folder)).into_iter().flatten().flatten().filter(|entry| entry.path().extension().is_some_and(|ext| ext == "json")).collect();
+        let mut entries: Vec<_> = std::fs::read_dir(dir.join(folder))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "json"))
+            .collect();
         entries.sort_by_key(|entry| entry.file_name());
         for entry in entries {
             let meta = entry.metadata().ok();
-            (entry.file_name(), meta.as_ref().map(std::fs::Metadata::len), meta.and_then(|m| m.modified().ok())).hash(&mut hasher);
+            (
+                entry.file_name(),
+                meta.as_ref().map(std::fs::Metadata::len),
+                meta.and_then(|m| m.modified().ok()),
+            )
+                .hash(&mut hasher);
         }
     }
     hasher.finish()
@@ -214,25 +277,54 @@ impl Store {
     pub fn open(project: &Path) -> Self {
         let root = primary_root(project);
         let (old, dir) = (root.join(".po"), folder_of(&root));
-        let adopted = if old == dir { Ok(()) } else { adopt(&old, &dir) };
+        let adopted = if old == dir {
+            Ok(())
+        } else {
+            adopt(&old, &dir)
+        };
         let mut store = Self::open_at(root, dir);
         if let Err(error) = adopted {
             log::error!("issues in {}: {error}", old.display());
-            store.problems.push(format!("The issues in {} could not be copied over: {error}", old.display()));
+            store.problems.push(format!(
+                "The issues in {} could not be copied over: {error}",
+                old.display()
+            ));
         }
         store
     }
 
     fn open_at(root: PathBuf, dir: PathBuf) -> Self {
-        let name = root.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
-        let (Loaded { tracker, problems, unreadable }, seen) = load(&dir, &default_prefix(&name));
-        Self { root, dir, tracker, problems, seen, unreadable }
+        let name = root
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let (
+            Loaded {
+                tracker,
+                problems,
+                unreadable,
+            },
+            seen,
+        ) = load(&dir, &default_prefix(&name));
+        Self {
+            root,
+            dir,
+            tracker,
+            problems,
+            seen,
+            unreadable,
+        }
     }
 
     /// What a poller needs to see whether the files changed without holding the store: whose they
     /// are, where they are, the prefix to read them with, and how they looked when last read.
     pub fn watch_state(&self) -> (PathBuf, PathBuf, String, u64) {
-        (self.root.clone(), self.dir.clone(), self.tracker.config.prefix.clone(), self.seen)
+        (
+            self.root.clone(),
+            self.dir.clone(),
+            self.tracker.config.prefix.clone(),
+            self.seen,
+        )
     }
 
     /// Takes a reading made by [`load`] while the files looked like `seen`, if nothing has
@@ -242,7 +334,8 @@ impl Store {
         if self.seen != seen || !self.tracker.dirty.is_empty() {
             return false;
         }
-        (self.tracker, self.problems, self.unreadable) = (loaded.tracker, loaded.problems, loaded.unreadable);
+        (self.tracker, self.problems, self.unreadable) =
+            (loaded.tracker, loaded.problems, loaded.unreadable);
         self.seen = read_at;
         true
     }
@@ -262,8 +355,16 @@ impl Store {
     /// are lost, so this is for after a [`Store::flush`].
     pub fn reload(&mut self) {
         let fallback = self.tracker.config.prefix.clone();
-        let (Loaded { tracker, problems, unreadable }, seen) = load(&self.dir, &fallback);
-        (self.tracker, self.problems, self.unreadable, self.seen) = (tracker, problems, unreadable, seen);
+        let (
+            Loaded {
+                tracker,
+                problems,
+                unreadable,
+            },
+            seen,
+        ) = load(&self.dir, &fallback);
+        (self.tracker, self.problems, self.unreadable, self.seen) =
+            (tracker, problems, unreadable, seen);
     }
 
     pub fn dir(&self) -> &Path {
@@ -290,7 +391,10 @@ impl Store {
         for mut number in made {
             self.tracker.dirty.created.remove(&number);
             while let Some(issue) = self.tracker.issue(number) {
-                let path = self.dir.join("issues").join(format!("{}.json", self.tracker.key(number)));
+                let path = self
+                    .dir
+                    .join("issues")
+                    .join(format!("{}.json", self.tracker.key(number)));
                 match create_new(&path, &issue.to_json()) {
                     Ok(()) => {
                         // Written whole: nothing more to do for it unless it changes again.
@@ -301,7 +405,11 @@ impl Store {
                         let floor = highest_on_disk(&self.dir, &self.tracker.config.prefix) + 1;
                         let new = self.tracker.renumber(number, floor);
                         self.tracker.dirty.created.remove(&new);
-                        log::warn!("{} was taken by another window; this issue is now {}", self.tracker.key(number), self.tracker.key(new));
+                        log::warn!(
+                            "{} was taken by another window; this issue is now {}",
+                            self.tracker.key(number),
+                            self.tracker.key(new)
+                        );
                         number = new;
                     }
                     Err(error) => {
@@ -319,8 +427,17 @@ impl Store {
             if dirty.config {
                 paths.push(self.dir.join("config.json"));
             }
-            paths.extend(dirty.epics.iter().map(|id| self.dir.join("epics").join(format!("{id}.json"))));
-            paths.extend(dirty.issues.iter().map(|number| self.dir.join("issues").join(format!("{}.json", self.tracker.key(*number)))));
+            paths.extend(
+                dirty
+                    .epics
+                    .iter()
+                    .map(|id| self.dir.join("epics").join(format!("{id}.json"))),
+            );
+            paths.extend(dirty.issues.iter().map(|number| {
+                self.dir
+                    .join("issues")
+                    .join(format!("{}.json", self.tracker.key(*number)))
+            }));
             for path in paths {
                 if self.unreadable.remove(&path)
                     && let Err(error) = std::fs::rename(&path, path.with_extension("json.bak"))
@@ -333,27 +450,50 @@ impl Store {
         dirty.created = failed_new;
         let tracker = &self.tracker;
         let mut left = super::Dirty::default();
-        if dirty.config && !note(write(&self.dir.join("config.json"), &tracker.config.to_json())) {
+        if dirty.config
+            && !note(write(
+                &self.dir.join("config.json"),
+                &tracker.config.to_json(),
+            ))
+        {
             left.config = true;
         }
         for number in dirty.issues {
-            let Some(issue) = tracker.issue(number) else { continue };
+            let Some(issue) = tracker.issue(number) else {
+                continue;
+            };
             // One whose creation failed is tried as a creation again, never written over a file.
             if dirty.created.contains(&number) {
                 left.issues.insert(number);
                 left.created.insert(number);
-            } else if !note(write(&self.dir.join("issues").join(format!("{}.json", tracker.key(number))), &issue.to_json())) {
+            } else if !note(write(
+                &self
+                    .dir
+                    .join("issues")
+                    .join(format!("{}.json", tracker.key(number))),
+                &issue.to_json(),
+            )) {
                 left.issues.insert(number);
             }
         }
         for number in dirty.removed {
-            if !note(remove(&self.dir.join("issues").join(format!("{}.json", tracker.key(number))))) {
+            if !note(remove(
+                &self
+                    .dir
+                    .join("issues")
+                    .join(format!("{}.json", tracker.key(number))),
+            )) {
                 left.removed.insert(number);
             }
         }
         for id in dirty.epics {
-            let Some(epic) = tracker.epic(&id) else { continue };
-            if !note(write(&self.dir.join("epics").join(format!("{id}.json")), &epic.to_json())) {
+            let Some(epic) = tracker.epic(&id) else {
+                continue;
+            };
+            if !note(write(
+                &self.dir.join("epics").join(format!("{id}.json")),
+                &epic.to_json(),
+            )) {
                 left.epics.insert(id);
             }
         }
@@ -372,7 +512,12 @@ impl Store {
 fn highest_on_disk(dir: &Path, prefix: &str) -> u64 {
     json_files(&dir.join("issues"))
         .iter()
-        .filter_map(|(stem, _)| stem.strip_prefix(prefix)?.strip_prefix('-')?.parse::<u64>().ok())
+        .filter_map(|(stem, _)| {
+            stem.strip_prefix(prefix)?
+                .strip_prefix('-')?
+                .parse::<u64>()
+                .ok()
+        })
         .max()
         .unwrap_or(0)
 }
@@ -384,7 +529,10 @@ fn write(path: &Path, value: &Value) -> io::Result<()> {
     if std::fs::read(path).is_ok_and(|now| now == bytes) {
         return Ok(());
     }
-    std::fs::create_dir_all(path.parent().ok_or_else(|| io::Error::other("no directory"))?)?;
+    std::fs::create_dir_all(
+        path.parent()
+            .ok_or_else(|| io::Error::other("no directory"))?,
+    )?;
     let temp = path.with_extension(format!("json.{}.tmp", std::process::id()));
     std::fs::write(&temp, bytes)?;
     std::fs::rename(&temp, path)
@@ -396,13 +544,20 @@ fn write(path: &Path, value: &Value) -> io::Result<()> {
 fn create_new(path: &Path, value: &Value) -> io::Result<()> {
     let mut bytes = serde_json::to_vec_pretty(value)?;
     bytes.push(b'\n');
-    std::fs::create_dir_all(path.parent().ok_or_else(|| io::Error::other("no directory"))?)?;
+    std::fs::create_dir_all(
+        path.parent()
+            .ok_or_else(|| io::Error::other("no directory"))?,
+    )?;
     let temp = path.with_extension(format!("json.{}.new", std::process::id()));
     std::fs::write(&temp, &bytes)?;
     let linked = std::fs::hard_link(&temp, path);
     let _ = std::fs::remove_file(&temp);
     match linked {
-        Err(error) if error.kind() != io::ErrorKind::AlreadyExists => std::fs::OpenOptions::new().write(true).create_new(true).open(path)?.write_all(&bytes),
+        Err(error) if error.kind() != io::ErrorKind::AlreadyExists => std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)?
+            .write_all(&bytes),
         other => other,
     }
 }
@@ -416,7 +571,11 @@ fn remove(path: &Path) -> io::Result<()> {
 
 /// The JSON in `path`. A file that isn't is left alone and noted, to be moved aside only if
 /// something has to be written in its place: a merge in progress may be holding it.
-fn read_json(path: &Path, problems: &mut Vec<String>, unreadable: &mut HashSet<PathBuf>) -> Option<Value> {
+fn read_json(
+    path: &Path,
+    problems: &mut Vec<String>,
+    unreadable: &mut HashSet<PathBuf>,
+) -> Option<Value> {
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
         Err(error) => {
@@ -429,7 +588,10 @@ fn read_json(path: &Path, problems: &mut Vec<String>, unreadable: &mut HashSet<P
     match serde_json::from_str(&text) {
         Ok(value) => Some(value),
         Err(error) => {
-            problems.push(format!("{}: {error}; left as it is, and not shown", path.display()));
+            problems.push(format!(
+                "{}: {error}; left as it is, and not shown",
+                path.display()
+            ));
             unreadable.insert(path.to_path_buf());
             None
         }
@@ -453,15 +615,28 @@ fn json_files(dir: &Path) -> Vec<(String, PathBuf)> {
 fn read(dir: &Path, fallback_prefix: &str) -> Loaded {
     let mut problems = vec![];
     let mut unreadable = HashSet::new();
-    let config = read_json(&dir.join("config.json"), &mut problems, &mut unreadable).map_or_else(|| Config::new(fallback_prefix.to_string()), |value| Config::from_json(&value, fallback_prefix));
+    let config = read_json(&dir.join("config.json"), &mut problems, &mut unreadable).map_or_else(
+        || Config::new(fallback_prefix.to_string()),
+        |value| Config::from_json(&value, fallback_prefix),
+    );
     let mut issues = vec![];
     for (stem, path) in json_files(&dir.join("issues")) {
-        let number = stem.strip_prefix(config.prefix.as_str()).and_then(|rest| rest.strip_prefix('-')).and_then(|n| n.parse::<u64>().ok()).filter(|n| *n > 0);
+        let number = stem
+            .strip_prefix(config.prefix.as_str())
+            .and_then(|rest| rest.strip_prefix('-'))
+            .and_then(|n| n.parse::<u64>().ok())
+            .filter(|n| *n > 0);
         let Some(number) = number else {
-            problems.push(format!("{}: not named {}-<number>; skipped", path.display(), config.prefix));
+            problems.push(format!(
+                "{}: not named {}-<number>; skipped",
+                path.display(),
+                config.prefix
+            ));
             continue;
         };
-        let Some(value) = read_json(&path, &mut problems, &mut unreadable) else { continue };
+        let Some(value) = read_json(&path, &mut problems, &mut unreadable) else {
+            continue;
+        };
         match Issue::from_json(number, &value) {
             Some(issue) => issues.push(issue),
             None => problems.push(format!("{}: no title; skipped", path.display())),
@@ -473,7 +648,9 @@ fn read(dir: &Path, fallback_prefix: &str) -> Loaded {
             problems.push(format!("{}: not a lowercase name; skipped", path.display()));
             continue;
         }
-        let Some(value) = read_json(&path, &mut problems, &mut unreadable) else { continue };
+        let Some(value) = read_json(&path, &mut problems, &mut unreadable) else {
+            continue;
+        };
         match Epic::from_json(id, &value) {
             Some(epic) => epics.push(epic),
             None => problems.push(format!("{}: no name; skipped", path.display())),
@@ -481,7 +658,11 @@ fn read(dir: &Path, fallback_prefix: &str) -> Loaded {
     }
     let (tracker, mended) = Tracker::from_parts(config, issues, epics);
     problems.extend(mended);
-    Loaded { tracker, problems, unreadable }
+    Loaded {
+        tracker,
+        problems,
+        unreadable,
+    }
 }
 
 #[cfg(test)]
@@ -497,7 +678,11 @@ mod tests {
     impl Temp {
         fn new(name: &str) -> Self {
             static COUNT: AtomicUsize = AtomicUsize::new(0);
-            let base = std::env::temp_dir().join(format!("po-issues-{}-{}", std::process::id(), COUNT.fetch_add(1, Ordering::Relaxed)));
+            let base = std::env::temp_dir().join(format!(
+                "po-issues-{}-{}",
+                std::process::id(),
+                COUNT.fetch_add(1, Ordering::Relaxed)
+            ));
             let path = base.join(name);
             std::fs::create_dir_all(&path).unwrap();
             Self(std::fs::canonicalize(path).unwrap())
@@ -517,10 +702,22 @@ mod tests {
     #[test]
     fn a_repo_is_known_by_its_remote_however_it_is_written() {
         let parts = |url: &str| remote_parts(url).map(|parts| parts.join("/"));
-        for url in ["git@github.com:me/repo.git", "https://github.com/me/repo", "https://token@GitHub.com/me/repo.git/", "ssh://git@github.com:22/me/repo.git"] {
+        for url in [
+            "git@github.com:me/repo.git",
+            "https://github.com/me/repo",
+            "https://token@GitHub.com/me/repo.git/",
+            "ssh://git@github.com:22/me/repo.git",
+        ] {
             assert_eq!(parts(url).as_deref(), Some("github.com/me/repo"), "{url}");
         }
-        for url in ["/srv/git/repo.git", "../repo", "./repo", "file:///srv/repo", r"C:\\repos\\x", "https://github.com"] {
+        for url in [
+            "/srv/git/repo.git",
+            "../repo",
+            "./repo",
+            "file:///srv/repo",
+            r"C:\\repos\\x",
+            "https://github.com",
+        ] {
             assert_eq!(parts(url), None, "{url}");
         }
     }
@@ -528,9 +725,18 @@ mod tests {
     #[test]
     fn a_non_default_remote_port_keeps_its_issues_separate() {
         let parts = |url: &str| remote_parts(url).map(|parts| parts.join("/"));
-        assert_eq!(parts("https://github.com:443/me/repo"), parts("https://github.com/me/repo"));
-        assert_ne!(parts("https://github.com:8443/me/repo"), parts("https://github.com/me/repo"));
-        assert_eq!(parts("https://github.com:8443/me/repo").as_deref(), Some("github.com/port-8443/me/repo"));
+        assert_eq!(
+            parts("https://github.com:443/me/repo"),
+            parts("https://github.com/me/repo")
+        );
+        assert_ne!(
+            parts("https://github.com:8443/me/repo"),
+            parts("https://github.com/me/repo")
+        );
+        assert_eq!(
+            parts("https://github.com:8443/me/repo").as_deref(),
+            Some("github.com/port-8443/me/repo")
+        );
     }
 
     #[test]
@@ -544,11 +750,23 @@ mod tests {
     fn a_repos_folder_stays_inside_the_issues_home_whatever_its_remote_says() {
         let repo = Temp::new("hostile");
         std::fs::create_dir_all(repo.0.join(".git")).unwrap();
-        for url in ["https://../../../../etc/passwd", "git@host:../../../secret", "git@..:..", "https://host/a/../../b"] {
-            std::fs::write(repo.0.join(".git/config"), format!("[remote \"origin\"]\n\turl = {url}\n")).unwrap();
+        for url in [
+            "https://../../../../etc/passwd",
+            "git@host:../../../secret",
+            "git@..:..",
+            "https://host/a/../../b",
+        ] {
+            std::fs::write(
+                repo.0.join(".git/config"),
+                format!("[remote \"origin\"]\n\turl = {url}\n"),
+            )
+            .unwrap();
             let dir = central_dir(Path::new("/home"), &repo.0);
             assert_eq!(dir.parent(), Some(Path::new("/home")), "{url}");
-            assert!(!dir.file_name().unwrap().to_string_lossy().contains('/'), "{url}");
+            assert!(
+                !dir.file_name().unwrap().to_string_lossy().contains('/'),
+                "{url}"
+            );
         }
     }
 
@@ -557,13 +775,23 @@ mod tests {
         let (one, two, alone) = (Temp::new("one"), Temp::new("two"), Temp::new("alone"));
         for repo in [&one, &two] {
             std::fs::create_dir_all(repo.0.join(".git")).unwrap();
-            std::fs::write(repo.0.join(".git/config"), "[remote \"origin\"]\n\turl = git@github.com:me/repo.git\n").unwrap();
+            std::fs::write(
+                repo.0.join(".git/config"),
+                "[remote \"origin\"]\n\turl = git@github.com:me/repo.git\n",
+            )
+            .unwrap();
         }
         let home = Path::new("/home");
         assert_eq!(central_dir(home, &one.0), home.join("github.com~me~repo"));
         assert_eq!(central_dir(home, &one.0), central_dir(home, &two.0));
         let own = central_dir(home, &alone.0);
-        assert!(own.file_name().unwrap().to_string_lossy().starts_with("local~"), "{own:?}");
+        assert!(
+            own.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("local~"),
+            "{own:?}"
+        );
         assert_ne!(own, central_dir(home, &one.0));
     }
 
@@ -587,12 +815,23 @@ mod tests {
         assert_eq!(store.root(), repo.0);
         assert!(!dir.join("other").exists());
         assert!(old.join("issues/PO-12.json").exists());
-        assert_eq!(std::fs::read_dir(&home.0).unwrap().count(), 1, "nothing is left beside it");
+        assert_eq!(
+            std::fs::read_dir(&home.0).unwrap().count(),
+            1,
+            "nothing is left beside it"
+        );
 
         // Once it is there, what is in it stands, whatever the repo's folder says later.
         std::fs::write(old.join("issues/PO-12.json"), r#"{"title":"from git"}"#).unwrap();
         adopt(&old, &dir).unwrap();
-        assert_eq!(Store::open_at(repo.0.clone(), dir).tracker.issue(12).unwrap().title, "mine");
+        assert_eq!(
+            Store::open_at(repo.0.clone(), dir)
+                .tracker
+                .issue(12)
+                .unwrap()
+                .title,
+            "mine"
+        );
     }
 
     #[test]
@@ -662,13 +901,26 @@ mod tests {
         store.flush().unwrap();
         store.tracker.update(b, 2, |i| i.status = Status::Done);
         store.flush().unwrap();
-        assert_eq!(std::fs::read_to_string(file(a)).unwrap(), "{\"title\":\"hand edited\"}");
+        assert_eq!(
+            std::fs::read_to_string(file(a)).unwrap(),
+            "{\"title\":\"hand edited\"}"
+        );
         assert_ne!(std::fs::read(file(b)).unwrap(), before);
         // One field, one line.
-        let diff = std::fs::read_to_string(file(b)).unwrap().lines().zip(String::from_utf8(before).unwrap().lines()).filter(|(x, y)| x != y).count();
+        let diff = std::fs::read_to_string(file(b))
+            .unwrap()
+            .lines()
+            .zip(String::from_utf8(before).unwrap().lines())
+            .filter(|(x, y)| x != y)
+            .count();
         assert_eq!(diff, 2, "status and updated");
         // No temp files are left behind.
-        assert_eq!(std::fs::read_dir(repo.0.join(".po/issues")).unwrap().count(), 2);
+        assert_eq!(
+            std::fs::read_dir(repo.0.join(".po/issues"))
+                .unwrap()
+                .count(),
+            2
+        );
     }
 
     #[test]
@@ -681,7 +933,10 @@ mod tests {
         store.tracker.remove(a, 2);
         store.tracker.remove_epic(&e, 2);
         store.flush().unwrap();
-        assert!(files(&repo.0.join(".po/issues")).is_empty() && files(&repo.0.join(".po/epics")).is_empty());
+        assert!(
+            files(&repo.0.join(".po/issues")).is_empty()
+                && files(&repo.0.join(".po/epics")).is_empty()
+        );
         // The number is not given out again.
         assert_eq!(Store::open(&repo.0).tracker.config.next, 2);
         // Removing what was never written is no error.
@@ -697,7 +952,11 @@ mod tests {
         store.tracker.create("mine", 1);
         store.flush().unwrap();
         // A merge brings in PO-40 without the config that counted it.
-        std::fs::write(repo.0.join(".po/issues/PO-40.json"), r#"{"title":"theirs"}"#).unwrap();
+        std::fs::write(
+            repo.0.join(".po/issues/PO-40.json"),
+            r#"{"title":"theirs"}"#,
+        )
+        .unwrap();
         let mut store = Store::open(&repo.0);
         assert_eq!(store.tracker.config.next, 41);
         assert_eq!(store.problems.len(), 1);
@@ -719,11 +978,21 @@ mod tests {
         std::fs::write(repo.0.join(".po/issues/OTHER-1.json"), r#"{"title":"x"}"#).unwrap();
         std::fs::write(repo.0.join(".po/epics/Not An Id.json"), r#"{"name":"x"}"#).unwrap();
         let store = Store::open(&repo.0);
-        assert_eq!(store.tracker.issues().map(|i| i.title.as_str()).collect::<Vec<_>>(), ["fine"]);
+        assert_eq!(
+            store
+                .tracker
+                .issues()
+                .map(|i| i.title.as_str())
+                .collect::<Vec<_>>(),
+            ["fine"]
+        );
         assert_eq!(store.tracker.epics().len(), 1);
         assert_eq!(store.problems.len(), 5, "{:?}", store.problems);
         // Reading leaves the folder as it was: a file a merge is holding stays where it is.
-        assert!(repo.0.join(".po/issues/PO-2.json").exists() && !repo.0.join(".po/issues/PO-2.json.bak").exists());
+        assert!(
+            repo.0.join(".po/issues/PO-2.json").exists()
+                && !repo.0.join(".po/issues/PO-2.json.bak").exists()
+        );
         // The number it holds is not handed out again; and an epic of the same name as a bad
         // file moves that file aside rather than writing over it.
         std::fs::write(repo.0.join(".po/epics/launch.json"), "<<<<<<< HEAD").unwrap();
@@ -732,20 +1001,49 @@ mod tests {
         store.tracker.create_epic("Launch", 9);
         store.tracker.create("new", 9);
         store.flush().unwrap();
-        assert_eq!(std::fs::read_to_string(repo.0.join(".po/epics/launch.json.bak")).unwrap(), "<<<<<<< HEAD");
-        let new = store.tracker.issues().find(|issue| issue.title == "new").unwrap();
-        assert!(new.number > 3, "PO-2 and PO-3 are taken on disk, whatever they hold: {}", new.number);
-        assert!(repo.0.join(".po/issues/PO-2.json").exists(), "the unreadable PO-2 was not replaced");
+        assert_eq!(
+            std::fs::read_to_string(repo.0.join(".po/epics/launch.json.bak")).unwrap(),
+            "<<<<<<< HEAD"
+        );
+        let new = store
+            .tracker
+            .issues()
+            .find(|issue| issue.title == "new")
+            .unwrap();
+        assert!(
+            new.number > 3,
+            "PO-2 and PO-3 are taken on disk, whatever they hold: {}",
+            new.number
+        );
+        assert!(
+            repo.0.join(".po/issues/PO-2.json").exists(),
+            "the unreadable PO-2 was not replaced"
+        );
         // A bad config is read as the defaults, and left alone until something is written over it.
         std::fs::write(repo.0.join(".po/config.json"), "nope").unwrap();
         let mut store = Store::open(&repo.0);
-        assert!(repo.0.join(".po/config.json").exists() && !repo.0.join(".po/config.json.bak").exists());
+        assert!(
+            repo.0.join(".po/config.json").exists() && !repo.0.join(".po/config.json.bak").exists()
+        );
         // The counter is read past the issues that are there (PO-1 and the renumbered new one).
-        assert_eq!((store.tracker.config.prefix.as_str(), store.tracker.config.next), ("PO", 5));
+        assert_eq!(
+            (
+                store.tracker.config.prefix.as_str(),
+                store.tracker.config.next
+            ),
+            ("PO", 5)
+        );
         store.tracker.define_label("bug", "");
         store.flush().unwrap();
-        assert_eq!(std::fs::read_to_string(repo.0.join(".po/config.json.bak")).unwrap(), "nope", "set aside, not lost");
-        assert!(Store::open(&repo.0).problems.len() >= 4, "the other files are still there to be reported");
+        assert_eq!(
+            std::fs::read_to_string(repo.0.join(".po/config.json.bak")).unwrap(),
+            "nope",
+            "set aside, not lost"
+        );
+        assert!(
+            Store::open(&repo.0).problems.len() >= 4,
+            "the other files are still there to be reported"
+        );
     }
 
     #[test]
@@ -755,7 +1053,11 @@ mod tests {
         // What `git worktree add` leaves: a `.git` file, the git dir it names, and its `commondir`.
         std::fs::create_dir_all(repo.0.join(".git/worktrees/fix")).unwrap();
         std::fs::write(repo.0.join(".git/worktrees/fix/commondir"), "../..\n").unwrap();
-        std::fs::write(tree.0.join(".git"), format!("gitdir: {}\n", repo.0.join(".git/worktrees/fix").display())).unwrap();
+        std::fs::write(
+            tree.0.join(".git"),
+            format!("gitdir: {}\n", repo.0.join(".git/worktrees/fix").display()),
+        )
+        .unwrap();
         assert_eq!(primary_root(&tree.0), repo.0);
         assert_eq!(primary_root(&repo.0), repo.0);
 
@@ -769,7 +1071,11 @@ mod tests {
         assert_eq!(Store::open(&repo.0).tracker.issues().count(), 1);
         // A submodule's `.git` file has no commondir, and a folder with none is itself.
         std::fs::create_dir_all(repo.0.join(".git/modules/sub")).unwrap();
-        std::fs::write(tree.0.join(".git"), format!("gitdir: {}\n", repo.0.join(".git/modules/sub").display())).unwrap();
+        std::fs::write(
+            tree.0.join(".git"),
+            format!("gitdir: {}\n", repo.0.join(".git/modules/sub").display()),
+        )
+        .unwrap();
         assert_eq!(primary_root(&tree.0), tree.0);
         std::fs::remove_file(tree.0.join(".git")).unwrap();
         assert_eq!(primary_root(&tree.0), tree.0);
@@ -784,17 +1090,33 @@ mod tests {
         // b has not seen PO-1: it makes a parent and a sub-issue, and its PO-1 is taken.
         let parent = b.tracker.create("parent from b", 2);
         let child = b.tracker.create("child from b", 2);
-        b.tracker.update(child, 3, |issue| issue.parent = Some(parent));
+        b.tracker
+            .update(child, 3, |issue| issue.parent = Some(parent));
         b.flush().unwrap();
         let all = Store::open(&repo.0);
-        let titles: Vec<_> = all.tracker.issues().map(|i| (i.number, i.title.as_str(), i.parent)).collect();
-        assert_eq!(titles, [(1, "from a", None), (2, "child from b", Some(3)), (3, "parent from b", None)]);
+        let titles: Vec<_> = all
+            .tracker
+            .issues()
+            .map(|i| (i.number, i.title.as_str(), i.parent))
+            .collect();
+        assert_eq!(
+            titles,
+            [
+                (1, "from a", None),
+                (2, "child from b", Some(3)),
+                (3, "parent from b", None)
+            ]
+        );
         assert_eq!(all.tracker.config.next, 4);
         assert!(all.problems.is_empty(), "{:?}", all.problems);
         // Deleting an issue never written does not delete another window's file of that number.
         let mut c = Store::open(&repo.0);
         let n = c.tracker.create("gone", 4);
-        std::fs::write(repo.0.join(format!(".po/issues/PO-{n}.json")), r#"{"title":"theirs"}"#).unwrap();
+        std::fs::write(
+            repo.0.join(format!(".po/issues/PO-{n}.json")),
+            r#"{"title":"theirs"}"#,
+        )
+        .unwrap();
         c.tracker.remove(n, 5);
         c.flush().unwrap();
         assert!(repo.0.join(format!(".po/issues/PO-{n}.json")).exists());
@@ -820,8 +1142,16 @@ mod tests {
         let mut store = Store::open(&repo.0);
         store.tracker.create("a", 1);
         store.flush().unwrap();
-        std::fs::write(repo.0.join(".po/issues/PO-2.json"), r#"{"title":"b","status":"todo"}"#).unwrap();
-        std::fs::write(repo.0.join(".po/config.json"), r#"{"prefix":"PO","next":3}"#).unwrap();
+        std::fs::write(
+            repo.0.join(".po/issues/PO-2.json"),
+            r#"{"title":"b","status":"todo"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            repo.0.join(".po/config.json"),
+            r#"{"prefix":"PO","next":3}"#,
+        )
+        .unwrap();
         store.reload();
         assert_eq!(store.tracker.issues().count(), 2);
         assert_eq!(store.tracker.issue(2).unwrap().status, Status::Todo);

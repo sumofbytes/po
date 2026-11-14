@@ -49,8 +49,18 @@ pub fn set_sizes(config: &Value) {
 
 /// The UI and the monospace scale the config's sizes make.
 fn scales(config: &Value) -> (f32, f32) {
-    let size = |key: &str, base: f32| config["font"][key].as_f64().map(|n| n as f32).filter(|n| SIZES.contains(n)).unwrap_or(base) / base;
-    (size("size", BASE_UI_SIZE), size("mono_size", BASE_MONO_SIZE))
+    let size = |key: &str, base: f32| {
+        config["font"][key]
+            .as_f64()
+            .map(|n| n as f32)
+            .filter(|n| SIZES.contains(n))
+            .unwrap_or(base)
+            / base
+    };
+    (
+        size("size", BASE_UI_SIZE),
+        size("mono_size", BASE_MONO_SIZE),
+    )
 }
 
 fn ui_scale() -> f32 {
@@ -62,7 +72,11 @@ fn mono_scale() -> f32 {
 }
 
 fn scaled(style: TextStyle, by: f32) -> TextStyle {
-    TextStyle { size: style.size * by, line_height: style.line_height * by, ..style }
+    TextStyle {
+        size: style.size * by,
+        line_height: style.line_height * by,
+        ..style
+    }
 }
 
 /// A UI text style of `size` points at the base size, as the configured size makes it.
@@ -73,13 +87,32 @@ pub fn ui(size: f32, weight: f32) -> TextStyle {
 /// A style of the system monospace font, `size` points on a `line` high line at the base size, as
 /// the configured monospace size makes it.
 pub fn mono(size: f32, line: f32) -> TextStyle {
-    scaled(TextStyle { family: Family::SystemMono, line_height: line, ..TextStyle::new(size, 400.0) }, mono_scale())
+    scaled(
+        TextStyle {
+            family: Family::SystemMono,
+            line_height: line,
+            ..TextStyle::new(size, 400.0)
+        },
+        mono_scale(),
+    )
 }
 
 /// The kit's type, at the configured sizes: the kit's own controls and Po's draw alike.
 pub fn scale_type(ty: &mut Type) {
     let ui = ui_scale();
-    for style in [&mut ty.ui, &mut ty.ui_medium, &mut ty.ui_compact, &mut ty.small, &mut ty.small_medium, &mut ty.body, &mut ty.body_medium, &mut ty.text_small, &mut ty.text_small_medium, &mut ty.text_xsmall, &mut ty.text_xsmall_medium] {
+    for style in [
+        &mut ty.ui,
+        &mut ty.ui_medium,
+        &mut ty.ui_compact,
+        &mut ty.small,
+        &mut ty.small_medium,
+        &mut ty.body,
+        &mut ty.body_medium,
+        &mut ty.text_small,
+        &mut ty.text_small_medium,
+        &mut ty.text_xsmall,
+        &mut ty.text_xsmall_medium,
+    ] {
         *style = scaled(*style, ui);
     }
     ty.mono = scaled(ty.mono, mono_scale());
@@ -93,7 +126,13 @@ pub fn family_list(named: &Value, base: &str, last: &str) -> String {
         Value::Array(list) => list.iter().filter_map(Value::as_str).collect(),
         _ => vec![],
     };
-    names.into_iter().map(str::trim).filter(|name| !name.is_empty()).chain([base, last]).collect::<Vec<_>>().join(", ")
+    names
+        .into_iter()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .chain([base, last])
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 #[cfg(test)]
@@ -104,24 +143,56 @@ mod tests {
 
     #[test]
     fn families_come_from_a_name_or_a_list_over_the_bundled_one() {
-        assert_eq!(family_list(&json!("Iosevka"), "Geist", "system-ui"), "Iosevka, Geist, system-ui");
-        assert_eq!(family_list(&json!(["A", " B ", ""]), "Geist", "system-ui"), "A, B, Geist, system-ui");
-        assert_eq!(family_list(&json!([]), "Geist", "system-ui"), "Geist, system-ui");
-        assert_eq!(family_list(&Value::Null, "Geist", "system-ui"), "Geist, system-ui");
+        assert_eq!(
+            family_list(&json!("Iosevka"), "Geist", "system-ui"),
+            "Iosevka, Geist, system-ui"
+        );
+        assert_eq!(
+            family_list(&json!(["A", " B ", ""]), "Geist", "system-ui"),
+            "A, B, Geist, system-ui"
+        );
+        assert_eq!(
+            family_list(&json!([]), "Geist", "system-ui"),
+            "Geist, system-ui"
+        );
+        assert_eq!(
+            family_list(&Value::Null, "Geist", "system-ui"),
+            "Geist, system-ui"
+        );
     }
 
     #[test]
     fn sizes_scale_from_the_base_and_a_bad_one_is_the_base() {
         assert_eq!(scales(&Value::Null), (1.0, 1.0));
-        assert_eq!(scales(&json!({ "font": { "size": 28, "mono_size": 26 } })), (2.0, 2.0));
-        assert_eq!(scales(&json!({ "font": { "size": 7, "mono_size": "big" } })), (1.0, 1.0), "outside SIZES or not a number");
-        assert_eq!(scales(&json!({ "font": { "size": 14, "mono_size": 12 } })).1, 12.0 / 13.0);
+        assert_eq!(
+            scales(&json!({ "font": { "size": 28, "mono_size": 26 } })),
+            (2.0, 2.0)
+        );
+        assert_eq!(
+            scales(&json!({ "font": { "size": 7, "mono_size": "big" } })),
+            (1.0, 1.0),
+            "outside SIZES or not a number"
+        );
+        assert_eq!(
+            scales(&json!({ "font": { "size": 14, "mono_size": 12 } })).1,
+            12.0 / 13.0
+        );
     }
 
     #[test]
     fn a_style_scales_its_size_and_its_line() {
-        let style = scaled(TextStyle { line_height: 19.0, ..TextStyle::new(13.0, 400.0) }, 2.0);
+        let style = scaled(
+            TextStyle {
+                line_height: 19.0,
+                ..TextStyle::new(13.0, 400.0)
+            },
+            2.0,
+        );
         assert_eq!((style.size, style.line_height), (26.0, 38.0));
-        assert_eq!(scaled(TextStyle::new(13.0, 400.0), 2.0).line_height, 0.0, "0 stays the kit's own 1.25 × size");
+        assert_eq!(
+            scaled(TextStyle::new(13.0, 400.0), 2.0).line_height,
+            0.0,
+            "0 stays the kit's own 1.25 × size"
+        );
     }
 }

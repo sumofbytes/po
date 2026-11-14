@@ -56,7 +56,8 @@ const VERSIONS: [&str; 3] = ["2025-06-18", "2025-03-26", "2024-11-05"];
 /// Each tool, the command it sends, what it is for and its arguments.
 fn tools() -> Vec<(&'static str, &'static str, &'static str, Value, Scope)> {
     let string = |description: &str| json!({ "type": "string", "description": description });
-    let number = |description: &str| json!({ "type": "integer", "minimum": 1, "description": description });
+    let number =
+        |description: &str| json!({ "type": "integer", "minimum": 1, "description": description });
     vec![
         (
             "show_view",
@@ -728,16 +729,25 @@ fn listed(grant: Option<&Grant>) -> Vec<Value> {
 
 /// The answer to one JSON-RPC message, or none for a notification. `send` carries a command to
 /// the window and returns its reply; `grant` is this server's, and `initialize` refreshes it.
-fn handle(message: &Value, send: &dyn Fn(Value) -> anyhow::Result<Value>, grant: &mut Option<Grant>) -> Option<Value> {
+fn handle(
+    message: &Value,
+    send: &dyn Fn(Value) -> anyhow::Result<Value>,
+    grant: &mut Option<Grant>,
+) -> Option<Value> {
     let id = message.get("id")?.clone();
     let params = &message["params"];
     let result = match message["method"].as_str().unwrap_or_default() {
         "initialize" => {
             // Who this thread is and what it may do: the tool list is fixed for the agent's
             // lifetime from this answer, so it is asked now, once.
-            *grant = crate::control::send(json!({ "command": "control.info" })).ok().and_then(|reply| grant_of(&reply));
+            *grant = crate::control::send(json!({ "command": "control.info" }))
+                .ok()
+                .and_then(|reply| grant_of(&reply));
             let asked = params["protocolVersion"].as_str().unwrap_or_default();
-            let version = VERSIONS.iter().find(|version| **version == asked).unwrap_or(&VERSIONS[0]);
+            let version = VERSIONS
+                .iter()
+                .find(|version| **version == asked)
+                .unwrap_or(&VERSIONS[0]);
             Ok(json!({
                 "protocolVersion": version,
                 "capabilities": { "tools": {} },
@@ -752,7 +762,9 @@ fn handle(message: &Value, send: &dyn Fn(Value) -> anyhow::Result<Value>, grant:
     };
     Some(match result {
         Ok(result) => json!({ "jsonrpc": "2.0", "id": id, "result": result }),
-        Err((code, message)) => json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } }),
+        Err((code, message)) => {
+            json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } })
+        }
     })
 }
 
@@ -773,9 +785,17 @@ fn grant_of(reply: &Value) -> Option<Grant> {
 
 /// Runs a tool. What the window refuses is the tool's error for the agent to read, not the
 /// protocol's; a tool the grant no longer allows is refused before the window hears of it.
-fn call(params: &Value, send: &dyn Fn(Value) -> anyhow::Result<Value>, grant: Option<&Grant>) -> Result<Value, (i64, String)> {
+fn call(
+    params: &Value,
+    send: &dyn Fn(Value) -> anyhow::Result<Value>,
+    grant: Option<&Grant>,
+) -> Result<Value, (i64, String)> {
     let name = params["name"].as_str().unwrap_or_default();
-    let command = tools().into_iter().find(|tool| tool.0 == name).map(|tool| tool.1).ok_or((-32602, format!("no tool `{name}`")))?;
+    let command = tools()
+        .into_iter()
+        .find(|tool| tool.0 == name)
+        .map(|tool| tool.1)
+        .ok_or((-32602, format!("no tool `{name}`")))?;
     let mut request = match &params["arguments"] {
         Value::Object(arguments) => Value::Object(arguments.clone()),
         Value::Null => json!({}),
@@ -785,7 +805,9 @@ fn call(params: &Value, send: &dyn Fn(Value) -> anyhow::Result<Value>, grant: Op
     if let Some(grant) = grant {
         let parsed = Command::parse(&request).map_err(|error| (-32602, error))?;
         if !grant.allows(&parsed, Relation::Own) {
-            return Ok(json!({ "content": [{ "type": "text", "text": "the user has not granted this" }], "isError": true }));
+            return Ok(
+                json!({ "content": [{ "type": "text", "text": "the user has not granted this" }], "isError": true }),
+            );
         }
     }
     let (text, error) = match send(request) {
@@ -824,7 +846,9 @@ pub fn serve() -> anyhow::Result<()> {
         // Calls that take a while (a wait) run beside the rest, but not without end.
         if running.fetch_add(1, std::sync::atomic::Ordering::SeqCst) >= MAX_CALLS {
             running.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
-            let id = serde_json::from_str::<Value>(&line).ok().and_then(|message| message.get("id").cloned());
+            let id = serde_json::from_str::<Value>(&line)
+                .ok()
+                .and_then(|message| message.get("id").cloned());
             if let Some(id) = id {
                 send_line.send(json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32000, "message": "too many calls at once" } }).to_string()).ok();
             }
@@ -835,7 +859,9 @@ pub fn serve() -> anyhow::Result<()> {
             let mut mine = *grant.lock().expect("grant lock");
             let reply = match serde_json::from_str::<Value>(&line) {
                 Ok(message) => handle(&message, &crate::control::send, &mut mine),
-                Err(error) => Some(json!({ "jsonrpc": "2.0", "id": null, "error": { "code": -32700, "message": error.to_string() } })),
+                Err(error) => Some(
+                    json!({ "jsonrpc": "2.0", "id": null, "error": { "code": -32700, "message": error.to_string() } }),
+                ),
             };
             *grant.lock().expect("grant lock") = mine;
             if let Some(reply) = reply {
@@ -845,7 +871,9 @@ pub fn serve() -> anyhow::Result<()> {
         });
     }
     drop(send_line);
-    writer.join().map_err(|_| anyhow::anyhow!("the writer stopped"))?;
+    writer
+        .join()
+        .map_err(|_| anyhow::anyhow!("the writer stopped"))?;
     Ok(())
 }
 
@@ -853,7 +881,10 @@ pub fn serve() -> anyhow::Result<()> {
 /// with a ` (deleted)` suffix; the new one is at the path without it.
 fn own_binary() -> Option<std::path::PathBuf> {
     let exe = std::env::current_exe().ok()?;
-    match exe.to_str().and_then(|path| path.strip_suffix(" (deleted)")) {
+    match exe
+        .to_str()
+        .and_then(|path| path.strip_suffix(" (deleted)"))
+    {
         Some(path) => Some(path.into()),
         None => Some(exe),
     }
@@ -863,7 +894,10 @@ fn own_binary() -> Option<std::path::PathBuf> {
 /// token). None if Po can't name its own binary.
 pub fn server(env: &[(String, String)]) -> Option<Value> {
     let exe = own_binary()?;
-    let env: Vec<Value> = env.iter().map(|(name, value)| json!({ "name": name, "value": value })).collect();
+    let env: Vec<Value> = env
+        .iter()
+        .map(|(name, value)| json!({ "name": name, "value": value }))
+        .collect();
     Some(json!({ "name": "po", "command": exe.to_string_lossy(), "args": ["mcp"], "env": env }))
 }
 
@@ -891,7 +925,9 @@ mod tests {
 
     #[test]
     fn notifications_get_no_answer() {
-        assert!(handle_(&json!({ "jsonrpc": "2.0", "method": "notifications/initialized" })).is_none());
+        assert!(
+            handle_(&json!({ "jsonrpc": "2.0", "method": "notifications/initialized" })).is_none()
+        );
     }
 
     #[test]
@@ -899,11 +935,21 @@ mod tests {
         let reply = handle_(&json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" })).unwrap();
         let listed = reply["result"]["tools"].as_array().unwrap();
         assert_eq!(listed.len(), tools().len());
-        assert!(listed.iter().all(|tool| tool["inputSchema"]["type"] == "object"));
+        assert!(
+            listed
+                .iter()
+                .all(|tool| tool["inputSchema"]["type"] == "object")
+        );
         for (_, command, ..) in tools() {
             // Refused for missing arguments, perhaps, but never as an unknown command.
             let parsed = crate::command::Command::parse(&json!({ "command": command }));
-            assert!(parsed.as_ref().err().is_none_or(|error| !error.starts_with("no command")), "{command}: {parsed:?}");
+            assert!(
+                parsed
+                    .as_ref()
+                    .err()
+                    .is_none_or(|error| !error.starts_with("no command")),
+                "{command}: {parsed:?}"
+            );
         }
     }
 
@@ -923,17 +969,46 @@ mod tests {
     fn a_grant_lists_and_allows_only_its_tools() {
         let viewer = Grant::default();
         let viewer_tools = listed(Some(&viewer));
-        assert!(!viewer_tools.iter().any(|tool| tool["name"] == "create_thread"));
+        assert!(
+            !viewer_tools
+                .iter()
+                .any(|tool| tool["name"] == "create_thread")
+        );
         assert!(viewer_tools.iter().any(|tool| tool["name"] == "get_thread"));
-        let orchestrate = Grant { scope: Scope::Orchestrate, ..Grant::default() };
+        let orchestrate = Grant {
+            scope: Scope::Orchestrate,
+            ..Grant::default()
+        };
         // The project tools are Global's: an orchestrator lists all but those.
         let orchestrate_tools = listed(Some(&orchestrate));
-        assert!(orchestrate_tools.iter().any(|tool| tool["name"] == "create_thread"));
-        assert!(!orchestrate_tools.iter().any(|tool| tool["name"] == "open_project"));
+        assert!(
+            orchestrate_tools
+                .iter()
+                .any(|tool| tool["name"] == "create_thread")
+        );
+        assert!(
+            !orchestrate_tools
+                .iter()
+                .any(|tool| tool["name"] == "open_project")
+        );
         // Answering a permission ask takes `approvals` too, whatever the scope.
-        let global = Grant { scope: Scope::Global, ..orchestrate };
-        assert!(!listed(Some(&global)).iter().any(|tool| tool["name"] == "answer_thread"));
-        assert_eq!(listed(Some(&Grant { approvals: true, ..global })).len(), tools().len());
+        let global = Grant {
+            scope: Scope::Global,
+            ..orchestrate
+        };
+        assert!(
+            !listed(Some(&global))
+                .iter()
+                .any(|tool| tool["name"] == "answer_thread")
+        );
+        assert_eq!(
+            listed(Some(&Grant {
+                approvals: true,
+                ..global
+            }))
+            .len(),
+            tools().len()
+        );
         let sent = RefCell::new(false);
         let send = |_: Value| {
             *sent.borrow_mut() = true;
@@ -942,7 +1017,10 @@ mod tests {
         let mut grant = Some(viewer);
         let reply = handle(&json!({ "jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": { "name": "create_thread", "arguments": { "prompt": "x" } } }), &send, &mut grant).unwrap();
         assert_eq!(reply["result"]["isError"], true);
-        assert_eq!(reply["result"]["content"][0]["text"], "the user has not granted this");
+        assert_eq!(
+            reply["result"]["content"][0]["text"],
+            "the user has not granted this"
+        );
         assert!(!*sent.borrow());
         let mut grant = Some(orchestrate);
         let reply = handle(&json!({ "jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": { "name": "create_thread", "arguments": { "prompt": "x" } } }), &send, &mut grant).unwrap();
@@ -955,22 +1033,41 @@ mod tests {
         let sent = RefCell::new(vec![]);
         let send = |request: Value| {
             sent.borrow_mut().push(request.clone());
-            if request["path"] == "nope.rs" { anyhow::bail!("no file `nope.rs` in the project") } else { Ok(json!({ "deferred": true })) }
+            if request["path"] == "nope.rs" {
+                anyhow::bail!("no file `nope.rs` in the project")
+            } else {
+                Ok(json!({ "deferred": true }))
+            }
         };
         let call = |arguments| json!({ "jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": { "name": "open_file", "arguments": arguments } });
-        let reply = handle(&call(json!({ "path": "src/main.rs", "line": 4, "command": "viewer.close" })), &send, &mut None).unwrap();
+        let reply = handle(
+            &call(json!({ "path": "src/main.rs", "line": 4, "command": "viewer.close" })),
+            &send,
+            &mut None,
+        )
+        .unwrap();
         assert_eq!(reply["result"]["isError"], false);
-        assert_eq!(reply["result"]["content"][0]["text"], r#"{"deferred":true}"#);
+        assert_eq!(
+            reply["result"]["content"][0]["text"],
+            r#"{"deferred":true}"#
+        );
         // The tool decides the command, whatever the arguments say.
-        assert_eq!(sent.borrow()[0], json!({ "command": "file.open", "path": "src/main.rs", "line": 4 }));
+        assert_eq!(
+            sent.borrow()[0],
+            json!({ "command": "file.open", "path": "src/main.rs", "line": 4 })
+        );
         let reply = handle(&call(json!({ "path": "nope.rs" })), &send, &mut None).unwrap();
         assert_eq!(reply["result"]["isError"], true);
-        assert_eq!(reply["result"]["content"][0]["text"], "no file `nope.rs` in the project");
+        assert_eq!(
+            reply["result"]["content"][0]["text"],
+            "no file `nope.rs` in the project"
+        );
     }
 
     #[test]
     fn unknown_methods_and_tools_are_protocol_errors() {
-        let reply = handle_(&json!({ "jsonrpc": "2.0", "id": 4, "method": "resources/list" })).unwrap();
+        let reply =
+            handle_(&json!({ "jsonrpc": "2.0", "id": 4, "method": "resources/list" })).unwrap();
         assert_eq!(reply["error"]["code"], -32601);
         let mut none = None;
         let reply = handle(&json!({ "jsonrpc": "2.0", "id": 5, "method": "tools/call", "params": { "name": "rm" } }), &refuse, &mut none).unwrap();
@@ -981,7 +1078,11 @@ mod tests {
     fn the_instructions_say_what_each_scope_may_do() {
         let base = instructions(None);
         assert!(base.contains("control_info") && base.contains("last_reply"));
-        assert_eq!(instructions(Some(&Grant::default())), base, "a viewer's instructions are the base");
+        assert_eq!(
+            instructions(Some(&Grant::default())),
+            base,
+            "a viewer's instructions are the base"
+        );
         let all = instructions(Some(&Grant::user()));
         assert!(all.contains(ORCHESTRATE) && all.contains(GLOBAL));
     }
@@ -989,7 +1090,13 @@ mod tests {
     #[test]
     fn a_grant_is_read_out_of_control_info() {
         let reply = json!({ "grant": { "scope": "orchestrate", "read_project": false, "approvals": false } });
-        assert_eq!(grant_of(&reply), Some(Grant { scope: Scope::Orchestrate, ..Grant::default() }));
+        assert_eq!(
+            grant_of(&reply),
+            Some(Grant {
+                scope: Scope::Orchestrate,
+                ..Grant::default()
+            })
+        );
         assert_eq!(grant_of(&json!({ "grant": { "scope": "surprise" } })), None);
     }
 }

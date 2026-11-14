@@ -39,14 +39,24 @@ fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
     } else {
         let stderr = String::from_utf8_lossy(&out.stderr);
         let stdout = String::from_utf8_lossy(&out.stdout);
-        let why = if stderr.trim().is_empty() { stdout } else { stderr };
-        Err(format!("git {}: {}", args.first().copied().unwrap_or_default(), why.trim()))
+        let why = if stderr.trim().is_empty() {
+            stdout
+        } else {
+            stderr
+        };
+        Err(format!(
+            "git {}: {}",
+            args.first().copied().unwrap_or_default(),
+            why.trim()
+        ))
     }
 }
 
 /// The top of the repository `dir` is in, if it is in one.
 pub fn repo_of(dir: &Path) -> Option<PathBuf> {
-    git(dir, &["rev-parse", "--show-toplevel"]).ok().map(PathBuf::from)
+    git(dir, &["rev-parse", "--show-toplevel"])
+        .ok()
+        .map(PathBuf::from)
 }
 
 /// Where a checkout's HEAD is: a branch, or a commit when detached, and whether it has
@@ -62,7 +72,17 @@ pub struct Head {
 /// every few seconds never makes the user's own `git add` or `git commit` fail; untracked
 /// files aren't counted, which keeps it cheap on a big tree.
 pub fn head_of(dir: &Path) -> Option<Head> {
-    let status = git(dir, &["--no-optional-locks", "status", "--porcelain=v2", "--branch", "-uno"]).ok()?;
+    let status = git(
+        dir,
+        &[
+            "--no-optional-locks",
+            "status",
+            "--porcelain=v2",
+            "--branch",
+            "-uno",
+        ],
+    )
+    .ok()?;
     let mut branch = None;
     let mut oid = None;
     let mut dirty = false;
@@ -96,16 +116,34 @@ fn commit_all(spec: &Spec, message: &str) -> Result<bool, String> {
     }
     git(&spec.path, &["add", "-A"])?;
     // Not the user's own commit, so their hooks and signing prompts don't apply.
-    git(&spec.path, &["-c", "commit.gpgsign=false", "commit", "--no-verify", "-q", "-m", message])?;
+    git(
+        &spec.path,
+        &[
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "--no-verify",
+            "-q",
+            "-m",
+            message,
+        ],
+    )?;
     Ok(true)
 }
 
 /// How many commits the branch has on top of where it started. An error is not "none": callers
 /// must not treat a branch they couldn't inspect as empty.
 fn ahead(spec: &Spec) -> Result<usize, String> {
-    git(&spec.repo, &["rev-list", "--count", &format!("{}..{}", spec.base, spec.branch)])?
-        .parse()
-        .map_err(|_| "git rev-list: unexpected output".to_string())
+    git(
+        &spec.repo,
+        &[
+            "rev-list",
+            "--count",
+            &format!("{}..{}", spec.base, spec.branch),
+        ],
+    )?
+    .parse()
+    .map_err(|_| "git rev-list: unexpected output".to_string())
 }
 
 /// Takes the worktree's directory away, and its branch too when `delete_branch`.
@@ -130,23 +168,52 @@ impl Worktree {
     fn create_in(from: &Path, parent: &Path) -> Result<Self, String> {
         static COUNT: AtomicU32 = AtomicU32::new(0);
         let repo = repo_of(from).ok_or("not in a git repository")?;
-        let base = git(&repo, &["rev-parse", "HEAD"]).map_err(|_| "the repository has no commits yet".to_string())?;
-        let stamp = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
+        let base = git(&repo, &["rev-parse", "HEAD"])
+            .map_err(|_| "the repository has no commits yet".to_string())?;
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
         let id = format!("{stamp:x}{:x}", COUNT.fetch_add(1, Ordering::Relaxed));
         let branch = format!("po/{id}");
-        let name = repo.file_name().map_or_else(|| "repo".to_string(), |n| n.to_string_lossy().to_string());
+        let name = repo
+            .file_name()
+            .map_or_else(|| "repo".to_string(), |n| n.to_string_lossy().to_string());
         let path = parent.join(format!("{name}-{id}"));
-        std::fs::create_dir_all(path.parent().expect("under the data directory")).map_err(|err| err.to_string())?;
-        git(&repo, &["worktree", "add", "-b", &branch, &path.to_string_lossy(), &base])?;
-        Ok(Self { spec: Spec { path, branch, base, repo }, done: false })
+        std::fs::create_dir_all(path.parent().expect("under the data directory"))
+            .map_err(|err| err.to_string())?;
+        git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                &branch,
+                &path.to_string_lossy(),
+                &base,
+            ],
+        )?;
+        Ok(Self {
+            spec: Spec {
+                path,
+                branch,
+                base,
+                repo,
+            },
+            done: false,
+        })
     }
 
     /// Takes over a worktree made earlier (by a previous run), if it is still there.
     /// The spec comes from a file on disk, so only a checkout under po's own directory on a
     /// `po/` branch is taken: closing one deletes its directory.
     pub fn adopt(spec: Spec) -> Option<Self> {
-        let ours = spec.path.starts_with(crate::config::data_dir().join("worktrees"))
-            && !spec.path.components().any(|c| c == std::path::Component::ParentDir)
+        let ours = spec
+            .path
+            .starts_with(crate::config::data_dir().join("worktrees"))
+            && !spec
+                .path
+                .components()
+                .any(|c| c == std::path::Component::ParentDir)
             && spec.branch.starts_with("po/");
         (ours && spec.path.join(".git").exists()).then_some(Self { spec, done: false })
     }
@@ -156,12 +223,16 @@ impl Worktree {
     /// conflicts the merge is undone and everything is left as it was.
     pub fn merge(spec: &Spec, message: &str) -> Result<String, String> {
         commit_all(spec, message)?;
-        let into = git(&spec.repo, &["rev-parse", "--abbrev-ref", "HEAD"]).unwrap_or_else(|_| "HEAD".into());
+        let into = git(&spec.repo, &["rev-parse", "--abbrev-ref", "HEAD"])
+            .unwrap_or_else(|_| "HEAD".into());
         if ahead(spec)? > 0
             && let Err(error) = git(&spec.repo, &["merge", "--no-edit", &spec.branch])
         {
             git(&spec.repo, &["merge", "--abort"]).ok();
-            return Err(format!("could not merge into {into}; the branch {} is kept\n{error}", spec.branch));
+            return Err(format!(
+                "could not merge into {into}; the branch {} is kept\n{error}",
+                spec.branch
+            ));
         }
         remove(spec, true);
         Ok(into)
@@ -225,7 +296,10 @@ mod tests {
     }
 
     fn create(repo: &Path) -> Result<Worktree, String> {
-        Worktree::create_in(repo, &std::env::temp_dir().join(format!("po-wt-data-{}", std::process::id())))
+        Worktree::create_in(
+            repo,
+            &std::env::temp_dir().join(format!("po-wt-data-{}", std::process::id())),
+        )
     }
 
     fn branches(repo: &Path) -> String {
@@ -235,7 +309,13 @@ mod tests {
     #[test]
     fn head_names_the_branch_and_notices_changes_to_tracked_files() {
         let repo = repo("head");
-        assert_eq!(head_of(&repo), Some(Head { name: "main".into(), dirty: false }));
+        assert_eq!(
+            head_of(&repo),
+            Some(Head {
+                name: "main".into(),
+                dirty: false
+            })
+        );
         // Untracked files don't count; edits to tracked ones do.
         std::fs::write(repo.join("new.txt"), "x\n").unwrap();
         assert_eq!(head_of(&repo).map(|h| h.dirty), Some(false));
@@ -260,7 +340,13 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         assert_eq!(head_of(&dir), None);
         sh(&dir, &["init", "-q", "-b", "trunk"]);
-        assert_eq!(head_of(&dir), Some(Head { name: "trunk".into(), dirty: false }));
+        assert_eq!(
+            head_of(&dir),
+            Some(Head {
+                name: "trunk".into(),
+                dirty: false
+            })
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -273,7 +359,10 @@ mod tests {
         let spec = wt.spec.clone();
         let into = Worktree::merge(&spec, "add b").unwrap();
         assert_eq!(into, "main");
-        assert_eq!(std::fs::read_to_string(repo.join("b.txt")).unwrap(), "new\n");
+        assert_eq!(
+            std::fs::read_to_string(repo.join("b.txt")).unwrap(),
+            "new\n"
+        );
         assert!(!spec.path.exists());
         assert!(branches(&repo).is_empty());
         let mut wt = wt;
@@ -289,8 +378,14 @@ mod tests {
         sh(&repo, &["commit", "-q", "-am", "diverge"]);
         let error = Worktree::merge(&wt.spec.clone(), "edit a").unwrap_err();
         assert!(error.contains("could not merge"), "{error}");
-        assert_eq!(std::fs::read_to_string(repo.join("a.txt")).unwrap(), "from the checkout\n");
-        assert!(sh(&repo, &["status", "--porcelain"]).is_empty(), "the merge was left half done");
+        assert_eq!(
+            std::fs::read_to_string(repo.join("a.txt")).unwrap(),
+            "from the checkout\n"
+        );
+        assert!(
+            sh(&repo, &["status", "--porcelain"]).is_empty(),
+            "the merge was left half done"
+        );
         assert!(wt.spec.path.is_dir());
         assert!(branches(&repo).contains(&wt.spec.branch));
     }
@@ -343,7 +438,12 @@ mod tests {
     fn only_po_s_own_worktrees_are_adopted() {
         let dir = std::env::temp_dir().join(format!("po-wt-adopt-{}", std::process::id()));
         std::fs::create_dir_all(dir.join(".git")).unwrap();
-        let spec = Spec { path: dir.clone(), branch: "po/x".into(), base: "b".into(), repo: dir };
+        let spec = Spec {
+            path: dir.clone(),
+            branch: "po/x".into(),
+            base: "b".into(),
+            repo: dir,
+        };
         assert!(Worktree::adopt(spec).is_none());
     }
 }

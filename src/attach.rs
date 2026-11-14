@@ -3,7 +3,10 @@
 use std::{
     io::Cursor,
     path::{Path, PathBuf},
-    sync::{Arc, OnceLock, atomic::{AtomicU64, Ordering}},
+    sync::{
+        Arc, OnceLock,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 use anyhow::{Context, Result, bail};
@@ -81,16 +84,27 @@ impl Attachment {
     fn new(format: ImageFormat, bytes: Vec<u8>, size: Option<(u32, u32)>) -> Self {
         let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
         let size = size
-            .or_else(|| ImageReader::new(Cursor::new(&bytes)).with_guessed_format().ok().and_then(|reader| reader.into_dimensions().ok()))
+            .or_else(|| {
+                ImageReader::new(Cursor::new(&bytes))
+                    .with_guessed_format()
+                    .ok()
+                    .and_then(|reader| reader.into_dimensions().ok())
+            })
             .unwrap_or((MAX_SIDE, MAX_SIDE));
-        Self { image: Arc::new(Image { format, bytes, id }), size, saved: OnceLock::new(), uri: OnceLock::new() }
+        Self {
+            image: Arc::new(Image { format, bytes, id }),
+            size,
+            saved: OnceLock::new(),
+            uri: OnceLock::new(),
+        }
     }
 
     /// Takes the bytes of an image file or clipboard image, shrinking it if an agent would refuse it.
     pub fn from_bytes(bytes: Vec<u8>) -> Result<Self> {
         let codec = image::guess_format(&bytes).context("not an image")?;
         let format = format_of(codec).context("that image format can't be sent")?;
-        let (width, height) = ImageReader::with_format(Cursor::new(&bytes), codec).into_dimensions()?;
+        let (width, height) =
+            ImageReader::with_format(Cursor::new(&bytes), codec).into_dimensions()?;
         if bytes.len() <= MAX_BYTES && width.max(height) <= MAX_SIDE {
             return Ok(Self::new(format, bytes, Some((width, height))));
         }
@@ -124,7 +138,12 @@ impl Attachment {
     pub fn data_uri(&self) -> Arc<str> {
         self.uri
             .get_or_init(|| {
-                format!("data:{};base64,{}", self.image.format.mime_type(), STANDARD.encode(&self.image.bytes)).into()
+                format!(
+                    "data:{};base64,{}",
+                    self.image.format.mime_type(),
+                    STANDARD.encode(&self.image.bytes)
+                )
+                .into()
             })
             .clone()
     }
@@ -133,8 +152,14 @@ impl Attachment {
     pub fn saved(&self) -> Option<&Path> {
         if self.saved.get().is_none() {
             let dir = crate::config::data_dir().join("attachments");
-            let path = dir.join(format!("{}-{}.{}", std::process::id(), self.image.id, self.image.format.extension()));
-            let written = std::fs::create_dir_all(&dir).and_then(|()| std::fs::write(&path, &self.image.bytes));
+            let path = dir.join(format!(
+                "{}-{}.{}",
+                std::process::id(),
+                self.image.id,
+                self.image.format.extension()
+            ));
+            let written = std::fs::create_dir_all(&dir)
+                .and_then(|()| std::fs::write(&path, &self.image.bytes));
             match written {
                 Ok(()) => drop(self.saved.set(path)),
                 Err(error) => log::warn!("attachment: {}: {error}", path.display()),
@@ -146,16 +171,27 @@ impl Attachment {
 
 /// What dex is told in place of the pictures it can't be sent.
 pub fn note(attachments: &[Arc<Attachment>]) -> String {
-    let paths: Vec<String> = attachments.iter().filter_map(|a| a.saved()).map(|p| format!("`{}`", p.display())).collect();
+    let paths: Vec<String> = attachments
+        .iter()
+        .filter_map(|a| a.saved())
+        .map(|p| format!("`{}`", p.display()))
+        .collect();
     match paths.len() {
         0 => String::new(),
         1 => format!("\n\n[The user attached an image, saved at {}.]", paths[0]),
-        _ => format!("\n\n[The user attached images, saved at {}.]", paths.join(", ")),
+        _ => format!(
+            "\n\n[The user attached images, saved at {}.]",
+            paths.join(", ")
+        ),
     }
 }
 
 fn has_image_extension(path: &Path) -> bool {
-    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or_default().to_ascii_lowercase();
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
     matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "webp" | "gif")
 }
 
@@ -174,7 +210,11 @@ fn shrink(picture: DynamicImage) -> Result<(ImageFormat, Vec<u8>)> {
     let opaque = !picture.color().has_alpha();
     let mut side = picture.width().max(picture.height()).min(TARGET_SIDE);
     loop {
-        let scaled = if picture.width().max(picture.height()) > side { picture.resize(side, side, FilterType::Triangle) } else { picture.clone() };
+        let scaled = if picture.width().max(picture.height()) > side {
+            picture.resize(side, side, FilterType::Triangle)
+        } else {
+            picture.clone()
+        };
         let mut out = Cursor::new(Vec::new());
         if opaque {
             scaled.to_rgb8().write_to(&mut out, Codec::Jpeg)?;
@@ -183,7 +223,14 @@ fn shrink(picture: DynamicImage) -> Result<(ImageFormat, Vec<u8>)> {
         }
         let bytes = out.into_inner();
         if bytes.len() <= MAX_BYTES || side <= MIN_SIDE {
-            return Ok((if opaque { ImageFormat::Jpeg } else { ImageFormat::Png }, bytes));
+            return Ok((
+                if opaque {
+                    ImageFormat::Jpeg
+                } else {
+                    ImageFormat::Png
+                },
+                bytes,
+            ));
         }
         side = (side * 3 / 4).max(MIN_SIDE);
     }
@@ -195,7 +242,9 @@ mod tests {
 
     fn png(width: u32, height: u32) -> Vec<u8> {
         let mut out = Cursor::new(Vec::new());
-        DynamicImage::new_rgba8(width, height).write_to(&mut out, Codec::Png).unwrap();
+        DynamicImage::new_rgba8(width, height)
+            .write_to(&mut out, Codec::Png)
+            .unwrap();
         out.into_inner()
     }
 
@@ -211,7 +260,10 @@ mod tests {
     fn a_huge_picture_is_scaled_down() {
         let attachment = Attachment::from_bytes(png(4000, 1000)).unwrap();
         let shrunk = image::load_from_memory(&attachment.image.bytes).unwrap();
-        assert_eq!((shrunk.width(), shrunk.height()), (TARGET_SIDE, TARGET_SIDE / 4));
+        assert_eq!(
+            (shrunk.width(), shrunk.height()),
+            (TARGET_SIDE, TARGET_SIDE / 4)
+        );
     }
 
     #[test]

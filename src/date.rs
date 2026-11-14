@@ -5,9 +5,30 @@
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub struct Date(i64);
 
-const MONTHS: [&str; 12] = ["january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december"];
+const MONTHS: [&str; 12] = [
+    "january",
+    "february",
+    "march",
+    "april",
+    "may",
+    "june",
+    "july",
+    "august",
+    "september",
+    "october",
+    "november",
+    "december",
+];
 /// From Sunday, as `Date::weekday` counts.
-const WEEKDAYS: [&str; 7] = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"];
+const WEEKDAYS: [&str; 7] = [
+    "sunday",
+    "monday",
+    "tuesday",
+    "wednesday",
+    "thursday",
+    "friday",
+    "saturday",
+];
 
 fn leap(year: i64) -> bool {
     year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)
@@ -25,7 +46,11 @@ fn days_in_month(year: i64, month: u32) -> u32 {
 impl Date {
     /// The day, if there is one by that number in that month.
     pub fn from_ymd(year: i64, month: u32, day: u32) -> Option<Self> {
-        if !(1..=9999).contains(&year) || !(1..=12).contains(&month) || day == 0 || day > days_in_month(year, month) {
+        if !(1..=9999).contains(&year)
+            || !(1..=12).contains(&month)
+            || day == 0
+            || day > days_in_month(year, month)
+        {
             return None;
         }
         // Howard Hinnant's days_from_civil.
@@ -84,7 +109,13 @@ pub fn today() -> Date {
             let mut tm: libc::tm = std::mem::zeroed();
             (!libc::localtime_r(&now, &mut tm).is_null()).then_some(tm)
         };
-        if let Some(day) = local.and_then(|tm| Date::from_ymd(i64::from(tm.tm_year) + 1900, tm.tm_mon as u32 + 1, tm.tm_mday as u32)) {
+        if let Some(day) = local.and_then(|tm| {
+            Date::from_ymd(
+                i64::from(tm.tm_year) + 1900,
+                tm.tm_mon as u32 + 1,
+                tm.tm_mday as u32,
+            )
+        }) {
             return day;
         }
     }
@@ -111,13 +142,20 @@ impl Date {
     /// `Tuesday, November 5`.
     pub fn long(self) -> String {
         let (_, month, day) = self.ymd();
-        format!("{}, {} {day}", crate::sentence(WEEKDAYS[self.weekday()]), crate::sentence(MONTHS[month as usize - 1]))
+        format!(
+            "{}, {} {day}",
+            crate::sentence(WEEKDAYS[self.weekday()]),
+            crate::sentence(MONTHS[month as usize - 1])
+        )
     }
 }
 
 /// A month by its name or the first three letters of it.
 fn month(word: &str) -> Option<u32> {
-    (word.len() >= 3).then(|| MONTHS.iter().position(|name| name.starts_with(word))).flatten().map(|ix| ix as u32 + 1)
+    (word.len() >= 3)
+        .then(|| MONTHS.iter().position(|name| name.starts_with(word)))
+        .flatten()
+        .map(|ix| ix as u32 + 1)
 }
 
 /// The first day after `today` that is `weekday`.
@@ -129,12 +167,18 @@ fn next_weekday(today: Date, weekday: usize) -> Date {
 /// A day of `month` with no year given: the first one from today on, which for Feb 29 may be years off.
 fn coming(today: Date, month: u32, day: u32) -> Option<Date> {
     let year = today.ymd().0;
-    (year..=year + 8).filter_map(|year| Date::from_ymd(year, month, day)).find(|date| *date >= today)
+    (year..=year + 8)
+        .filter_map(|year| Date::from_ymd(year, month, day))
+        .find(|date| *date >= today)
 }
 
 /// `number` days or weeks from today. A span of more than a century is a typo.
 fn after(today: Date, number: &str, unit: &str) -> Option<Date> {
-    let number: i64 = number.trim_start_matches('+').parse().ok().filter(|n| *n <= 36_500)?;
+    let number: i64 = number
+        .trim_start_matches('+')
+        .parse()
+        .ok()
+        .filter(|n| *n <= 36_500)?;
     match unit {
         "d" | "day" | "days" => Some(today.plus(number)),
         "w" | "wk" | "wks" | "week" | "weeks" => Some(today.plus(number * 7)),
@@ -143,7 +187,10 @@ fn after(today: Date, number: &str, unit: &str) -> Option<Date> {
 }
 
 fn is_span(unit: &str) -> bool {
-    matches!(unit, "d" | "day" | "days" | "w" | "wk" | "wks" | "week" | "weeks")
+    matches!(
+        unit,
+        "d" | "day" | "days" | "w" | "wk" | "wks" | "week" | "weeks"
+    )
 }
 
 /// What the user typed for a due date, read the way people say it: `today`, `tomorrow`, a weekday
@@ -154,21 +201,35 @@ pub fn parse_due(text: &str, today: Date) -> Option<Option<Date>> {
     if text.is_empty() {
         return Some(None);
     }
-    let words: Vec<&str> = text.split(|c: char| c.is_whitespace() || c == ',').filter(|w| !w.is_empty()).collect();
+    let words: Vec<&str> = text
+        .split(|c: char| c.is_whitespace() || c == ',')
+        .filter(|w| !w.is_empty())
+        .collect();
     let date = match words.as_slice() {
         ["today" | "tod"] => Some(today),
         ["tomorrow" | "tmr" | "tom"] => Some(today.plus(1)),
         ["next", "week"] => Some(next_weekday(today, 1)),
-        [word] if word.len() >= 3 && WEEKDAYS.iter().any(|day| day.starts_with(word)) => WEEKDAYS.iter().position(|day| day.starts_with(word)).map(|ix| next_weekday(today, ix)),
+        [word] if word.len() >= 3 && WEEKDAYS.iter().any(|day| day.starts_with(word)) => WEEKDAYS
+            .iter()
+            .position(|day| day.starts_with(word))
+            .map(|ix| next_weekday(today, ix)),
         [word] if word.contains('-') => Date::from_iso(word),
         [word] => {
             let count = word.trim_start_matches('+');
-            let (number, unit) = count.split_at(count.find(|c: char| !c.is_ascii_digit()).unwrap_or(count.len()));
+            let (number, unit) = count.split_at(
+                count
+                    .find(|c: char| !c.is_ascii_digit())
+                    .unwrap_or(count.len()),
+            );
             after(today, number, unit)
         }
         [number, unit] | ["in", number, unit] if is_span(unit) => after(today, number, unit),
         [first, second] | [first, second, _] => {
-            let (name, day) = if first.chars().all(|c| c.is_ascii_digit()) { (second, first) } else { (first, second) };
+            let (name, day) = if first.chars().all(|c| c.is_ascii_digit()) {
+                (second, first)
+            } else {
+                (first, second)
+            };
             let (month, day) = (month(name)?, day.parse().ok()?);
             match words.get(2) {
                 Some(year) => {
@@ -189,7 +250,12 @@ pub fn parse_due(text: &str, today: Date) -> Option<Option<Date>> {
 pub fn due_label(due: Date, today: Date) -> String {
     let short = |name: &str| {
         let mut chars = name.chars();
-        chars.next().map(|c| c.to_ascii_uppercase()).into_iter().chain(chars.take(2)).collect::<String>()
+        chars
+            .next()
+            .map(|c| c.to_ascii_uppercase())
+            .into_iter()
+            .chain(chars.take(2))
+            .collect::<String>()
     };
     match due.0 - today.0 {
         0 => "Today".into(),
@@ -199,7 +265,11 @@ pub fn due_label(due: Date, today: Date) -> String {
         _ => {
             let (year, month, day) = due.ymd();
             let name = short(MONTHS[month as usize - 1]);
-            if year == today.ymd().0 { format!("{name} {day}") } else { format!("{name} {day} {year}") }
+            if year == today.ymd().0 {
+                format!("{name} {day}")
+            } else {
+                format!("{name} {day} {year}")
+            }
         }
     }
 }
@@ -235,11 +305,20 @@ mod tests {
         assert_eq!(parse_due("+3d", monday), Some(Some(day(2026, 10, 29))));
         assert_eq!(parse_due("2w", monday), Some(Some(day(2026, 11, 9))));
         assert_eq!(parse_due("nov 2", monday), Some(Some(day(2026, 11, 2))));
-        assert_eq!(parse_due("2 November", monday), Some(Some(day(2026, 11, 2))));
+        assert_eq!(
+            parse_due("2 November", monday),
+            Some(Some(day(2026, 11, 2)))
+        );
         // A day already gone this year is next year's.
         assert_eq!(parse_due("jan 5", monday), Some(Some(day(2027, 1, 5))));
-        assert_eq!(parse_due("mar 1, 2028", monday), Some(Some(day(2028, 3, 1))));
-        assert_eq!(parse_due("2026-12-31", monday), Some(Some(day(2026, 12, 31))));
+        assert_eq!(
+            parse_due("mar 1, 2028", monday),
+            Some(Some(day(2028, 3, 1)))
+        );
+        assert_eq!(
+            parse_due("2026-12-31", monday),
+            Some(Some(day(2026, 12, 31)))
+        );
         assert_eq!(parse_due("soon", monday), None);
         assert_eq!(parse_due("feb 30", monday), None);
     }
@@ -248,7 +327,10 @@ mod tests {
     fn spans_years_and_leap_days_are_read_sensibly() {
         let monday = day(2026, 10, 26);
         assert_eq!(parse_due("3 days", monday), Some(Some(day(2026, 10, 29))));
-        assert_eq!(parse_due("in 2 weeks", monday), Some(Some(day(2026, 11, 9))));
+        assert_eq!(
+            parse_due("in 2 weeks", monday),
+            Some(Some(day(2026, 11, 9)))
+        );
         assert_eq!(parse_due("nov 2 27", monday), Some(Some(day(2027, 11, 2))));
         // Feb 29 waits for the next leap year, 2028.
         assert_eq!(parse_due("feb 29", monday), Some(Some(day(2028, 2, 29))));

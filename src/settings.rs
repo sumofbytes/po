@@ -34,40 +34,70 @@ pub struct Form {
 fn names_line(value: &Value) -> String {
     match value {
         Value::String(name) => name.clone(),
-        Value::Array(list) => list.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(", "),
+        Value::Array(list) => list
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>()
+            .join(", "),
         _ => String::new(),
     }
 }
 
 /// The inverse of `names_line`: one name stays a string, several become a list.
 fn names_value(line: &str) -> Option<Value> {
-    let mut names: Vec<&str> = line.split(',').map(str::trim).filter(|name| !name.is_empty()).collect();
+    let mut names: Vec<&str> = line
+        .split(',')
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .collect();
     match names.len() {
         0 => None,
         1 => Some(Value::String(names.remove(0).to_string())),
-        _ => Some(Value::Array(names.into_iter().map(|name| Value::String(name.to_string())).collect())),
+        _ => Some(Value::Array(
+            names
+                .into_iter()
+                .map(|name| Value::String(name.to_string()))
+                .collect(),
+        )),
     }
 }
 
 /// A field's number: nothing for an empty field (the default applies), an error for text, for a
 /// fraction where `whole` is asked, or for a number the option would ignore.
-fn number(label: &str, line: &str, range: std::ops::RangeInclusive<f64>, whole: bool) -> Result<Option<f64>, String> {
+fn number(
+    label: &str,
+    line: &str,
+    range: std::ops::RangeInclusive<f64>,
+    whole: bool,
+) -> Result<Option<f64>, String> {
     let line = line.trim();
     if line.is_empty() {
         return Ok(None);
     }
-    let n = line.parse::<f64>().ok().filter(|n| n.is_finite()).ok_or_else(|| format!("{label} needs a number"))?;
+    let n = line
+        .parse::<f64>()
+        .ok()
+        .filter(|n| n.is_finite())
+        .ok_or_else(|| format!("{label} needs a number"))?;
     if whole && n.fract() != 0. {
         return Err(format!("{label} needs a whole number"));
     }
     if !range.contains(&n) {
-        return Err(format!("{label} must be from {} to {}", range.start(), range.end()));
+        return Err(format!(
+            "{label} must be from {} to {}",
+            range.start(),
+            range.end()
+        ));
     }
     Ok(Some(n))
 }
 
 fn json_number(n: f64) -> Value {
-    if n.fract() == 0. { Value::from(n as u64) } else { Value::from(n) }
+    if n.fract() == 0. {
+        Value::from(n as u64)
+    } else {
+        Value::from(n)
+    }
 }
 
 /// Sets `key`, or removes it for `None` so the option goes back to its default.
@@ -98,9 +128,24 @@ impl Form {
             .flatten()
             .filter_map(Value::as_object)
             .map(|entry| {
-                let get = |key: &str| entry.get(key).and_then(Value::as_str).unwrap_or("").to_string();
-                let extra = entry.iter().filter(|(key, _)| !["id", "name", "command"].contains(&key.as_str())).map(|(k, v)| (k.clone(), v.clone())).collect();
-                AgentForm { id: get("id"), name: get("name"), command: get("command"), extra }
+                let get = |key: &str| {
+                    entry
+                        .get(key)
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string()
+                };
+                let extra = entry
+                    .iter()
+                    .filter(|(key, _)| !["id", "name", "command"].contains(&key.as_str()))
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
+                AgentForm {
+                    id: get("id"),
+                    name: get("name"),
+                    command: get("command"),
+                    extra,
+                }
             })
             .collect();
         Self {
@@ -128,9 +173,18 @@ impl Form {
         let sizes = f64::from(*fonts::SIZES.start())..=f64::from(*fonts::SIZES.end());
         let font_size = number("Font size", &read(&self.font_size), sizes.clone(), false)?;
         let mono_size = number("Mono font size", &read(&self.mono_size), sizes, false)?;
-        let idle = number("Idle minutes", &read(&self.idle_minutes), 0.0..=1_000_000., true)?;
+        let idle = number(
+            "Idle minutes",
+            &read(&self.idle_minutes),
+            0.0..=1_000_000.,
+            true,
+        )?;
         let max_live = number("Max live agents", &read(&self.max_live), 1.0..=1000., true)?;
-        let (theme, font_family, mono_family) = (read(&self.theme), names_value(&read(&self.font_family)), names_value(&read(&self.mono_family)));
+        let (theme, font_family, mono_family) = (
+            read(&self.theme),
+            names_value(&read(&self.font_family)),
+            names_value(&read(&self.mono_family)),
+        );
         let (notifications, viewer_left) = (self.notifications, self.viewer_left);
         let mut agents = Vec::new();
         for row in &self.agents {
@@ -149,18 +203,38 @@ impl Form {
         }
         Ok(move |config: &mut Map<String, Value>| {
             put(config, "theme", (!theme.is_empty()).then(|| theme.into()));
-            let mut font = config.get("font").and_then(Value::as_object).cloned().unwrap_or_default();
+            let mut font = config
+                .get("font")
+                .and_then(Value::as_object)
+                .cloned()
+                .unwrap_or_default();
             put(&mut font, "family", font_family);
             put(&mut font, "size", font_size.map(json_number));
             put(&mut font, "mono_family", mono_family);
             put(&mut font, "mono_size", mono_size.map(json_number));
-            put(config, "font", (!font.is_empty()).then_some(Value::Object(font)));
+            put(
+                config,
+                "font",
+                (!font.is_empty()).then_some(Value::Object(font)),
+            );
             put(config, "idle_minutes", idle.map(json_number));
             put(config, "max_live_agents", max_live.map(json_number));
             // Notifications default on, so only turning them off is written.
-            put(config, "notifications", (!notifications).then_some(Value::Bool(false)));
-            put(config, "viewer_position", Some((if viewer_left { "left" } else { "right" }).into()));
-            put(config, "agents", (!agents.is_empty()).then_some(Value::Array(agents)));
+            put(
+                config,
+                "notifications",
+                (!notifications).then_some(Value::Bool(false)),
+            );
+            put(
+                config,
+                "viewer_position",
+                Some((if viewer_left { "left" } else { "right" }).into()),
+            );
+            put(
+                config,
+                "agents",
+                (!agents.is_empty()).then_some(Value::Array(agents)),
+            );
         })
     }
 }
@@ -194,7 +268,18 @@ mod tests {
     }
 
     fn blank() -> Form {
-        Form { theme: String::new(), font_family: String::new(), font_size: String::new(), mono_family: String::new(), mono_size: String::new(), idle_minutes: String::new(), max_live: String::new(), notifications: true, viewer_left: false, agents: vec![] }
+        Form {
+            theme: String::new(),
+            font_family: String::new(),
+            font_size: String::new(),
+            mono_family: String::new(),
+            mono_size: String::new(),
+            idle_minutes: String::new(),
+            max_live: String::new(),
+            notifications: true,
+            viewer_left: false,
+            agents: vec![],
+        }
     }
 
     fn saved(form: &Form, mut config: Map<String, Value>) -> Map<String, Value> {
@@ -205,11 +290,20 @@ mod tests {
     #[test]
     fn saving_writes_the_sizes_and_keeps_what_the_page_has_no_field_for() {
         let mut form = blank();
-        (form.font_size, form.mono_size, form.font_family) = ("15".into(), "12.5".into(), "A, B".into());
-        let before = json!({ "glass": true, "font": { "transcript_size": 12 }, "mcp_servers": { "x": {} } });
+        (form.font_size, form.mono_size, form.font_family) =
+            ("15".into(), "12.5".into(), "A, B".into());
+        let before =
+            json!({ "glass": true, "font": { "transcript_size": 12 }, "mcp_servers": { "x": {} } });
         let config = saved(&form, before.as_object().unwrap().clone());
-        assert_eq!(config["font"], json!({ "transcript_size": 12, "size": 15, "mono_size": 12.5, "family": ["A", "B"] }));
-        assert_eq!(config["glass"], json!(true), "an option the page doesn't have is left as it was");
+        assert_eq!(
+            config["font"],
+            json!({ "transcript_size": 12, "size": 15, "mono_size": 12.5, "family": ["A", "B"] })
+        );
+        assert_eq!(
+            config["glass"],
+            json!(true),
+            "an option the page doesn't have is left as it was"
+        );
         assert!(config.contains_key("mcp_servers"));
         assert_eq!(config["viewer_position"], "right");
     }

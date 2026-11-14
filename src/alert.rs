@@ -11,7 +11,17 @@ pub fn send(summary: &str, body: &str, clicked: impl FnOnce(Option<String>) + Se
         // Waited on a thread of its own: an action keeps the notifier running until it is answered.
         std::thread::spawn(move || {
             // The token goes to stderr so that it can't run into the action on stdout.
-            let asked = Command::new("notify-send").args(["--app-name=po", "--action=default=Open", "--activation-token-fd=2", "--", &summary, &body]).stdin(Stdio::null()).output();
+            let asked = Command::new("notify-send")
+                .args([
+                    "--app-name=po",
+                    "--action=default=Open",
+                    "--activation-token-fd=2",
+                    "--",
+                    &summary,
+                    &body,
+                ])
+                .stdin(Stdio::null())
+                .output();
             match asked {
                 Ok(output) if output.status.success() => {
                     if let Some(token) = click(&output.stdout, &output.stderr) {
@@ -32,7 +42,14 @@ pub fn send(summary: &str, body: &str, clicked: impl FnOnce(Option<String>) + Se
         drop(clicked);
         let escape = |text: &str| text.replace('\\', "\\\\").replace('"', "\\\"");
         let mut command = Command::new("osascript");
-        command.args(["-e", &format!("display notification \"{}\" with title \"{}\"", escape(body), escape(summary))]);
+        command.args([
+            "-e",
+            &format!(
+                "display notification \"{}\" with title \"{}\"",
+                escape(body),
+                escape(summary)
+            ),
+        ]);
         // Waited on a thread of its own, so the notifier doesn't linger as a zombie.
         std::thread::spawn(move || quietly(command));
     }
@@ -42,7 +59,10 @@ pub fn send(summary: &str, body: &str, clicked: impl FnOnce(Option<String>) + Se
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn quietly(mut command: Command) {
-    command.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
     command.status().ok();
 }
 
@@ -50,10 +70,17 @@ fn quietly(mut command: Command) {
 /// if there was one. Its stderr may also hold its own messages, which have spaces in them.
 #[cfg(any(target_os = "linux", test))]
 fn click(stdout: &[u8], stderr: &[u8]) -> Option<Option<String>> {
-    String::from_utf8_lossy(stdout).lines().any(|line| line.trim() == "default").then(|| {
-        let stderr = String::from_utf8_lossy(stderr);
-        stderr.lines().map(str::trim).find(|line| !line.is_empty() && !line.contains(char::is_whitespace)).map(str::to_string)
-    })
+    String::from_utf8_lossy(stdout)
+        .lines()
+        .any(|line| line.trim() == "default")
+        .then(|| {
+            let stderr = String::from_utf8_lossy(stderr);
+            stderr
+                .lines()
+                .map(str::trim)
+                .find(|line| !line.is_empty() && !line.contains(char::is_whitespace))
+                .map(str::to_string)
+        })
 }
 
 #[cfg(test)]
@@ -72,6 +99,9 @@ mod tests {
 
     #[test]
     fn the_token_is_told_from_the_notifiers_own_messages() {
-        assert_eq!(click(b"default\n", b"Wait timeout expired\nabc-123\n"), Some(Some("abc-123".to_string())));
+        assert_eq!(
+            click(b"default\n", b"Wait timeout expired\nabc-123\n"),
+            Some(Some("abc-123".to_string()))
+        );
     }
 }

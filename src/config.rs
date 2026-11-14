@@ -26,18 +26,22 @@ pub struct Agent {
 
 /// The user's home directory: `$HOME`, or `%USERPROFILE%` on Windows.
 pub fn home() -> Option<PathBuf> {
-    std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map(PathBuf::from)
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
 }
 
 /// `$XDG_CONFIG_HOME/po`, or `~/.config/po` (`%APPDATA%\po` on Windows).
 pub fn dir() -> Option<PathBuf> {
-    let base = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).or_else(|| {
-        if cfg!(windows) {
-            std::env::var_os("APPDATA").map(PathBuf::from)
-        } else {
-            home().map(|home| home.join(".config"))
-        }
-    })?;
+    let base = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| {
+            if cfg!(windows) {
+                std::env::var_os("APPDATA").map(PathBuf::from)
+            } else {
+                home().map(|home| home.join(".config"))
+            }
+        })?;
     Some(base.join("po"))
 }
 
@@ -72,7 +76,9 @@ pub fn read_json(path: &Path) -> Option<Value> {
 /// [`crate::plugin::effective_config`], which has the plugins' entries in it too.
 #[hotpath::measure]
 pub fn load() -> Value {
-    dir().and_then(|dir| read_json(&dir.join("config.json"))).unwrap_or(Value::Null)
+    dir()
+        .and_then(|dir| read_json(&dir.join("config.json")))
+        .unwrap_or(Value::Null)
 }
 
 /// Changes the user's `config.json` and writes it back, keeping every key `change` leaves alone.
@@ -86,16 +92,25 @@ pub fn update(change: impl FnOnce(&mut serde_json::Map<String, Value>)) -> Resul
     let mut config = match std::fs::read_to_string(&path) {
         Ok(text) => match serde_json::from_str::<Value>(&text) {
             Ok(Value::Object(map)) => map,
-            _ => return Err(format!("{} isn't a JSON object; fix it first", path.display())),
+            _ => {
+                return Err(format!(
+                    "{} isn't a JSON object; fix it first",
+                    path.display()
+                ));
+            }
         },
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => serde_json::Map::new(),
         Err(error) => return Err(format!("{}: {error}", path.display())),
     };
     change(&mut config);
-    std::fs::create_dir_all(path.parent().unwrap_or(&dir)).map_err(|error| format!("{}: {error}", dir.display()))?;
+    std::fs::create_dir_all(path.parent().unwrap_or(&dir))
+        .map_err(|error| format!("{}: {error}", dir.display()))?;
     let temp = path.with_extension("json.tmp");
-    let text = serde_json::to_string_pretty(&Value::Object(config)).map_err(|error| error.to_string())?;
-    std::fs::write(&temp, text + "\n").and_then(|()| std::fs::rename(&temp, &path)).map_err(|error| format!("{}: {error}", path.display()))
+    let text =
+        serde_json::to_string_pretty(&Value::Object(config)).map_err(|error| error.to_string())?;
+    std::fs::write(&temp, text + "\n")
+        .and_then(|()| std::fs::rename(&temp, &path))
+        .map_err(|error| format!("{}: {error}", path.display()))
 }
 
 /// Whether the config puts the viewer left of the conversation (`"viewer_position": "left"`), or
@@ -118,18 +133,31 @@ fn parse(list: &Value) -> Vec<Agent> {
             let name = entry["name"].as_str().unwrap_or(&id).to_string();
             let daemon = entry["daemon"].as_str().map(String::from);
             let plugin = entry[FROM_PLUGIN].as_str().map(String::from);
-            Some(Agent { id, name, command, daemon, vouched: false, plugin })
+            Some(Agent {
+                id,
+                name,
+                command,
+                daemon,
+                vouched: false,
+                plugin,
+            })
         })
         .collect()
 }
 
 /// The bundled agents with the config's `agents` list merged in.
 pub fn agents(config: &Value) -> Vec<Agent> {
-    let mut agents = serde_json::from_str(DEFAULT_AGENTS).map(|list: Value| parse(&list)).unwrap_or_default();
+    let mut agents = serde_json::from_str(DEFAULT_AGENTS)
+        .map(|list: Value| parse(&list))
+        .unwrap_or_default();
     for agent in parse(&config["agents"]) {
         match agents.iter_mut().find(|known| known.id == agent.id) {
             // Plugins come first and repeat no `id` among them, so what it would replace is ours.
-            Some(known) if agent.plugin.is_some() => log::warn!("plugin {}: the agent `{}` is one of Po's own, so it stays", agent.plugin.as_deref().unwrap_or_default(), known.id),
+            Some(known) if agent.plugin.is_some() => log::warn!(
+                "plugin {}: the agent `{}` is one of Po's own, so it stays",
+                agent.plugin.as_deref().unwrap_or_default(),
+                known.id
+            ),
             Some(known) => *known = agent,
             None => agents.push(agent),
         }
@@ -151,12 +179,19 @@ pub struct McpServer {
 impl McpServer {
     /// What the user is asked to approve: the command line, which is what will run.
     pub fn line(&self) -> String {
-        std::iter::once(self.command.as_str()).chain(self.args.iter().map(String::as_str)).collect::<Vec<_>>().join(" ")
+        std::iter::once(self.command.as_str())
+            .chain(self.args.iter().map(String::as_str))
+            .collect::<Vec<_>>()
+            .join(" ")
     }
 
     /// The server as ACP's `mcpServers` entry.
     fn acp(&self) -> Value {
-        let env: Vec<Value> = self.env.iter().map(|(name, value)| serde_json::json!({ "name": name, "value": value })).collect();
+        let env: Vec<Value> = self
+            .env
+            .iter()
+            .map(|(name, value)| serde_json::json!({ "name": name, "value": value }))
+            .collect();
         serde_json::json!({ "name": self.name, "command": self.command, "args": self.args, "env": env })
     }
 
@@ -171,7 +206,8 @@ impl McpServer {
 pub fn mcp_entries(config: &Value) -> Vec<McpServer> {
     let mut servers: Vec<McpServer> = Vec::new();
     for entry in config["mcp_servers"].as_array().into_iter().flatten() {
-        let (Some(name), Some(command)) = (entry["name"].as_str(), entry["command"].as_str()) else {
+        let (Some(name), Some(command)) = (entry["name"].as_str(), entry["command"].as_str())
+        else {
             log::warn!("mcp_servers: an entry needs a name and a command: {entry}");
             continue;
         };
@@ -186,11 +222,15 @@ pub fn mcp_entries(config: &Value) -> Vec<McpServer> {
                 for item in list {
                     match item.as_str() {
                         Some(arg) => args.push(arg.to_string()),
-                        None => log::warn!("mcp_servers: `{name}`: an argument is not a string and is skipped: {item}"),
+                        None => log::warn!(
+                            "mcp_servers: `{name}`: an argument is not a string and is skipped: {item}"
+                        ),
                     }
                 }
             }
-            other => log::warn!("mcp_servers: `{name}`: `args` is not a list and is ignored: {other}"),
+            other => {
+                log::warn!("mcp_servers: `{name}`: `args` is not a list and is ignored: {other}")
+            }
         }
         let mut env = Vec::new();
         match &entry["env"] {
@@ -199,14 +239,24 @@ pub fn mcp_entries(config: &Value) -> Vec<McpServer> {
                 for (key, value) in map {
                     match value.as_str() {
                         Some(value) => env.push((key.clone(), value.to_string())),
-                        None => log::warn!("mcp_servers: `{name}`: `env` value for {key} is not a string and is skipped: {value}"),
+                        None => log::warn!(
+                            "mcp_servers: `{name}`: `env` value for {key} is not a string and is skipped: {value}"
+                        ),
                     }
                 }
             }
-            other => log::warn!("mcp_servers: `{name}`: `env` is not an object and is ignored: {other}"),
+            other => {
+                log::warn!("mcp_servers: `{name}`: `env` is not an object and is ignored: {other}")
+            }
         }
         let plugin = entry[FROM_PLUGIN].as_str().map(String::from);
-        servers.push(McpServer { name: name.to_string(), command: command.to_string(), args, env, plugin });
+        servers.push(McpServer {
+            name: name.to_string(),
+            command: command.to_string(),
+            args,
+            env,
+            plugin,
+        });
     }
     servers
 }
@@ -215,19 +265,28 @@ pub fn mcp_entries(config: &Value) -> Vec<McpServer> {
 static DECLINED: std::sync::Mutex<Vec<Value>> = std::sync::Mutex::new(Vec::new());
 
 fn declined(server: &McpServer) -> bool {
-    DECLINED.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).contains(&server.approval())
+    DECLINED
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .contains(&server.approval())
 }
 
 fn approved_mcp(path: &Path, server: &McpServer) -> bool {
     let wanted = server.approval();
-    approved_this_run_value(&wanted) || read_json(path).and_then(|list| list.as_array().map(|list| list.contains(&wanted))).unwrap_or(false)
+    approved_this_run_value(&wanted)
+        || read_json(path)
+            .and_then(|list| list.as_array().map(|list| list.contains(&wanted)))
+            .unwrap_or(false)
 }
 
 /// The config's servers that Po has not been told it may hand to an agent, and the user has not
 /// declined this run. A server is code the agent runs as the user, like an agent's own command.
 pub fn unapproved_mcp(config: &Value) -> Vec<McpServer> {
     let path = approvals_path();
-    mcp_entries(config).into_iter().filter(|server| !approved_mcp(&path, server) && !declined(server)).collect()
+    mcp_entries(config)
+        .into_iter()
+        .filter(|server| !approved_mcp(&path, server) && !declined(server))
+        .collect()
 }
 
 /// The config's `mcp_servers` that are approved, as ACP's `mcpServers` list for a new or resumed
@@ -237,7 +296,10 @@ pub fn mcp_servers(config: &Value) -> Value {
     let servers = mcp_entries(config).into_iter().filter(|server| {
         let approved = approved_mcp(&path, server);
         if !approved {
-            log::info!("mcp_servers: `{}` is not approved, so it is not given to the agent", server.name);
+            log::info!(
+                "mcp_servers: `{}` is not approved, so it is not given to the agent",
+                server.name
+            );
         }
         approved
     });
@@ -251,14 +313,19 @@ pub fn approve_mcp(servers: &[McpServer]) {
     for server in servers {
         approve_value_this_run(server.approval());
         if let Err(error) = approve_value_in(&path, server.approval()) {
-            log::error!("{}: {error}; the approval holds until Po is closed", path.display());
+            log::error!(
+                "{}: {error}; the approval holds until Po is closed",
+                path.display()
+            );
         }
     }
 }
 
 /// Leaves `servers` out for the rest of this run.
 pub fn decline_mcp(servers: &[McpServer]) {
-    let mut declined = DECLINED.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut declined = DECLINED
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     for server in servers {
         if !declined.contains(&server.approval()) {
             declined.push(server.approval());
@@ -272,7 +339,10 @@ pub fn decline_mcp(servers: &[McpServer]) {
 /// it) can't make Po run a program the user never saw. A plugin's is asked about even when it is
 /// a bundled command, since the name it goes by in the picker is the plugin's to choose.
 pub fn trusted(agent: &Agent) -> bool {
-    agent.vouched || (agent.plugin.is_none() && shipped(agent)) || approved_this_run(agent) || approved_in(&approvals_path(), agent)
+    agent.vouched
+        || (agent.plugin.is_none() && shipped(agent))
+        || approved_this_run(agent)
+        || approved_in(&approvals_path(), agent)
 }
 
 /// Commands approved since Po started, kept apart from the file so that a yes holds even if the
@@ -284,7 +354,10 @@ fn approved_this_run(agent: &Agent) -> bool {
 }
 
 fn approved_this_run_value(wanted: &Value) -> bool {
-    THIS_RUN.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).contains(wanted)
+    THIS_RUN
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .contains(wanted)
 }
 
 fn approve_this_run(agent: &Agent) {
@@ -292,15 +365,21 @@ fn approve_this_run(agent: &Agent) {
 }
 
 fn approve_value_this_run(value: Value) {
-    let mut approved = THIS_RUN.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut approved = THIS_RUN
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     if !approved.contains(&value) {
         approved.push(value);
     }
 }
 
 fn shipped(agent: &Agent) -> bool {
-    let bundled = serde_json::from_str(DEFAULT_AGENTS).map(|list: Value| parse(&list)).unwrap_or_default();
-    bundled.iter().any(|known| known.command == agent.command && known.daemon == agent.daemon)
+    let bundled = serde_json::from_str(DEFAULT_AGENTS)
+        .map(|list: Value| parse(&list))
+        .unwrap_or_default();
+    bundled
+        .iter()
+        .any(|known| known.command == agent.command && known.daemon == agent.daemon)
 }
 
 /// Records that the user approved running `agent`'s command: for this run always, and for the
@@ -309,7 +388,10 @@ pub fn approve(agent: &Agent) {
     approve_this_run(agent);
     let path = approvals_path();
     if let Err(error) = approve_in(&path, agent) {
-        log::error!("{}: {error}; the approval holds until Po is closed", path.display());
+        log::error!(
+            "{}: {error}; the approval holds until Po is closed",
+            path.display()
+        );
     }
 }
 
@@ -324,7 +406,9 @@ fn entry(agent: &Agent) -> Value {
 
 fn approved_in(path: &Path, agent: &Agent) -> bool {
     let wanted = entry(agent);
-    read_json(path).and_then(|list| list.as_array().map(|list| list.contains(&wanted))).unwrap_or(false)
+    read_json(path)
+        .and_then(|list| list.as_array().map(|list| list.contains(&wanted)))
+        .unwrap_or(false)
 }
 
 /// Adds `agent` to the approvals file, writing a new file and renaming it over the old so that a
@@ -352,7 +436,10 @@ fn approve_value_in(path: &Path, wanted: Value) -> std::io::Result<()> {
         std::fs::create_dir_all(dir)?;
     }
     let temp = path.with_extension("json.tmp");
-    std::fs::write(&temp, serde_json::to_string_pretty(&list).expect("a list of objects"))?;
+    std::fs::write(
+        &temp,
+        serde_json::to_string_pretty(&list).expect("a list of objects"),
+    )?;
     std::fs::rename(&temp, path)
 }
 
@@ -364,7 +451,9 @@ fn choices_path() -> PathBuf {
 }
 
 pub fn load_choices() -> Choices {
-    read_json(&choices_path()).and_then(|value| serde_json::from_value(value).ok()).unwrap_or_default()
+    read_json(&choices_path())
+        .and_then(|value| serde_json::from_value(value).ok())
+        .unwrap_or_default()
 }
 
 /// Remembers one choice. The file is read again first, so other windows' choices are kept, and
@@ -373,23 +462,37 @@ pub fn save_choice(agent: &str, id: &str, value: &str) {
     // Saves run on background tasks and in other windows' processes; one at a time keeps a
     // pick from overwriting another.
     static SAVING: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let _saving = SAVING.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _saving = SAVING
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let path = choices_path();
     let _ = path.parent().map(std::fs::create_dir_all);
     // Held until the end of the save; released when the file closes.
-    let lock = std::fs::OpenOptions::new().create(true).write(true).truncate(false).open(path.with_extension("lock"));
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(path.with_extension("lock"));
     if let Ok(lock) = &lock
         && let Err(error) = lock.lock()
     {
         log::warn!("{}: {error}", path.display());
     }
     let mut choices = load_choices();
-    choices.entry(agent.to_string()).or_default().insert(id.to_string(), value.to_string());
+    choices
+        .entry(agent.to_string())
+        .or_default()
+        .insert(id.to_string(), value.to_string());
     let temp = path.with_extension("json.tmp");
     let saved = path
         .parent()
         .map_or(Ok(()), std::fs::create_dir_all)
-        .and_then(|()| std::fs::write(&temp, serde_json::to_string_pretty(&choices).unwrap_or_default()))
+        .and_then(|()| {
+            std::fs::write(
+                &temp,
+                serde_json::to_string_pretty(&choices).unwrap_or_default(),
+            )
+        })
         .and_then(|()| std::fs::rename(&temp, &path));
     if let Err(error) = saved {
         log::error!("{}: {error}", path.display());
@@ -401,7 +504,14 @@ mod tests {
     use super::*;
 
     fn agent(command: &str) -> Agent {
-        Agent { id: "x".into(), name: "X".into(), command: command.into(), daemon: None, vouched: false, plugin: None }
+        Agent {
+            id: "x".into(),
+            name: "X".into(),
+            command: command.into(),
+            daemon: None,
+            vouched: false,
+            plugin: None,
+        }
     }
 
     #[test]
@@ -410,11 +520,20 @@ mod tests {
         // The same program with other arguments is a change.
         assert!(!shipped(&agent("claude-agent-acp --other")));
         assert!(!shipped(&agent("./my-agent")));
-        assert!(trusted(&Agent { vouched: true, ..agent("./mine") }));
+        assert!(trusted(&Agent {
+            vouched: true,
+            ..agent("./mine")
+        }));
     }
 
     fn server(name: &str, command: &str) -> McpServer {
-        McpServer { name: name.into(), command: command.into(), args: vec![], env: vec![], plugin: None }
+        McpServer {
+            name: name.into(),
+            command: command.into(),
+            args: vec![],
+            env: vec![],
+            plugin: None,
+        }
     }
 
     #[test]
@@ -425,7 +544,12 @@ mod tests {
             { "id": "new", "command": "new-agent", FROM_PLUGIN: "p" },
         ] });
         let agents = agents(&config);
-        let command = |id: &str| agents.iter().find(|agent| agent.id == id).map(|agent| agent.command.clone());
+        let command = |id: &str| {
+            agents
+                .iter()
+                .find(|agent| agent.id == id)
+                .map(|agent| agent.command.clone())
+        };
         assert_eq!(command("claude").as_deref(), Some("claude-agent-acp"));
         assert_eq!(command("codex").as_deref(), Some("my-codex"));
         assert_eq!(command("new").as_deref(), Some("new-agent"));
@@ -434,7 +558,10 @@ mod tests {
     #[test]
     fn a_plugins_agent_is_asked_about_even_with_a_bundled_command() {
         assert!(trusted(&agent("claude-agent-acp")));
-        assert!(!trusted(&Agent { plugin: Some("p".into()), ..agent("claude-agent-acp") }));
+        assert!(!trusted(&Agent {
+            plugin: Some("p".into()),
+            ..agent("claude-agent-acp")
+        }));
     }
 
     #[test]
@@ -457,7 +584,10 @@ mod tests {
             servers[0].acp(),
             serde_json::json!({ "name": "fs", "command": "npx", "args": ["-y", "server-fs", "."], "env": [{ "name": "TOKEN", "value": "x" }] })
         );
-        assert_eq!(servers[1].acp(), serde_json::json!({ "name": "bare", "command": "tool", "args": [], "env": [] }));
+        assert_eq!(
+            servers[1].acp(),
+            serde_json::json!({ "name": "bare", "command": "tool", "args": [], "env": [] })
+        );
         assert_eq!(servers[0].line(), "npx -y server-fs .");
     }
 
@@ -482,15 +612,30 @@ mod tests {
 
     #[test]
     fn a_server_is_approved_for_what_it_runs_not_its_name() {
-        let path = std::env::temp_dir().join(format!("po-mcp-approvals-{}/approved.json", std::process::id()));
+        let path = std::env::temp_dir().join(format!(
+            "po-mcp-approvals-{}/approved.json",
+            std::process::id()
+        ));
         let fs = server("fs", "npx");
         assert!(!approved_mcp(&path, &fs));
         approve_value_in(&path, fs.approval()).unwrap();
         assert!(approved_mcp(&path, &fs));
         assert!(approved_mcp(&path, &server("renamed", "npx")));
         assert!(!approved_mcp(&path, &server("fs", "other")));
-        assert!(!approved_mcp(&path, &McpServer { args: vec!["--more".into()], ..fs.clone() }));
-        assert!(!approved_mcp(&path, &McpServer { env: vec![("K".into(), "v".into())], ..fs }));
+        assert!(!approved_mcp(
+            &path,
+            &McpServer {
+                args: vec!["--more".into()],
+                ..fs.clone()
+            }
+        ));
+        assert!(!approved_mcp(
+            &path,
+            &McpServer {
+                env: vec![("K".into(), "v".into())],
+                ..fs
+            }
+        ));
         std::fs::remove_dir_all(path.parent().unwrap()).ok();
     }
 
@@ -512,7 +657,10 @@ mod tests {
         approve_this_run(&agent);
         assert!(approved_this_run(&agent));
         assert!(trusted(&agent));
-        assert!(!approved_this_run(&Agent { command: "./another".into(), ..agent }));
+        assert!(!approved_this_run(&Agent {
+            command: "./another".into(),
+            ..agent
+        }));
     }
 
     #[test]
@@ -528,13 +676,20 @@ mod tests {
 
     #[test]
     fn an_approval_is_for_that_exact_command() {
-        let path = std::env::temp_dir().join(format!("po-approvals-{}/approved.json", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("po-approvals-{}/approved.json", std::process::id()));
         assert!(!approved_in(&path, &agent("./a")));
         approve_in(&path, &agent("./a")).unwrap();
         approve_in(&path, &agent("./a")).unwrap();
         assert!(approved_in(&path, &agent("./a")));
         assert!(!approved_in(&path, &agent("./a --more")));
-        assert!(!approved_in(&path, &Agent { daemon: Some("http://x".into()), ..agent("./a") }));
+        assert!(!approved_in(
+            &path,
+            &Agent {
+                daemon: Some("http://x".into()),
+                ..agent("./a")
+            }
+        ));
         assert_eq!(read_json(&path).unwrap().as_array().unwrap().len(), 1);
         std::fs::remove_dir_all(path.parent().unwrap()).ok();
     }

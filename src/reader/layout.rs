@@ -56,7 +56,10 @@ impl Reader {
                     return Err(format!("no file `{path}` in the project"));
                 }
                 // A link inside the project may lead out of it.
-                let inside = file.canonicalize().and_then(|file| root.canonicalize().map(|root| file.starts_with(root))).unwrap_or(false);
+                let inside = file
+                    .canonicalize()
+                    .and_then(|file| root.canonicalize().map(|root| file.starts_with(root)))
+                    .unwrap_or(false);
                 if !inside {
                     return Err(format!("`{path}` is not in the project"));
                 }
@@ -64,7 +67,12 @@ impl Reader {
             }
             Command::DiffShow { path: Some(path) } => {
                 let path = command::project_path(root, &path)?;
-                if !self.project.changes.iter().any(|change| change.path == path) {
+                if !self
+                    .project
+                    .changes
+                    .iter()
+                    .any(|change| change.path == path)
+                {
                     return Err(format!("`{path}` has no changes"));
                 }
                 Command::DiffShow { path: Some(path) }
@@ -73,7 +81,12 @@ impl Reader {
         })
     }
 
-    pub(crate) fn apply_move(&mut self, command: command::Command, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn apply_move(
+        &mut self,
+        command: command::Command,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         use command::Command;
         match command {
             Command::FileOpen { path, line } => {
@@ -96,19 +109,27 @@ impl Reader {
     }
 
     pub(crate) fn panes(&self) -> Panes {
-        Panes { viewer: self.side_open, agent: self.agent_open }
+        Panes {
+            viewer: self.side_open,
+            agent: self.agent_open,
+        }
     }
 
     /// Runs `change`, which an agent asked for, noting what it did to the layout so the
     /// workspace goes on saving the user's.
-    pub(crate) fn as_agent(&mut self, cx: &mut Context<Self>, change: impl FnOnce(&mut Self, &mut Context<Self>)) {
+    pub(crate) fn as_agent(
+        &mut self,
+        cx: &mut Context<Self>,
+        change: impl FnOnce(&mut Self, &mut Context<Self>),
+    ) {
         let (panes, project, mode) = (self.panes(), self.project_id, self.mode);
         change(self, cx);
         if self.panes() != panes {
             self.agent_panes = Some(AgentChange::after(self.agent_panes, panes, self.panes()));
         }
         if self.mode != mode {
-            let change = AgentChange::after(self.agent_modes.get(&project).copied(), mode, self.mode);
+            let change =
+                AgentChange::after(self.agent_modes.get(&project).copied(), mode, self.mode);
             self.agent_modes.insert(project, change);
         }
     }
@@ -139,9 +160,19 @@ impl Reader {
     /// Holds `command` from thread `thread` until the user has been still for [`QUIET`]. A later
     /// request replaces it; it is dropped if another thread comes on screen or the user moves the
     /// viewer first.
-    pub(crate) fn defer_move(&mut self, thread: u64, command: command::Command, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn defer_move(
+        &mut self,
+        thread: u64,
+        command: command::Command,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let waiting = self.pending_move.is_some();
-        self.pending_move = Some(PendingMove { thread, command, from: self.screen() });
+        self.pending_move = Some(PendingMove {
+            thread,
+            command,
+            from: self.screen(),
+        });
         if waiting {
             return;
         }
@@ -150,7 +181,9 @@ impl Reader {
         cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor().timer(wait).await;
-                let next = handle.update(cx, |_, window, cx| this.update(cx, |reader, cx| reader.try_pending_move(window, cx)));
+                let next = handle.update(cx, |_, window, cx| {
+                    this.update(cx, |reader, cx| reader.try_pending_move(window, cx))
+                });
                 match next {
                     Ok(Ok(Some(more))) => wait = more,
                     _ => break,
@@ -161,7 +194,11 @@ impl Reader {
     }
 
     /// Applies the held move if the user has gone still, or says how much longer to wait.
-    pub(crate) fn try_pending_move(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<Duration> {
+    pub(crate) fn try_pending_move(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Duration> {
         let pending = self.pending_move.as_ref()?;
         if pending.thread != self.thread.id || pending.from != self.screen() {
             self.pending_move = None;
@@ -172,7 +209,9 @@ impl Reader {
             return Some(QUIET - still);
         }
         let pending = self.pending_move.take()?;
-        self.as_agent(cx, |reader, cx| reader.apply_move(pending.command, window, cx));
+        self.as_agent(cx, |reader, cx| {
+            reader.apply_move(pending.command, window, cx)
+        });
         cx.notify();
         None
     }
@@ -232,8 +271,15 @@ impl Reader {
         let mut ended = false;
         // The shell was what the viewer pane was showing: close the pane with it instead of
         // dropping to the file browser.
-        let was_showing = self.project.terminal_shown && self.project.terminal.as_ref().is_some_and(|term| term.exited());
-        for project in std::iter::once(&mut self.project).chain(self.slots.iter_mut().map(|slot| &mut slot.project)) {
+        let was_showing = self.project.terminal_shown
+            && self
+                .project
+                .terminal
+                .as_ref()
+                .is_some_and(|term| term.exited());
+        for project in std::iter::once(&mut self.project)
+            .chain(self.slots.iter_mut().map(|slot| &mut slot.project))
+        {
             if project.terminal.as_ref().is_some_and(|term| term.exited()) {
                 project.terminal = None;
                 project.terminal_shown = false;
@@ -285,8 +331,17 @@ impl Reader {
         self.thread.shown = None;
         self.project.terminal_shown = false;
         let full = Path::new(path);
-        let relative = full.strip_prefix(&self.project.root).unwrap_or(full).to_string_lossy().replace('\\', "/");
-        if self.project.changes.iter().any(|change| change.path == relative) {
+        let relative = full
+            .strip_prefix(&self.project.root)
+            .unwrap_or(full)
+            .to_string_lossy()
+            .replace('\\', "/");
+        if self
+            .project
+            .changes
+            .iter()
+            .any(|change| change.path == relative)
+        {
             self.set_mode(Mode::Diff, cx);
             self.pick(&relative, cx);
         } else if self.project.root.join(&relative).is_file() {
@@ -382,13 +437,23 @@ impl Reader {
     }
 
     /// Shows issue `number` of the repo `repo` on the issues page, whichever repo the page was on.
-    pub(crate) fn open_issue_of(&mut self, repo: &std::path::Path, number: u64, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open_issue_of(
+        &mut self,
+        repo: &std::path::Path,
+        number: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.hide_home(window, cx);
         issues::shared::set_project(repo);
         if !self.issues_open {
             self.issues_open = true;
         }
-        issues::shared::navigate(issues::shared::Nav { target: issues::shared::Target::Issue(number), filter: None, group: None });
+        issues::shared::navigate(issues::shared::Nav {
+            target: issues::shared::Target::Issue(number),
+            filter: None,
+            group: None,
+        });
         cx.notify();
     }
 
@@ -421,7 +486,12 @@ impl Reader {
     /// The issues page may be showing a project closed under it; it goes to the one on screen.
     pub(crate) fn leave_closed_issues(&self) {
         let shown = issues::shared::watch().borrow().root.clone();
-        if self.issues_open && !self.views().iter().any(|view| Some(issues::store::primary_root(&view.project.root)) == shown) {
+        if self.issues_open
+            && !self
+                .views()
+                .iter()
+                .any(|view| Some(issues::store::primary_root(&view.project.root)) == shown)
+        {
             self.follow_issues();
         }
     }
@@ -430,17 +500,34 @@ impl Reader {
     /// open, else a worktree or PR of it.
     fn project_of_repo(&self, root: &std::path::Path) -> Option<u64> {
         let views = self.views();
-        let mine = views.iter().filter(|view| issues::store::primary_root(&view.project.root) == root);
-        mine.min_by_key(|view| view.project.worktree.is_some() || view.project.pr.is_some()).map(|view| view.id)
+        let mine = views
+            .iter()
+            .filter(|view| issues::store::primary_root(&view.project.root) == root);
+        mine.min_by_key(|view| view.project.worktree.is_some() || view.project.pr.is_some())
+            .map(|view| view.id)
     }
 
     /// Opens a new thread for an issue with its prompt in the message field. Sending it starts the
     /// thread in a worktree of its own when the project is a repo, and moves the issue to In
     /// Progress with the branch linked.
-    pub(crate) fn work_on_issue(&mut self, repo: &std::path::Path, number: u64, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn work_on_issue(
+        &mut self,
+        repo: &std::path::Path,
+        number: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         // The issue is the page's, whose repo need not be the project on screen's; the page says
         // which, so a page that moved on meanwhile cannot make this another repo's issue.
-        let Some(page) = issues::shared::overview().borrow().repos.iter().find(|r| r.root == repo).cloned() else { return };
+        let Some(page) = issues::shared::overview()
+            .borrow()
+            .repos
+            .iter()
+            .find(|r| r.root == repo)
+            .cloned()
+        else {
+            return;
+        };
         if let Err(message) = issues::api::check_workable(&page.tracker, number) {
             self.worktree_status = Some(message);
             cx.notify();
@@ -456,7 +543,11 @@ impl Reader {
         }
         // Its thread starts in its own project, which working on it brings on screen.
         let elsewhere = issues::store::primary_root(&self.project.root) != repo;
-        let project = if elsewhere { self.project_of_repo(repo) } else { None };
+        let project = if elsewhere {
+            self.project_of_repo(repo)
+        } else {
+            None
+        };
         if elsewhere && project.is_none() {
             self.worktree_status = Some(format!("{} is no longer open", page.name));
             cx.notify();
@@ -472,16 +563,31 @@ impl Reader {
         self.thread.isolate = true;
         // What the user had already typed in this thread stays, above the prompt.
         let typed = self.thread.draft.trim().to_string();
-        self.update_draft(&if typed.is_empty() { prompt } else { format!("{typed}\n\n{prompt}") });
+        self.update_draft(&if typed.is_empty() {
+            prompt
+        } else {
+            format!("{typed}\n\n{prompt}")
+        });
         self.issue_draft = Some((self.thread.id, self.project.root.clone(), number));
         cx.notify();
     }
 
     /// `issue.show`: puts the issues page on screen where the request says. An agent only moves
     /// what the user is looking at from the project on screen, so that is the one it shows.
-    pub(crate) fn show_issues(&mut self, id: u64, args: &serde_json::Value, window: &mut Window, cx: &mut Context<Self>) -> command::Reply {
-        if self.project_of(id).is_some_and(|project| project != self.project_id) {
-            return Err("that project is not on screen; the issues page shows the one that is".into());
+    pub(crate) fn show_issues(
+        &mut self,
+        id: u64,
+        args: &serde_json::Value,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> command::Reply {
+        if self
+            .project_of(id)
+            .is_some_and(|project| project != self.project_id)
+        {
+            return Err(
+                "that project is not on screen; the issues page shows the one that is".into(),
+            );
         }
         // Like any move of what the user is looking at, it is the thread on screen's to make, and
         // not while the user is typing or scrolling.
@@ -540,7 +646,12 @@ impl Reader {
         }
         // An agent that was added on the command line isn't in the config; it stays.
         let mut agents = config::agents(&plugin::effective_config());
-        let kept: Vec<_> = self.agents.iter().filter(|agent| agent.vouched && !agents.iter().any(|known| known.id == agent.id)).cloned().collect();
+        let kept: Vec<_> = self
+            .agents
+            .iter()
+            .filter(|agent| agent.vouched && !agents.iter().any(|known| known.id == agent.id))
+            .cloned()
+            .collect();
         agents.extend(kept);
         self.agents = agents;
         cx.notify();

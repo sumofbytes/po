@@ -10,7 +10,9 @@ impl Reader {
         let changes_tree = FileTree::new(true);
         Project {
             root,
-            base: pr.as_ref().map_or_else(|| "HEAD".to_string(), |pr| pr.base.clone()),
+            base: pr
+                .as_ref()
+                .map_or_else(|| "HEAD".to_string(), |pr| pr.base.clone()),
             pr,
             files,
             changes: vec![],
@@ -40,26 +42,49 @@ impl Reader {
     /// Rebuilds the explorer from `files`, keeping folders open and the current file selected.
     #[hotpath::measure(impl_type = "Reader")]
     pub(crate) fn refresh_tree(&mut self) {
-        self.project.files_tree.set_paths(&self.project.files, self.project.current.as_deref());
+        self.project
+            .files_tree
+            .set_paths(&self.project.files, self.project.current.as_deref());
     }
 
     /// Takes a fresh list of changed files. In diff mode it picks a file if none is, and
     /// reloads the picked file's diff when `rediff` says it may have changed.
     #[hotpath::measure(impl_type = "Reader")]
-    pub(crate) fn apply_changes(&mut self, changes: Vec<Change>, rebuild: bool, rediff: bool, cx: &mut Context<Self>) {
+    pub(crate) fn apply_changes(
+        &mut self,
+        changes: Vec<Change>,
+        rebuild: bool,
+        rediff: bool,
+        cx: &mut Context<Self>,
+    ) {
         let listed = rebuild || self.project.changes != changes;
         self.project.changes = changes;
         if listed {
-            self.project.marks = Arc::new(self.project.changes.iter().map(|c| (c.path.clone(), c.status)).collect());
+            self.project.marks = Arc::new(
+                self.project
+                    .changes
+                    .iter()
+                    .map(|c| (c.path.clone(), c.status))
+                    .collect(),
+            );
         }
         if self.mode != Mode::Diff {
             return;
         }
         if listed {
-            let paths: Vec<String> = self.project.changes.iter().map(|c| c.path.clone()).collect();
+            let paths: Vec<String> = self
+                .project
+                .changes
+                .iter()
+                .map(|c| c.path.clone())
+                .collect();
             self.project.changes_tree.set_paths(&paths, None);
         }
-        let keep = self.project.picked.clone().filter(|path| self.project.changes.iter().any(|c| &c.path == path));
+        let keep = self
+            .project
+            .picked
+            .clone()
+            .filter(|path| self.project.changes.iter().any(|c| &c.path == path));
         match keep {
             Some(path) if rediff || listed => self.pick(&path, cx),
             Some(_) => {}
@@ -81,8 +106,14 @@ impl Reader {
     pub(crate) fn refresh_changes(&mut self, rebuild: bool, cx: &mut Context<Self>) {
         let (root, base) = (self.project.root.clone(), self.project.base.clone());
         self.project.listing = Some(cx.spawn(async move |this, cx| {
-            let changes = cx.background_executor().spawn(async move { diff::changes(&root, &base) }).await;
-            this.update(cx, |reader, cx| reader.apply_changes(changes, rebuild, true, cx)).ok();
+            let changes = cx
+                .background_executor()
+                .spawn(async move { diff::changes(&root, &base) })
+                .await;
+            this.update(cx, |reader, cx| {
+                reader.apply_changes(changes, rebuild, true, cx)
+            })
+            .ok();
         }));
     }
 
@@ -128,20 +159,37 @@ impl Reader {
             _ => (a, r),
         });
         self.project.rows = Arc::new(rows);
-        self.project.versions = versions.map(|(old, new)| (model::source::Shared(Arc::from(old)), model::source::Shared(Arc::from(new))));
+        self.project.versions = versions.map(|(old, new)| {
+            (
+                model::source::Shared(Arc::from(old)),
+                model::source::Shared(Arc::from(new)),
+            )
+        });
     }
 
     /// Shows `path`'s diff in the viewer, once `git` has produced it off the UI thread.
     pub(crate) fn pick(&mut self, path: &str, cx: &mut Context<Self>) {
         self.browse = false;
-        let Some(change) = self.project.changes.iter().find(|c| c.path == path).cloned() else { return };
+        let Some(change) = self
+            .project
+            .changes
+            .iter()
+            .find(|c| c.path == path)
+            .cloned()
+        else {
+            return;
+        };
         if self.project.picked.as_deref() != Some(path) {
             self.project.picked = Some(path.to_string());
             // The last file's diff isn't shown under this one's name while this one loads.
             self.set_rows(vec![], None);
             self.project.changes_tree.select(path);
         }
-        let (root, base, path) = (self.project.root.clone(), self.project.base.clone(), path.to_string());
+        let (root, base, path) = (
+            self.project.root.clone(),
+            self.project.base.clone(),
+            path.to_string(),
+        );
         self.project.diffing = Some(cx.spawn(async move |this, cx| {
             let (rows, versions) = cx
                 .background_executor()
@@ -178,10 +226,17 @@ impl Reader {
         self.pr_status = Some(format!("Checking out {spec}…"));
         cx.notify();
         // Reviewed from the checkout on screen, or from where `po` started if that is a PR.
-        let repo = if self.project.pr.is_none() { self.project.root.clone() } else { self.home.clone() };
+        let repo = if self.project.pr.is_none() {
+            self.project.root.clone()
+        } else {
+            self.home.clone()
+        };
         let handle = window.window_handle();
         cx.spawn(async move |this, cx| {
-            let result = cx.background_executor().spawn(async move { pr::Pr::open(&repo, &spec) }).await;
+            let result = cx
+                .background_executor()
+                .spawn(async move { pr::Pr::open(&repo, &spec) })
+                .await;
             handle
                 .update(cx, |_, window, cx| {
                     this.update(cx, |reader, cx| {
@@ -272,7 +327,13 @@ impl Reader {
     }
 
     /// [`Self::show_project`], with thread `thread` of it on screen if it has one.
-    pub(crate) fn show_project_with(&mut self, id: u64, thread: Option<u64>, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn show_project_with(
+        &mut self,
+        id: u64,
+        thread: Option<u64>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if !self.slots.iter().any(|slot| slot.id == id) {
             return;
         }
@@ -281,7 +342,9 @@ impl Reader {
         if self.thread.is_listing() {
             self.close_thread(self.thread.id, window, cx);
         }
-        let Some(at) = self.slots.iter().position(|slot| slot.id == id) else { return };
+        let Some(at) = self.slots.iter().position(|slot| slot.id == id) else {
+            return;
+        };
         self.suspend_project();
         self.swap_slot(at);
         if let Some(parked) = thread.and_then(|id| self.parked.iter().position(|t| t.id == id)) {
@@ -296,30 +359,60 @@ impl Reader {
     /// Adds a project over `root` (a PR's worktree when `pr` is given) and shows it. If it is
     /// already open, that one is shown. An agent starts in it, the same one as in the project
     /// it was opened from.
-    pub(crate) fn add_project(&mut self, root: PathBuf, pr: Option<pr::Pr>, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn add_project(
+        &mut self,
+        root: PathBuf,
+        pr: Option<pr::Pr>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if pr.is_none() {
             if self.project.pr.is_none() && self.project.root == root {
                 return;
             }
-            if let Some(id) = self.slots.iter().find(|slot| slot.project.pr.is_none() && slot.project.root == root).map(|slot| slot.id) {
+            if let Some(id) = self
+                .slots
+                .iter()
+                .find(|slot| slot.project.pr.is_none() && slot.project.root == root)
+                .map(|slot| slot.id)
+            {
                 return self.show_project(id, window, cx);
             }
         }
         let agent = self.thread.agent.clone();
         let review = pr.is_some();
         let project = Self::build_project(root, pr, vec![]);
-        self.open_project(project, if review { Mode::Diff } else { Mode::Source }, agent, window, cx);
+        self.open_project(
+            project,
+            if review { Mode::Diff } else { Mode::Source },
+            agent,
+            window,
+            cx,
+        );
     }
 
     /// Shows `project` in `mode`, with a thread of its own that runs `agent`, if any. The
     /// project on screen goes on running in the background.
-    pub(crate) fn open_project(&mut self, project: Project, mode: Mode, agent: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open_project(
+        &mut self,
+        project: Project,
+        mode: Mode,
+        agent: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let thread = self.blank_thread();
         self.suspend_project();
         let id = self.next_project;
         self.next_project += 1;
         // The project on screen goes into a slot, and the new one takes its fields.
-        self.slots.push(Slot { id, mode, project, thread, parked: vec![] });
+        self.slots.push(Slot {
+            id,
+            mode,
+            project,
+            thread,
+            parked: vec![],
+        });
         let at = self.slots.len() - 1;
         self.swap_slot(at);
         self.resume_project(window, cx);
@@ -334,7 +427,13 @@ impl Reader {
     /// a branch whose changes can be reviewed here, then merged or discarded.
     /// With `first`, the message to start it with and the blank thread it was typed in, which
     /// goes away once the worktree is up.
-    pub(crate) fn new_worktree_thread(&mut self, key: &str, first: Option<(Outgoing, (u64, u64))>, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn new_worktree_thread(
+        &mut self,
+        key: &str,
+        first: Option<(Outgoing, (u64, u64))>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.finishing {
             return;
         }
@@ -348,7 +447,10 @@ impl Reader {
         cx.notify();
         let (key, handle) = (key.to_string(), window.window_handle());
         cx.spawn(async move |this, cx| {
-            let made = cx.background_executor().spawn(async move { worktree::Worktree::create(&from) }).await;
+            let made = cx
+                .background_executor()
+                .spawn(async move { worktree::Worktree::create(&from) })
+                .await;
             handle
                 .update(cx, |_, window, cx| {
                     this.update(cx, |reader, cx| {
@@ -363,7 +465,8 @@ impl Reader {
                                 reader.issue_for_worktree = None;
                                 reader.worktree_status = Some(error);
                                 if let Some((_, (_, tid))) = first {
-                                    reader.with_thread(tid, |reader, _| reader.thread.status.clear());
+                                    reader
+                                        .with_thread(tid, |reader, _| reader.thread.status.clear());
                                 }
                                 cx.notify();
                             }
@@ -375,7 +478,14 @@ impl Reader {
         .detach();
     }
 
-    pub(crate) fn open_worktree(&mut self, wt: worktree::Worktree, agent: String, first: Option<(Outgoing, (u64, u64))>, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open_worktree(
+        &mut self,
+        wt: worktree::Worktree,
+        agent: String,
+        first: Option<(Outgoing, (u64, u64))>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         log::info!("worktree: {} for {agent}", wt.spec.branch);
         if let Some((root, number)) = self.issue_for_worktree.take() {
             self.issue_draft = None;
@@ -394,7 +504,10 @@ impl Reader {
             self.begin_turn(&out);
             self.thread.pending = Some(out);
             // The thread it was typed in stays only if something has happened to it since.
-            let blank = self.views().iter().any(|v| v.id == pid && v.threads.iter().any(|t| t.id == tid && t.blank));
+            let blank = self
+                .views()
+                .iter()
+                .any(|v| v.id == pid && v.threads.iter().any(|t| t.id == tid && t.blank));
             if blank {
                 self.close_any_thread(pid, tid, window, cx);
             }
@@ -402,7 +515,12 @@ impl Reader {
     }
 
     /// Merges the worktree on screen into the checkout it came from, or throws it away.
-    pub(crate) fn finish_worktree(&mut self, merge: bool, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn finish_worktree(
+        &mut self,
+        merge: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.project.worktree.is_none() || self.finishing {
             return;
         }
@@ -417,10 +535,26 @@ impl Reader {
 
     /// [`Self::finish_worktree`] for project `id`, on screen or not, once it is decided. With
     /// `tell`, that thread hears how it went.
-    pub(crate) fn finish_worktree_of(&mut self, id: u64, merge: bool, tell: Option<u64>, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(spec) = self.project_by_id(id).and_then(|project| project.worktree.as_ref()).map(|wt| wt.spec.clone()) else {
+    pub(crate) fn finish_worktree_of(
+        &mut self,
+        id: u64,
+        merge: bool,
+        tell: Option<u64>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(spec) = self
+            .project_by_id(id)
+            .and_then(|project| project.worktree.as_ref())
+            .map(|wt| wt.spec.clone())
+        else {
             if let Some(thread) = tell {
-                self.tell(thread, format!("Project {id} is not a worktree any more."), window, cx);
+                self.tell(
+                    thread,
+                    format!("Project {id} is not a worktree any more."),
+                    window,
+                    cx,
+                );
             }
             return;
         };
@@ -433,7 +567,13 @@ impl Reader {
         self.finishing = true;
         self.worktree_status = Some(if merge { "Merging…" } else { "Discarding…" }.into());
         let handle = window.window_handle();
-        let title = self.views().iter().find(|view| view.id == id).and_then(|view| view.threads.iter().find(|thread| thread.id == view.shown)).map(|thread| thread.title()).unwrap_or_default();
+        let title = self
+            .views()
+            .iter()
+            .find(|view| view.id == id)
+            .and_then(|view| view.threads.iter().find(|thread| thread.id == view.shown))
+            .map(|thread| thread.title())
+            .unwrap_or_default();
         let message = format!("po: {title}");
         cx.notify();
         cx.spawn(async move |this, cx| {
@@ -455,7 +595,17 @@ impl Reader {
                         let told = match result {
                             Ok(into) => {
                                 // A merged branch finishes the issues linked to it.
-                                let landed = into.is_some().then(|| reader.project_by_id(id).and_then(|p| p.worktree.as_ref()).map(|wt| (wt.spec.repo.clone(), wt.spec.branch.clone()))).flatten();
+                                let landed = into
+                                    .is_some()
+                                    .then(|| {
+                                        reader
+                                            .project_by_id(id)
+                                            .and_then(|p| p.worktree.as_ref())
+                                            .map(|wt| {
+                                                (wt.spec.repo.clone(), wt.spec.branch.clone())
+                                            })
+                                    })
+                                    .flatten();
                                 if let Some((repo, branch)) = landed {
                                     issues::shared::branch_merged(&repo, &branch);
                                 }
@@ -490,19 +640,39 @@ impl Reader {
         if self.project_id == id {
             return Some(&mut self.project);
         }
-        self.slots.iter_mut().find(|slot| slot.id == id).map(|slot| &mut slot.project)
+        self.slots
+            .iter_mut()
+            .find(|slot| slot.id == id)
+            .map(|slot| &mut slot.project)
     }
 
     /// Closes the project of a worktree that has been merged or discarded, going back to the
     /// project it came from if that is open.
-    pub(crate) fn close_worktree_project(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
-        let origin = self.project_by_id(id).and_then(|project| project.worktree.as_ref()).map(|wt| wt.spec.repo.clone());
-        if let Some(wt) = self.project_by_id(id).and_then(|project| project.worktree.as_mut()) {
+    pub(crate) fn close_worktree_project(
+        &mut self,
+        id: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let origin = self
+            .project_by_id(id)
+            .and_then(|project| project.worktree.as_ref())
+            .map(|wt| wt.spec.repo.clone());
+        if let Some(wt) = self
+            .project_by_id(id)
+            .and_then(|project| project.worktree.as_mut())
+        {
             wt.finished();
         }
         let parent = origin.and_then(|repo| {
-            std::iter::once((self.project_id, &self.project)).chain(self.slots.iter().map(|s| (s.id, &s.project)))
-                .find(|(pid, project)| *pid != id && project.worktree.is_none() && project.pr.is_none() && project.root == repo)
+            std::iter::once((self.project_id, &self.project))
+                .chain(self.slots.iter().map(|s| (s.id, &s.project)))
+                .find(|(pid, project)| {
+                    *pid != id
+                        && project.worktree.is_none()
+                        && project.pr.is_none()
+                        && project.root == repo
+                })
                 .map(|(pid, _)| pid)
         });
         if let Some(parent) = parent {
@@ -524,10 +694,14 @@ impl Reader {
         }
         if self.project_id == id {
             // Show another first; the closed project is then the one in the slot.
-            let Some(other) = self.slots.last().map(|slot| slot.id) else { return };
+            let Some(other) = self.slots.last().map(|slot| slot.id) else {
+                return;
+            };
             self.show_project(other, window, cx);
         }
-        let Some(at) = self.slots.iter().position(|slot| slot.id == id) else { return };
+        let Some(at) = self.slots.iter().position(|slot| slot.id == id) else {
+            return;
+        };
         // Its agents stop with the slot; a worktree is then closed off the UI thread without
         // losing what was done in it, which the user is told.
         let mut slot = self.slots.remove(at);
@@ -536,10 +710,14 @@ impl Reader {
         self.leave_closed_issues();
         if let Some(mut wt) = worktree {
             cx.spawn(async move |this, cx| {
-                let kept = cx.background_executor().spawn(async move { wt.retire() }).await;
+                let kept = cx
+                    .background_executor()
+                    .spawn(async move { wt.retire() })
+                    .await;
                 if let Some(branch) = kept {
                     this.update(cx, |reader, cx| {
-                        reader.worktree_status = Some(format!("Closed. Its work is kept on branch {branch}"));
+                        reader.worktree_status =
+                            Some(format!("Closed. Its work is kept on branch {branch}"));
                         cx.notify();
                     })
                     .ok();
@@ -594,7 +772,11 @@ impl Reader {
         let full = self.project.root.join(path);
         let too_big = std::fs::metadata(&full).is_ok_and(|m| m.len() > 4 * 1024 * 1024);
         // A file too big to show isn't read at all.
-        let read = if too_big { Ok(None) } else { std::fs::read_to_string(&full).map(Some) };
+        let read = if too_big {
+            Ok(None)
+        } else {
+            std::fs::read_to_string(&full).map(Some)
+        };
         match read {
             Ok(None) => {
                 self.project.code = None;
@@ -624,9 +806,16 @@ impl Reader {
     /// The file tree beside the viewer, drawn by NSH from what it publishes. `lead` and `trail` are
     /// the window's own controls, when this is the leftmost or rightmost pane.
     #[hotpath::measure(impl_type = "Reader")]
-    pub(crate) fn publish_explorer(&self, (lead, trail): (Vec<model::header::Control>, Vec<model::header::Control>)) {
+    pub(crate) fn publish_explorer(
+        &self,
+        (lead, trail): (Vec<model::header::Control>, Vec<model::header::Control>),
+    ) {
         let diff = self.mode == Mode::Diff;
-        let tree = if diff { &self.project.changes_tree } else { &self.project.files_tree };
+        let tree = if diff {
+            &self.project.changes_tree
+        } else {
+            &self.project.files_tree
+        };
         let body = if diff && self.project.changes.is_empty() {
             model::explorer::Body::Empty("No changes".into())
         } else {
@@ -634,32 +823,60 @@ impl Reader {
             model::explorer::Body::Rows(
                 tree.rows()
                     .into_iter()
-                    .map(|row| model::explorer::Entry { mark: diff.then(|| marks.get(row.id.as_str()).copied()).flatten(), row })
+                    .map(|row| model::explorer::Entry {
+                        mark: diff.then(|| marks.get(row.id.as_str()).copied()).flatten(),
+                        row,
+                    })
                     .collect(),
             )
         };
         model::strip::publish(model::strip::Snapshot {
-            worktree: self.project.worktree.as_ref().map(|wt| model::strip::Worktree {
-                branch: wt.spec.branch.clone(),
-                confirm_discard: self.confirm_discard,
-            }),
+            worktree: self
+                .project
+                .worktree
+                .as_ref()
+                .map(|wt| model::strip::Worktree {
+                    branch: wt.spec.branch.clone(),
+                    confirm_discard: self.confirm_discard,
+                }),
             pr: self
                 .project
                 .pr
                 .as_ref()
-                .map(|pr| model::strip::Pr::Opened { label: format!("PR #{} · {} files", pr.number, self.project.changes.len()) })
-                .or_else(|| diff.then(|| model::strip::Pr::Asking { status: self.pr_status.clone(), opening: self.opening })),
+                .map(|pr| model::strip::Pr::Opened {
+                    label: format!("PR #{} · {} files", pr.number, self.project.changes.len()),
+                })
+                .or_else(|| {
+                    diff.then(|| model::strip::Pr::Asking {
+                        status: self.pr_status.clone(),
+                        opening: self.opening,
+                    })
+                }),
             pr_reset: self.pr_serial,
         });
-        model::explorer::publish(model::explorer::Snapshot { changes: diff, body, ..Default::default() }.with_chrome(model::header::Chrome { lead, trail }));
+        model::explorer::publish(
+            model::explorer::Snapshot {
+                changes: diff,
+                body,
+                ..Default::default()
+            }
+            .with_chrome(model::header::Chrome { lead, trail }),
+        );
     }
 
     /// Opens, or shows the diff of, the file selected in the explorer's tree, as clicking it does.
     #[hotpath::measure(impl_type = "Reader")]
-    pub(crate) fn open_selected(&mut self, by_user: bool, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open_selected(
+        &mut self,
+        by_user: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         match self.mode {
             Mode::Source => {
-                let Some(path) = self.project.files_tree.selected_file().map(str::to_string) else { return };
+                let Some(path) = self.project.files_tree.selected_file().map(str::to_string) else {
+                    return;
+                };
                 // A file picked in the tree is what the viewer shows, not an agent's view.
                 if by_user {
                     self.thread.shown = None;
@@ -670,7 +887,14 @@ impl Reader {
                 }
             }
             Mode::Diff => {
-                let Some(path) = self.project.changes_tree.selected_file().map(str::to_string) else { return };
+                let Some(path) = self
+                    .project
+                    .changes_tree
+                    .selected_file()
+                    .map(str::to_string)
+                else {
+                    return;
+                };
                 if by_user {
                     self.thread.shown = None;
                     self.project.terminal_shown = false;
@@ -687,7 +911,8 @@ impl Reader {
 
     /// Whether a thread answers the sidebar's filter: its title or its latest line says it.
     pub(crate) fn matches_query(&self, thread: &Thread, query: &str) -> bool {
-        self.thread_label(thread).to_lowercase().contains(query) || thread.preview().to_lowercase().contains(query)
+        self.thread_label(thread).to_lowercase().contains(query)
+            || thread.preview().to_lowercase().contains(query)
     }
 
     /// The file tree is drawn beside the viewer: the pane is wide enough for both.

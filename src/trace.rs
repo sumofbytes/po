@@ -16,8 +16,14 @@ pub fn init() {
 
 pub fn mark(step: &str) {
     if let Some((start, _)) = START.get().filter(|(_, mode)| *mode > 0) {
-        let wall = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
-        eprintln!("po trace: {:>7.2} ms  {step}  [{:02}.{:03}]", start.elapsed().as_secs_f64() * 1e3, wall.as_secs() % 60, wall.subsec_millis());
+        let wall = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+        eprintln!(
+            "po trace: {:>7.2} ms  {step}  [{:02}.{:03}]",
+            start.elapsed().as_secs_f64() * 1e3,
+            wall.as_secs() % 60,
+            wall.subsec_millis()
+        );
     }
 }
-

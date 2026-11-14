@@ -58,17 +58,28 @@ pub fn discover(config_dir: &Path) -> Vec<Plugin> {
     dirs.sort_unstable();
     let mut plugins: Vec<Plugin> = Vec::new();
     for dir in dirs {
-        let folder = dir.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
+        let folder = dir
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
         let Some(manifest) = read_json(&dir.join("plugin.json")) else {
             log::warn!("plugins/{folder}: plugin.json did not read, so the plugin is skipped");
             continue;
         };
-        let Some(id) = manifest["id"].as_str().filter(|id| valid_id(id)).map(String::from) else {
-            log::warn!("plugins/{folder}: `id` must be letters, digits, `.`, `_` or `-`, so the plugin is skipped");
+        let Some(id) = manifest["id"]
+            .as_str()
+            .filter(|id| valid_id(id))
+            .map(String::from)
+        else {
+            log::warn!(
+                "plugins/{folder}: `id` must be letters, digits, `.`, `_` or `-`, so the plugin is skipped"
+            );
             continue;
         };
         if plugins.iter().any(|known| known.id == id) {
-            log::warn!("plugins/{folder}: another plugin already has the id `{id}`, so this one is skipped");
+            log::warn!(
+                "plugins/{folder}: another plugin already has the id `{id}`, so this one is skipped"
+            );
             continue;
         }
         if !manifest["screen"].is_null() {
@@ -81,7 +92,10 @@ pub fn discover(config_dir: &Path) -> Vec<Plugin> {
 
 /// An `id` is shown on the approval card, so it can't carry text of its own making.
 fn valid_id(id: &str) -> bool {
-    !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+    !id.is_empty()
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
 }
 
 /// `config.json` with what the plugins provide folded in: for what starts agents and lists
@@ -114,7 +128,13 @@ fn merge(config: Value, config_dir: &Path) -> Value {
         Value::Null => serde_json::Map::new(),
         other => return other,
     };
-    let own = |config: &serde_json::Map<String, Value>, key: &str| config.get(key).and_then(Value::as_array).cloned().unwrap_or_default();
+    let own = |config: &serde_json::Map<String, Value>, key: &str| {
+        config
+            .get(key)
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default()
+    };
     if !agents.is_empty() {
         agents.extend(own(&config, "agents"));
         config.insert("agents".into(), Value::Array(agents));
@@ -138,20 +158,30 @@ impl Plugin {
         };
         for entry in entries {
             let id = &self.id;
-            let (Some(name), Some(command)) = (entry[name_field].as_str(), entry["command"].as_str()) else {
-                log::warn!("plugin {id}: a {key} entry needs `{name_field}` and `command` as strings: {entry}");
+            let (Some(name), Some(command)) =
+                (entry[name_field].as_str(), entry["command"].as_str())
+            else {
+                log::warn!(
+                    "plugin {id}: a {key} entry needs `{name_field}` and `command` as strings: {entry}"
+                );
                 continue;
             };
             if out.iter().any(|known| known[name_field] == name) {
-                log::warn!("plugin {id}: another plugin already provides `{name}` in {key}, so this one is left out");
+                log::warn!(
+                    "plugin {id}: another plugin already provides `{name}` in {key}, so this one is left out"
+                );
                 continue;
             }
             let Some(root) = self.dir.to_str() else {
-                log::warn!("plugin {id}: its folder's path isn't UTF-8, so `{name}` in {key} is left out");
+                log::warn!(
+                    "plugin {id}: its folder's path isn't UTF-8, so `{name}` in {key} is left out"
+                );
                 continue;
             };
             if split_command && command.contains(PLUGIN_DIR) && root.contains(char::is_whitespace) {
-                log::warn!("plugin {id}: `{name}` can't run from a folder with a space in its path: {root}");
+                log::warn!(
+                    "plugin {id}: `{name}` can't run from a folder with a space in its path: {root}"
+                );
                 continue;
             }
             let mut entry = entry.clone();
@@ -161,9 +191,15 @@ impl Plugin {
                 }
             }
             let command = entry["command"].as_str().unwrap_or_default();
-            let program = if split_command { command.split_whitespace().next().unwrap_or_default() } else { command };
+            let program = if split_command {
+                command.split_whitespace().next().unwrap_or_default()
+            } else {
+                command
+            };
             if relative_path(program) {
-                log::warn!("plugin {id}: `{name}` runs `{program}`, which would depend on the project; use {PLUGIN_DIR}");
+                log::warn!(
+                    "plugin {id}: `{name}` runs `{program}`, which would depend on the project; use {PLUGIN_DIR}"
+                );
                 continue;
             }
             entry[config::FROM_PLUGIN] = Value::from(id.as_str());
@@ -251,8 +287,14 @@ mod tests {
         let dir = scratch("no-manifest");
         std::fs::create_dir_all(dir.join("plugins/empty")).unwrap();
         write(&dir.join("plugins/broken/plugin.json"), "not json");
-        write(&dir.join("plugins/no-id/plugin.json"), r#"{ "agents": [{ "id": "x", "command": "run" }] }"#);
-        write(&dir.join("plugins/odd-id/plugin.json"), r#"{ "id": "Approved by Po", "agents": [{ "id": "x", "command": "run" }] }"#);
+        write(
+            &dir.join("plugins/no-id/plugin.json"),
+            r#"{ "agents": [{ "id": "x", "command": "run" }] }"#,
+        );
+        write(
+            &dir.join("plugins/odd-id/plugin.json"),
+            r#"{ "id": "Approved by Po", "agents": [{ "id": "x", "command": "run" }] }"#,
+        );
         assert!(discover(&dir).is_empty());
         assert_eq!(merge(Value::Null, &dir), Value::Null);
         std::fs::remove_dir_all(&dir).ok();
@@ -303,8 +345,14 @@ mod tests {
         let root = dir.join("plugins/p");
         let root = root.to_str().unwrap();
         let config = merge(Value::Null, &dir);
-        assert_eq!(config["agents"][0]["command"], format!("{root}/bin/agent --acp"));
-        assert_eq!(config["mcp_servers"][0]["command"], format!("{root}/bin/mcp"));
+        assert_eq!(
+            config["agents"][0]["command"],
+            format!("{root}/bin/agent --acp")
+        );
+        assert_eq!(
+            config["mcp_servers"][0]["command"],
+            format!("{root}/bin/mcp")
+        );
         assert_eq!(config["mcp_servers"][0]["args"][1], format!("{root}/data"));
         assert_eq!(config["mcp_servers"][0]["env"]["HOME_OF"], root);
         std::fs::remove_dir_all(&dir).ok();
@@ -364,7 +412,10 @@ mod tests {
     #[test]
     fn a_config_that_is_not_an_object_is_left_alone() {
         let dir = scratch("not-object");
-        write(&dir.join("plugins/a/plugin.json"), r#"{ "id": "a", "agents": [{ "id": "x", "command": "run" }] }"#);
+        write(
+            &dir.join("plugins/a/plugin.json"),
+            r#"{ "id": "a", "agents": [{ "id": "x", "command": "run" }] }"#,
+        );
         let config = merge(serde_json::json!([1]), &dir);
         assert_eq!(config, serde_json::json!([1]));
         std::fs::remove_dir_all(&dir).ok();

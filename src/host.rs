@@ -25,7 +25,10 @@ pub struct Host<S> {
 
 impl<S> Clone for Host<S> {
     fn clone(&self) -> Self {
-        Self { jobs: self.jobs.clone(), wake: self.wake.clone() }
+        Self {
+            jobs: self.jobs.clone(),
+            wake: self.wake.clone(),
+        }
     }
 }
 
@@ -71,9 +74,15 @@ impl<S: 'static> Host<S> {
 
     /// Runs `f` on the window's thread and answers with what it returned; `None` once the window is
     /// gone.
-    pub async fn query<R: Send + 'static>(&self, f: impl FnOnce(&mut S) -> R + Send + 'static) -> Option<R> {
+    pub async fn query<R: Send + 'static>(
+        &self,
+        f: impl FnOnce(&mut S) -> R + Send + 'static,
+    ) -> Option<R> {
         let (tx, rx) = oneshot::channel();
-        let sent = self.jobs.send(Box::new(move |state| drop(tx.send(f(state))))).is_ok();
+        let sent = self
+            .jobs
+            .send(Box::new(move |state| drop(tx.send(f(state)))))
+            .is_ok();
         if !sent {
             return None;
         }
@@ -83,14 +92,23 @@ impl<S: 'static> Host<S> {
 
     /// Runs `task` to its end on a thread of its own, like `cx.spawn(..).detach()`.
     pub fn spawn(&self, task: impl Future<Output = ()> + Send + 'static) {
-        std::thread::Builder::new().name("po-task".into()).spawn(move || futures::executor::block_on(task)).expect("a thread for the task");
+        std::thread::Builder::new()
+            .name("po-task".into())
+            .spawn(move || futures::executor::block_on(task))
+            .expect("a thread for the task");
     }
 
     /// Runs blocking `work` on a thread of its own, and answers with what it returned: the
     /// counterpart of `cx.background_spawn`. `None` if the work panicked.
-    pub async fn background<R: Send + 'static>(&self, work: impl FnOnce() -> R + Send + 'static) -> Option<R> {
+    pub async fn background<R: Send + 'static>(
+        &self,
+        work: impl FnOnce() -> R + Send + 'static,
+    ) -> Option<R> {
         let (tx, rx) = oneshot::channel();
-        std::thread::Builder::new().name("po-work".into()).spawn(move || drop(tx.send(work()))).expect("a thread for the work");
+        std::thread::Builder::new()
+            .name("po-work".into())
+            .spawn(move || drop(tx.send(work())))
+            .expect("a thread for the work");
         rx.await.ok()
     }
 }
@@ -115,14 +133,22 @@ mod tests {
     fn counting() -> (Wake, Arc<AtomicUsize>) {
         let woken = Arc::new(AtomicUsize::new(0));
         let wake = woken.clone();
-        (Arc::new(move || { wake.fetch_add(1, Ordering::SeqCst); }), woken)
+        (
+            Arc::new(move || {
+                wake.fetch_add(1, Ordering::SeqCst);
+            }),
+            woken,
+        )
     }
 
     /// Polls `inbox` until `done`, the way a window polls each frame.
     fn pump<S: 'static>(inbox: &Inbox<S>, state: &mut S, done: impl Fn(&S) -> bool) {
         let start = Instant::now();
         while !done(state) {
-            assert!(start.elapsed() < Duration::from_secs(5), "the task finished in time");
+            assert!(
+                start.elapsed() < Duration::from_secs(5),
+                "the task finished in time"
+            );
             inbox.run(state);
             std::thread::sleep(Duration::from_millis(2));
         }
@@ -142,7 +168,10 @@ mod tests {
         });
         pump(&inbox, &mut state, |s| s.len() == 2);
         assert_eq!(state, [1, 2], "in the order asked for");
-        assert!(woken.load(Ordering::SeqCst) >= 2, "each update woke the window");
+        assert!(
+            woken.load(Ordering::SeqCst) >= 2,
+            "each update woke the window"
+        );
     }
 
     #[test]

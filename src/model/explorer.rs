@@ -34,11 +34,17 @@ pub struct Snapshot {
 
 impl Default for Snapshot {
     fn default() -> Self {
-        Self { changes: false, lead: vec![], trail: vec![], body: Body::Rows(vec![]) }
+        Self {
+            changes: false,
+            lead: vec![],
+            trail: vec![],
+            body: Body::Rows(vec![]),
+        }
     }
 }
 
-pub(crate) static SNAPSHOT: LazyLock<watch::Sender<Snapshot>> = LazyLock::new(|| watch::Sender::new(Snapshot::default()));
+pub(crate) static SNAPSHOT: LazyLock<watch::Sender<Snapshot>> =
+    LazyLock::new(|| watch::Sender::new(Snapshot::default()));
 
 /// Shows `snapshot`; nothing is redrawn when it is what the screen already has.
 #[hotpath::measure]

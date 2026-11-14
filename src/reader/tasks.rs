@@ -4,7 +4,11 @@ use crate::*;
 
 impl Reader {
     /// Answers what agents ask of this window through its control socket.
-    pub(crate) fn serve_control(mut requests: profile::UnboundedReceiver<control::Request>, window: &Window, cx: &mut Context<Self>) {
+    pub(crate) fn serve_control(
+        mut requests: profile::UnboundedReceiver<control::Request>,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
         let handle = window.window_handle();
         cx.spawn(async move |this, cx| {
             while let Some(request) = requests.next().await {
@@ -12,10 +16,20 @@ impl Reader {
                     this.update(cx, |reader, cx| {
                         if matches!(request.command, command::Command::EventsSubscribe) {
                             let authorized = reader.authorize(request.caller, &request.command);
-                            reader.record(request.caller, "events.subscribe", authorized.as_ref().map_or_else(|why| format!("refused: {why}"), |()| "ok".into()), true);
+                            reader.record(
+                                request.caller,
+                                "events.subscribe",
+                                authorized
+                                    .as_ref()
+                                    .map_or_else(|why| format!("refused: {why}"), |()| "ok".into()),
+                                true,
+                            );
                             match authorized {
                                 Ok(()) => {
-                                    request.reply.send(Ok(serde_json::json!({ "subscribed": true }))).ok();
+                                    request
+                                        .reply
+                                        .send(Ok(serde_json::json!({ "subscribed": true })))
+                                        .ok();
                                     reader.subscribers.push(request.reply);
                                 }
                                 Err(why) => {
@@ -44,11 +58,15 @@ impl Reader {
 
     /// What the user does on a screen drawn by NSH, run here where the window and the agents are.
     pub(crate) fn serve_nsh(window: &Window, cx: &mut Context<Self>) {
-        let Some(mut commands) = model::bus::commands() else { return };
+        let Some(mut commands) = model::bus::commands() else {
+            return;
+        };
         let handle = window.window_handle();
         cx.spawn(async move |this, cx| {
             while let Some(cmd) = commands.recv().await {
-                let ran = handle.update(cx, |_, window, cx| this.update(cx, |reader, cx| reader.run(cmd, window, cx)));
+                let ran = handle.update(cx, |_, window, cx| {
+                    this.update(cx, |reader, cx| reader.run(cmd, window, cx))
+                });
                 if !matches!(ran, Ok(Ok(()))) {
                     break;
                 }
@@ -70,7 +88,13 @@ impl Reader {
         })
         .detach();
         cx.spawn(async move |this, cx| {
-            while let Ok(open) = this.update(cx, |reader, _| reader.views().iter().map(|view| view.project.root.clone()).collect::<Vec<_>>()) {
+            while let Ok(open) = this.update(cx, |reader, _| {
+                reader
+                    .views()
+                    .iter()
+                    .map(|view| view.project.root.clone())
+                    .collect::<Vec<_>>()
+            }) {
                 issues::shared::track(open);
                 cx.background_executor().timer(Duration::from_secs(1)).await;
             }
@@ -82,7 +106,12 @@ impl Reader {
     pub(crate) fn poll_heads(cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
             while let Ok(roots) = this.update(cx, |reader, _| {
-                reader.views().iter().filter(|view| view.project.shows_branch()).map(|view| view.project.root.clone()).collect::<Vec<_>>()
+                reader
+                    .views()
+                    .iter()
+                    .filter(|view| view.project.shows_branch())
+                    .map(|view| view.project.root.clone())
+                    .collect::<Vec<_>>()
             }) {
                 // Each in its own run, so one slow repository doesn't hold up the rest. One
                 // that takes too long keeps what it showed before.
@@ -104,7 +133,9 @@ impl Reader {
                     .update(cx, |reader, cx| {
                         let mut heads = HashMap::new();
                         for (root, head) in found {
-                            if let Some(head) = head.unwrap_or_else(|| reader.heads.get(&root).cloned()) {
+                            if let Some(head) =
+                                head.unwrap_or_else(|| reader.heads.get(&root).cloned())
+                            {
                                 heads.insert(root, head);
                             }
                         }
@@ -128,8 +159,12 @@ impl Reader {
         let sweep = window.window_handle();
         cx.spawn(async move |this, cx| {
             loop {
-                cx.background_executor().timer(Duration::from_secs(60)).await;
-                let alive = sweep.update(cx, |_, window, cx| this.update(cx, |reader, cx| reader.sleep_idle(window, cx)));
+                cx.background_executor()
+                    .timer(Duration::from_secs(60))
+                    .await;
+                let alive = sweep.update(cx, |_, window, cx| {
+                    this.update(cx, |reader, cx| reader.sleep_idle(window, cx))
+                });
                 if alive.is_err() {
                     break;
                 }

@@ -65,11 +65,16 @@ impl Host for State {
     }
 
     fn layout(&self) -> Layout {
-        self.live.as_ref().map(|live| live.core.reader.layout()).unwrap_or_default()
+        self.live
+            .as_ref()
+            .map(|live| live.core.reader.layout())
+            .unwrap_or_default()
     }
 
     fn terminal(&self) -> Option<&rune_ui::terminal::Term> {
-        self.live.as_ref().and_then(|live| live.core.reader.project.terminal.as_ref())
+        self.live
+            .as_ref()
+            .and_then(|live| live.core.reader.project.terminal.as_ref())
     }
 
     fn attach(&mut self, sources: Vec<crate::Source>) {
@@ -85,13 +90,18 @@ impl Host for State {
     }
 
     fn terminal_mut(&mut self) -> Option<&mut rune_ui::terminal::Term> {
-        self.live.as_mut().and_then(|live| live.core.reader.project.terminal.as_mut())
+        self.live
+            .as_mut()
+            .and_then(|live| live.core.reader.project.terminal.as_mut())
     }
 }
 
 /// The kit for the theme the environment or the settings name.
 fn theme_kit(settings: &serde_json::Value) -> Kit {
-    let name = std::env::var("PO_THEME").ok().or_else(|| settings["theme"].as_str().map(String::from)).unwrap_or_else(|| rune_ui::theme::DEFAULT.into());
+    let name = std::env::var("PO_THEME")
+        .ok()
+        .or_else(|| settings["theme"].as_str().map(String::from))
+        .unwrap_or_else(|| rune_ui::theme::DEFAULT.into());
     named_kit(&name)
 }
 
@@ -103,7 +113,14 @@ fn init() -> State {
     let settings = config::load();
     crate::fonts::set_sizes(&settings);
     let kit = theme_kit(&settings);
-    State { kit, shell: Shell::default(), live: None, terminal_was_shown: false, widths_applied: false, bench_filled: false }
+    State {
+        kit,
+        shell: Shell::default(),
+        live: None,
+        terminal_was_shown: false,
+        widths_applied: false,
+        bench_filled: false,
+    }
 }
 
 fn view(s: &State, cx: &mut Cx<State>) -> El {
@@ -114,15 +131,29 @@ fn view(s: &State, cx: &mut Cx<State>) -> El {
 fn setup(s: &mut State, waker: Waker) {
     // Pictures: the cache that decodes the model's `data:` URIs, awake with the runtime.
     rune_ui::pictures::set(waker.clone());
-    let Some(launch) = LAUNCH.lock().ok().and_then(|mut launch| launch.take()) else { return };
+    let Some(launch) = LAUNCH.lock().ok().and_then(|mut launch| launch.take()) else {
+        return;
+    };
     let wake: Wake = waker;
     let (host, inbox) = host::host::<Core>(wake);
     let mut window = Window::new(host.clone());
     let mut cx = Context::new(host.clone());
-    let reader = Reader::new(launch.root, launch.pr, launch.command, launch.prefetch, &mut window, &mut cx);
+    let reader = Reader::new(
+        launch.root,
+        launch.pr,
+        launch.command,
+        launch.prefetch,
+        &mut window,
+        &mut cx,
+    );
     let mut core = Core { reader, window };
     core.reader.term_theme = terminal_colors(&s.kit);
-    s.live = Some(Live { core, host, inbox, commands: bus::commands() });
+    s.live = Some(Live {
+        core,
+        host,
+        inbox,
+        commands: bus::commands(),
+    });
 }
 
 fn terminal_colors(kit: &Kit) -> (crate::terminal::Rgb, crate::terminal::Rgb) {
@@ -141,31 +172,53 @@ fn terminal_colors(kit: &Kit) -> (crate::terminal::Rgb, crate::terminal::Rgb) {
 /// Runs on the first poll after two seconds, so the headless script has already opened a thread.
 /// Without `PO_BENCH` nothing happens: this is off unless it asks for it.
 fn bench_fill(reader: &mut crate::Reader) -> Option<usize> {
-    let rounds = std::env::var("PO_BENCH").ok().filter(|spec| spec.starts_with("stream")).and_then(|spec| spec.split(':').nth(1).and_then(|n| n.parse::<usize>().ok()))?;
+    let rounds = std::env::var("PO_BENCH")
+        .ok()
+        .filter(|spec| spec.starts_with("stream"))
+        .and_then(|spec| spec.split(':').nth(1).and_then(|n| n.parse::<usize>().ok()))?;
     let markdown = |seed: usize| {
         let mut out = String::new();
         for part in 0..3 {
-            out.push_str(&format!("## Part {seed}.{part}: ownership and borrowing\n\n"));
+            out.push_str(&format!(
+                "## Part {seed}.{part}: ownership and borrowing\n\n"
+            ));
             out.push_str("Rust's ownership model gives every value a single owner, so the compiler can tell when it is freed and who may touch it meanwhile. A **shared** borrow lets many readers look at a value; a *mutable* borrow lets exactly one writer change it, and never both at once.\n\n- A value has one owner at a time\n- Borrows are checked at compile time, with `&T` and `&mut T`\n- Lifetimes say how long a borrow may live\n\n```rust\nfn longest<'a>(a: &'a str, b: &'a str) -> &'a str {\n    if a.len() >= b.len() { a } else { b }\n}\n```\n\n");
         }
         out
     };
     reader.thread.blank = false;
     for i in 0..rounds {
-        reader.thread.messages.push(crate::Msg::User(format!("Question {i}: explain part {i} of Rust's ownership model."), vec![]));
-        reader.thread.messages.push(crate::Msg::Agent(vec![crate::Block::Text(markdown(i))]));
+        reader.thread.messages.push(crate::Msg::User(
+            format!("Question {i}: explain part {i} of Rust's ownership model."),
+            vec![],
+        ));
+        reader
+            .thread
+            .messages
+            .push(crate::Msg::Agent(vec![crate::Block::Text(markdown(i))]));
     }
     Some(rounds)
 }
 
 fn poll(s: &mut State, now: f64, tx: &mut Tx) -> bool {
-    let Some(live) = s.live.as_mut() else { return false };
-    let Live { core, host, inbox, commands } = live;
+    let Some(live) = s.live.as_mut() else {
+        return false;
+    };
+    let Live {
+        core,
+        host,
+        inbox,
+        commands,
+    } = live;
     // Before the commands are taken, so what a page asks (a save, say) is run in this tick, not
     // left until something else wakes the window.
     // A theme picked in the settings shows at once; saving keeps it, closing without saving
     // puts back the one on disk.
-    let picked = s.shell.settings.as_mut().and_then(|page| page.preview.take());
+    let picked = s
+        .shell
+        .settings
+        .as_mut()
+        .and_then(|page| page.preview.take());
     let settled = s.shell.settle();
     let recolored = picked.is_some() || settled;
     if let Some(name) = picked {
@@ -182,7 +235,10 @@ fn poll(s: &mut State, now: f64, tx: &mut Tx) -> bool {
     }
     let mut stale = inbox.run(core) | recolored;
     let mut cx = Context::new(host.clone());
-    while let Some(cmd) = commands.as_mut().and_then(|commands| commands.try_recv().ok()) {
+    while let Some(cmd) = commands
+        .as_mut()
+        .and_then(|commands| commands.try_recv().ok())
+    {
         core.reader.run(cmd, &mut core.window, &mut cx);
         stale = true;
     }
@@ -192,7 +248,10 @@ fn poll(s: &mut State, now: f64, tx: &mut Tx) -> bool {
     if let Some(term) = core.reader.project.terminal.as_mut() {
         stale |= term.poll();
     }
-    if now >= 2.0 && !s.bench_filled && let Some(rounds) = bench_fill(&mut core.reader) {
+    if now >= 2.0
+        && !s.bench_filled
+        && let Some(rounds) = bench_fill(&mut core.reader)
+    {
         s.bench_filled = true;
         stale |= rounds > 0;
     }
@@ -208,9 +267,20 @@ fn poll(s: &mut State, now: f64, tx: &mut Tx) -> bool {
     }
     if std::mem::take(&mut window.folder_asked) {
         tx.open_folder(Default::default(), |s: &mut State, picked, _| {
-            let Some(root) = picked.ok().flatten().and_then(|path| path.canonicalize().ok()) else { return };
+            let Some(root) = picked
+                .ok()
+                .flatten()
+                .and_then(|path| path.canonicalize().ok())
+            else {
+                return;
+            };
             if let Some(Live { core, host, .. }) = s.live.as_mut() {
-                core.reader.add_project(root, None, &mut core.window, &mut Context::new(host.clone()));
+                core.reader.add_project(
+                    root,
+                    None,
+                    &mut core.window,
+                    &mut Context::new(host.clone()),
+                );
             }
         });
     }
@@ -231,9 +301,19 @@ fn poll(s: &mut State, now: f64, tx: &mut Tx) -> bool {
             s.shell.viewer.set_width(width);
         }
     } else {
-        let now = crate::Widths { left: Some(s.shell.sidebar.width()), right: Some(s.shell.viewer.width()), explorer: widths.explorer };
+        let now = crate::Widths {
+            left: Some(s.shell.sidebar.width()),
+            right: Some(s.shell.viewer.width()),
+            explorer: widths.explorer,
+        };
         let dragging = s.shell.sidebar.is_resizing() || s.shell.viewer.is_resizing();
-        if !dragging && now != *widths && widths.left.is_some() | widths.right.is_some() | (now.left != Some(s.shell.sidebar.default_width())) | (now.right != Some(s.shell.viewer.default_width())) {
+        if !dragging
+            && now != *widths
+            && widths.left.is_some()
+                | widths.right.is_some()
+                | (now.left != Some(s.shell.sidebar.default_width()))
+                | (now.right != Some(s.shell.viewer.default_width()))
+        {
             *widths = now;
             core.reader.request_save(&mut cx);
         }
@@ -244,24 +324,38 @@ fn poll(s: &mut State, now: f64, tx: &mut Tx) -> bool {
 /// The window's shortcuts, which the focused control did not take. Where the terminal is what the
 /// viewer shows, the keys of readline, fzf and tmux (Ctrl+O, T, B, N, P, W and \) go to its shell.
 fn on_key(s: &mut State, event: &KeyEvent, tx: &mut Tx) -> bool {
-    let Some(live) = s.live.as_mut() else { return false };
+    let Some(live) = s.live.as_mut() else {
+        return false;
+    };
     let Live { core, host, .. } = live;
     core.reader.last_input = Instant::now();
-    let terminal_has_keys = core.reader.layout().terminal_shown && core.reader.project.terminal.is_some();
+    let terminal_has_keys =
+        core.reader.layout().terminal_shown && core.reader.project.terminal.is_some();
     // The terminal's selection goes to the clipboard on the window's copy chord, where Ctrl+C is
     // the shell's and otherwise the selection's own menu copies. Only the terminal's: elsewhere
     // the copy chord reads as a field's or a menu's and is theirs.
     if let Key::Command('c') = &event.key
         && (event.mods.logo || (event.mods.ctrl && event.mods.shift))
         && let Some(selected) = tx.text_selection()
-        && selected.texts().first().is_some_and(|text| text.path().contains("/terminal/"))
+        && selected
+            .texts()
+            .first()
+            .is_some_and(|text| text.path().contains("/terminal/"))
     {
         tx.copy(selected.text().to_string());
         return true;
     }
-    let readline = ['o', 't', 'b', 'n', 'p', 'w', '\\'].into_iter().any(|c| event.is_command(c)) && !event.mods.shift;
+    let readline = ['o', 't', 'b', 'n', 'p', 'w', '\\']
+        .into_iter()
+        .any(|c| event.is_command(c))
+        && !event.mods.shift;
     if terminal_has_keys && readline {
-        return core.reader.project.terminal.as_ref().is_some_and(|term| term.key(event));
+        return core
+            .reader
+            .project
+            .terminal
+            .as_ref()
+            .is_some_and(|term| term.key(event));
     }
     let mut cx = Context::new(host.clone());
     let (reader, window) = (&mut core.reader, &mut core.window);
@@ -354,15 +448,45 @@ fn on_key(s: &mut State, event: &KeyEvent, tx: &mut Tx) -> bool {
         return true;
     }
     // Whatever else is typed goes to the shell the viewer shows, if it shows one.
-    terminal_has_keys && core.reader.project.terminal.as_ref().is_some_and(|term| term.key(event))
+    terminal_has_keys
+        && core
+            .reader
+            .project
+            .terminal
+            .as_ref()
+            .is_some_and(|term| term.key(event))
 }
 
-pub fn run(root: std::path::PathBuf, pr: Option<pr::Pr>, command: Option<String>, prefetch: Prefetch) {
-    *LAUNCH.lock().expect("launch") = Some(Launch { root, pr, command, prefetch });
+pub fn run(
+    root: std::path::PathBuf,
+    pr: Option<pr::Pr>,
+    command: Option<String>,
+    prefetch: Prefetch,
+) {
+    *LAUNCH.lock().expect("launch") = Some(Launch {
+        root,
+        pr,
+        command,
+        prefetch,
+    });
     let settings = config::load();
     // The fonts the settings name, as a list the text system tries in order, over the bundled ones.
-    let ui: &'static str = Box::leak(crate::fonts::family_list(&settings["font"]["family"], crate::fonts::BUNDLED_UI_FAMILY, "system-ui").into_boxed_str());
-    let mono: &'static str = Box::leak(crate::fonts::family_list(&settings["font"]["mono_family"], crate::fonts::BUNDLED_MONO_FAMILY, "ui-monospace").into_boxed_str());
+    let ui: &'static str = Box::leak(
+        crate::fonts::family_list(
+            &settings["font"]["family"],
+            crate::fonts::BUNDLED_UI_FAMILY,
+            "system-ui",
+        )
+        .into_boxed_str(),
+    );
+    let mono: &'static str = Box::leak(
+        crate::fonts::family_list(
+            &settings["font"]["mono_family"],
+            crate::fonts::BUNDLED_MONO_FAMILY,
+            "ui-monospace",
+        )
+        .into_boxed_str(),
+    );
     rune::set_app_id("po");
     let app = rune::App::new(AppSpec::<State> {
         fonts: &crate::fonts::BUNDLED,
