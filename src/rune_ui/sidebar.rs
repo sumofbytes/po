@@ -211,17 +211,25 @@ fn mark(k: &Kit, mark: Mark, flush: bool) -> El {
     row().size(14.0, 14.0).center().child(shown)
 }
 
+/// How a thread's row differs between the lists it is in.
+#[derive(Clone, Copy)]
+struct Look<'a> {
+    /// The project's name under the title, for lists that mix projects.
+    subtitle: Option<&'a str>,
+    /// Its mark starts where the pages' icons do, for lists that sit under them; the project tree keeps its own.
+    flush: bool,
+}
+
 fn thread_row<S: 'static>(
     k: &Kit,
     t: &Thread,
-    subtitle: Option<&str>,
+    look: Look<'_>,
     at: At<S>,
     rename: &super::rename::Rename,
     rename_at: super::rename::At<S>,
     room: f32,
-    // Its mark starts where the pages' icons do, for lists that sit under them; the project tree keeps its own.
-    flush: bool,
 ) -> El {
+    let Look { subtitle, flush } = look;
     let (pid, tid) = (t.project, t.id);
     if rename.open_at((pid, tid), super::rename::Place::Sidebar) {
         let line = row()
@@ -438,7 +446,16 @@ fn project_section<S: 'static>(
     if !p.collapsed {
         for t in &p.threads {
             section = section.child(thread_row::<S>(
-                k, t, None, at, rename, rename_at, room, false,
+                k,
+                t,
+                Look {
+                    subtitle: None,
+                    flush: false,
+                },
+                at,
+                rename,
+                rename_at,
+                room,
             ));
         }
         if let Some((expanded, hidden)) = p.fold {
@@ -712,12 +729,14 @@ pub fn view<S: 'static>(
             needs = needs.row(thread_row::<S>(
                 k,
                 &w.thread,
-                Some(&w.project),
+                Look {
+                    subtitle: Some(&w.project),
+                    flush: true,
+                },
                 at,
                 &state.rename,
                 rename_at,
                 room,
-                true,
             ));
         }
         // Pinned above the scrolling projects so it stays in view; a long list scrolls within its own cap.
@@ -744,12 +763,14 @@ pub fn view<S: 'static>(
                 section = section.row(thread_row::<S>(
                     k,
                     &r.thread,
-                    Some(&r.project),
+                    Look {
+                        subtitle: Some(&r.project),
+                        flush: true,
+                    },
                     at,
                     &state.rename,
                     rename_at,
                     room,
-                    true,
                 ));
             }
             if any {
