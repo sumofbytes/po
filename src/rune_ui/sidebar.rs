@@ -533,7 +533,7 @@ fn finder<S: 'static>(k: &Kit, snapshot: &Snapshot, search: El, at: At<S>) -> El
         ],
         at,
     );
-    let mut tools = row().w_full().h(24.0).items_center().px(4.0).child(layout);
+    let mut tools = row().w_full().h(24.0).items_center().px(3.0).child(layout);
     // One project has nothing to narrow to.
     if snapshot.choices.len() > 1 {
         let name = snapshot
@@ -593,8 +593,8 @@ pub fn view<S: 'static>(
     let search = row()
         .w_full()
         .h(ROW)
-        .px(7.0)
-        .gap(5.0)
+        .px(8.0)
+        .gap(6.0)
         .items_center()
         .child(
             el().child(rune::icon(&SEARCH, 16.0).color(k.c.icon_muted))
