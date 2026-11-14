@@ -781,13 +781,6 @@ impl Thread {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
-    
-    
-    
-    
-    
-    
 
     #[test]
     fn a_thread_keeps_its_sidebar_row_while_its_agent_works() {

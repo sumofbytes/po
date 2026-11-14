@@ -12,8 +12,9 @@ use rune_kit::{
     SidebarSection, Spinner,
 };
 
+use super::dropdown::{self, Line};
 use crate::model::bus::{Cmd, send};
-use crate::model::sidebar::{Mark, Project, Snapshot, Thread};
+use crate::model::sidebar::{Age, Layout, Mark, Project, Snapshot, Thread};
 
 static FOLDER_PLUS: Icon = Icon {
     name: "po-folder-plus",
@@ -72,6 +73,8 @@ pub struct State {
     pub rename: super::rename::Rename,
     /// A project's header being dragged to a new place in the list.
     pub drag: Option<ProjectDrag>,
+    /// The layout and project menus under the search field.
+    pub menu: dropdown::State,
 }
 
 /// A project dragged by its header: its place in the list, where it would land if dropped now,
@@ -156,6 +159,7 @@ impl Default for State {
             confirm: None,
             rename: Default::default(),
             drag: None,
+            menu: Default::default(),
         }
     }
 }
@@ -189,7 +193,7 @@ fn icon_slot<S: 'static>(
 /// What a thread's state looks like at the start of its row: a faint ring when it is idle, a dot when
 /// it has something to say, and the spinner while its agent works. Each sits in a slot as wide as
 /// the spinner, so titles line up whatever the state.
-fn mark(k: &Kit, mark: Mark) -> El {
+fn mark(k: &Kit, mark: Mark, flush: bool) -> El {
     let dot = |color| el().size(8.0, 8.0).radius(4.0).fill(color);
     let shown = match mark {
         Mark::Idle => el().size(8.0, 8.0).radius(4.0).border(1.0, k.c.icon_faint),
@@ -200,17 +204,32 @@ fn mark(k: &Kit, mark: Mark) -> El {
             .font(crate::config::fonts::ui(14.0, 500.0))
             .color(k.c.danger.fg),
     };
+    if flush {
+        // At the left of the slot, where the pages' icons begin, not centred in it.
+        return row().size(16.0, 16.0).items_center().pl(2.0).child(shown);
+    }
     row().size(14.0, 14.0).center().child(shown)
+}
+
+/// How a thread's row differs between the lists it is in.
+#[derive(Clone, Copy)]
+struct Look<'a> {
+    /// The project's name under the title, for lists that mix projects.
+    subtitle: Option<&'a str>,
+    /// Its mark starts where the pages' icons do, for lists that sit under them; the project tree keeps its own.
+    flush: bool,
 }
 
 fn thread_row<S: 'static>(
     k: &Kit,
     t: &Thread,
-    subtitle: Option<&str>,
+    look: Look<'_>,
     at: At<S>,
     rename: &super::rename::Rename,
     rename_at: super::rename::At<S>,
+    room: f32,
 ) -> El {
+    let Look { subtitle, flush } = look;
     let (pid, tid) = (t.project, t.id);
     if rename.open_at((pid, tid), super::rename::Place::Sidebar) {
         let line = row()
@@ -223,13 +242,36 @@ fn thread_row<S: 'static>(
             .items_center()
             .radius(k.radius.md)
             .fill(k.c.layer_02)
-            .child(mark(k, t.mark))
+            .child(mark(k, t.mark, flush))
             .child(super::rename::input::<S>(k, rename, rename_at, k.ty.ui));
         return line;
     }
     let (name, t_loses) = (t.name.clone(), t.closing);
     let rename_name = t.name.clone();
-    let mut row = SidebarRow::new(t.label.clone())
+    // Rune cuts a title mid-word; cut it at a word instead, in the type the row will set it in.
+    let font = match subtitle {
+        Some(_) => TextStyle {
+            weight: 500.0,
+            ..k.ty.ui_compact
+        },
+        None => k.ty.ui,
+    };
+    let label = at_word(&t.label, room, |s| {
+        rune::text::measure(s, &[], font, None).0
+    });
+    // A running thread's title takes the accent the spinner has, so it reads as live in the list.
+    let live;
+    let kit = if t.mark == Mark::Running {
+        let mut lit = k.clone();
+        lit.c.text_muted = k.c.text_accent;
+        lit.c.text_base = k.c.text_accent;
+        live = lit;
+        &live
+    } else {
+        k
+    };
+    let mut row = SidebarRow::new(label)
+        .title_style(font)
         .selected(t.selected)
         .on_select(move |_: &mut S, _: &mut Tx| send(Cmd::OpenThread(pid, tid)))
         .on_double_click(move |s: &mut S, _: &mut Tx| {
@@ -243,7 +285,7 @@ fn thread_row<S: 'static>(
                 loses_work: t_loses,
             })
         });
-    row = row.avatar(mark(k, t.mark));
+    row = row.avatar(mark(k, t.mark, flush));
     if let Some(ago) = &t.ago {
         // In the slot the close button takes over on hover, so it stands where the section's plus does.
         row = row.status(RowStatus::Other(
@@ -255,7 +297,39 @@ fn thread_row<S: 'static>(
     } else {
         row = row.height(ROW);
     }
-    row.build(k).key(format!("thread-{pid}-{tid}"))
+    // The shortened title is only for the eye; assistive tech gets the whole one.
+    row.build(kit)
+        .key(format!("thread-{pid}-{tid}"))
+        .label(t.label.clone())
+}
+
+/// What a row's title does not get of the sidebar's width: the insets and gutter, the row's own
+/// padding, its mark and the slot at its end. Over-counted a little, so that a title that fits
+/// here fits the row and Rune never has to cut it again.
+const TITLE_RESERVE: f32 = 96.0;
+
+/// `text` if `width` says it fits `room`, else its longest run of whole words with "…" after it
+/// that does. When not even the first word fits, `text` as it is, for Rune to cut.
+fn at_word(text: &str, room: f32, width: impl Fn(&str) -> f32) -> String {
+    if room <= 0.0 || width(text) <= room {
+        return text.to_string();
+    }
+    let ends: Vec<usize> = text
+        .char_indices()
+        .filter(|&(i, c)| c.is_whitespace() && i > 0)
+        .map(|(i, _)| i)
+        .collect();
+    for &end in ends.iter().rev() {
+        let head = text[..end].trim_end_matches(|c: char| c.is_whitespace() || ",;:-".contains(c));
+        if head.is_empty() {
+            continue;
+        }
+        let cut = format!("{head}…");
+        if width(&cut) <= room {
+            return cut;
+        }
+    }
+    text.to_string()
 }
 
 /// A project: a header that toggles it (larger title, no disclosure glyph, the kit's header
@@ -277,6 +351,7 @@ fn project_section<S: 'static>(
     at: At<S>,
     rename: &super::rename::Rename,
     rename_at: super::rename::At<S>,
+    room: f32,
 ) -> El {
     let pid = p.id;
     let pname = p.name.clone();
@@ -370,7 +445,18 @@ fn project_section<S: 'static>(
         .child(header);
     if !p.collapsed {
         for t in &p.threads {
-            section = section.child(thread_row::<S>(k, t, None, at, rename, rename_at));
+            section = section.child(thread_row::<S>(
+                k,
+                t,
+                Look {
+                    subtitle: None,
+                    flush: false,
+                },
+                at,
+                rename,
+                rename_at,
+                room,
+            ));
         }
         if let Some((expanded, hidden)) = p.fold {
             let label = if expanded {
@@ -420,6 +506,89 @@ const BAND: f32 = super::header::BAND;
 /// right of its rows, which the shell lets the rows keep by laying the sidebar out the pane's full width.
 pub const GUTTER: f32 = 20.0;
 
+/// Where the sidebar sits: what the window's buttons take at its leading edge, and how wide it is.
+#[derive(Clone, Copy)]
+pub struct Edge {
+    pub inset: f32,
+    pub width: f32,
+}
+
+/// A chip in the finder: `label` and a chevron, opening `lines` when pressed.
+fn chip<S: 'static>(k: &Kit, key: &str, label: String, lines: Vec<Line>, at: At<S>) -> El {
+    let menu: dropdown::At<S> = Rc::new(move |s: &mut S| &mut at(s).menu);
+    let face = row()
+        .px(6.0)
+        .py(2.0)
+        .radius(k.radius.md)
+        .gap(2.0)
+        .items_center()
+        .shrink()
+        .child(
+            text(label)
+                .font(crate::config::fonts::ui(12.0, 500.0))
+                .color(k.c.text_muted)
+                .truncate()
+                .shrink(),
+        )
+        .child(rune::icon(&dropdown::CHEVRON, 12.0).color(k.c.text_faint));
+    dropdown::opens::<S>(k, key, face, lines, vec![], menu)
+}
+
+/// The search field, with under it how the list is laid out and which project it is narrowed to.
+fn finder<S: 'static>(k: &Kit, snapshot: &Snapshot, search: El, at: At<S>) -> El {
+    let layout = chip::<S>(
+        k,
+        "side-layout",
+        match snapshot.layout {
+            Layout::Activity => "By activity",
+            Layout::Project => "By project",
+        }
+        .to_string(),
+        vec![
+            Line::choice(
+                "By activity",
+                snapshot.layout == Layout::Activity,
+                Cmd::SideLayout(Layout::Activity),
+            ),
+            Line::choice(
+                "By project",
+                snapshot.layout == Layout::Project,
+                Cmd::SideLayout(Layout::Project),
+            ),
+        ],
+        at,
+    );
+    let mut tools = row().w_full().h(24.0).items_center().px(3.0).child(layout);
+    // One project has nothing to narrow to.
+    if snapshot.choices.len() > 1 {
+        let name = snapshot
+            .filter
+            .and_then(|id| snapshot.choices.iter().find(|(p, _)| *p == id))
+            .map_or("All projects", |(_, name)| name.as_str())
+            .to_string();
+        let mut lines = vec![Line::choice(
+            "All projects",
+            snapshot.filter.is_none(),
+            Cmd::SideProject(None),
+        )];
+        for (id, name) in &snapshot.choices {
+            lines.push(Line::choice(
+                name.clone(),
+                snapshot.filter == Some(*id),
+                Cmd::SideProject(Some(*id)),
+            ));
+        }
+        tools = tools.child(el().grow(1.0).a11y_hidden()).child(chip::<S>(
+            k,
+            "side-project",
+            name,
+            lines,
+            at,
+        ));
+    }
+    col().w_full().gap(8.0).child(search).child(tools)
+}
+
 /// The sidebar for `snapshot`, with its filter in the host's state through `at`.
 pub fn view<S: 'static>(
     snapshot: &Snapshot,
@@ -428,8 +597,10 @@ pub fn view<S: 'static>(
     at: At<S>,
     rename_at: super::rename::At<S>,
     settings_open: bool,
-    inset: f32,
+    edge: Edge,
 ) -> El {
+    let Edge { inset, width } = edge;
+    let room = (width - TITLE_RESERVE).max(0.0);
     // The kit's field hardcodes a faint placeholder; the rows' own ink is what this one wants.
     let field = rune::text_input(&state.query, k.ty.ui_compact)
         .single_line()
@@ -447,8 +618,8 @@ pub fn view<S: 'static>(
     let search = row()
         .w_full()
         .h(ROW)
-        .px(7.0)
-        .gap(5.0)
+        .px(8.0)
+        .gap(6.0)
         .items_center()
         .child(
             el().child(rune::icon(&SEARCH, 16.0).color(k.c.icon_muted))
@@ -499,13 +670,15 @@ pub fn view<S: 'static>(
                 .build(k)
                 .key("new-thread"),
         )
-        .child(col().w_full().py(4.0).child(search))
         .child(
             issues
                 .on_select(|_: &mut S, _: &mut Tx| send(Cmd::ToggleIssues))
                 .build(k)
                 .key("issues"),
-        );
+        )
+        // The search and what narrows it, right under the pages with the same step between rows, above the
+        // threads they act on.
+        .child(finder::<S>(k, snapshot, search, at));
 
     let mut bar = Sidebar::new()
         .label("Projects")
@@ -556,10 +729,14 @@ pub fn view<S: 'static>(
             needs = needs.row(thread_row::<S>(
                 k,
                 &w.thread,
-                Some(&w.project),
+                Look {
+                    subtitle: Some(&w.project),
+                    flush: true,
+                },
                 at,
                 &state.rename,
                 rename_at,
+                room,
             ));
         }
         // Pinned above the scrolling projects so it stays in view; a long list scrolls within its own cap.
@@ -572,6 +749,52 @@ pub fn view<S: 'static>(
                 })
                 .child(needs.build(k)),
         );
+    }
+    if snapshot.layout == Layout::Activity {
+        for (age, title) in [
+            (Age::Day, "Past day"),
+            (Age::Week, "Past week"),
+            (Age::Earlier, "Earlier"),
+        ] {
+            let mut section = SidebarSection::new(title).key(format!("recent-{title}"));
+            let mut any = false;
+            for r in snapshot.recent.iter().filter(|r| r.age == age) {
+                any = true;
+                section = section.row(thread_row::<S>(
+                    k,
+                    &r.thread,
+                    Look {
+                        subtitle: Some(&r.project),
+                        flush: true,
+                    },
+                    at,
+                    &state.rename,
+                    rename_at,
+                    room,
+                ));
+            }
+            if any {
+                bar = bar.child(section.build(k));
+            }
+        }
+        if let Some((expanded, hidden)) = snapshot.recent_fold {
+            let label = if expanded {
+                "Show less".to_string()
+            } else {
+                format!("{hidden} more")
+            };
+            let chevron = rune::icon(if expanded { &CHEVRON_UP } else { &CHEVRON_DOWN }, 14.0)
+                .color(k.c.icon_muted);
+            bar = bar.child(
+                SidebarRow::new(label)
+                    .height(MORE_ROW)
+                    .avatar(chevron)
+                    .title_style(crate::config::fonts::ui(13.0, 400.0))
+                    .select_only()
+                    .on_select(|_: &mut S, _: &mut Tx| send(Cmd::ToggleMoreRecent))
+                    .build(k),
+            );
+        }
     }
     // Projects are dragged to reorder them, unless a search hides some of them.
     let ids: Rc<Vec<u64>> = Rc::new(snapshot.projects.iter().map(|p| p.id).collect());
@@ -597,6 +820,7 @@ pub fn view<S: 'static>(
             at,
             &state.rename,
             rename_at,
+            room,
         ));
     }
 
@@ -762,10 +986,32 @@ mod tests {
                 |s| &mut s.side,
                 |s| &mut s.side.rename,
                 false,
-                s.inset,
+                Edge {
+                    inset: s.inset,
+                    width: 300.0,
+                },
             ),
             vec![],
         )
+    }
+
+    #[test]
+    fn a_long_title_is_cut_at_a_word() {
+        let wide = |s: &str| s.chars().count() as f32;
+        assert_eq!(at_word("short", 10.0, wide), "short");
+        assert_eq!(
+            at_word("fix the sidebar colour bug", 16.0, wide),
+            "fix the sidebar…"
+        );
+        // The ellipsis counts toward the room.
+        assert_eq!(at_word("fix the sidebar colour", 15.0, wide), "fix the…");
+        // Trailing punctuation does not stay in front of it.
+        assert_eq!(at_word("fix, the sidebar", 8.0, wide), "fix…");
+        // One long word has no boundary to cut at.
+        assert_eq!(
+            at_word("supercalifragilistic", 8.0, wide),
+            "supercalifragilistic"
+        );
     }
 
     #[test]
@@ -870,6 +1116,7 @@ mod tests {
             fold: None,
         };
         Snapshot {
+            layout: Layout::Project,
             projects: vec![
                 project(1, vec![thread(1, 1), thread(1, 2)]),
                 project(2, vec![thread(2, 1)]),

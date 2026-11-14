@@ -445,8 +445,10 @@ pub fn view<S: Host>(host: &S, k: &Kit, inset: f32) -> El {
             )
         });
     // The toolbar, and the toggle that floats over it, start past the window's buttons.
+    // The toolbar belongs to the main pane, so it takes the pane's background, not the sidebar's.
     let mut split = SplitView::new(middle)
         .frame_inset(0.0)
+        .toolbar_in_panel()
         .titlebar_inset(inset);
     if let Some(toolbar) = toolbar {
         split = split.toolbar(toolbar);
@@ -474,7 +476,10 @@ pub fn view<S: Host>(host: &S, k: &Kit, inset: f32) -> El {
                 side_of::<S>,
                 rename_of::<S>,
                 layout.settings_open,
-                inset,
+                sidebar::Edge {
+                    inset,
+                    width: shell.sidebar.width(),
+                },
             )),
     );
     // The kit draws the main pane as a bordered, rounded card; Po's panes sit flush, told apart by
@@ -492,6 +497,8 @@ pub fn view<S: Host>(host: &S, k: &Kit, inset: f32) -> El {
     dropdown::overlay::<S>(k, &shell.chat.menu, &menu, &mut layer);
     let issue_menu: dropdown::At<S> = std::rc::Rc::new(|s: &mut S| &mut s.shell().issues.menu);
     dropdown::overlay::<S>(k, &shell.issues.menu, &issue_menu, &mut layer);
+    let side_menu: dropdown::At<S> = std::rc::Rc::new(|s: &mut S| &mut s.shell().side.menu);
+    dropdown::overlay::<S>(k, &shell.side.menu, &side_menu, &mut layer);
     // One rule under the whole top band, drawn over the panes so none of them leaves a gap in it.
     let rule = rune::el()
         .absolute(0.0, super::header::BAND - 1.0)

@@ -149,13 +149,6 @@ impl Project {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
-    
-    
-    
-    
-    
-    
 
     #[test]
     fn an_empty_viewer_says_how_to_get_the_tree_back() {

@@ -37,6 +37,14 @@ pub fn kit(theme: &Value) -> (Kit, bool) {
     kit.c.submit_fg = on_accent;
     kit.c.submit_icon = on_accent;
     kit.c.bg_accent = accent;
+    // The kit paints the sidebar (`bg_deep`) and the main pane (`bg_base`) with the same colour,
+    // and Po's panes sit flush, so the window would be one flat slab. Step one apart: on a dark
+    // scheme the main pane rises a tone above the sidebar, on a light one the sidebar sinks.
+    if kit.dark {
+        kit.c.bg_base = kit.c.layer_01;
+    } else {
+        kit.c.bg_deep = kit.c.layer_02;
+    }
     crate::config::fonts::scale_type(&mut kit.ty);
     let dark = kit.dark;
     (kit, dark)
