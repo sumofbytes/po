@@ -533,7 +533,7 @@ fn finder<S: 'static>(k: &Kit, snapshot: &Snapshot, search: El, at: At<S>) -> El
         ],
         at,
     );
-    let mut tools = row().w_full().items_center().px(4.0).child(layout);
+    let mut tools = row().w_full().h(24.0).items_center().px(4.0).child(layout);
     // One project has nothing to narrow to.
     if snapshot.choices.len() > 1 {
         let name = snapshot
@@ -561,7 +561,7 @@ fn finder<S: 'static>(k: &Kit, snapshot: &Snapshot, search: El, at: At<S>) -> El
             at,
         ));
     }
-    col().w_full().py(4.0).child(search).child(tools)
+    col().w_full().gap(8.0).child(search).child(tools)
 }
 
 /// The sidebar for `snapshot`, with its filter in the host's state through `at`.
