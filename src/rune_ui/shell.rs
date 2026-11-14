@@ -445,8 +445,10 @@ pub fn view<S: Host>(host: &S, k: &Kit, inset: f32) -> El {
             )
         });
     // The toolbar, and the toggle that floats over it, start past the window's buttons.
+    // The toolbar belongs to the main pane, so it takes the pane's background, not the sidebar's.
     let mut split = SplitView::new(middle)
         .frame_inset(0.0)
+        .toolbar_in_panel()
         .titlebar_inset(inset);
     if let Some(toolbar) = toolbar {
         split = split.toolbar(toolbar);
