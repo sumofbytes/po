@@ -14,12 +14,12 @@ not touched.
 - `src/rune_ui/` — the screens, each drawing a snapshot and sending `Cmd`s: shell (layout), header,
   home, issues (list, board, epics, issue page), sidebar, explorer, tabs, finder, source, diff,
   agent, chat, terminal, settings, theme.
-- `src/app.rs` — the Rune host: `rune::run(AppSpec{..})`, shortcuts, and the `poll` that takes what
+- `src/host/app.rs` — the Rune host: `rune::run(AppSpec{..})`, shortcuts, and the `poll` that takes what
   the `Reader` published and runs the `Cmd`s the screens sent.
-- `src/reader/*` and `Reader` in `main.rs` — the logic, unchanged, written against gpui's
-  `Window`/`Context<Self>`. `src/rt.rs` provides those names over `src/host.rs` (a thread per
+- `src/reader/*` and `Reader` in `src/reader/state.rs` — the logic, unchanged, written against gpui's
+  `Window`/`Context<Self>`. `src/host/rt.rs` provides those names over `src/host/mod.rs` (a thread per
   spawned task, a scoped hop back onto the window's thread for `update`), so the logic needed no rewrite.
-- `src/fonts.rs` — the bundled Geist and Geist Mono, handed to Rune's `AppSpec`.
+- `src/config/fonts.rs` — the bundled Geist and Geist Mono, handed to Rune's `AppSpec`.
 
 gpui, NSH, `vendor/`, `src/nsh`, `src/ui`, `terminal_view.rs` and `theme.rs` are gone.
 

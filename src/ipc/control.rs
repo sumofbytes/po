@@ -8,11 +8,11 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, mpsc::Sender};
 
-use crate::profile::UnboundedReceiver;
+use crate::dev::profile::UnboundedReceiver;
 use anyhow::Result;
 use serde_json::Value;
 
-use crate::command::{Caller, Command, Reply};
+use crate::ipc::command::{Caller, Command, Reply};
 
 /// A parsed request for the window to answer.
 pub struct Request {
@@ -268,7 +268,7 @@ mod server {
     use std::os::unix::{fs::PermissionsExt, net::UnixListener};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use crate::profile::UnboundedSender;
+    use crate::dev::profile::UnboundedSender;
     use futures::channel::mpsc::unbounded;
     use serde_json::json;
 
@@ -420,7 +420,7 @@ mod server {
     /// One line, the request. A little over the biggest body is read (it is JSON-escaped), and
     /// all of it within a few seconds, so a client that drips bytes can't hold a slot.
     pub(super) fn read_request(stream: &std::os::unix::net::UnixStream) -> Result<String, String> {
-        let limit = crate::command::MAX_BODY * 2 + 4096;
+        let limit = crate::ipc::command::MAX_BODY * 2 + 4096;
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         let mut reader = BufReader::new(stream);
         let mut line = Vec::new();

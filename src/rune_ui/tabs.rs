@@ -8,7 +8,7 @@ use crate::model::bus::{Cmd, send};
 use crate::model::tabs::Snapshot;
 
 fn caption_style() -> TextStyle {
-    crate::fonts::ui(12.0, 400.0)
+    crate::config::fonts::ui(12.0, 400.0)
 }
 
 /// The strip of the agent's views, in the band; nothing while there are none to show.

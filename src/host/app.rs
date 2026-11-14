@@ -1,4 +1,4 @@
-//! The Rune host of the [`crate::Reader`]: the window, its panes, and the loop that gives the
+//! The Rune host of the [`crate::reader::state::Reader`]: the window, its panes, and the loop that gives the
 //! reader what happens (tasks finishing, commands the screens send, keys) and the screens what the
 //! reader publishes.
 use std::sync::{Mutex, OnceLock};
@@ -7,12 +7,12 @@ use std::time::Instant;
 use rune::{AppSpec, Cx, El, Key, KeyEvent, Tx, Waker};
 use rune_kit::Kit;
 
+use crate::host::rt::{Context, Core, Window};
 use crate::host::{self, Inbox, Wake};
 use crate::model::bus::{self};
 use crate::reader::render::Layout;
-use crate::rt::{Context, Core, Window};
 use crate::rune_ui::shell::{Host, Shell};
-use crate::{Prefetch, Reader, config, pr, rune_ui};
+use crate::{config, files::watch::Prefetch, reader::state::Reader, rune_ui, vcs::pr};
 
 /// What `main` parsed: what the first window opens.
 struct Launch {
@@ -77,7 +77,7 @@ impl Host for State {
             .and_then(|live| live.core.reader.project.terminal.as_ref())
     }
 
-    fn attach(&mut self, sources: Vec<crate::Source>) {
+    fn attach(&mut self, sources: Vec<crate::session::thread::Source>) {
         if let Some(Live { core, host, .. }) = self.live.as_mut() {
             core.reader.attach(sources, &mut Context::new(host.clone()));
         }
@@ -111,7 +111,7 @@ fn named_kit(name: &str) -> Kit {
 
 fn init() -> State {
     let settings = config::load();
-    crate::fonts::set_sizes(&settings);
+    crate::config::fonts::set_sizes(&settings);
     let kit = theme_kit(&settings);
     State {
         kit,
@@ -156,11 +156,11 @@ fn setup(s: &mut State, waker: Waker) {
     });
 }
 
-fn terminal_colors(kit: &Kit) -> (crate::terminal::Rgb, crate::terminal::Rgb) {
+fn terminal_colors(kit: &Kit) -> (crate::system::terminal::Rgb, crate::system::terminal::Rgb) {
     let rgb = |c: rune::Color| {
         let hex = c.hex();
         let byte = |i: usize| u8::from_str_radix(&hex[i..i + 2], 16).unwrap_or(0);
-        crate::terminal::Rgb(byte(1), byte(3), byte(5))
+        crate::system::terminal::Rgb(byte(1), byte(3), byte(5))
     };
     (rgb(kit.c.text_base), rgb(kit.c.bg_base))
 }
@@ -171,7 +171,7 @@ fn terminal_colors(kit: &Kit) -> (crate::terminal::Rgb, crate::terminal::Rgb) {
 /// `rounds` question-and-answer pairs so a long transcript lays out with nobody at the window.
 /// Runs on the first poll after two seconds, so the headless script has already opened a thread.
 /// Without `PO_BENCH` nothing happens: this is off unless it asks for it.
-fn bench_fill(reader: &mut crate::Reader) -> Option<usize> {
+fn bench_fill(reader: &mut crate::reader::state::Reader) -> Option<usize> {
     let rounds = std::env::var("PO_BENCH")
         .ok()
         .filter(|spec| spec.starts_with("stream"))
@@ -188,14 +188,16 @@ fn bench_fill(reader: &mut crate::Reader) -> Option<usize> {
     };
     reader.thread.blank = false;
     for i in 0..rounds {
-        reader.thread.messages.push(crate::Msg::User(
+        reader.thread.messages.push(crate::session::chat::Msg::User(
             format!("Question {i}: explain part {i} of Rust's ownership model."),
             vec![],
         ));
         reader
             .thread
             .messages
-            .push(crate::Msg::Agent(vec![crate::Block::Text(markdown(i))]));
+            .push(crate::session::chat::Msg::Agent(vec![
+                crate::session::chat::Block::Text(markdown(i)),
+            ]));
     }
     Some(rounds)
 }
@@ -227,7 +229,7 @@ fn poll(s: &mut State, now: f64, tx: &mut Tx) -> bool {
     if settled {
         // What is on disk now: a save's sizes and theme, or, after a close, the ones from before.
         let settings = config::load();
-        crate::fonts::set_sizes(&settings);
+        crate::config::fonts::set_sizes(&settings);
         s.kit = theme_kit(&settings);
     }
     if recolored {
@@ -301,7 +303,7 @@ fn poll(s: &mut State, now: f64, tx: &mut Tx) -> bool {
             s.shell.viewer.set_width(width);
         }
     } else {
-        let now = crate::Widths {
+        let now = crate::reader::state::Widths {
             left: Some(s.shell.sidebar.width()),
             right: Some(s.shell.viewer.width()),
             explorer: widths.explorer,
@@ -382,11 +384,11 @@ fn on_key(s: &mut State, event: &KeyEvent, tx: &mut Tx) -> bool {
             true
         }
         _ if event.is_command('1') => {
-            reader.show_viewer(crate::Mode::Source, &mut cx);
+            reader.show_viewer(crate::session::project::Mode::Source, &mut cx);
             true
         }
         _ if event.is_command('2') => {
-            reader.show_viewer(crate::Mode::Diff, &mut cx);
+            reader.show_viewer(crate::session::project::Mode::Diff, &mut cx);
             true
         }
         _ if event.is_command('3') => {
@@ -472,24 +474,24 @@ pub fn run(
     let settings = config::load();
     // The fonts the settings name, as a list the text system tries in order, over the bundled ones.
     let ui: &'static str = Box::leak(
-        crate::fonts::family_list(
+        crate::config::fonts::family_list(
             &settings["font"]["family"],
-            crate::fonts::BUNDLED_UI_FAMILY,
+            crate::config::fonts::BUNDLED_UI_FAMILY,
             "system-ui",
         )
         .into_boxed_str(),
     );
     let mono: &'static str = Box::leak(
-        crate::fonts::family_list(
+        crate::config::fonts::family_list(
             &settings["font"]["mono_family"],
-            crate::fonts::BUNDLED_MONO_FAMILY,
+            crate::config::fonts::BUNDLED_MONO_FAMILY,
             "ui-monospace",
         )
         .into_boxed_str(),
     );
     rune::set_app_id("po");
     let app = rune::App::new(AppSpec::<State> {
-        fonts: &crate::fonts::BUNDLED,
+        fonts: &crate::config::fonts::BUNDLED,
         families: (ui, mono),
         setup: Some(setup),
         poll: Some(poll),

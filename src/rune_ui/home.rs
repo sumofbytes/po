@@ -8,7 +8,7 @@ use super::work::{
     body_style, card, metric, muted, priority_tint, small_style, status_glyph, status_tint,
     title_style,
 };
-use crate::date::{Date, due_label};
+use crate::issues::date::{Date, due_label};
 use crate::model::bus::{Cmd, send};
 use crate::model::home::{Model, Pickup, TASKS, Task, complete, greeting};
 use crate::model::sidebar::Mark;
@@ -154,7 +154,7 @@ fn thread_row<S: 'static>(k: &Kit, thread: &Pickup) -> El {
 }
 
 pub fn view<S: 'static>(model: &Model, state: &State, k: &Kit, at: At<S>) -> El {
-    let today = crate::date::today();
+    let today = crate::issues::date::today();
     let mut tasks = card(k, "Today");
     if model.tasks.is_empty() {
         tasks = tasks.child(muted(
@@ -239,7 +239,7 @@ pub fn view<S: 'static>(model: &Model, state: &State, k: &Kit, at: At<S>) -> El 
                 .gap(4.0)
                 .child(muted(k, today.long()))
                 .child(
-                    text(greeting(crate::date::hour()))
+                    text(greeting(crate::issues::date::hour()))
                         .font(title_style())
                         .color(k.c.text_base),
                 )

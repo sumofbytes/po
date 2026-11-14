@@ -1,9 +1,14 @@
 //! Methods of [`Reader`], grouped by what they do.
 
+use crate::files::watch::*;
+use crate::reader::state::*;
+use crate::session::chat::*;
+use crate::session::project::*;
+use crate::session::thread::*;
 use crate::*;
 
 /// An agent's view as the pane shows it, with no chrome.
-pub(crate) fn agent_view_snapshot(view: &command::AgentView) -> model::agent::Snapshot {
+pub(crate) fn agent_view_snapshot(view: &crate::ipc::command::AgentView) -> model::agent::Snapshot {
     model::agent::Snapshot {
         title: view.title.clone(),
         body: model::agent::Body::Markdown(model::source::Shared(Arc::from(view.body.as_str()))),
@@ -12,7 +17,7 @@ pub(crate) fn agent_view_snapshot(view: &command::AgentView) -> model::agent::Sn
 }
 
 /// A form the agent put on screen as the pane shows it, with no chrome.
-pub(crate) fn form_view_snapshot(form: &command::AgentForm) -> model::agent::Snapshot {
+pub(crate) fn form_view_snapshot(form: &crate::ipc::command::AgentForm) -> model::agent::Snapshot {
     let fields = form
         .fields
         .iter()
@@ -70,7 +75,8 @@ impl Reader {
             },
             selected: (pid, thread.id) == (active_project, active_thread),
             controlled: self.grants.get(&thread.id).is_some_and(|grant| {
-                *grant != command::Grant::initial() && *grant != command::Grant::default()
+                *grant != crate::ipc::command::Grant::initial()
+                    && *grant != crate::ipc::command::Grant::default()
             }),
             ago: ago(now, thread.active_at),
             closing: self.close_loses_work(thread.id),
@@ -218,7 +224,9 @@ impl Reader {
             issues_open: self.issues_open,
             home_open: self.home_open,
             // What the store worked out, with no disk read: a render only reads the issues.
-            issues: issues::shared::overview().borrow().counts(date::today()),
+            issues: issues::shared::overview()
+                .borrow()
+                .counts(crate::issues::date::today()),
         }
     }
 
@@ -314,7 +322,7 @@ impl Reader {
             .grants
             .get(&thread.id)
             .copied()
-            .unwrap_or_else(command::Grant::initial);
+            .unwrap_or_else(crate::ipc::command::Grant::initial);
         chat::Snapshot {
             title: capitalized(thread.title()),
             thread: (self.project_id, thread.id),
@@ -346,12 +354,12 @@ impl Reader {
                     || (grant.read_project && !started.read_project)
                     || (grant.approvals && !started.approvals)
             }),
-            isolate: worktree::in_repo(&self.project.root).then_some(thread.isolate),
+            isolate: crate::vcs::worktree::in_repo(&self.project.root).then_some(thread.isolate),
             grant: Some(grant).map(|g| chat::Grant {
                 scope: match g.scope {
-                    command::Scope::Viewer => chat::Scope::Viewer,
-                    command::Scope::Orchestrate => chat::Scope::Orchestrate,
-                    command::Scope::Global => chat::Scope::Global,
+                    crate::ipc::command::Scope::Viewer => chat::Scope::Viewer,
+                    crate::ipc::command::Scope::Orchestrate => chat::Scope::Orchestrate,
+                    crate::ipc::command::Scope::Global => chat::Scope::Global,
                 },
                 read: g.read_project,
                 approvals: g.approvals,
@@ -467,13 +475,13 @@ impl Reader {
                     .grants
                     .get(&id)
                     .copied()
-                    .unwrap_or_else(command::Grant::initial);
+                    .unwrap_or_else(crate::ipc::command::Grant::initial);
                 match change {
                     GrantChange::Set(set) => {
                         let scope = match set.scope {
-                            ChatScope::Viewer => command::Scope::Viewer,
-                            ChatScope::Orchestrate => command::Scope::Orchestrate,
-                            ChatScope::Global => command::Scope::Global,
+                            ChatScope::Viewer => crate::ipc::command::Scope::Viewer,
+                            ChatScope::Orchestrate => crate::ipc::command::Scope::Orchestrate,
+                            ChatScope::Global => crate::ipc::command::Scope::Global,
                         };
                         self.set_grant(id, scope, set.read, set.approvals, cx);
                     }
@@ -493,7 +501,7 @@ impl Reader {
                         .grants
                         .get(&id)
                         .copied()
-                        .unwrap_or_else(command::Grant::initial)
+                        .unwrap_or_else(crate::ipc::command::Grant::initial)
                         != grant
                     && let Some(key) = self
                         .thread
@@ -674,7 +682,7 @@ impl Reader {
         } else {
             self.thread
                 .views
-                .apply(command::Command::ViewClose { id: id.to_string() })
+                .apply(crate::ipc::command::Command::ViewClose { id: id.to_string() })
                 .ok();
         }
         self.sync_view_docs(cx);
@@ -778,10 +786,10 @@ impl Reader {
         if children.is_empty() {
             return None;
         }
-        let in_state = |state: crate::state::ThreadState| {
+        let in_state = |state: crate::session::state::ThreadState| {
             children
                 .iter()
-                .filter(|t| crate::state::state(&t.facts()) == state)
+                .filter(|t| crate::session::state::state(&t.facts()) == state)
                 .count()
         };
         let mut line = format!(
@@ -789,11 +797,11 @@ impl Reader {
             children.len(),
             if children.len() == 1 { "" } else { "s" }
         );
-        let asking = in_state(crate::state::ThreadState::Asking);
+        let asking = in_state(crate::session::state::ThreadState::Asking);
         if asking > 0 {
             line.push_str(&format!(" · {asking} asking"));
         }
-        let failed = in_state(crate::state::ThreadState::Failed);
+        let failed = in_state(crate::session::state::ThreadState::Failed);
         if failed > 0 {
             line.push_str(&format!(" · {failed} failed"));
         }

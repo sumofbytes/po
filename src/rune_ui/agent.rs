@@ -10,10 +10,10 @@ use crate::model::agent::{Body, Field, Snapshot};
 use crate::model::bus::{Cmd, send};
 
 fn label_style() -> TextStyle {
-    crate::fonts::ui(12.0, 500.0)
+    crate::config::fonts::ui(12.0, 500.0)
 }
 fn name_style() -> TextStyle {
-    crate::fonts::ui(13.0, 400.0)
+    crate::config::fonts::ui(13.0, 400.0)
 }
 
 /// What the user has put in the form on screen. Seeded anew when the form's id or fields change,

@@ -17,8 +17,8 @@ use anyhow::{Context, Result, anyhow, bail};
 use futures::channel::mpsc::unbounded;
 use serde_json::{Value, json};
 
-use crate::acp::{ConfigOption, Event, PermissionOption, SessionInfo};
-use crate::profile::{UnboundedReceiver, UnboundedSender};
+use crate::agent::acp::{ConfigOption, Event, PermissionOption, SessionInfo};
+use crate::dev::profile::{UnboundedReceiver, UnboundedSender};
 
 /// The client's events, for the thread to take; followed by hotpath in a profiled build.
 fn events() -> (UnboundedSender<Event>, UnboundedReceiver<Event>) {

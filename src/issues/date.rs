@@ -119,7 +119,7 @@ pub fn today() -> Date {
             return day;
         }
     }
-    Date((crate::now_ms() / 86_400_000) as i64)
+    Date((crate::session::thread::now_ms() / 86_400_000) as i64)
 }
 
 /// The hour of the day where the user is, 0 to 23.
@@ -135,7 +135,7 @@ pub fn hour() -> u32 {
             }
         }
     }
-    ((crate::now_ms() / 3_600_000) % 24) as u32
+    ((crate::session::thread::now_ms() / 3_600_000) % 24) as u32
 }
 
 impl Date {
@@ -144,8 +144,8 @@ impl Date {
         let (_, month, day) = self.ymd();
         format!(
             "{}, {} {day}",
-            crate::sentence(WEEKDAYS[self.weekday()]),
-            crate::sentence(MONTHS[month as usize - 1])
+            crate::session::chat::sentence(WEEKDAYS[self.weekday()]),
+            crate::session::chat::sentence(MONTHS[month as usize - 1])
         )
     }
 }

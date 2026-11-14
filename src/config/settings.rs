@@ -4,7 +4,7 @@
 use serde_json::{Map, Value};
 
 use crate::config;
-use crate::fonts;
+use crate::config::fonts;
 
 /// One entry of the config's `agents`. Keys the page has no field for, like `daemon`, are kept.
 #[derive(Clone, Debug, PartialEq)]

@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 
 use super::{Status, Tracker};
-use crate::date::Date;
+use crate::issues::date::Date;
 
 /// One line of the old list: a todo, or a header that grouped the todos under it.
 #[derive(Clone, Debug, PartialEq)]

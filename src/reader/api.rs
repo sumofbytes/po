@@ -1,5 +1,9 @@
 //! Methods of [`Reader`], grouped by what they do.
 
+use crate::reader::state::*;
+use crate::session::chat::*;
+use crate::session::project::*;
+use crate::session::thread::*;
 use crate::*;
 
 impl Reader {
@@ -8,17 +12,17 @@ impl Reader {
     #[hotpath::measure(impl_type = "Reader")]
     pub(crate) fn run_command(
         &mut self,
-        caller: command::Caller,
-        command: command::Command,
+        caller: crate::ipc::command::Caller,
+        command: crate::ipc::command::Command,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> command::Answer {
+    ) -> crate::ipc::command::Answer {
         let (name, writes) = (command.name(), command.writes());
         let answer = self.run_command_inner(caller, command, window, cx);
         let outcome = match &answer {
-            command::Answer::Now(Ok(_)) => "ok".to_string(),
-            command::Answer::Now(Err(why)) => format!("refused: {why}"),
-            command::Answer::Later(_) => "waiting".to_string(),
+            crate::ipc::command::Answer::Now(Ok(_)) => "ok".to_string(),
+            crate::ipc::command::Answer::Now(Err(why)) => format!("refused: {why}"),
+            crate::ipc::command::Answer::Later(_) => "waiting".to_string(),
         };
         self.record(caller, name, outcome, writes);
         answer
@@ -26,31 +30,35 @@ impl Reader {
 
     pub(crate) fn run_command_inner(
         &mut self,
-        caller: command::Caller,
-        command: command::Command,
+        caller: crate::ipc::command::Caller,
+        command: crate::ipc::command::Command,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> command::Answer {
+    ) -> crate::ipc::command::Answer {
         log::info!("control: {caller:?} {}", command.name());
         if let Err(why) = self.authorize(caller, &command) {
             log::warn!("control: {caller:?} {} refused: {why}", command.name());
-            return command::Answer::Now(Err(why));
+            return crate::ipc::command::Answer::Now(Err(why));
         }
         // The user's connection has no thread of its own; its commands act on the one on screen.
         let id = match caller {
-            command::Caller::Thread(id) => id,
-            command::Caller::User => self.thread.id,
+            crate::ipc::command::Caller::Thread(id) => id,
+            crate::ipc::command::Caller::User => self.thread.id,
         };
         match command.family() {
-            command::Family::View => command::Answer::Now(self.run_view(id, command, window, cx)),
-            command::Family::Project if command.writes() => {
-                command::Answer::Now(self.run_project(id, command, window, cx))
+            crate::ipc::command::Family::View => {
+                crate::ipc::command::Answer::Now(self.run_view(id, command, window, cx))
             }
-            command::Family::Control
-            | command::Family::Agent
-            | command::Family::Project
-            | command::Family::Window => command::Answer::Now(self.run_read(caller, id, command)),
-            command::Family::Thread => self.run_thread(caller, id, command, window, cx),
+            crate::ipc::command::Family::Project if command.writes() => {
+                crate::ipc::command::Answer::Now(self.run_project(id, command, window, cx))
+            }
+            crate::ipc::command::Family::Control
+            | crate::ipc::command::Family::Agent
+            | crate::ipc::command::Family::Project
+            | crate::ipc::command::Family::Window => {
+                crate::ipc::command::Answer::Now(self.run_read(caller, id, command))
+            }
+            crate::ipc::command::Family::Thread => self.run_thread(caller, id, command, window, cx),
         }
     }
 
@@ -58,16 +66,16 @@ impl Reader {
     /// the command names stands to the caller's own.
     pub(crate) fn authorize(
         &self,
-        caller: command::Caller,
-        command: &command::Command,
+        caller: crate::ipc::command::Caller,
+        command: &crate::ipc::command::Command,
     ) -> Result<(), String> {
         let (grant, id) = match caller {
-            command::Caller::User => (command::Grant::user(), None),
-            command::Caller::Thread(id) => (
+            crate::ipc::command::Caller::User => (crate::ipc::command::Grant::user(), None),
+            crate::ipc::command::Caller::Thread(id) => (
                 self.grants
                     .get(&id)
                     .copied()
-                    .unwrap_or_else(command::Grant::initial),
+                    .unwrap_or_else(crate::ipc::command::Grant::initial),
                 Some(id),
             ),
         };
@@ -81,9 +89,9 @@ impl Reader {
         let relation = match command.target() {
             Some(target) => match id {
                 Some(id) => self.relation_to(id, target),
-                None => command::Relation::Own,
+                None => crate::ipc::command::Relation::Own,
             },
-            None => command::Relation::Own,
+            None => crate::ipc::command::Relation::Own,
         };
         grant
             .allows(command, relation)
@@ -93,8 +101,8 @@ impl Reader {
 
     /// How `target` stands to thread `caller`: itself, its child, a
     /// sibling thread of its project, or a thread elsewhere.
-    pub(crate) fn relation_to(&self, caller: u64, target: u64) -> command::Relation {
-        use command::Relation;
+    pub(crate) fn relation_to(&self, caller: u64, target: u64) -> crate::ipc::command::Relation {
+        use crate::ipc::command::Relation;
         if target == caller {
             return Relation::Own;
         }
@@ -110,7 +118,7 @@ impl Reader {
             .iter()
             .map(|view| view.threads.iter().map(|thread| thread.id).collect())
             .collect();
-        if state::share_project(&projects, caller, target) {
+        if crate::session::state::share_project(&projects, caller, target) {
             Relation::Sibling
         } else {
             Relation::Elsewhere
@@ -133,11 +141,11 @@ impl Reader {
     pub(crate) fn run_view(
         &mut self,
         id: u64,
-        command: command::Command,
+        command: crate::ipc::command::Command,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> command::Reply {
-        use command::Command;
+    ) -> crate::ipc::command::Reply {
+        use crate::ipc::command::Command;
         let reply = if command.moves_viewer() {
             self.with_thread(id, |reader, visible| {
                 if !visible {
@@ -203,15 +211,16 @@ impl Reader {
     /// reads answer from the state as it is.
     pub(crate) fn run_read(
         &self,
-        caller: command::Caller,
+        caller: crate::ipc::command::Caller,
         id: u64,
-        command: command::Command,
-    ) -> command::Reply {
-        use command::{Command, Scope};
+        command: crate::ipc::command::Command,
+    ) -> crate::ipc::command::Reply {
+        use crate::ipc::command::{Command, Scope};
         use serde_json::json;
         let grant = self.grant_of(caller);
         // Everything, for the user's connection; otherwise what it was granted.
-        let everywhere = matches!(caller, command::Caller::User) || grant.scope == Scope::Global;
+        let everywhere =
+            matches!(caller, crate::ipc::command::Caller::User) || grant.scope == Scope::Global;
         match command {
             Command::ControlInfo => self.read_control_info(id, grant),
             Command::AuditList { limit } => self.read_audit(limit),
@@ -231,7 +240,7 @@ impl Reader {
                     .agents
                     .iter()
                     .map(|agent| {
-                        state::AgentInfo {
+                        crate::session::state::AgentInfo {
                             id: agent.id.clone(),
                             name: agent.name.clone(),
                             trusted: config::trusted(agent),
@@ -273,7 +282,7 @@ impl Reader {
                     .options
                     .iter()
                     .map(|option| {
-                        state::OptionInfo {
+                        crate::session::state::OptionInfo {
                             id: option.id.clone(),
                             name: option.name.clone(),
                             category: option.category.clone(),
@@ -296,8 +305,12 @@ impl Reader {
         }
     }
 
-    fn read_control_info(&self, id: u64, grant: command::Grant) -> command::Reply {
-        use command::Scope;
+    fn read_control_info(
+        &self,
+        id: u64,
+        grant: crate::ipc::command::Grant,
+    ) -> crate::ipc::command::Reply {
+        use crate::ipc::command::Scope;
         use serde_json::json;
         let scope = match grant.scope {
             Scope::Viewer => "viewer",
@@ -311,7 +324,7 @@ impl Reader {
         }))
     }
 
-    fn read_audit(&self, limit: Option<usize>) -> command::Reply {
+    fn read_audit(&self, limit: Option<usize>) -> crate::ipc::command::Reply {
         use serde_json::json;
         let skip = self
             .audit
@@ -323,8 +336,8 @@ impl Reader {
             .skip(skip)
             .map(|entry| {
                 let who = match entry.caller {
-                    command::Caller::User => json!("user"),
-                    command::Caller::Thread(id) => json!({ "thread": id }),
+                    crate::ipc::command::Caller::User => json!("user"),
+                    crate::ipc::command::Caller::Thread(id) => json!({ "thread": id }),
                 };
                 json!({ "at": entry.at, "caller": who, "command": entry.command, "outcome": entry.outcome, "count": entry.count })
             })
@@ -332,8 +345,13 @@ impl Reader {
         Ok(json!({ "entries": entries }))
     }
 
-    fn read_thread_find(&self, id: u64, grant: command::Grant, session: String) -> command::Reply {
-        use command::Command;
+    fn read_thread_find(
+        &self,
+        id: u64,
+        grant: crate::ipc::command::Grant,
+        session: String,
+    ) -> crate::ipc::command::Reply {
+        use crate::ipc::command::Command;
         use serde_json::json;
         let views = self.views();
         let found = views
@@ -360,7 +378,7 @@ impl Reader {
         everywhere: bool,
         project: Option<u64>,
         path: Option<String>,
-    ) -> command::Reply {
+    ) -> crate::ipc::command::Reply {
         use serde_json::json;
         let own = self.own_project(id);
         let at = project.or(own).ok_or("that thread is gone")?;
@@ -374,26 +392,27 @@ impl Reader {
         }
         // Read from the repository now: a project that was never on screen has not had
         // its changes listed, and an agent's isolated worktree is just that.
-        let changes = diff::changes(&view.project.root, &view.project.base);
+        let changes = crate::vcs::diff::changes(&view.project.root, &view.project.base);
         match path {
             Some(path) => {
                 let change = changes
                     .iter()
                     .find(|change| change.path == path)
                     .ok_or(format!("`{path}` has no changes"))?;
-                let rows = diff::file_diff(&view.project.root, &view.project.base, change);
+                let rows =
+                    crate::vcs::diff::file_diff(&view.project.root, &view.project.base, change);
                 let mut text = String::new();
                 for row in rows {
-                    if text.len() > state::MAX_DIFF {
-                        text.truncate(state::MAX_DIFF);
+                    if text.len() > crate::session::state::MAX_DIFF {
+                        text.truncate(crate::session::state::MAX_DIFF);
                         text.push_str("\n…");
                         break;
                     }
                     text.push_str(&match row.kind {
-                        diff::Kind::Hunk => format!("{}\n", row.text),
-                        diff::Kind::Added => format!("+{}\n", row.text),
-                        diff::Kind::Removed => format!("-{}\n", row.text),
-                        diff::Kind::Context => format!(" {}\n", row.text),
+                        crate::vcs::diff::Kind::Hunk => format!("{}\n", row.text),
+                        crate::vcs::diff::Kind::Added => format!("+{}\n", row.text),
+                        crate::vcs::diff::Kind::Removed => format!("-{}\n", row.text),
+                        crate::vcs::diff::Kind::Context => format!(" {}\n", row.text),
                     });
                 }
                 Ok(json!({ "path": path, "diff": text }))
@@ -407,17 +426,17 @@ impl Reader {
     fn read_thread_list(
         &self,
         id: u64,
-        grant: command::Grant,
+        grant: crate::ipc::command::Grant,
         everywhere: bool,
         project: Option<u64>,
         state: Option<String>,
-    ) -> command::Reply {
-        use command::Command;
+    ) -> crate::ipc::command::Reply {
+        use crate::ipc::command::Command;
         use serde_json::json;
         let own = self.own_project(id);
         let want = state
             .as_deref()
-            .and_then(crate::state::ThreadState::from_name);
+            .and_then(crate::session::state::ThreadState::from_name);
         let mut threads = Vec::new();
         for view in self.views() {
             if !(everywhere || own == Some(view.id)) || project.is_some_and(|want| want != view.id)
@@ -452,7 +471,7 @@ impl Reader {
         cursor: Option<String>,
         limit: Option<usize>,
         full: Option<bool>,
-    ) -> command::Reply {
+    ) -> crate::ipc::command::Reply {
         use serde_json::json;
         let want = thread.unwrap_or(id);
         let views = self.views();
@@ -465,7 +484,9 @@ impl Reader {
             Some(_) => (true, 0), // the transcript was cleared or replaced since
             None => (false, 0),
         };
-        let limit = limit.unwrap_or(state::DEFAULT_MESSAGES).max(1);
+        let limit = limit
+            .unwrap_or(crate::session::state::DEFAULT_MESSAGES)
+            .max(1);
         let entries: Vec<Value> = all
             .iter()
             .skip(start)
@@ -480,7 +501,7 @@ impl Reader {
         }))
     }
 
-    fn read_last_reply(&self, id: u64, thread: Option<u64>) -> command::Reply {
+    fn read_last_reply(&self, id: u64, thread: Option<u64>) -> crate::ipc::command::Reply {
         use serde_json::json;
         let want = thread.unwrap_or(id);
         let views = self.views();
@@ -504,21 +525,24 @@ impl Reader {
             })
             .unwrap_or_default();
         let mut text = text;
-        if text.len() > command::MAX_BODY {
-            text.truncate(command::MAX_BODY);
+        if text.len() > crate::ipc::command::MAX_BODY {
+            text.truncate(crate::ipc::command::MAX_BODY);
             text.push_str("\n…");
         }
-        Ok(json!({ "text": text, "state": state::state(&thread.facts()).name() }))
+        Ok(json!({ "text": text, "state": crate::session::state::state(&thread.facts()).name() }))
     }
 
-    pub(crate) fn grant_of(&self, caller: command::Caller) -> command::Grant {
+    pub(crate) fn grant_of(
+        &self,
+        caller: crate::ipc::command::Caller,
+    ) -> crate::ipc::command::Grant {
         match caller {
-            command::Caller::User => command::Grant::user(),
-            command::Caller::Thread(id) => self
+            crate::ipc::command::Caller::User => crate::ipc::command::Grant::user(),
+            crate::ipc::command::Caller::Thread(id) => self
                 .grants
                 .get(&id)
                 .copied()
-                .unwrap_or_else(command::Grant::initial),
+                .unwrap_or_else(crate::ipc::command::Grant::initial),
         }
     }
 
@@ -527,11 +551,11 @@ impl Reader {
     pub(crate) fn run_project(
         &mut self,
         id: u64,
-        command: command::Command,
+        command: crate::ipc::command::Command,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> command::Reply {
-        use command::Command;
+    ) -> crate::ipc::command::Reply {
+        use crate::ipc::command::Command;
         use serde_json::json;
         match command {
             Command::Issues {
@@ -636,9 +660,9 @@ impl Reader {
         id: u64,
         op: issues::api::Op,
         args: &serde_json::Value,
-    ) -> command::Reply {
+    ) -> crate::ipc::command::Reply {
         let root = self.issues_root_of(id);
-        let today = date::today();
+        let today = crate::issues::date::today();
         issues::shared::change_repo(&root, |tracker, now| {
             issues::api::run(op, args, tracker, now, today)
         })
@@ -662,11 +686,11 @@ impl Reader {
     pub(crate) fn create_isolated(
         &mut self,
         id: u64,
-        command: command::Command,
+        command: crate::ipc::command::Command,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> command::Reply {
-        let command::Command::ThreadCreateIsolated {
+    ) -> crate::ipc::command::Reply {
+        let crate::ipc::command::Command::ThreadCreateIsolated {
             prompt,
             agent,
             options,
@@ -686,7 +710,7 @@ impl Reader {
         args: &serde_json::Value,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> command::Reply {
+    ) -> crate::ipc::command::Reply {
         let root = self.issues_root_of(id);
         let (number, prompt, key) = issues::shared::change_repo(&root, |tracker, _| {
             let number = issues::api::work_issue(tracker, args)?;
@@ -734,7 +758,7 @@ impl Reader {
         issue: Option<(PathBuf, u64)>,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> command::Reply {
+    ) -> crate::ipc::command::Reply {
         let key = self.child_agent(id, agent)?;
         let project = self.project_of(id).ok_or("that thread is gone")?;
         if self.finishing || self.isolating {
@@ -753,7 +777,7 @@ impl Reader {
         self.next_request += 1;
         let handle = window.window_handle();
         cx.spawn(async move |this, cx| {
-            let made = cx.background_executor().spawn(async move { worktree::Worktree::create(&from) }).await;
+            let made = cx.background_executor().spawn(async move { crate::vcs::worktree::Worktree::create(&from) }).await;
             handle
                 .update(cx, |_, window, cx| {
                     this.update(cx, |reader, cx| {
@@ -788,7 +812,7 @@ impl Reader {
     pub(crate) fn start_isolated(
         &mut self,
         parent: u64,
-        wt: worktree::Worktree,
+        wt: crate::vcs::worktree::Worktree,
         key: String,
         prompt: String,
         options: Vec<(String, String)>,
@@ -895,7 +919,7 @@ impl Reader {
                         .background_executor()
                         .spawn({
                             let spec = spec.clone();
-                            async move { pr::Pr::open(&from, &spec) }
+                            async move { crate::vcs::pr::Pr::open(&from, &spec) }
                         })
                         .await;
                     handle
@@ -974,13 +998,13 @@ impl Reader {
     /// runs on the UI thread through the swap, and nothing here switches the screen.
     pub(crate) fn run_thread(
         &mut self,
-        caller: command::Caller,
+        caller: crate::ipc::command::Caller,
         id: u64,
-        command: command::Command,
+        command: crate::ipc::command::Command,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> command::Answer {
-        use command::{Answer, Command};
+    ) -> crate::ipc::command::Answer {
+        use crate::ipc::command::{Answer, Command};
         // A wait's deadline is capped with the command's own timeout, judged before the
         // command is taken apart.
         let deadline = std::time::Instant::now() + command.timeout();
@@ -1041,7 +1065,7 @@ impl Reader {
         later: Option<bool>,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> command::Reply {
+    ) -> crate::ipc::command::Reply {
         if target == id {
             return Err("send to a thread you started, not to yourself".into());
         }
@@ -1073,7 +1097,7 @@ impl Reader {
         option: String,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> command::Reply {
+    ) -> crate::ipc::command::Reply {
         let answered = self.with_thread(target, |reader, _| {
             reader.observed(window, cx, |reader, _, cx| {
                 // Only a permission ask: the user's approval of a command or an MCP
@@ -1113,7 +1137,7 @@ impl Reader {
         answered.unwrap_or_else(|| Err("no such thread".into()))
     }
 
-    fn cancel_thread(&mut self, target: u64, cx: &mut Context<Self>) -> command::Reply {
+    fn cancel_thread(&mut self, target: u64, cx: &mut Context<Self>) -> crate::ipc::command::Reply {
         let stopped = self.with_thread(target, |reader, _| {
             reader.stop(cx);
             let dropped: Vec<Value> = reader
@@ -1135,7 +1159,7 @@ impl Reader {
         value: String,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> command::Reply {
+    ) -> crate::ipc::command::Reply {
         let target = thread.unwrap_or(id);
         let stored = self.with_thread(target, |reader, _| {
             let thread = &mut reader.thread;
@@ -1179,7 +1203,7 @@ impl Reader {
         target: u64,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> command::Reply {
+    ) -> crate::ipc::command::Reply {
         match self.project_of(target) {
             Some(project) => {
                 self.close_any_thread(project, target, window, cx);
@@ -1192,19 +1216,19 @@ impl Reader {
     /// Refuses an orchestrator's command that names itself: these are for the threads it started.
     fn not_self(
         &self,
-        caller: command::Caller,
+        caller: crate::ipc::command::Caller,
         id: u64,
         target: u64,
         verb: &str,
     ) -> Result<(), String> {
-        if matches!(caller, command::Caller::Thread(_)) && target == id {
+        if matches!(caller, crate::ipc::command::Caller::Thread(_)) && target == id {
             return Err(format!("{verb} a thread you started, not yourself"));
         }
         Ok(())
     }
 
     /// Whether the caller may hold one more wait: two each, [`MAX_WAITS`] in all.
-    fn wait_room(&self, caller: command::Caller) -> Result<(), String> {
+    fn wait_room(&self, caller: crate::ipc::command::Caller) -> Result<(), String> {
         if self
             .waiters
             .iter()
@@ -1222,12 +1246,12 @@ impl Reader {
 
     fn wait_on_threads(
         &self,
-        caller: command::Caller,
+        caller: crate::ipc::command::Caller,
         id: u64,
         threads: Option<Vec<u64>>,
         until: Option<String>,
         deadline: std::time::Instant,
-    ) -> Result<command::Wait, String> {
+    ) -> Result<crate::ipc::command::Wait, String> {
         self.wait_room(caller)?;
         // Waits target children only; a wait on the caller itself never ends well.
         for target in threads.iter().flatten() {
@@ -1248,12 +1272,12 @@ impl Reader {
                 vec!["ready", "asking", "approval", "failed", "asleep", "closed"]
             }
             Some(state) => vec![
-                crate::state::ThreadState::from_name(state)
+                crate::session::state::ThreadState::from_name(state)
                     .expect("checked")
                     .name(),
             ],
         };
-        Ok(command::Wait {
+        Ok(crate::ipc::command::Wait {
             threads: threads.unwrap_or_default(),
             until,
             deadline,
@@ -1263,13 +1287,13 @@ impl Reader {
 
     fn wait_on_form(
         &mut self,
-        caller: command::Caller,
+        caller: crate::ipc::command::Caller,
         id: u64,
         form: String,
         deadline: std::time::Instant,
-    ) -> command::Answer {
+    ) -> crate::ipc::command::Answer {
         if let Err(why) = self.wait_room(caller) {
-            return command::Answer::Now(Err(why));
+            return crate::ipc::command::Answer::Now(Err(why));
         }
         // A form the user has answered already answers now; one still open is waited on.
         let state = self.with_thread(id, |reader, _| {
@@ -1280,25 +1304,25 @@ impl Reader {
                 .and_then(|form| form.answered.clone())
         });
         match state {
-            Some(Some(values)) => command::Answer::Now(Ok(values)),
-            Some(None) => command::Answer::Later(command::Wait {
+            Some(Some(values)) => crate::ipc::command::Answer::Now(Ok(values)),
+            Some(None) => crate::ipc::command::Answer::Later(crate::ipc::command::Wait {
                 threads: vec![],
                 until: vec![],
                 deadline,
                 form: Some(form),
             }),
-            None => {
-                command::Answer::Now(Err(format!("no form `{form}`; show_form returns its id")))
-            }
+            None => crate::ipc::command::Answer::Now(Err(format!(
+                "no form `{form}`; show_form returns its id"
+            ))),
         }
     }
 
     /// Holds a wait the window answered later, and starts its timer.
     pub(crate) fn add_waiter(
         &mut self,
-        caller: command::Caller,
-        wait: command::Wait,
-        reply: std::sync::mpsc::Sender<command::Reply>,
+        caller: crate::ipc::command::Caller,
+        wait: crate::ipc::command::Wait,
+        reply: std::sync::mpsc::Sender<crate::ipc::command::Reply>,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -1329,7 +1353,7 @@ impl Reader {
     /// push the rest out. The same thing twice in a row is counted, not repeated.
     pub(crate) fn record(
         &mut self,
-        caller: command::Caller,
+        caller: crate::ipc::command::Caller,
         command: &'static str,
         outcome: String,
         writes: bool,
@@ -1371,7 +1395,7 @@ impl Reader {
 
     /// Ends the waits of a caller whose turn stopped, failed or exited, or whose grant was
     /// lowered: they would never be answered in time, and the caller is told why.
-    pub(crate) fn drop_waiters(&mut self, caller: command::Caller, why: &str) {
+    pub(crate) fn drop_waiters(&mut self, caller: crate::ipc::command::Caller, why: &str) {
         let mut kept = Vec::new();
         for waiter in self.waiters.drain(..) {
             if waiter.caller == caller {
@@ -1385,7 +1409,7 @@ impl Reader {
 
     /// Answers the waits `id`'s change satisfies. A waiter whose receiving side is gone is
     /// dropped here, rather than held for a sweep.
-    pub(crate) fn wake_waiters(&mut self, id: u64, after: crate::state::ThreadState) {
+    pub(crate) fn wake_waiters(&mut self, id: u64, after: crate::session::state::ThreadState) {
         // The parent of the thread that changed, computed before the waits are taken out, so
         // the two looks at the threads don't meet.
         let parent = self
@@ -1399,8 +1423,8 @@ impl Reader {
                 kept.push(waiter);
                 continue;
             }
-            let watched = matches!(waiter.caller, command::Caller::User)
-                || matches!(waiter.caller, command::Caller::Thread(caller) if parent == Some(caller));
+            let watched = matches!(waiter.caller, crate::ipc::command::Caller::User)
+                || matches!(waiter.caller, crate::ipc::command::Caller::Thread(caller) if parent == Some(caller));
             let hit = (waiter.threads.contains(&id) || (waiter.threads.is_empty() && watched))
                 && (waiter.until.is_empty() || waiter.until.contains(&after.name()));
             if hit && waiter
@@ -1422,7 +1446,7 @@ impl Reader {
         let mut kept = Vec::new();
         for waiter in self.waiters.drain(..) {
             let hit = waiter.form.as_deref() == Some(id)
-                && waiter.caller == command::Caller::Thread(owner);
+                && waiter.caller == crate::ipc::command::Caller::Thread(owner);
             if hit && waiter.reply.send(Ok(reply.clone())).is_ok() {
                 continue;
             }
@@ -1436,7 +1460,7 @@ impl Reader {
         let mut kept = Vec::new();
         for waiter in self.waiters.drain(..) {
             let hit = waiter.form.as_deref() == Some(id)
-                && waiter.caller == command::Caller::Thread(owner);
+                && waiter.caller == crate::ipc::command::Caller::Thread(owner);
             if hit {
                 waiter
                     .reply
@@ -1457,9 +1481,9 @@ impl Reader {
         cx: &mut Context<Self>,
         work: impl FnOnce(&mut Self, &mut Window, &mut Context<Self>) -> R,
     ) -> R {
-        let before = crate::state::state(&self.thread.facts());
+        let before = crate::session::state::state(&self.thread.facts());
         let out = work(self, window, cx);
-        let after = crate::state::state(&self.thread.facts());
+        let after = crate::session::state::state(&self.thread.facts());
         if before != after {
             self.changed(self.thread.id, after, window, cx);
         }
@@ -1470,7 +1494,7 @@ impl Reader {
     pub(crate) fn changed(
         &mut self,
         id: u64,
-        after: crate::state::ThreadState,
+        after: crate::session::state::ThreadState,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -1482,7 +1506,7 @@ impl Reader {
     /// Tells every `po ctl watch` that thread `id` is now in `after`; one that has hung up is
     /// dropped.
     #[hotpath::measure(impl_type = "Reader")]
-    pub(crate) fn publish(&mut self, id: u64, after: crate::state::ThreadState) {
+    pub(crate) fn publish(&mut self, id: u64, after: crate::session::state::ThreadState) {
         if self.subscribers.is_empty() {
             return;
         }
@@ -1503,7 +1527,7 @@ impl Reader {
     pub(crate) fn notify_parent(
         &mut self,
         id: u64,
-        after: crate::state::ThreadState,
+        after: crate::session::state::ThreadState,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -1524,21 +1548,21 @@ impl Reader {
         if level == Notify::Done
             && matches!(
                 after,
-                crate::state::ThreadState::Running | crate::state::ThreadState::Starting
+                crate::session::state::ThreadState::Running
+                    | crate::session::state::ThreadState::Starting
             )
         {
             return;
         }
         let word = match after {
-            crate::state::ThreadState::Running => "started a turn",
-            crate::state::ThreadState::Asking | crate::state::ThreadState::Approval => {
-                "asks for an answer"
-            }
-            crate::state::ThreadState::Failed => "failed",
-            crate::state::ThreadState::Asleep => "went to sleep",
-            crate::state::ThreadState::Closed => "is closed",
-            crate::state::ThreadState::Starting => "is starting",
-            crate::state::ThreadState::Ready => "finished its turn",
+            crate::session::state::ThreadState::Running => "started a turn",
+            crate::session::state::ThreadState::Asking
+            | crate::session::state::ThreadState::Approval => "asks for an answer",
+            crate::session::state::ThreadState::Failed => "failed",
+            crate::session::state::ThreadState::Asleep => "went to sleep",
+            crate::session::state::ThreadState::Closed => "is closed",
+            crate::session::state::ThreadState::Starting => "is starting",
+            crate::session::state::ThreadState::Ready => "finished its turn",
         };
         let line =
             format!("Thread #{id} {word}. Use last_reply or get_thread to read what it said.");
@@ -1627,7 +1651,11 @@ impl Reader {
 
     /// One thread as the read model sees it: a snapshot of the fields an outsider gets.
     #[hotpath::measure(impl_type = "Reader")]
-    pub(crate) fn thread_info(&self, view: &View<'_>, thread: &Thread) -> state::ThreadInfo {
+    pub(crate) fn thread_info(
+        &self,
+        view: &View<'_>,
+        thread: &Thread,
+    ) -> crate::session::state::ThreadInfo {
         let asking = thread.messages.iter().rev().find_map(|msg| {
             let Msg::Agent(blocks) = msg else { return None };
             blocks.iter().find_map(|block| match block {
@@ -1636,11 +1664,11 @@ impl Reader {
                     title,
                     options,
                     answered: None,
-                }) => Some(state::AskInfo {
+                }) => Some(crate::session::state::AskInfo {
                     title: title.clone(),
                     options: options
                         .iter()
-                        .map(|o| state::AskOption {
+                        .map(|o| crate::session::state::AskOption {
                             id: o.id.clone(),
                             name: o.name.clone(),
                             kind: o.kind.clone(),
@@ -1655,12 +1683,12 @@ impl Reader {
             .filter(|child| child.parent == Some(thread.id))
             .map(|child| child.id)
             .collect();
-        state::ThreadInfo {
+        crate::session::state::ThreadInfo {
             id: thread.id,
             project: view.id,
             title: thread.title(),
             agent: thread.agent.clone().unwrap_or_default(),
-            state: state::state(&thread.facts()),
+            state: crate::session::state::state(&thread.facts()),
             unread: thread.unread,
             busy: thread.busy,
             status: thread.status.clone(),
@@ -1680,8 +1708,8 @@ impl Reader {
 
     /// One project as the read model sees it.
     #[hotpath::measure(impl_type = "Reader")]
-    pub(crate) fn project_info(&self, view: &View<'_>) -> state::ProjectInfo {
-        state::ProjectInfo {
+    pub(crate) fn project_info(&self, view: &View<'_>) -> crate::session::state::ProjectInfo {
+        crate::session::state::ProjectInfo {
             id: view.id,
             root: view.project.root.to_string_lossy().into_owned(),
             name: view.project.name(),
@@ -1698,7 +1726,7 @@ impl Reader {
             dirty: if view.id == self.project_id {
                 !view.project.changes.is_empty()
             } else {
-                !diff::changes(&view.project.root, &view.project.base).is_empty()
+                !crate::vcs::diff::changes(&view.project.root, &view.project.base).is_empty()
             },
             pr: view.project.pr.as_ref().map(|pr| pr.number),
             worktree_of: view.project.worktree.as_ref().map(|wt| {
@@ -1720,12 +1748,12 @@ impl Reader {
     pub(crate) fn set_grant(
         &mut self,
         id: u64,
-        scope: command::Scope,
+        scope: crate::ipc::command::Scope,
         read_project: bool,
         approvals: bool,
         cx: &mut Context<Self>,
     ) {
-        let grant = command::Grant {
+        let grant = crate::ipc::command::Grant {
             scope,
             read_project,
             approvals,
@@ -1736,7 +1764,7 @@ impl Reader {
             .grants
             .get(&id)
             .copied()
-            .unwrap_or_else(command::Grant::initial);
+            .unwrap_or_else(crate::ipc::command::Grant::initial);
         let lowered = before.scope > grant.scope
             || (before.read_project && !grant.read_project)
             || (before.approvals && !grant.approvals);
@@ -1746,7 +1774,10 @@ impl Reader {
         self.grants.insert(id, grant);
         // A lowered grant ends the thread's waits; they would answer what it can no longer ask.
         if lowered {
-            self.drop_waiters(command::Caller::Thread(id), "the grant was lowered");
+            self.drop_waiters(
+                crate::ipc::command::Caller::Thread(id),
+                "the grant was lowered",
+            );
         }
         log::info!(
             "control: thread {id} granted {:?} read_project={read_project} approvals={approvals}",
@@ -1757,7 +1788,7 @@ impl Reader {
 
     /// Ends what thread `id`'s agent may do: back to Viewer, its waiters gone, and its children left running as ordinary threads.
     pub(crate) fn stop_agent_control(&mut self, id: u64, cx: &mut Context<Self>) {
-        self.set_grant(id, command::Scope::Viewer, false, false, cx);
+        self.set_grant(id, crate::ipc::command::Scope::Viewer, false, false, cx);
         // Its children go on as ordinary threads, and no longer start turns of its.
         let quiet = |thread: &mut Thread| {
             if thread.parent == Some(id) {

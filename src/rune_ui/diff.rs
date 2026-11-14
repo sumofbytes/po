@@ -11,10 +11,10 @@ use crate::model::bus::{Cmd, send};
 use crate::model::diff::{Body, Snapshot};
 
 fn caption_style() -> TextStyle {
-    crate::fonts::ui(12.0, 400.0)
+    crate::config::fonts::ui(12.0, 400.0)
 }
 fn name_style() -> TextStyle {
-    crate::fonts::ui(13.0, 400.0)
+    crate::config::fonts::ui(13.0, 400.0)
 }
 
 /// The diff the pane draws, and the two versions it was made from.

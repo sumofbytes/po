@@ -325,7 +325,7 @@ derives its UI colours from each scheme's palette. The set is the
 collection (MIT).
 
 To make your own, write a theme as JSON (see any scheme converted in
-`src/schemes.rs` for the keys) and save it as `<config>/themes/<name>.json`, or
+`src/config/schemes.rs` for the keys) and save it as `<config>/themes/<name>.json`, or
 set `"theme"` to the absolute path of the file; a file there wins over a scheme
 of the same name. The `font` block overrides the theme's UI and monospace fonts
 and sizes. `family` and `mono_family` take a name or a list tried in order

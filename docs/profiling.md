@@ -5,7 +5,7 @@ features times the functions on Po's busy paths, follows its channels and locks,
 report when Po quits. A normal build compiles all of it to nothing, so release binaries are
 unchanged.
 
-`PO_TRACE=1` (see `src/trace.rs`) says how long each launch step took. hotpath says which
+`PO_TRACE=1` (see `src/dev/trace.rs`) says how long each launch step took. hotpath says which
 functions that time went to, how often they ran, and what they allocated, for the whole run.
 
 ## Running

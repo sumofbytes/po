@@ -19,16 +19,16 @@ use crate::model::chat::{
 };
 
 fn body_style() -> TextStyle {
-    crate::fonts::ui(14.0, 400.0)
+    crate::config::fonts::ui(14.0, 400.0)
 }
 fn small_style() -> TextStyle {
-    crate::fonts::ui(12.0, 400.0)
+    crate::config::fonts::ui(12.0, 400.0)
 }
 fn label_style() -> TextStyle {
-    crate::fonts::ui(12.0, 500.0)
+    crate::config::fonts::ui(12.0, 500.0)
 }
 fn mono_style() -> TextStyle {
-    crate::fonts::mono(12.0, 17.0)
+    crate::config::fonts::mono(12.0, 17.0)
 }
 /// The column the conversation and the composer share.
 const COLUMN: f32 = 760.0;

@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 
-use crate::worktree::Spec;
+use crate::vcs::worktree::Spec;
 
 /// A thread that had an agent session, which is what it is resumed from.
 #[derive(Clone)]

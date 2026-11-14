@@ -60,7 +60,7 @@ static SETTINGS: Icon = Icon {
 const NEEDS_MAX: f32 = 220.0;
 
 fn caption_style() -> rune::tok::TextStyle {
-    crate::fonts::ui(12.0, 400.0)
+    crate::config::fonts::ui(12.0, 400.0)
 }
 
 /// What the sidebar keeps between frames: the filter field.
@@ -197,7 +197,7 @@ fn mark(k: &Kit, mark: Mark) -> El {
         Mark::Running => Spinner::new().size(14.0).color(k.c.icon_accent).build(k),
         Mark::Asking => dot(k.c.warning.icon),
         Mark::Failed => text("×")
-            .font(crate::fonts::ui(14.0, 500.0))
+            .font(crate::config::fonts::ui(14.0, 500.0))
             .color(k.c.danger.fg),
     };
     row().size(14.0, 14.0).center().child(shown)
@@ -385,7 +385,7 @@ fn project_section<S: 'static>(
                 SidebarRow::new(label)
                     .height(MORE_ROW)
                     .avatar(chevron)
-                    .title_style(crate::fonts::ui(13.0, 400.0))
+                    .title_style(crate::config::fonts::ui(13.0, 400.0))
                     .select_only()
                     .on_select(move |_: &mut S, _: &mut Tx| send(Cmd::ToggleMore(pid)))
                     .build(k),
@@ -652,7 +652,7 @@ pub fn view<S: 'static>(
         .items_center()
         .child(
             text("Po")
-                .font(crate::fonts::ui(18.0, 600.0))
+                .font(crate::config::fonts::ui(18.0, 600.0))
                 .color(k.c.text_base)
                 .key("brand"),
         );

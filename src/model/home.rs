@@ -4,7 +4,7 @@
 use std::path::{Path, PathBuf};
 
 use super::sidebar::{Mark, Snapshot};
-use crate::date::Date;
+use crate::issues::date::Date;
 use crate::issues::shared::{self, Overview};
 use crate::issues::{Priority, Status};
 

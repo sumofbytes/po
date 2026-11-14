@@ -1,5 +1,7 @@
 //! Methods of [`Reader`], grouped by what they do.
 
+use crate::reader::state::*;
+use crate::session::project::*;
 use crate::*;
 
 impl Reader {
@@ -45,12 +47,15 @@ impl Reader {
     }
 
     /// `command` with its path made one inside the project, or why there is nothing to show.
-    pub(crate) fn check_move(&self, command: command::Command) -> Result<command::Command, String> {
-        use command::Command;
+    pub(crate) fn check_move(
+        &self,
+        command: crate::ipc::command::Command,
+    ) -> Result<crate::ipc::command::Command, String> {
+        use crate::ipc::command::Command;
         let root = &self.project.root;
         Ok(match command {
             Command::FileOpen { path, line } => {
-                let path = command::project_path(root, &path)?;
+                let path = crate::ipc::command::project_path(root, &path)?;
                 let file = root.join(&path);
                 if !file.is_file() {
                     return Err(format!("no file `{path}` in the project"));
@@ -66,7 +71,7 @@ impl Reader {
                 Command::FileOpen { path, line }
             }
             Command::DiffShow { path: Some(path) } => {
-                let path = command::project_path(root, &path)?;
+                let path = crate::ipc::command::project_path(root, &path)?;
                 if !self
                     .project
                     .changes
@@ -83,11 +88,11 @@ impl Reader {
 
     pub(crate) fn apply_move(
         &mut self,
-        command: command::Command,
+        command: crate::ipc::command::Command,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        use command::Command;
+        use crate::ipc::command::Command;
         match command {
             Command::FileOpen { path, line } => {
                 self.show_viewer(Mode::Source, cx);
@@ -163,7 +168,7 @@ impl Reader {
     pub(crate) fn defer_move(
         &mut self,
         thread: u64,
-        command: command::Command,
+        command: crate::ipc::command::Command,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -580,7 +585,7 @@ impl Reader {
         args: &serde_json::Value,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> command::Reply {
+    ) -> crate::ipc::command::Reply {
         if self
             .project_of(id)
             .is_some_and(|project| project != self.project_id)
@@ -645,7 +650,7 @@ impl Reader {
             self.request_save(cx);
         }
         // An agent that was added on the command line isn't in the config; it stays.
-        let mut agents = config::agents(&plugin::effective_config());
+        let mut agents = config::agents(&crate::config::plugin::effective_config());
         let kept: Vec<_> = self
             .agents
             .iter()

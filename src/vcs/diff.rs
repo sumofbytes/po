@@ -45,7 +45,7 @@ pub fn changes(root: &Path, base: &str) -> Vec<Change> {
     } else {
         against(root, base)
     };
-    out.sort_by_cached_key(|change| crate::explorer::order(&change.path));
+    out.sort_by_cached_key(|change| crate::files::explorer::order(&change.path));
     out
 }
 

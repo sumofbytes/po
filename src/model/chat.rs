@@ -1,5 +1,5 @@
 //! What the conversation screen is given and what it sends back: the types [`Snapshot`] is made of,
-//! the channel [`crate::Reader`] publishes it through, and the commands the user's actions become.
+//! the channel [`crate::reader::state::Reader`] publishes it through, and the commands the user's actions become.
 //! No view code, so a screen on any toolkit can use it.
 use std::sync::{Arc, LazyLock};
 
@@ -335,7 +335,7 @@ pub fn shown() -> tokio::sync::watch::Ref<'static, Snapshot> {
     SNAPSHOT.borrow()
 }
 
-/// What the user did, for [`crate::Reader::run`].
+/// What the user did, for [`crate::reader::state::Reader::run`].
 #[derive(Clone, Debug, PartialEq)]
 pub enum Cmd {
     /// The draft changed.

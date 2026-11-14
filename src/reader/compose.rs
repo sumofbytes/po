@@ -1,5 +1,8 @@
 //! Methods of [`Reader`], grouped by what they do.
 
+use crate::reader::state::*;
+use crate::session::chat::*;
+use crate::session::thread::*;
 use crate::*;
 
 impl Reader {
@@ -134,7 +137,7 @@ impl Reader {
             // The thread may have been switched away from meanwhile; the pictures still go to it.
             this.update(cx, |reader, cx| {
                 reader.with_thread(thread, |reader, _| {
-                    let room = attach::MAX_PER_MESSAGE.saturating_sub(reader.thread.attachments.len());
+                    let room = crate::agent::attach::MAX_PER_MESSAGE.saturating_sub(reader.thread.attachments.len());
                     let over = made.len().saturating_sub(room);
                     reader.thread.attachments.extend(made.into_iter().take(room));
                     let mut notes = Vec::new();
@@ -142,7 +145,7 @@ impl Reader {
                         notes.push(format!("{skipped} not attached: only PNG, JPEG, WebP and GIF pictures are taken"));
                     }
                     if over > 0 {
-                        notes.push(format!("{over} not attached: a message holds at most {} pictures", attach::MAX_PER_MESSAGE));
+                        notes.push(format!("{over} not attached: a message holds at most {} pictures", crate::agent::attach::MAX_PER_MESSAGE));
                     }
                     reader.thread.attach_note = (!notes.is_empty()).then(|| notes.join("; "));
                 });
@@ -180,7 +183,9 @@ impl Reader {
         self.thread
             .attachments
             .splice(0..0, item.out.images.iter().cloned());
-        self.thread.attachments.truncate(attach::MAX_PER_MESSAGE);
+        self.thread
+            .attachments
+            .truncate(crate::agent::attach::MAX_PER_MESSAGE);
         let text = if draft.trim().is_empty() {
             item.out.text
         } else {
@@ -226,7 +231,9 @@ impl Reader {
                 self.thread
                     .attachments
                     .splice(0..0, item.out.images.iter().cloned());
-                self.thread.attachments.truncate(attach::MAX_PER_MESSAGE);
+                self.thread
+                    .attachments
+                    .truncate(crate::agent::attach::MAX_PER_MESSAGE);
                 text.push(item.out.text);
             } else {
                 // Kept for `thread.get` to report; the sender is notified as well.

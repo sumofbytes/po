@@ -1,11 +1,12 @@
 //! The tasks a window runs for as long as it lives.
 
+use crate::reader::state::*;
 use crate::*;
 
 impl Reader {
     /// Answers what agents ask of this window through its control socket.
     pub(crate) fn serve_control(
-        mut requests: profile::UnboundedReceiver<control::Request>,
+        mut requests: crate::dev::profile::UnboundedReceiver<crate::ipc::control::Request>,
         window: &Window,
         cx: &mut Context<Self>,
     ) {
@@ -14,7 +15,10 @@ impl Reader {
             while let Some(request) = requests.next().await {
                 let answered = handle.update(cx, |_, window, cx| {
                     this.update(cx, |reader, cx| {
-                        if matches!(request.command, command::Command::EventsSubscribe) {
+                        if matches!(
+                            request.command,
+                            crate::ipc::command::Command::EventsSubscribe
+                        ) {
                             let authorized = reader.authorize(request.caller, &request.command);
                             reader.record(
                                 request.caller,
@@ -39,10 +43,10 @@ impl Reader {
                             return;
                         }
                         match reader.run_command(request.caller, request.command, window, cx) {
-                            command::Answer::Now(reply) => {
+                            crate::ipc::command::Answer::Now(reply) => {
                                 request.reply.send(reply).ok();
                             }
-                            command::Answer::Later(wait) => {
+                            crate::ipc::command::Answer::Later(wait) => {
                                 reader.add_waiter(request.caller, wait, request.reply, window, cx);
                             }
                         };
@@ -118,7 +122,7 @@ impl Reader {
                 let runs = roots.into_iter().map(|root| {
                     let run = cx.background_executor().spawn({
                         let root = root.clone();
-                        async move { worktree::head_of(&root) }
+                        async move { crate::vcs::worktree::head_of(&root) }
                     });
                     let limit = cx.background_executor().timer(Duration::from_secs(10));
                     async move {
