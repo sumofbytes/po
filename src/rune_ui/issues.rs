@@ -13,7 +13,7 @@ use super::dropdown::{self, Line};
 use super::work::{
     body_style, heading_style, muted, priority_tint, small_style, status_glyph, status_tint,
 };
-use crate::date::{Date, due_label, parse_due, today};
+use crate::issues::date::{Date, due_label, parse_due, today};
 use crate::issues::query::{Filter, Group, Scope, parse_quick, sections_across};
 use crate::issues::shared::{self, Nav, Overview, Target};
 use crate::issues::{EpicStatus, Priority, Status};
@@ -563,7 +563,7 @@ fn header<S: 'static>(k: &Kit, state: &State, at: At<S>) -> El {
         .py(12.0)
         .child(
             text("Issues")
-                .font(crate::fonts::ui(20.0, 600.0))
+                .font(crate::config::fonts::ui(20.0, 600.0))
                 .color(k.c.text_base)
                 .mr(16.0),
         )

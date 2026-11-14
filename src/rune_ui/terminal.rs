@@ -1,4 +1,4 @@
-//! The terminal pane on Rune. [`crate::terminal`] runs the shell and hands out frames; each row
+//! The terminal pane on Rune. [`crate::system::terminal`] runs the shell and hands out frames; each row
 //! of a frame is one mono text with a span per styled run, so Rune draws it like any text.
 use std::sync::Arc;
 
@@ -6,14 +6,14 @@ use rune::tok::TextStyle;
 use rune::{Color, El, Key as RuneKey, KeyEvent, Span, Tx, WheelEvent, col, color, text};
 use rune_kit::Kit;
 
-use crate::terminal::{self, Frame, Key, KeyInput, Rgb, Session};
+use crate::system::terminal::{Frame, Key, KeyInput, Rgb, Session};
 
 const COLS: u16 = 100;
 const ROWS: u16 = 30;
 /// The grid's font at the configured monospace size, on a line of whole points: the shell is told
 /// its cells in whole pixels.
 fn font_style() -> TextStyle {
-    let style = crate::fonts::mono(13.0, 17.0);
+    let style = crate::config::fonts::mono(13.0, 17.0);
     TextStyle {
         line_height: style.line_height.round(),
         ..style
@@ -180,7 +180,7 @@ impl Term {
 
 /// The key the encoder names for a typed character.
 fn key_of(ch: char) -> Key {
-    use terminal::Key as K;
+    use crate::system::terminal::Key as K;
     const LETTERS: [K; 26] = [
         K::A,
         K::B,

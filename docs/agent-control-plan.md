@@ -38,7 +38,7 @@ tests of the window-side pieces, which need a window.
 
 Phase 4 is in: `thread.answer` (Orchestrate plus `approvals`, children only for a thread; any
 thread for the user; it matches `Block::Permission` alone), `thread.find`, `window.info`
-(`Family::Window`, user only), tools for the first two, `src/ctl.rs` for `po ctl`, and
+(`Family::Window`, user only), tools for the first two, `src/ipc/ctl.rs` for `po ctl`, and
 `parent_session` saved in `workspace.rs` and relinked by `relink_children` on restore. `po ctl`
 speaks as `Caller::User`, so it reads, answers, stops, closes and sets options on any thread, but
 `thread.create`, `create_isolated`, `send` and `wait` are refused for it (`needs_parent`): they
@@ -100,13 +100,13 @@ That is why:
 ## 2. Where we are
 
 ```
-agent ──stdio MCP──▶ `po mcp` (src/mcp.rs) ──unix socket + PO_TOKEN──▶ control.rs
-      ──▶ Command::parse (src/command.rs) ──▶ Reader::run_command (src/main.rs:1844)
+agent ──stdio MCP──▶ `po mcp` (src/ipc/mcp.rs) ──unix socket + PO_TOKEN──▶ control.rs
+      ──▶ Command::parse (src/ipc/command.rs) ──▶ Reader::run_command (src/reader/api.rs)
 ```
 
 - There are 6 commands: `view.show`, `view.update`, `view.close`, `file.open`, `diff.show` and
   `viewer.close`. The only caller is `Caller::Thread(id)`, and it acts on its own thread.
-- Replies are synchronous. The pump at `main.rs:1170` sends whatever `run_command` returns, and
+- Replies are synchronous. The pump at `src/reader/` sends whatever `run_command` returns, and
   `control::answer` waits at most 10 s.
 - `po mcp` handles one request at a time (`mcp.rs:140`). The socket allows 16 connections and
   drops any beyond that without answering (`control.rs:76`).
@@ -229,13 +229,13 @@ struct Outgoing { text: String, origin: Origin }
 1. **`submit(out: Outgoing, later: bool)`** replaces the body of `send`. It covers today's
    paths, and none of them touch the draft:
    - **Blank or unstarted:** `start_thread(out, later)`. Today that path calls `self.send`
-     again and reads the draft a second time (`main.rs:2506`). The rewrite passes `out` along.
+     again and reads the draft a second time (`src/reader/`). The rewrite passes `out` along.
    - **Starting, loading, or woken from sleep** (`picking`, `restore`, `loading`, `applying`,
      or not `ready`): the text goes to `pending: Option<Outgoing>`, or behind it in the queue
      if one is already pending.
      - This fixes sending to a sleeping thread. Today it falls through to `dispatch` and fails
-       with "not ready" (`main.rs:3337`, `3421`).
-     - `send_pending` already runs on `Ready` for a resumed thread (`main.rs:3000`).
+       with "not ready" (`src/reader/`, `3421`).
+     - `send_pending` already runs on `Ready` for a resumed thread (`src/reader/`).
    - **Busy:**
      - A dex agent gets `enqueue` (steer, or followup with `later`).
      - Any other agent's text goes to `queue: Vec<Queued>`, and `Queued` gains
@@ -252,17 +252,17 @@ struct Outgoing { text: String, origin: Origin }
    | `Po` | `[Po]` |
 
    `pending` and `Queued` keep the `Outgoing`, so the label survives every deferral.
-3. **`restore_queue`** (on stop, fail and exit, `main.rs:3415`) moves only `Origin::User` items
+3. **`restore_queue`** (on stop, fail and exit, `src/reader/`) moves only `Origin::User` items
    into the draft. Items from an agent are dropped and reported to their sender, as a
    notification in phase 2 or as `dropped` in `thread.get`.
 4. **Settings stay per thread.**
-   - `Applying` gains `overrides: HashMap<String, String>`, and `apply_next` (`main.rs:2373`)
+   - `Applying` gains `overrides: HashMap<String, String>`, and `apply_next` (`src/reader/`)
      reads them before `self.choices`.
    - An option set through the API goes into `Thread.api_options: HashSet<String>`. When
-     `OptionSet` arrives (`main.rs:2978`), an id in that set is not saved to `choices` or
+     `OptionSet` arrives (`src/reader/`), an id in that set is not saved to `choices` or
      `config`.
-   - `start_thread` stops setting `chosen_agent` (`main.rs:2488`) unless the origin is `User`.
-   - Resumed sessions skip `apply_choices` (`fresh == false`, `main.rs:2998`), so they apply
+   - `start_thread` stops setting `chosen_agent` (`src/reader/`) unless the origin is `User`.
+   - Resumed sessions skip `apply_choices` (`fresh == false`, `src/reader/`), so they apply
      `overrides` alone after `Ready`.
 
 ### 4.4 Change detection in one place
@@ -285,7 +285,7 @@ fn observed<R>(&mut self, id: u64, work: impl FnOnce(&mut Self) -> R) -> R
 ```
 
 - `with_thread` calls go through `observed`. That covers events, which already arrive through
-  `with_thread` (`main.rs:2309`), and the API's own writes.
+  `with_thread` (`src/reader/`), and the API's own writes.
 - `close_any_thread`, `close_thread`, `sleep` and `enforce_cap` report `Closed` or `Asleep`
   explicitly.
 - `changed` feeds notify-parent (§4.5) and the waiters (§4.7).
@@ -307,14 +307,14 @@ fn observed<R>(&mut self, id: u64, work: impl FnOnce(&mut Self) -> R) -> R
   ends. A parent that is asleep is woken by it.
 - **Cost guard:** each notification turn costs tokens. Notifications to a parent are limited to
   1 message per 10 s. More frequent ones are merged into the next.
-- When a child is asking, it still raises a desktop notification for the user (`main.rs:3014`).
+- When a child is asking, it still raises a desktop notification for the user (`src/reader/`).
   When a child finishes a turn, it does **not** notify the desktop while its parent gets the
   message.
 
 This removes most of the long-poll machinery from the main path. It needs nothing new from the
 socket, and agents handle "a message arrived" naturally.
 
-### 4.6 Read model (`src/state.rs`, new, no GPUI)
+### 4.6 Read model (`src/session/state.rs`, new, no GPUI)
 
 ```rust
 pub enum ThreadState { Starting, Approval, Ready, Running, Asking, Failed, Asleep, Closed }
@@ -359,7 +359,7 @@ block.
   - The socket gets a separate budget for waits (`MAX_WAITS = 8`) beside `MAX_CONNECTIONS`, so
     waits can't push out the viewer tools.
 - **The window replies later.** `run_command` returns `Answer::Now(Reply)` or
-  `Answer::Later`. For `Later`, the pump (`main.rs:1170`) moves `request.reply` into a
+  `Answer::Later`. For `Later`, the pump (`src/reader/`) moves `request.reply` into a
   `Waiter`. `control::answer` and `call_at` take their timeout from `Command::timeout()`.
 - **Waking:** `changed` (§4.4) replies to each matching waiter. A timer drops expired ones with
   `timed_out: true`.
@@ -439,10 +439,10 @@ the command. **Reach** uses the target relations from §4.2: self, child, siblin
 `thread.create`:
 
 - **`prompt` is required.** A promptless thread would be `blank`, and `parked.retain(worth_keeping)`
-  drops it silently (`main.rs:1575`, `2616`). It is also never saved (`2789`).
+  drops it silently (`src/reader/`, `2616`). It is also never saved (`2789`).
 - **`agent`:**
   - It must be an id from `agent.list`. Anything else is refused. Today `connect` turns an
-    unknown key into a command line (`main.rs:2261`).
+    unknown key into a command line (`src/reader/`).
   - It defaults to the caller's agent.
   - An untrusted agent or unapproved MCP servers give `state: "approval"`. The user approves in
     the UI, and the parent is notified when the thread starts.
@@ -452,7 +452,7 @@ the command. **Reach** uses the target relations from §4.2: self, child, siblin
 - **Where the thread goes:** it is parked in the caller's project, not shown, and marked with
   its parent (§7). Its grant is `Viewer`.
 - **Limits:** a parent can have at most `MAX_CHILDREN` (4) live children.
-  - `max_live` defaults to 8 (`main.rs:1145`). With the orchestrator plus 4 children,
+  - `max_live` defaults to 8 (`src/reader/`). With the orchestrator plus 4 children,
     `enforce_cap` has room for the user's own threads.
   - When a child is put to sleep, the parent is told (`Asleep`), and its next `thread.send`
     wakes it (§4.3).
@@ -501,8 +501,8 @@ Other orchestration commands:
 `thread.create_isolated`:
 
 - It needs a background `open_project` variant that doesn't swap the slot. Today it always does
-  (`main.rs:1608`). It also needs worktree creation to stop returning silently while a merge is
-  `finishing` (`main.rs:1624`, `2485`); it can queue behind it, or refuse with a reason.
+  (`src/reader/`). It also needs worktree creation to stop returning silently while a merge is
+  `finishing` (`src/reader/`, `2485`); it can queue behind it, or refuse with a reason.
 - The worktree is made asynchronously, so the reply holds a request id. The parent is notified
   with `{thread, project}` once it exists, or with the error.
 
@@ -537,7 +537,7 @@ behaviour, at scope `Viewer`, reach self.
 - **The parent's header** shows a status line with its children: "3 threads · 1 asking ·
   1 failed".
 - **Confirmation cards** (opening a project, merging a worktree) appear in the orchestrator's
-  thread. They are built like the existing approval card, `main.rs:5228`.
+  thread. They are built like the existing approval card, `src/reader/`.
 
 ## 8. Phases
 

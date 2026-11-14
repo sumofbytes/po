@@ -6,16 +6,16 @@ use rune_kit::Kit;
 use crate::issues::{Priority, Status};
 
 pub fn body_style() -> TextStyle {
-    crate::fonts::ui(13.0, 400.0)
+    crate::config::fonts::ui(13.0, 400.0)
 }
 pub fn small_style() -> TextStyle {
-    crate::fonts::ui(12.0, 400.0)
+    crate::config::fonts::ui(12.0, 400.0)
 }
 pub fn title_style() -> TextStyle {
-    crate::fonts::ui(22.0, 600.0)
+    crate::config::fonts::ui(22.0, 600.0)
 }
 pub fn heading_style() -> TextStyle {
-    crate::fonts::ui(14.0, 600.0)
+    crate::config::fonts::ui(14.0, 600.0)
 }
 
 pub fn status_tint(k: &Kit, status: Status) -> Color {
@@ -78,7 +78,7 @@ pub fn metric(k: &Kit, label: &str, value: usize, tint: Color) -> El {
         .border(1.0, k.c.border_base)
         .child(
             text(value.to_string())
-                .font(crate::fonts::ui(24.0, 600.0))
+                .font(crate::config::fonts::ui(24.0, 600.0))
                 .color(tint),
         )
         .child(muted(k, label))

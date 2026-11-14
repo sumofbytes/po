@@ -7,6 +7,11 @@ use std::time::Duration;
 
 use serde_json::json;
 
+use crate::files::watch::*;
+use crate::reader::state::*;
+use crate::session::chat::*;
+use crate::session::project::*;
+use crate::session::thread::*;
 use crate::*;
 
 struct Scenario {
@@ -81,7 +86,7 @@ pub fn start(reader: &Entity<Reader>, window: &Window, cx: &mut App) {
             let update = handle.update(cx, |_, window, cx| {
                 reader.update(cx, |reader, cx| {
                     let update = json!({ "sessionUpdate": "agent_message_chunk", "content": { "text": chunk } });
-                    reader.on_event(acp::Event::Update(update), true, window, cx);
+                    reader.on_event(crate::agent::acp::Event::Update(update), true, window, cx);
                     cx.notify();
                 })
             });
@@ -93,13 +98,13 @@ pub fn start(reader: &Entity<Reader>, window: &Window, cx: &mut App) {
         handle
             .update(cx, |_, window, cx| {
                 reader.update(cx, |reader, cx| {
-                    reader.on_event(acp::Event::Stopped("end_turn".into()), true, window, cx);
+                    reader.on_event(crate::agent::acp::Event::Stopped("end_turn".into()), true, window, cx);
                     cx.notify();
                 })
             })
             .ok();
         executor.timer(Duration::from_secs(1)).await;
-        profile::finish();
+        crate::dev::profile::finish();
         cx.update(|cx| cx.quit());
     })
     .detach();

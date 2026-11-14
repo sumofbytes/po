@@ -7,10 +7,10 @@ use crate::model::bus::{Cmd, send};
 use crate::model::finder::Snapshot;
 
 fn name_style() -> TextStyle {
-    crate::fonts::ui(13.0, 400.0)
+    crate::config::fonts::ui(13.0, 400.0)
 }
 fn caption_style() -> TextStyle {
-    crate::fonts::ui(12.0, 400.0)
+    crate::config::fonts::ui(12.0, 400.0)
 }
 /// The most matches drawn: the list is as long as the repository.
 const SHOWN: usize = 12;

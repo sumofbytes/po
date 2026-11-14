@@ -5,7 +5,7 @@
 use serde_json::{Value, json};
 
 /// Every scheme, as an `@@ <name>` line followed by its `key = value` lines..
-const BUNDLE: &str = include_str!("../themes/schemes.txt");
+const BUNDLE: &str = include_str!("../../themes/schemes.txt");
 
 type Rgb = [f32; 3];
 

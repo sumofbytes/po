@@ -1,11 +1,19 @@
 //! Methods of [`Reader`], grouped by what they do.
 
+use crate::files::watch::*;
+use crate::reader::state::*;
+use crate::session::project::*;
+use crate::session::thread::*;
 use crate::*;
 
 impl Reader {
     /// A project over `root`, showing `files` in its explorer until the next walk.
     #[hotpath::measure(impl_type = "Reader")]
-    pub(crate) fn build_project(root: PathBuf, pr: Option<pr::Pr>, files: Vec<String>) -> Project {
+    pub(crate) fn build_project(
+        root: PathBuf,
+        pr: Option<crate::vcs::pr::Pr>,
+        files: Vec<String>,
+    ) -> Project {
         let files_tree = FileTree::new(false);
         let changes_tree = FileTree::new(true);
         Project {
@@ -108,7 +116,7 @@ impl Reader {
         self.project.listing = Some(cx.spawn(async move |this, cx| {
             let changes = cx
                 .background_executor()
-                .spawn(async move { diff::changes(&root, &base) })
+                .spawn(async move { crate::vcs::diff::changes(&root, &base) })
                 .await;
             this.update(cx, |reader, cx| {
                 reader.apply_changes(changes, rebuild, true, cx)
@@ -194,10 +202,10 @@ impl Reader {
             let (rows, versions) = cx
                 .background_executor()
                 .spawn(async move {
-                    let rows = diff::file_diff(&root, &base, &change);
+                    let rows = crate::vcs::diff::file_diff(&root, &base, &change);
                     // Only files with changed lines need their versions.
                     let versions = (!rows.is_empty()).then(|| {
-                        let (old, new) = diff::versions(&root, &base, &change);
+                        let (old, new) = crate::vcs::diff::versions(&root, &base, &change);
                         (old.unwrap_or_default(), new.unwrap_or_default())
                     });
                     (rows, versions)
@@ -235,7 +243,7 @@ impl Reader {
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
-                .spawn(async move { pr::Pr::open(&repo, &spec) })
+                .spawn(async move { crate::vcs::pr::Pr::open(&repo, &spec) })
                 .await;
             handle
                 .update(cx, |_, window, cx| {
@@ -362,7 +370,7 @@ impl Reader {
     pub(crate) fn add_project(
         &mut self,
         root: PathBuf,
-        pr: Option<pr::Pr>,
+        pr: Option<crate::vcs::pr::Pr>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -449,7 +457,7 @@ impl Reader {
         cx.spawn(async move |this, cx| {
             let made = cx
                 .background_executor()
-                .spawn(async move { worktree::Worktree::create(&from) })
+                .spawn(async move { crate::vcs::worktree::Worktree::create(&from) })
                 .await;
             handle
                 .update(cx, |_, window, cx| {
@@ -480,7 +488,7 @@ impl Reader {
 
     pub(crate) fn open_worktree(
         &mut self,
-        wt: worktree::Worktree,
+        wt: crate::vcs::worktree::Worktree,
         agent: String,
         first: Option<(Outgoing, (u64, u64))>,
         window: &mut Window,
@@ -581,9 +589,9 @@ impl Reader {
                 .background_executor()
                 .spawn(async move {
                     if merge {
-                        worktree::Worktree::merge(&spec, &message).map(Some)
+                        crate::vcs::worktree::Worktree::merge(&spec, &message).map(Some)
                     } else {
-                        worktree::Worktree::discard(&spec);
+                        crate::vcs::worktree::Worktree::discard(&spec);
                         Ok(None)
                     }
                 })

@@ -1,15 +1,18 @@
 //! The agent behind a thread: an ACP process, or a dex daemon that can also take steering.
+
+pub(crate) mod acp;
+pub(crate) mod attach;
+pub(crate) mod dex;
+pub(crate) mod handoff;
 use std::{path::Path, sync::Arc};
 
 use anyhow::Result;
 use serde_json::Value;
 
 use crate::{
-    acp::{self, Event},
-    attach::{self, Attachment},
+    agent::{acp::Event, attach::Attachment, dex::Queue},
     config,
-    dex::{self, Queue},
-    profile::UnboundedReceiver,
+    dev::profile::UnboundedReceiver,
 };
 
 pub enum Client {

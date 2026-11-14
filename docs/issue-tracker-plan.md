@@ -18,7 +18,7 @@ Where the build differs from the plan below:
 - "Work on this" uses Po's usual worktree (branch `po/<id>`), not `po-12-short-title`, and links
   the branch, not the thread (the session id is not known when the worktree opens). Merging the
   worktree moves the issues linked to its branch to Done; PRs opened elsewhere are not watched.
-- The old todo list is removed (page, store and sidebar row); `src/todo.rs` became `src/date.rs`
+- The old todo list is removed (page, store and sidebar row); `src/todo.rs` became `src/issues/date.rs`
   for the date helpers, and `todos.json` is read only by the import.
 - Phase 6: the `todos.json` import is in. Saved views, a cross-project "My issues" and cycles are
   not.
@@ -73,7 +73,7 @@ fresh.
 
 Worktrees: Po makes a checkout per isolated thread. Each would have its own copy of `.po/`, and
 edits would diverge. Rule: the store always resolves to the **primary checkout's** `.po/` (a
-worktree's `worktree_of` project, `ProjectInfo::worktree_of` in `src/state.rs`), so every thread
+worktree's `worktree_of` project, `ProjectInfo::worktree_of` in `src/session/state.rs`), so every thread
 sees one live copy. Whether to commit `.po/` is the user's call; it is not gitignored.
 
 Writes keep `task.rs`'s habits: temp file then rename, a file that cannot be parsed is moved to
@@ -93,7 +93,7 @@ by this. A one-time "import as issues" action per header can come later.
 | `src/nsh/issue.rs` | Detail pane: title, description editor, property rows (status, priority, labels, due, epic, parent), sub-issues, links. |
 | `src/nsh/epics.rs` | Epic list and an epic page with progress bar, milestones, its issues. |
 
-Reused as is: `Date`, `parse_due` and `due_label` (move them to `src/date.rs`, no behaviour
+Reused as is: `Date`, `parse_due` and `due_label` (move them to `src/issues/date.rs`, no behaviour
 change), the overlay page frame (`nsh::overlay::Overlay::page`), `Cmd` bus, icons (add a few from
 Lucide: `circle-dashed`, `circle-dot`, `circle-check`, `signal`, `tag`, `kanban`, `milestone`).
 

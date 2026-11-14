@@ -1,5 +1,5 @@
 //! The settings page on Rune: the options of `config.json` as fields, written back on Save. What
-//! the fields hold and how they are written is [`crate::settings`]; this is the screen, and the
+//! the fields hold and how they are written is [`crate::config::settings`]; this is the screen, and the
 //! Rune counterpart of `src/nsh/settings.rs`.
 use rune::tok::TextStyle;
 use rune::{El, TextEdit, Tx, col, el, row, text};
@@ -9,7 +9,7 @@ use rune_kit::{
 };
 
 use super::theme_pick;
-use crate::settings::{AgentForm, Form};
+use crate::config::settings::{AgentForm, Form};
 
 /// Where the host keeps the page: handlers reach it through this.
 pub type At<S> = fn(&mut S) -> &mut Page;
@@ -129,16 +129,16 @@ impl Page {
 }
 
 fn title_style() -> TextStyle {
-    crate::fonts::ui(18.0, 600.0)
+    crate::config::fonts::ui(18.0, 600.0)
 }
 fn body_style() -> TextStyle {
-    crate::fonts::ui(13.0, 400.0)
+    crate::config::fonts::ui(13.0, 400.0)
 }
 fn caption_style() -> TextStyle {
-    crate::fonts::ui(12.0, 400.0)
+    crate::config::fonts::ui(12.0, 400.0)
 }
 fn eyebrow_style() -> TextStyle {
-    crate::fonts::ui(11.0, 500.0)
+    crate::config::fonts::ui(11.0, 500.0)
 }
 const PAD: f32 = 32.0;
 const CONTROL_WIDTH: f32 = 260.0;
@@ -229,7 +229,7 @@ pub fn view<S: 'static>(p: &Page, k: &Kit, page: At<S>, layer: &mut Vec<El>) -> 
             input(
                 k,
                 "UI font",
-                crate::fonts::BUNDLED_UI_FAMILY,
+                crate::config::fonts::BUNDLED_UI_FAMILY,
                 &p.font_family,
                 |p| &mut p.font_family,
                 page,
@@ -257,7 +257,7 @@ pub fn view<S: 'static>(p: &Page, k: &Kit, page: At<S>, layer: &mut Vec<El>) -> 
             input(
                 k,
                 "Monospace font",
-                crate::fonts::BUNDLED_MONO_FAMILY,
+                crate::config::fonts::BUNDLED_MONO_FAMILY,
                 &p.mono_family,
                 |p| &mut p.mono_family,
                 page,

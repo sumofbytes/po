@@ -1,10 +1,13 @@
-//! What the [`crate::Reader`] needs from a toolkit, with none of its types: wake the window, run
+//! What the [`crate::reader::state::Reader`] needs from a toolkit, with none of its types: wake the window, run
 //! something on the window's thread, and wait for work or time off it. Rune has no executor, so a
 //! [`Host`] runs each task on a thread of its own and hands every "update the state" back through
 //! a channel the window drains in its `poll` ([`Inbox::run`]).
 //!
 //! A task is a future that talks to the state only through [`Host::update`] and [`Host::query`],
 //! which run on the window's thread, so the state needs no locks and no `Send`.
+
+pub(crate) mod app;
+pub(crate) mod rt;
 use std::future::Future;
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -74,6 +77,7 @@ impl<S: 'static> Host<S> {
 
     /// Runs `f` on the window's thread and answers with what it returned; `None` once the window is
     /// gone.
+    #[allow(dead_code)]
     pub async fn query<R: Send + 'static>(
         &self,
         f: impl FnOnce(&mut S) -> R + Send + 'static,
@@ -91,6 +95,7 @@ impl<S: 'static> Host<S> {
     }
 
     /// Runs `task` to its end on a thread of its own, like `cx.spawn(..).detach()`.
+    #[allow(dead_code)]
     pub fn spawn(&self, task: impl Future<Output = ()> + Send + 'static) {
         std::thread::Builder::new()
             .name("po-task".into())
@@ -100,6 +105,7 @@ impl<S: 'static> Host<S> {
 
     /// Runs blocking `work` on a thread of its own, and answers with what it returned: the
     /// counterpart of `cx.background_spawn`. `None` if the work panicked.
+    #[allow(dead_code)]
     pub async fn background<R: Send + 'static>(
         &self,
         work: impl FnOnce() -> R + Send + 'static,

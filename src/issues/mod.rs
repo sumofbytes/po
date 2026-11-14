@@ -1,7 +1,9 @@
 //! Issues and epics: a small tracker for each repo, kept in Po's data folder. This is the model, with
 //! no I/O: [`Tracker`] holds what a repo has and answers questions about it, and [`store`] reads
 //! and writes the files; [`api`] is what agents ask, [`shared`] the copy the app follows.
+
 pub mod api;
+pub(crate) mod date;
 pub mod import;
 pub mod query;
 pub mod shared;
@@ -11,7 +13,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::{Map, Value, json};
 
-use crate::date::Date;
+use crate::issues::date::Date;
 
 /// Where an issue is, in the order work moves through them.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]

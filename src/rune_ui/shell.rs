@@ -1,5 +1,5 @@
 //! The window: a sidebar, the main pane and a viewer pane, as Rune's `SplitView` lays them out.
-//! Counterpart of the layout half of `Reader::render` in `main.rs`. What fills the panes comes from
+//! Counterpart of the layout half of `Reader::render` (`src/reader/render.rs`). What fills the panes comes from
 //! the screens; this decides what is shown where.
 use rune::{El, Tx, col, row};
 use rune_kit::shell::SidebarToggle;
@@ -151,7 +151,7 @@ impl Shell {
             self.home_model = model::home::model(
                 &self.overview_feed.value,
                 &self.sidebar_feed.value,
-                crate::date::today(),
+                crate::issues::date::today(),
             );
         }
         stale |= overview;
@@ -212,7 +212,7 @@ pub trait Host: 'static {
     /// The window has, or has lost, the user's attention.
     fn set_active(&mut self, active: bool);
     /// Files on the desk or the clipboard, pictures pasted: what the draft takes.
-    fn attach(&mut self, sources: Vec<crate::Source>);
+    fn attach(&mut self, sources: Vec<crate::session::thread::Source>);
 }
 
 fn sidebar_of<S: Host>(s: &mut S) -> &mut PaneState {
@@ -546,7 +546,13 @@ pub fn view<S: Host>(host: &S, k: &Kit, inset: f32) -> El {
     // What is pasted while no field has the keyboard: files and images attach to the message being
     // written; plain text goes to the terminal, where it is showing.
     root.on_drop_files(|s: &mut S, paths: &[std::path::PathBuf], _: &mut Tx| {
-        s.attach(paths.iter().cloned().map(crate::Source::Path).collect())
+        s.attach(
+            paths
+                .iter()
+                .cloned()
+                .map(crate::session::thread::Source::Path)
+                .collect(),
+        )
     })
     .on_window_focus(|s: &mut S, focused: bool, _: &mut Tx| s.set_active(focused))
     .on_paste_content(|s: &mut S, content: &rune::ClipboardContent, _: &mut Tx| {
@@ -556,11 +562,13 @@ pub fn view<S: Host>(host: &S, k: &Kit, inset: f32) -> El {
                     .files()
                     .iter()
                     .cloned()
-                    .map(crate::Source::Path)
+                    .map(crate::session::thread::Source::Path)
                     .collect(),
             );
         } else if let Some(image) = content.image() {
-            s.attach(vec![crate::Source::Bytes(image.png().to_vec())]);
+            s.attach(vec![crate::session::thread::Source::Bytes(
+                image.png().to_vec(),
+            )]);
         } else if s.layout().terminal_shown
             && let Some(term) = s.terminal_mut()
         {
@@ -597,7 +605,7 @@ mod tests {
             None
         }
         fn set_active(&mut self, _: bool) {}
-        fn attach(&mut self, _: Vec<crate::Source>) {}
+        fn attach(&mut self, _: Vec<crate::session::thread::Source>) {}
     }
     fn view(s: &App, _: &mut Cx<App>) -> El {
         super::view::<App>(s, &s.kit, 0.0)

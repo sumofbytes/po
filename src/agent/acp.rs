@@ -14,7 +14,7 @@ use anyhow::{Context, Result};
 use futures::channel::mpsc::unbounded;
 use serde_json::{Value, json};
 
-use crate::profile::{UnboundedReceiver, UnboundedSender};
+use crate::dev::profile::{UnboundedReceiver, UnboundedSender};
 
 #[derive(Clone, Debug)]
 pub struct PermissionOption {
@@ -114,12 +114,12 @@ pub enum Event {
     /// The agent took a steering or follow-up message into the turn (dex daemon only).
     Accepted {
         content: String,
-        queue: crate::dex::Queue,
+        queue: crate::agent::dex::Queue,
     },
     /// The daemon had no turn to add a steering or follow-up message to (dex daemon only).
     Rejected {
         content: String,
-        queue: crate::dex::Queue,
+        queue: crate::agent::dex::Queue,
     },
     Failed(String),
     Exited(String),
@@ -172,7 +172,8 @@ impl Shared {
     fn mcp_servers(&self) -> Value {
         let mut servers = vec![];
         servers.extend(self.po_mcp.clone());
-        if let Value::Array(config) = crate::config::mcp_servers(&crate::plugin::effective_config())
+        if let Value::Array(config) =
+            crate::config::mcp_servers(&crate::config::plugin::effective_config())
         {
             // A config server named `po` would hide Po's own from the agent.
             servers.extend(
@@ -495,7 +496,7 @@ impl Client {
             po_mcp: if control.is_empty() {
                 None
             } else {
-                crate::mcp::server(&control)
+                crate::ipc::mcp::server(&control)
             },
         });
         let child = Arc::new(Mutex::new(child));

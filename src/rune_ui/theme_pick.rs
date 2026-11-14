@@ -5,7 +5,7 @@ use rune::{El, Key, ScrollSpec, TextEdit, col, el, icon, row, text, tok::TextSty
 use rune_kit::{Kit, Placement, Popover, TextInput};
 
 use super::dropdown::CHEVRON;
-use crate::schemes;
+use crate::config::schemes;
 
 /// Where the host keeps the state, and what it does with the name picked.
 pub type At<S> = std::rc::Rc<dyn for<'a> Fn(&'a mut S) -> &'a mut State>;
@@ -14,7 +14,7 @@ pub type Choose<S> = std::rc::Rc<dyn Fn(&mut S, &str)>;
 const ROW: f32 = 28.0;
 const SHOWN: f32 = 280.0;
 fn small_style() -> TextStyle {
-    crate::fonts::ui(13.0, 400.0)
+    crate::config::fonts::ui(13.0, 400.0)
 }
 
 #[derive(Default)]

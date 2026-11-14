@@ -1,7 +1,7 @@
 //! Self-update from GitHub releases (`po update`).
 //!
 //! `po update` downloads the latest released build for this platform and
-//! replaces the running binary in place. Like [`crate::dex`]'s own client it
+//! replaces the running binary in place. Like [`crate::agent::dex`]'s own client it
 //! has no async crate of its own for this, so the flow is plain blocking code
 //! that runs in `main` before the GUI is set up.
 //!
@@ -466,7 +466,7 @@ mod tests {
 
     #[test]
     fn release_targets_are_the_ones_release_yml_builds() {
-        let yml = include_str!("../.github/workflows/release.yml");
+        let yml = include_str!("../../.github/workflows/release.yml");
         if let Ok(target) = release_target() {
             assert!(
                 yml.contains(&format!("target: {target}")),

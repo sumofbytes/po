@@ -13,13 +13,13 @@ use crate::model::bus::{Cmd, send};
 use crate::model::source::{Body, Snapshot};
 
 fn mono_style() -> TextStyle {
-    crate::fonts::mono(13.0, 19.0)
+    crate::config::fonts::mono(13.0, 19.0)
 }
 fn caption_style() -> TextStyle {
-    crate::fonts::ui(12.0, 400.0)
+    crate::config::fonts::ui(12.0, 400.0)
 }
 fn name_style() -> TextStyle {
-    crate::fonts::ui(13.0, 400.0)
+    crate::config::fonts::ui(13.0, 400.0)
 }
 const LINE: f32 = 19.0;
 

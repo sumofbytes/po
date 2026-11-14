@@ -1,10 +1,15 @@
+pub(crate) mod fonts;
+pub(crate) mod plugin;
+pub(crate) mod schemes;
+pub(crate) mod settings;
+
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
 /// Agents shipped in the binary; the user's config adds to or overrides them by `id`.
-const DEFAULT_AGENTS: &str = include_str!("../agents.json");
+const DEFAULT_AGENTS: &str = include_str!("../../agents.json");
 
 /// The key of an `agents` or `mcp_servers` entry saying which plugin provided it. Po sets it
 /// when it folds a plugin's entries in, over whatever the manifest says.
@@ -73,7 +78,7 @@ pub fn read_json(path: &Path) -> Option<Value> {
 }
 
 /// The user's `config.json`, or null when there is none. What starts or lists agents wants
-/// [`crate::plugin::effective_config`], which has the plugins' entries in it too.
+/// [`crate::config::plugin::effective_config`], which has the plugins' entries in it too.
 #[hotpath::measure]
 pub fn load() -> Value {
     dir()

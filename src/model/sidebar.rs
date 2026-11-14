@@ -1,4 +1,4 @@
-//! The sidebar screen's data: what [`crate::Reader`] publishes and what it sends back. No view code.
+//! The sidebar screen's data: what [`crate::reader::state::Reader`] publishes and what it sends back. No view code.
 #![allow(unused_imports)]
 use std::sync::{Arc, LazyLock};
 

@@ -1,9 +1,9 @@
-//! `po mcp`: the commands of [`crate::command`] as an MCP server, so an agent finds them among its
+//! `po mcp`: the commands of [`crate::ipc::command`] as an MCP server, so an agent finds them among its
 //! tools. Po hands it to each agent it starts, with the
 //! socket and token of that agent's thread; every tool call becomes one request to the window.
 use serde_json::{Value, json};
 
-use crate::command::{Command, Grant, Relation, Scope};
+use crate::ipc::command::{Command, Grant, Relation, Scope};
 
 /// What the server tells the agent it is for.
 const BASE: &str = "You are running inside Po, a desktop app that shows the user your \
@@ -740,7 +740,7 @@ fn handle(
         "initialize" => {
             // Who this thread is and what it may do: the tool list is fixed for the agent's
             // lifetime from this answer, so it is asked now, once.
-            *grant = crate::control::send(json!({ "command": "control.info" }))
+            *grant = crate::ipc::control::send(json!({ "command": "control.info" }))
                 .ok()
                 .and_then(|reply| grant_of(&reply));
             let asked = params["protocolVersion"].as_str().unwrap_or_default();
@@ -858,7 +858,7 @@ pub fn serve() -> anyhow::Result<()> {
         std::thread::spawn(move || {
             let mut mine = *grant.lock().expect("grant lock");
             let reply = match serde_json::from_str::<Value>(&line) {
-                Ok(message) => handle(&message, &crate::control::send, &mut mine),
+                Ok(message) => handle(&message, &crate::ipc::control::send, &mut mine),
                 Err(error) => Some(
                     json!({ "jsonrpc": "2.0", "id": null, "error": { "code": -32700, "message": error.to_string() } }),
                 ),
@@ -942,7 +942,7 @@ mod tests {
         );
         for (_, command, ..) in tools() {
             // Refused for missing arguments, perhaps, but never as an unknown command.
-            let parsed = crate::command::Command::parse(&json!({ "command": command }));
+            let parsed = crate::ipc::command::Command::parse(&json!({ "command": command }));
             assert!(
                 parsed
                     .as_ref()

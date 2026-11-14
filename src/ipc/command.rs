@@ -902,7 +902,7 @@ impl Command {
         if let Self::ThreadList {
             state: Some(state), ..
         } = self
-            && crate::state::ThreadState::from_name(state).is_none()
+            && crate::session::state::ThreadState::from_name(state).is_none()
         {
             return Err(format!("`{state}` is not a thread state"));
         }
@@ -925,7 +925,7 @@ impl Command {
         } = self
             && until != "any"
             && until != "done"
-            && crate::state::ThreadState::from_name(until).is_none()
+            && crate::session::state::ThreadState::from_name(until).is_none()
         {
             return Err(format!(
                 "`{until}` is not a state to wait for; a state name, `done` or `any`"

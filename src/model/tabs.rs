@@ -1,4 +1,4 @@
-//! The tabs screen's data: what [`crate::Reader`] publishes. No view code.
+//! The tabs screen's data: what [`crate::reader::state::Reader`] publishes. No view code.
 #![allow(unused_imports)]
 use std::sync::LazyLock;
 

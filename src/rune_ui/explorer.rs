@@ -5,16 +5,16 @@ use rune::tok::TextStyle;
 use rune::{El, Key, KeyEvent, TextEdit, Tx, col, row, text};
 use rune_kit::{Button, ButtonVariant, Kit, TextInput};
 
-use crate::explorer::Step;
+use crate::files::explorer::Step;
 use crate::model::bus::{Cmd, send};
 use crate::model::explorer::{Body, Entry, Snapshot};
 use crate::model::strip::{Pr, Snapshot as Strips};
 
 fn name_style() -> TextStyle {
-    crate::fonts::ui(13.0, 400.0)
+    crate::config::fonts::ui(13.0, 400.0)
 }
 fn caption_style() -> TextStyle {
-    crate::fonts::ui(12.0, 400.0)
+    crate::config::fonts::ui(12.0, 400.0)
 }
 const INDENT: f32 = 14.0;
 

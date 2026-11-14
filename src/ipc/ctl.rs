@@ -1,4 +1,4 @@
-//! `po ctl`: the commands of [`crate::command`] from a terminal, to a window that is running.
+//! `po ctl`: the commands of [`crate::ipc::command`] from a terminal, to a window that is running.
 //! The window knows who is asking by the process, so there is no token to give: this is refused
 //! from inside an agent Po started, and works from the user's own shell.
 use std::path::PathBuf;
@@ -98,9 +98,9 @@ pub struct Found {
 pub fn windows() -> (Vec<Found>, Vec<String>) {
     let mut found = vec![];
     let mut refused = vec![];
-    for socket in crate::control::sockets() {
+    for socket in crate::ipc::control::sockets() {
         let path = socket.to_string_lossy().into_owned();
-        match crate::control::call_at(&path, &json!({ "command": "window.info" })) {
+        match crate::ipc::control::call_at(&path, &json!({ "command": "window.info" })) {
             Ok(mut reply) if reply["error"].is_null() => found.push(Found {
                 socket,
                 info: reply["ok"].take(),
@@ -162,7 +162,7 @@ pub fn pick<'a>(
 }
 
 fn ask(found: &Found, request: &Value) -> Result<Value> {
-    let mut reply = crate::control::call_at(&found.socket.to_string_lossy(), request)?;
+    let mut reply = crate::ipc::control::call_at(&found.socket.to_string_lossy(), request)?;
     match reply["error"].as_str() {
         Some(error) => bail!("{error}"),
         None => Ok(reply["ok"].take()),
@@ -188,7 +188,7 @@ pub fn run(args: &[String]) -> Result<()> {
         }
         Task::Watch { window } => {
             let found = pick(&all, window, &cwd)?;
-            crate::control::watch_at(
+            crate::ipc::control::watch_at(
                 &found.socket.to_string_lossy(),
                 &json!({ "command": "events.subscribe" }),
                 |line| {

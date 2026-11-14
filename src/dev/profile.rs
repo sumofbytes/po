@@ -1,4 +1,4 @@
-//! Profiling with hotpath (<https://hotpath.rs>), like [`crate::trace`] but for the whole run: built
+//! Profiling with hotpath (<https://hotpath.rs>), like [`crate::dev::trace`] but for the whole run: built
 //! with `--features hotpath`, Po times the functions marked `#[hotpath::measure]`, follows the
 //! channels and locks made through hotpath's macros, and writes the report when it quits;
 //! `--features hotpath-alloc` also counts what each function allocates. Built without them, the

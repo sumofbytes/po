@@ -84,7 +84,7 @@ pub static CHEVRON: Icon = Icon {
 };
 
 fn small_style() -> TextStyle {
-    crate::fonts::ui(12.0, 400.0)
+    crate::config::fonts::ui(12.0, 400.0)
 }
 
 /// A chip that opens `lines` below it (above, when there is no room). `key` names it; it must be

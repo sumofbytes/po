@@ -4,7 +4,7 @@ use serde_json::{Value, json};
 
 use super::query::{self, Filter, Group, Scope};
 use super::{Issue, Link, Priority, Status, Tracker};
-use crate::date::{Date, parse_due};
+use crate::issues::date::{Date, parse_due};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Op {

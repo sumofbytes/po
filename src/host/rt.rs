@@ -1,4 +1,4 @@
-//! The slice of the old gpui API the [`crate::Reader`] was written against, over [`crate::host`]: a `Context`
+//! The slice of the old gpui API the [`crate::reader::state::Reader`] was written against, over [`crate::host`]: a `Context`
 //! that notifies and spawns, a `WeakEntity` tasks update the reader through, a `WindowHandle` for
 //! the window's own thread, a background executor, and a `Window` that records what the reader
 //! asked of it for the Rune host to carry out. The names are gpui's, so the reader's logic reads as
@@ -15,8 +15,8 @@ use std::time::Duration;
 use futures::channel::oneshot;
 use futures::future::{AbortHandle, Abortable};
 
-use crate::Reader;
 use crate::host::{self, Host};
+use crate::reader::state::Reader;
 
 /// What the window's thread owns: the reader, and the window it asks things of.
 pub struct Core {

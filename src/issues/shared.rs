@@ -12,7 +12,7 @@ use tokio::sync::watch;
 
 use super::store::{Store, fingerprint, load, primary_root};
 use super::{Config, Tracker};
-use crate::date::Date;
+use crate::issues::date::Date;
 
 /// What a screen sees of the repo's issues.
 #[derive(Clone, PartialEq, Debug)]
@@ -343,7 +343,7 @@ fn apply<R>(store: &mut Store, f: impl FnOnce(&mut Tracker, u64) -> R) -> R {
     if store.tracker.dirty.is_empty() && store.changed_on_disk() {
         store.reload();
     }
-    let out = f(&mut store.tracker, crate::now_ms());
+    let out = f(&mut store.tracker, crate::session::thread::now_ms());
     if let Err(error) = store.flush() {
         log::warn!("saving {}: {error}", store.dir().display());
     }
@@ -575,7 +575,7 @@ mod tests {
         assert_eq!(held.checkouts[&two.0], std::slice::from_ref(&two.0));
         change_repo(&two.0, |t, now| t.create("second", now));
         assert_eq!(
-            overview().borrow().counts(crate::date::today()).0,
+            overview().borrow().counts(crate::issues::date::today()).0,
             2,
             "a change through the store is seen at once"
         );
@@ -595,13 +595,21 @@ mod tests {
             r#"{"title":"from git"}"#,
         )
         .unwrap();
-        assert_eq!(tracked(&[&one, &two]).counts(crate::date::today()).0, 3);
+        assert_eq!(
+            tracked(&[&one, &two])
+                .counts(crate::issues::date::today())
+                .0,
+            3
+        );
 
         // What is finished is not counted; showing one repo on the page leaves the other alone.
         change_repo(&one.0, |t, now| {
             t.update(1, now, |i| i.status = Status::Done)
         });
-        assert_eq!(overview().borrow().counts(crate::date::today()).0, 2);
+        assert_eq!(
+            overview().borrow().counts(crate::issues::date::today()).0,
+            2
+        );
         set_project(&two.0);
         assert_eq!(VIEW.borrow().name, "over-two");
         assert_eq!(tracked(&[&one, &two]).repos.len(), 2);
@@ -610,7 +618,10 @@ mod tests {
         let before = VIEW.borrow().clone();
         change_repo(&one.0, |t, now| t.create("elsewhere", now));
         assert_eq!(*VIEW.borrow(), before);
-        assert_eq!(overview().borrow().counts(crate::date::today()).0, 3);
+        assert_eq!(
+            overview().borrow().counts(crate::issues::date::today()).0,
+            3
+        );
 
         // A project closed stops being held, once the page has moved on from it.
         assert_eq!(tracked(&[&one]).repos.len(), 1);
@@ -630,7 +641,7 @@ mod tests {
         let _turn = turn();
         let repo = Repo::new("over-late");
         tracked(&[&repo]);
-        let today = crate::date::today();
+        let today = crate::issues::date::today();
         change_repo(&repo.0, |t, now| {
             let (a, b, c) = (t.create("a", now), t.create("b", now), t.create("c", now));
             t.update(a, now, |i| i.due = Some(today.plus(-1)));
