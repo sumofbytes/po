@@ -292,6 +292,11 @@ pub(crate) struct Reader {
     /// The sidebar's filter: threads and projects that don't match it are left out of its lists.
     /// What the sidebar's filter holds.
     pub(crate) side_query: String,
+    /// How the sidebar lists threads, the project it is narrowed to, and whether its flat list shows
+    /// the older threads too.
+    pub(crate) side_layout: crate::model::sidebar::Layout,
+    pub(crate) side_project: Option<u64>,
+    pub(crate) recent_expanded: bool,
     /// A line the viewer was asked to scroll to, and a number that changes with each ask.
     pub(crate) reveal: Option<(u32, u64)>,
     pub(crate) reveal_serial: u64,
@@ -451,6 +456,9 @@ impl Reader {
             next_thread: 1,
             home,
             side_query: String::new(),
+            side_layout: Default::default(),
+            side_project: None,
+            recent_expanded: false,
             reveal: None,
             reveal_serial: 0,
             chat_marks: std::cell::Cell::new(((0, 0), 0, 0, false, 0)),

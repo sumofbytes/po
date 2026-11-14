@@ -12,8 +12,9 @@ use rune_kit::{
     SidebarSection, Spinner,
 };
 
+use super::dropdown::{self, Line};
 use crate::model::bus::{Cmd, send};
-use crate::model::sidebar::{Mark, Project, Snapshot, Thread};
+use crate::model::sidebar::{Age, Layout, Mark, Project, Snapshot, Thread};
 
 static FOLDER_PLUS: Icon = Icon {
     name: "po-folder-plus",
@@ -72,6 +73,8 @@ pub struct State {
     pub rename: super::rename::Rename,
     /// A project's header being dragged to a new place in the list.
     pub drag: Option<ProjectDrag>,
+    /// The layout and project menus under the search field.
+    pub menu: dropdown::State,
 }
 
 /// A project dragged by its header: its place in the list, where it would land if dropped now,
@@ -156,6 +159,7 @@ impl Default for State {
             confirm: None,
             rename: Default::default(),
             drag: None,
+            menu: Default::default(),
         }
     }
 }
@@ -484,6 +488,82 @@ pub struct Edge {
     pub width: f32,
 }
 
+/// A chip in the finder: `label` and a chevron, opening `lines` when pressed.
+fn chip<S: 'static>(k: &Kit, key: &str, label: String, lines: Vec<Line>, at: At<S>) -> El {
+    let menu: dropdown::At<S> = Rc::new(move |s: &mut S| &mut at(s).menu);
+    let face = row()
+        .px(6.0)
+        .py(2.0)
+        .radius(k.radius.md)
+        .gap(2.0)
+        .items_center()
+        .shrink()
+        .child(
+            text(label)
+                .font(crate::config::fonts::ui(12.0, 500.0))
+                .color(k.c.text_muted)
+                .truncate()
+                .shrink(),
+        )
+        .child(rune::icon(&dropdown::CHEVRON, 12.0).color(k.c.text_faint));
+    dropdown::opens::<S>(k, key, face, lines, vec![], menu)
+}
+
+/// The search field, with under it how the list is laid out and which project it is narrowed to.
+fn finder<S: 'static>(k: &Kit, snapshot: &Snapshot, search: El, at: At<S>) -> El {
+    let layout = chip::<S>(
+        k,
+        "side-layout",
+        match snapshot.layout {
+            Layout::Activity => "By activity",
+            Layout::Project => "By project",
+        }
+        .to_string(),
+        vec![
+            Line::choice(
+                "By activity",
+                snapshot.layout == Layout::Activity,
+                Cmd::SideLayout(Layout::Activity),
+            ),
+            Line::choice(
+                "By project",
+                snapshot.layout == Layout::Project,
+                Cmd::SideLayout(Layout::Project),
+            ),
+        ],
+        at,
+    );
+    let mut tools = row().w_full().items_center().px(4.0).child(layout);
+    // One project has nothing to narrow to.
+    if snapshot.choices.len() > 1 {
+        let name = snapshot
+            .filter
+            .and_then(|id| snapshot.choices.iter().find(|(p, _)| *p == id))
+            .map_or("All projects", |(_, name)| name.as_str())
+            .to_string();
+        let mut lines = vec![Line::choice(
+            "All projects",
+            snapshot.filter.is_none(),
+            Cmd::SideProject(None),
+        )];
+        for (id, name) in &snapshot.choices {
+            lines.push(Line::choice(
+                name.clone(),
+                snapshot.filter == Some(*id),
+                Cmd::SideProject(Some(*id)),
+            ));
+        }
+        tools = tools.child(el().grow(1.0).a11y_hidden()).child(chip::<S>(
+            k,
+            "side-project",
+            name,
+            lines,
+            at,
+        ));
+    }
+    col().w_full().py(4.0).child(search).child(tools)
+}
+
 /// The sidebar for `snapshot`, with its filter in the host's state through `at`.
 pub fn view<S: 'static>(
     snapshot: &Snapshot,
@@ -565,7 +645,6 @@ pub fn view<S: 'static>(
                 .build(k)
                 .key("new-thread"),
         )
-        .child(col().w_full().py(4.0).child(search))
         .child(
             issues
                 .on_select(|_: &mut S, _: &mut Tx| send(Cmd::ToggleIssues))
@@ -580,6 +659,9 @@ pub fn view<S: 'static>(
         .header_padding(12.0, 8.0)
         .row_gap(4.0)
         .header(pages);
+
+    // The search and what narrows it sit above the threads they act on, not among the pages.
+    bar = bar.header(finder::<S>(k, snapshot, search, at));
 
     if !snapshot.suggestions.is_empty() {
         let mut list = col().w_full().gap(4.0).py(4.0);
@@ -639,6 +721,49 @@ pub fn view<S: 'static>(
                 })
                 .child(needs.build(k)),
         );
+    }
+    if snapshot.layout == Layout::Activity {
+        for (age, title) in [
+            (Age::Day, "Past day"),
+            (Age::Week, "Past week"),
+            (Age::Earlier, "Earlier"),
+        ] {
+            let mut section = SidebarSection::new(title).key(format!("recent-{title}"));
+            let mut any = false;
+            for r in snapshot.recent.iter().filter(|r| r.age == age) {
+                any = true;
+                section = section.row(thread_row::<S>(
+                    k,
+                    &r.thread,
+                    Some(&r.project),
+                    at,
+                    &state.rename,
+                    rename_at,
+                    room,
+                ));
+            }
+            if any {
+                bar = bar.child(section.build(k));
+            }
+        }
+        if let Some((expanded, hidden)) = snapshot.recent_fold {
+            let label = if expanded {
+                "Show less".to_string()
+            } else {
+                format!("{hidden} more")
+            };
+            let chevron = rune::icon(if expanded { &CHEVRON_UP } else { &CHEVRON_DOWN }, 14.0)
+                .color(k.c.icon_muted);
+            bar = bar.child(
+                SidebarRow::new(label)
+                    .height(MORE_ROW)
+                    .avatar(chevron)
+                    .title_style(crate::config::fonts::ui(13.0, 400.0))
+                    .select_only()
+                    .on_select(|_: &mut S, _: &mut Tx| send(Cmd::ToggleMoreRecent))
+                    .build(k),
+            );
+        }
     }
     // Projects are dragged to reorder them, unless a search hides some of them.
     let ids: Rc<Vec<u64>> = Rc::new(snapshot.projects.iter().map(|p| p.id).collect());
@@ -960,6 +1085,7 @@ mod tests {
             fold: None,
         };
         Snapshot {
+            layout: Layout::Project,
             projects: vec![
                 project(1, vec![thread(1, 1), thread(1, 2)]),
                 project(2, vec![thread(2, 1)]),

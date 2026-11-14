@@ -495,6 +495,8 @@ pub fn view<S: Host>(host: &S, k: &Kit, inset: f32) -> El {
     dropdown::overlay::<S>(k, &shell.chat.menu, &menu, &mut layer);
     let issue_menu: dropdown::At<S> = std::rc::Rc::new(|s: &mut S| &mut s.shell().issues.menu);
     dropdown::overlay::<S>(k, &shell.issues.menu, &issue_menu, &mut layer);
+    let side_menu: dropdown::At<S> = std::rc::Rc::new(|s: &mut S| &mut s.shell().side.menu);
+    dropdown::overlay::<S>(k, &shell.side.menu, &side_menu, &mut layer);
     // One rule under the whole top band, drawn over the panes so none of them leaves a gap in it.
     let rule = rune::el()
         .absolute(0.0, super::header::BAND - 1.0)

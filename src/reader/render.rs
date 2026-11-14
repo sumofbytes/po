@@ -68,6 +68,12 @@ impl Reader {
         let many = views.len() > 1;
         let (active_project, active_thread) = (self.project_id, self.thread.id);
         let now = now_ms();
+        let layout = self.side_layout;
+        // Narrowed to a project that is gone, it shows them all again.
+        let filter = self
+            .side_project
+            .filter(|id| views.iter().any(|view| view.id == *id));
+        let in_scope = |view: &View<'_>| filter.is_none_or(|id| id == view.id);
         let thread_row = |pid: u64, thread: &Thread| side::Thread {
             project: pid,
             id: thread.id,
@@ -95,6 +101,7 @@ impl Reader {
         let mut waiting: Vec<(&View<'_>, &Thread)> = views
             .iter()
             .flat_map(|view| view.threads.iter().map(move |thread| (view, *thread)))
+            .filter(|(view, _)| in_scope(view))
             .filter(|(view, thread)| self.waits_on_user(view.id, thread))
             .filter(|(view, thread)| {
                 !searching || project_hit(view) || self.matches_query(thread, &query)
@@ -111,6 +118,7 @@ impl Reader {
 
         let projects = views
             .iter()
+            .filter(|view| layout == model::sidebar::Layout::Project && in_scope(view))
             .filter(|view| {
                 !searching
                     || project_hit(view)
@@ -174,6 +182,60 @@ impl Reader {
             })
             .collect();
 
+        // The flat list: every thread that keeps a row, the most recently used first, whatever its project.
+        let mut flat: Vec<(&View<'_>, &Thread)> = if layout == model::sidebar::Layout::Activity {
+            views
+                .iter()
+                .filter(|view| in_scope(view))
+                .flat_map(|view| view.threads.iter().map(move |thread| (view, *thread)))
+                .filter(|(view, t)| {
+                    (!t.blank || t.id == view.shown) && !self.waits_on_user(view.id, t)
+                })
+                .filter(|(view, t)| {
+                    !searching || project_hit(view) || self.matches_query(t, &query)
+                })
+                .collect()
+        } else {
+            vec![]
+        };
+        flat.sort_by_key(|(_, t)| (std::cmp::Reverse(t.used_at), std::cmp::Reverse(t.id)));
+        let recent_total = flat.len();
+        let recent_expanded = self.recent_expanded || searching;
+        let kept =
+            |i: usize, view: &View<'_>, t: &Thread| i < MIN_THREADS || listed(now, view.shown, t);
+        let kept_count = flat
+            .iter()
+            .enumerate()
+            .filter(|(i, (view, t))| kept(*i, view, t))
+            .count();
+        let hidden = recent_total - kept_count;
+        if !recent_expanded {
+            let mut i = 0;
+            flat.retain(|(view, t)| {
+                i += 1;
+                kept(i - 1, view, t)
+            });
+        }
+        let recent_fold = (hidden > 0).then_some((recent_expanded, hidden));
+        let recent = flat
+            .into_iter()
+            .map(|(view, t)| side::Recent {
+                thread: thread_row(view.id, t),
+                project: view.project.name(),
+                age: if !stale(now, t.used_at) {
+                    side::Age::Day
+                } else if now.saturating_sub(t.used_at) <= 7 * STALE_MS {
+                    side::Age::Week
+                } else {
+                    side::Age::Earlier
+                },
+            })
+            .collect();
+        let choices = views
+            .iter()
+            .map(|view| (view.id, view.project.name()))
+            .collect();
+
         let suggestions = self
             .suggestions
             .iter()
@@ -225,6 +287,11 @@ impl Reader {
         side::Snapshot {
             waiting,
             projects,
+            layout,
+            recent,
+            recent_fold,
+            choices,
+            filter,
             suggestions,
             status: self.worktree_status.clone(),
             searching,
@@ -562,6 +629,18 @@ impl Reader {
         match cmd {
             Cmd::SideQuery(query) => {
                 self.side_query = query;
+                cx.notify();
+            }
+            Cmd::SideLayout(layout) => {
+                self.side_layout = layout;
+                cx.notify();
+            }
+            Cmd::SideProject(project) => {
+                self.side_project = project;
+                cx.notify();
+            }
+            Cmd::ToggleMoreRecent => {
+                self.recent_expanded = !self.recent_expanded;
                 cx.notify();
             }
             Cmd::ToggleProject(pid) => {
