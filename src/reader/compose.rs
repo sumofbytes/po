@@ -3,7 +3,11 @@
 use crate::reader::state::*;
 use crate::session::chat::*;
 use crate::session::thread::*;
-use crate::*;
+use std::sync::Arc;
+use std::time::Instant;
+
+use crate::agent::attach::Attachment;
+use crate::host::rt::{Context, Window};
 
 impl Reader {
     /// Sends the draft: as a new turn, or, while the agent is working, into the queue

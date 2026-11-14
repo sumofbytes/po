@@ -5,7 +5,14 @@ use crate::reader::state::*;
 use crate::session::chat::*;
 use crate::session::project::*;
 use crate::session::thread::*;
-use crate::*;
+use std::collections::{HashMap, HashSet};
+use std::time::{Duration, Instant};
+
+use crate::agent::Client;
+use crate::agent::acp::{ConfigOption, Event};
+use crate::host::rt::{Context, Window};
+use crate::{config, model};
+use futures::StreamExt;
 
 /// The longest name a user can give a thread, in characters.
 const RENAME_MAX: usize = 120;

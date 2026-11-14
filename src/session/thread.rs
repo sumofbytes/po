@@ -1,6 +1,15 @@
 use crate::reader::state::*;
 use crate::session::chat::*;
-use crate::*;
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use crate::agent::Client;
+use crate::agent::acp::{ConfigOption, SessionInfo};
+use crate::agent::attach::Attachment;
+use crate::agent::dex::Queue;
+use serde_json::Value;
 
 /// How much longer a parent must wait before it may be told something, given how long ago it
 /// last was; `None` when it may be told now (never told, or long enough ago). A wait of nothing

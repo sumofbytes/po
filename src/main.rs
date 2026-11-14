@@ -13,22 +13,9 @@ mod session;
 mod system;
 mod vcs;
 
-use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime};
 
-use agent::Client;
-use agent::acp::{ConfigOption, Event, PermissionOption, SessionInfo};
-use agent::attach::Attachment;
-use agent::dex::Queue;
-use files::explorer::FileTree;
 use files::watch::Prefetch;
-use futures::StreamExt;
-use serde_json::Value;
-use vcs::diff::{Change, Kind, Row};
-
-use host::rt::{Context, Task, Window};
 
 /// Relaunch ourselves in its own process group with output going to a log file,
 /// so the shell gets its prompt back (like `code .`).
