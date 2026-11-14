@@ -477,6 +477,13 @@ const BAND: f32 = super::header::BAND;
 /// right of its rows, which the shell lets the rows keep by laying the sidebar out the pane's full width.
 pub const GUTTER: f32 = 20.0;
 
+/// Where the sidebar sits: what the window's buttons take at its leading edge, and how wide it is.
+#[derive(Clone, Copy)]
+pub struct Edge {
+    pub inset: f32,
+    pub width: f32,
+}
+
 /// The sidebar for `snapshot`, with its filter in the host's state through `at`.
 pub fn view<S: 'static>(
     snapshot: &Snapshot,
@@ -485,9 +492,9 @@ pub fn view<S: 'static>(
     at: At<S>,
     rename_at: super::rename::At<S>,
     settings_open: bool,
-    inset: f32,
-    width: f32,
+    edge: Edge,
 ) -> El {
+    let Edge { inset, width } = edge;
     let room = (width - TITLE_RESERVE).max(0.0);
     // The kit's field hardcodes a faint placeholder; the rows' own ink is what this one wants.
     let field = rune::text_input(&state.query, k.ty.ui_compact)
@@ -823,8 +830,10 @@ mod tests {
                 |s| &mut s.side,
                 |s| &mut s.side.rename,
                 false,
-                s.inset,
-                300.0,
+                Edge {
+                    inset: s.inset,
+                    width: 300.0,
+                },
             ),
             vec![],
         )

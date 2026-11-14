@@ -474,8 +474,10 @@ pub fn view<S: Host>(host: &S, k: &Kit, inset: f32) -> El {
                 side_of::<S>,
                 rename_of::<S>,
                 layout.settings_open,
-                inset,
-                shell.sidebar.width(),
+                sidebar::Edge {
+                    inset,
+                    width: shell.sidebar.width(),
+                },
             )),
     );
     // The kit draws the main pane as a bordered, rounded card; Po's panes sit flush, told apart by
