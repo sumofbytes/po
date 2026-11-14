@@ -541,13 +541,8 @@ pub(crate) struct Widths {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     use crate::agent::dex::Queue;
-    
-    
-    
-    
-    
 
     // submit's paths (§4.3 of the control plan): blank, unstarted, starting, asleep, ready,
     // busy for an agent that takes messages mid-turn (dex) and one that doesn't (ACP).

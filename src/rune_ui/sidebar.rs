@@ -210,6 +210,7 @@ fn thread_row<S: 'static>(
     at: At<S>,
     rename: &super::rename::Rename,
     rename_at: super::rename::At<S>,
+    room: f32,
 ) -> El {
     let (pid, tid) = (t.project, t.id);
     if rename.open_at((pid, tid), super::rename::Place::Sidebar) {
@@ -229,7 +230,30 @@ fn thread_row<S: 'static>(
     }
     let (name, t_loses) = (t.name.clone(), t.closing);
     let rename_name = t.name.clone();
-    let mut row = SidebarRow::new(t.label.clone())
+    // Rune cuts a title mid-word; cut it at a word instead, in the type the row will set it in.
+    let font = match subtitle {
+        Some(_) => TextStyle {
+            weight: 500.0,
+            ..k.ty.ui_compact
+        },
+        None => k.ty.ui,
+    };
+    let label = at_word(&t.label, room, |s| {
+        rune::text::measure(s, &[], font, None).0
+    });
+    // A running thread's title takes the accent the spinner has, so it reads as live in the list.
+    let live;
+    let kit = if t.mark == Mark::Running {
+        let mut lit = k.clone();
+        lit.c.text_muted = k.c.text_accent;
+        lit.c.text_base = k.c.text_accent;
+        live = lit;
+        &live
+    } else {
+        k
+    };
+    let mut row = SidebarRow::new(label)
+        .title_style(font)
         .selected(t.selected)
         .on_select(move |_: &mut S, _: &mut Tx| send(Cmd::OpenThread(pid, tid)))
         .on_double_click(move |s: &mut S, _: &mut Tx| {
@@ -255,7 +279,39 @@ fn thread_row<S: 'static>(
     } else {
         row = row.height(ROW);
     }
-    row.build(k).key(format!("thread-{pid}-{tid}"))
+    // The shortened title is only for the eye; assistive tech gets the whole one.
+    row.build(kit)
+        .key(format!("thread-{pid}-{tid}"))
+        .label(t.label.clone())
+}
+
+/// What a row's title does not get of the sidebar's width: the insets and gutter, the row's own
+/// padding, its mark and the slot at its end. Over-counted a little, so that a title that fits
+/// here fits the row and Rune never has to cut it again.
+const TITLE_RESERVE: f32 = 112.0;
+
+/// `text` if `width` says it fits `room`, else its longest run of whole words with "…" after it
+/// that does. When not even the first word fits, `text` as it is, for Rune to cut.
+fn at_word(text: &str, room: f32, width: impl Fn(&str) -> f32) -> String {
+    if room <= 0.0 || width(text) <= room {
+        return text.to_string();
+    }
+    let ends: Vec<usize> = text
+        .char_indices()
+        .filter(|&(i, c)| c.is_whitespace() && i > 0)
+        .map(|(i, _)| i)
+        .collect();
+    for &end in ends.iter().rev() {
+        let head = text[..end].trim_end_matches(|c: char| c.is_whitespace() || ",;:-".contains(c));
+        if head.is_empty() {
+            continue;
+        }
+        let cut = format!("{head}…");
+        if width(&cut) <= room {
+            return cut;
+        }
+    }
+    text.to_string()
 }
 
 /// A project: a header that toggles it (larger title, no disclosure glyph, the kit's header
@@ -277,6 +333,7 @@ fn project_section<S: 'static>(
     at: At<S>,
     rename: &super::rename::Rename,
     rename_at: super::rename::At<S>,
+    room: f32,
 ) -> El {
     let pid = p.id;
     let pname = p.name.clone();
@@ -370,7 +427,7 @@ fn project_section<S: 'static>(
         .child(header);
     if !p.collapsed {
         for t in &p.threads {
-            section = section.child(thread_row::<S>(k, t, None, at, rename, rename_at));
+            section = section.child(thread_row::<S>(k, t, None, at, rename, rename_at, room));
         }
         if let Some((expanded, hidden)) = p.fold {
             let label = if expanded {
@@ -429,7 +486,9 @@ pub fn view<S: 'static>(
     rename_at: super::rename::At<S>,
     settings_open: bool,
     inset: f32,
+    width: f32,
 ) -> El {
+    let room = (width - TITLE_RESERVE).max(0.0);
     // The kit's field hardcodes a faint placeholder; the rows' own ink is what this one wants.
     let field = rune::text_input(&state.query, k.ty.ui_compact)
         .single_line()
@@ -560,6 +619,7 @@ pub fn view<S: 'static>(
                 at,
                 &state.rename,
                 rename_at,
+                room,
             ));
         }
         // Pinned above the scrolling projects so it stays in view; a long list scrolls within its own cap.
@@ -597,6 +657,7 @@ pub fn view<S: 'static>(
             at,
             &state.rename,
             rename_at,
+            room,
         ));
     }
 
@@ -763,9 +824,29 @@ mod tests {
                 |s| &mut s.side.rename,
                 false,
                 s.inset,
+                300.0,
             ),
             vec![],
         )
+    }
+
+    #[test]
+    fn a_long_title_is_cut_at_a_word() {
+        let wide = |s: &str| s.chars().count() as f32;
+        assert_eq!(at_word("short", 10.0, wide), "short");
+        assert_eq!(
+            at_word("fix the sidebar colour bug", 16.0, wide),
+            "fix the sidebar…"
+        );
+        // The ellipsis counts toward the room.
+        assert_eq!(at_word("fix the sidebar colour", 15.0, wide), "fix the…");
+        // Trailing punctuation does not stay in front of it.
+        assert_eq!(at_word("fix, the sidebar", 8.0, wide), "fix…");
+        // One long word has no boundary to cut at.
+        assert_eq!(
+            at_word("supercalifragilistic", 8.0, wide),
+            "supercalifragilistic"
+        );
     }
 
     #[test]
