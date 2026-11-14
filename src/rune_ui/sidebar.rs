@@ -193,7 +193,7 @@ fn icon_slot<S: 'static>(
 /// What a thread's state looks like at the start of its row: a faint ring when it is idle, a dot when
 /// it has something to say, and the spinner while its agent works. Each sits in a slot as wide as
 /// the spinner, so titles line up whatever the state.
-fn mark(k: &Kit, mark: Mark) -> El {
+fn mark(k: &Kit, mark: Mark, flush: bool) -> El {
     let dot = |color| el().size(8.0, 8.0).radius(4.0).fill(color);
     let shown = match mark {
         Mark::Idle => el().size(8.0, 8.0).radius(4.0).border(1.0, k.c.icon_faint),
@@ -204,6 +204,10 @@ fn mark(k: &Kit, mark: Mark) -> El {
             .font(crate::config::fonts::ui(14.0, 500.0))
             .color(k.c.danger.fg),
     };
+    if flush {
+        // At the left of the slot, where the pages' icons begin, not centred in it.
+        return row().size(16.0, 16.0).items_center().pl(2.0).child(shown);
+    }
     row().size(14.0, 14.0).center().child(shown)
 }
 
@@ -215,6 +219,8 @@ fn thread_row<S: 'static>(
     rename: &super::rename::Rename,
     rename_at: super::rename::At<S>,
     room: f32,
+    // Its mark starts where the pages' icons do, for lists that sit under them; the project tree keeps its own.
+    flush: bool,
 ) -> El {
     let (pid, tid) = (t.project, t.id);
     if rename.open_at((pid, tid), super::rename::Place::Sidebar) {
@@ -228,7 +234,7 @@ fn thread_row<S: 'static>(
             .items_center()
             .radius(k.radius.md)
             .fill(k.c.layer_02)
-            .child(mark(k, t.mark))
+            .child(mark(k, t.mark, flush))
             .child(super::rename::input::<S>(k, rename, rename_at, k.ty.ui));
         return line;
     }
@@ -271,7 +277,7 @@ fn thread_row<S: 'static>(
                 loses_work: t_loses,
             })
         });
-    row = row.avatar(mark(k, t.mark));
+    row = row.avatar(mark(k, t.mark, flush));
     if let Some(ago) = &t.ago {
         // In the slot the close button takes over on hover, so it stands where the section's plus does.
         row = row.status(RowStatus::Other(
@@ -431,7 +437,9 @@ fn project_section<S: 'static>(
         .child(header);
     if !p.collapsed {
         for t in &p.threads {
-            section = section.child(thread_row::<S>(k, t, None, at, rename, rename_at, room));
+            section = section.child(thread_row::<S>(
+                k, t, None, at, rename, rename_at, room, false,
+            ));
         }
         if let Some((expanded, hidden)) = p.fold {
             let label = if expanded {
@@ -709,6 +717,7 @@ pub fn view<S: 'static>(
                 &state.rename,
                 rename_at,
                 room,
+                true,
             ));
         }
         // Pinned above the scrolling projects so it stays in view; a long list scrolls within its own cap.
@@ -740,6 +749,7 @@ pub fn view<S: 'static>(
                     &state.rename,
                     rename_at,
                     room,
+                    true,
                 ));
             }
             if any {
