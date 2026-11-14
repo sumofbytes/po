@@ -537,3 +537,138 @@ pub(crate) struct Widths {
     pub right: Option<f32>,
     pub explorer: Option<f32>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    
+    use crate::agent::dex::Queue;
+    
+    
+    
+    
+    
+
+    // submit's paths (§4.3 of the control plan): blank, unstarted, starting, asleep, ready,
+    // busy for an agent that takes messages mid-turn (dex) and one that doesn't (ACP).
+    #[test]
+    fn a_message_goes_where_its_thread_is() {
+        assert_eq!(
+            route(true, false, false, false, false, false, false),
+            Where::Start,
+            "blank"
+        );
+        assert_eq!(
+            route(false, true, false, false, false, false, false),
+            Where::Start,
+            "unstarted"
+        );
+        assert_eq!(
+            route(false, false, false, true, false, false, false),
+            Where::Wait,
+            "starting"
+        );
+        assert_eq!(
+            route(false, false, true, false, false, false, false),
+            Where::Wait,
+            "asleep"
+        );
+        assert_eq!(
+            route(false, false, false, false, false, false, false),
+            Where::Dispatch,
+            "ready"
+        );
+        assert_eq!(
+            route(false, false, false, false, true, true, false),
+            Where::Take(Queue::Steer),
+            "dex mid-turn"
+        );
+        assert_eq!(
+            route(false, false, false, false, true, true, true),
+            Where::Take(Queue::Followup),
+            "dex follow-up"
+        );
+        assert_eq!(
+            route(false, false, false, false, true, false, false),
+            Where::Queue,
+            "ACP mid-turn"
+        );
+        // A thread that is busy is not starting anything, however the rest stands.
+        assert_eq!(
+            route(false, false, false, true, true, false, false),
+            Where::Queue
+        );
+    }
+
+    #[test]
+    fn an_agents_layout_is_saved_as_the_users_until_the_user_changes_it() {
+        use crate::reader::state::AgentChange;
+        // The agent opened the viewer: while it is open, the user's closed one is what is saved.
+        let change = AgentChange::after(None, 1, 2);
+        assert_eq!(AgentChange::saved(Some(&change), 2), 1);
+        // The user moved on from it: what they left is theirs.
+        assert_eq!(AgentChange::saved(Some(&change), 3), 3);
+        // A second move on top of the agent's keeps the user's from before the first.
+        let modes = AgentChange::after(None, 'f', 'd');
+        let again = AgentChange::after(Some(modes), 'd', 'c');
+        assert_eq!(AgentChange::saved(Some(&again), 'c'), 'f');
+        // A move after the user changed it starts from theirs.
+        let after_user = AgentChange::after(Some(modes), 'c', 'd');
+        assert_eq!(AgentChange::saved(Some(&after_user), 'd'), 'c');
+        assert_eq!(AgentChange::saved(Some(&after_user), 'x'), 'x');
+        assert_eq!(AgentChange::saved(None, 'x'), 'x');
+        // The user moved off the agent's layout and back by hand: the record is gone, so what
+        // they came back to is what is saved.
+        let change = AgentChange::after(None, 1, 2);
+        assert!(AgentChange::settled(Some(change), 2).is_some());
+        let gone = AgentChange::settled(Some(change), 3);
+        assert!(gone.is_none());
+        assert_eq!(AgentChange::saved(gone.as_ref(), 2), 2);
+    }
+
+    #[test]
+    fn an_agents_own_view_show_does_not_drop_its_pending_move() {
+        use crate::ipc::command::Command;
+        use crate::reader::state::{PendingMove, Screen};
+        use crate::session::project::Mode;
+        let from = Screen {
+            side_open: false,
+            agent_open: false,
+            mode: Mode::Source,
+            current: None,
+            picked: None,
+            shown: None,
+        };
+        // The agent shows a view on the thread whose file open waits: the move follows what the
+        // agent touched, so it applies once the pause comes.
+        let mut pending = PendingMove {
+            thread: 1,
+            command: Command::FileOpen {
+                path: "a.rs".into(),
+                line: None,
+            },
+            from: from.clone(),
+        };
+        let shown = Screen {
+            side_open: true,
+            agent_open: true,
+            mode: Mode::Source,
+            current: None,
+            picked: None,
+            shown: Some("v".into()),
+        };
+        pending.follows_agent(1, &shown);
+        assert_eq!(pending.from.shown.as_deref(), Some("v"));
+        assert!(pending.from.side_open && pending.from.agent_open);
+        // What the agent did not touch stays as deferred, so a user's change to it still counts.
+        assert!(matches!(pending.from.mode, Mode::Source));
+        // A move of another thread does not follow: it drops when its thread goes off screen.
+        let mut other = PendingMove {
+            thread: 2,
+            command: Command::ViewerClose,
+            from,
+        };
+        other.follows_agent(1, &shown);
+        assert_eq!(other.from.shown, None);
+    }
+}

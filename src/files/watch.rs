@@ -133,3 +133,21 @@ pub(crate) fn language(path: &str) -> &'static str {
         _ => "Plain text",
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    
+    
+    
+    
+    
+    
+    
+
+    #[test]
+    fn elixir_files_are_named() {
+        assert_eq!(language("lib/app.ex"), "Elixir");
+        assert_eq!(language("lib/app.exs"), "Elixir");
+    }
+}
