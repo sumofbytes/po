@@ -34,7 +34,14 @@ pub enum Category {
 }
 
 impl Status {
-    pub const ALL: [Status; 6] = [Status::Backlog, Status::Todo, Status::InProgress, Status::InReview, Status::Done, Status::Canceled];
+    pub const ALL: [Status; 6] = [
+        Status::Backlog,
+        Status::Todo,
+        Status::InProgress,
+        Status::InReview,
+        Status::Done,
+        Status::Canceled,
+    ];
 
     /// As the files spell it.
     pub fn slug(self) -> &'static str {
@@ -88,7 +95,13 @@ pub enum Priority {
 }
 
 impl Priority {
-    pub const ALL: [Priority; 5] = [Priority::None, Priority::Urgent, Priority::High, Priority::Medium, Priority::Low];
+    pub const ALL: [Priority; 5] = [
+        Priority::None,
+        Priority::Urgent,
+        Priority::High,
+        Priority::Medium,
+        Priority::Low,
+    ];
 
     pub fn slug(self) -> &'static str {
         match self {
@@ -111,7 +124,9 @@ impl Priority {
     }
 
     pub fn from_slug(slug: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|priority| priority.slug() == slug)
+        Self::ALL
+            .into_iter()
+            .find(|priority| priority.slug() == slug)
     }
 
     /// For sorting: urgent first, no priority last.
@@ -180,11 +195,19 @@ pub struct Issue {
 }
 
 fn text(value: &Value) -> Option<String> {
-    value.as_str().filter(|text| !text.is_empty()).map(str::to_string)
+    value
+        .as_str()
+        .filter(|text| !text.is_empty())
+        .map(str::to_string)
 }
 
 fn strings(value: &Value) -> Vec<String> {
-    value.as_array().into_iter().flatten().filter_map(text).collect()
+    value
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(text)
+        .collect()
 }
 
 impl Issue {
@@ -227,9 +250,16 @@ impl Issue {
             out.insert("labels".into(), json!(self.labels));
         }
         if !self.links.is_empty() {
-            out.insert("links".into(), Value::Array(self.links.iter().map(Link::to_json).collect()));
+            out.insert(
+                "links".into(),
+                Value::Array(self.links.iter().map(Link::to_json).collect()),
+            );
         }
-        for (key, value) in [("assignee", &self.assignee), ("epic", &self.epic), ("milestone", &self.milestone)] {
+        for (key, value) in [
+            ("assignee", &self.assignee),
+            ("epic", &self.epic),
+            ("milestone", &self.milestone),
+        ] {
             if let Some(value) = value {
                 out.insert(key.into(), json!(value));
             }
@@ -252,19 +282,35 @@ impl Issue {
         Some(Self {
             number,
             title: value["title"].as_str()?.to_string(),
-            description: value["description"].as_str().unwrap_or_default().to_string(),
-            status: value["status"].as_str().and_then(Status::from_slug).unwrap_or(Status::Backlog),
-            priority: value["priority"].as_str().and_then(Priority::from_slug).unwrap_or(Priority::None),
+            description: value["description"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string(),
+            status: value["status"]
+                .as_str()
+                .and_then(Status::from_slug)
+                .unwrap_or(Status::Backlog),
+            priority: value["priority"]
+                .as_str()
+                .and_then(Priority::from_slug)
+                .unwrap_or(Priority::None),
             labels: strings(&value["labels"]),
             assignee: text(&value["assignee"]),
             parent: value["parent"].as_u64(),
             epic: text(&value["epic"]),
             milestone: text(&value["milestone"]),
             due: value["due"].as_str().and_then(Date::from_iso),
-            estimate: value["estimate"].as_u64().and_then(|n| u32::try_from(n).ok()),
+            estimate: value["estimate"]
+                .as_u64()
+                .and_then(|n| u32::try_from(n).ok()),
             created: value["created"].as_u64().unwrap_or(0),
             updated: value["updated"].as_u64().unwrap_or(0),
-            links: value["links"].as_array().into_iter().flatten().filter_map(Link::from_json).collect(),
+            links: value["links"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Link::from_json)
+                .collect(),
         })
     }
 }
@@ -278,7 +324,12 @@ pub enum EpicStatus {
 }
 
 impl EpicStatus {
-    pub const ALL: [EpicStatus; 4] = [EpicStatus::Planned, EpicStatus::Active, EpicStatus::Paused, EpicStatus::Done];
+    pub const ALL: [EpicStatus; 4] = [
+        EpicStatus::Planned,
+        EpicStatus::Active,
+        EpicStatus::Paused,
+        EpicStatus::Done,
+    ];
 
     pub fn slug(self) -> &'static str {
         match self {
@@ -334,12 +385,19 @@ pub fn slug(name: &str, fallback: &str) -> String {
         .filter(|word| !word.is_empty())
         .map(str::to_ascii_lowercase)
         .collect();
-    if words.is_empty() { fallback.to_string() } else { words.join("-") }
+    if words.is_empty() {
+        fallback.to_string()
+    } else {
+        words.join("-")
+    }
 }
 
 /// Whether `id` is something that can be a file's name here.
 pub(crate) fn is_id(id: &str) -> bool {
-    !id.is_empty() && id.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+    !id.is_empty()
+        && id
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
 }
 
 /// `base`, or `base-2`, `base-3`… for the first that `taken` does not hold.
@@ -347,7 +405,10 @@ fn unique(base: String, taken: impl Fn(&str) -> bool) -> String {
     if !taken(&base) {
         return base;
     }
-    (2..).map(|n| format!("{base}-{n}")).find(|id| !taken(id)).expect("an unbounded range")
+    (2..)
+        .map(|n| format!("{base}-{n}"))
+        .find(|id| !taken(id))
+        .expect("an unbounded range")
 }
 
 impl Epic {
@@ -368,8 +429,14 @@ impl Epic {
 
     /// Adds a milestone at the end, and returns its id.
     pub fn add_milestone(&mut self, name: &str, target: Option<Date>) -> String {
-        let id = unique(slug(name, "milestone"), |id| self.milestones.iter().any(|m| m.id == id));
-        self.milestones.push(Milestone { id: id.clone(), name: name.to_string(), target });
+        let id = unique(slug(name, "milestone"), |id| {
+            self.milestones.iter().any(|m| m.id == id)
+        });
+        self.milestones.push(Milestone {
+            id: id.clone(),
+            name: name.to_string(),
+            target,
+        });
         id
     }
 
@@ -411,15 +478,29 @@ impl Epic {
     }
 
     pub fn from_json(id: String, value: &Value) -> Option<Self> {
-        let milestones = value["milestones"].as_array().into_iter().flatten().filter_map(|m| {
-            let id = text(&m["id"]).filter(|id| is_id(id))?;
-            Some(Milestone { id, name: m["name"].as_str().unwrap_or_default().to_string(), target: m["target"].as_str().and_then(Date::from_iso) })
-        });
+        let milestones = value["milestones"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|m| {
+                let id = text(&m["id"]).filter(|id| is_id(id))?;
+                Some(Milestone {
+                    id,
+                    name: m["name"].as_str().unwrap_or_default().to_string(),
+                    target: m["target"].as_str().and_then(Date::from_iso),
+                })
+            });
         Some(Self {
             id,
             name: value["name"].as_str()?.to_string(),
-            description: value["description"].as_str().unwrap_or_default().to_string(),
-            status: value["status"].as_str().and_then(EpicStatus::from_slug).unwrap_or(EpicStatus::Planned),
+            description: value["description"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string(),
+            status: value["status"]
+                .as_str()
+                .and_then(EpicStatus::from_slug)
+                .unwrap_or(EpicStatus::Planned),
             lead: text(&value["lead"]),
             start: value["start"].as_str().and_then(Date::from_iso),
             target: value["target"].as_str().and_then(Date::from_iso),
@@ -449,18 +530,33 @@ pub struct Config {
 
 /// Keys for a repo called `name`: its initials, or the start of its name if it is one word.
 pub fn default_prefix(name: &str) -> String {
-    let words: Vec<&str> = name.split(|c: char| !c.is_ascii_alphanumeric()).filter(|word| !word.is_empty()).collect();
+    let words: Vec<&str> = name
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .collect();
     let prefix: String = match words.as_slice() {
         [] => String::new(),
         [one] => one.chars().take(3).collect(),
-        many => many.iter().filter_map(|word| word.chars().next()).take(4).collect(),
+        many => many
+            .iter()
+            .filter_map(|word| word.chars().next())
+            .take(4)
+            .collect(),
     };
-    if prefix.is_empty() { "ISS".into() } else { prefix.to_ascii_uppercase() }
+    if prefix.is_empty() {
+        "ISS".into()
+    } else {
+        prefix.to_ascii_uppercase()
+    }
 }
 
 impl Config {
     pub fn new(prefix: String) -> Self {
-        Self { prefix, next: 1, labels: vec![] }
+        Self {
+            prefix,
+            next: 1,
+            labels: vec![],
+        }
     }
 
     pub fn to_json(&self) -> Value {
@@ -477,7 +573,9 @@ impl Config {
 
     /// The config a file holds, with `fallback`'s prefix if it has none that will do as one.
     pub fn from_json(value: &Value, fallback: &str) -> Self {
-        let prefix = value["prefix"].as_str().filter(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_alphanumeric()));
+        let prefix = value["prefix"]
+            .as_str()
+            .filter(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_alphanumeric()));
         Self {
             prefix: prefix.unwrap_or(fallback).to_string(),
             next: value["next"].as_u64().unwrap_or(1).max(1),
@@ -485,7 +583,12 @@ impl Config {
                 .as_array()
                 .into_iter()
                 .flatten()
-                .filter_map(|label| Some(Label { name: text(&label["name"])?, color: label["color"].as_str().unwrap_or_default().to_string() }))
+                .filter_map(|label| {
+                    Some(Label {
+                        name: text(&label["name"])?,
+                        color: label["color"].as_str().unwrap_or_default().to_string(),
+                    })
+                })
                 .collect(),
         }
     }
@@ -530,7 +633,12 @@ pub(crate) struct Dirty {
 
 impl Dirty {
     pub fn is_empty(&self) -> bool {
-        !self.config && self.issues.is_empty() && self.created.is_empty() && self.removed.is_empty() && self.epics.is_empty() && self.removed_epics.is_empty()
+        !self.config
+            && self.issues.is_empty()
+            && self.created.is_empty()
+            && self.removed.is_empty()
+            && self.epics.is_empty()
+            && self.removed_epics.is_empty()
     }
 }
 
@@ -546,29 +654,67 @@ pub struct Tracker {
 
 impl Tracker {
     pub fn new(config: Config) -> Self {
-        Self { config, issues: BTreeMap::new(), epics: vec![], dirty: Dirty::default() }
+        Self {
+            config,
+            issues: BTreeMap::new(),
+            epics: vec![],
+            dirty: Dirty::default(),
+        }
     }
 
     /// A tracker over what was read from files. Anything a merge or a hand edit left inconsistent
     /// is mended in memory, and told in the returned list; it is written only when it changes.
-    pub fn from_parts(mut config: Config, issues: Vec<Issue>, mut epics: Vec<Epic>) -> (Self, Vec<String>) {
+    pub fn from_parts(
+        mut config: Config,
+        issues: Vec<Issue>,
+        mut epics: Vec<Epic>,
+    ) -> (Self, Vec<String>) {
         let mut problems = vec![];
-        let issues: BTreeMap<u64, Issue> = issues.into_iter().map(|issue| (issue.number, issue)).collect();
+        let issues: BTreeMap<u64, Issue> = issues
+            .into_iter()
+            .map(|issue| (issue.number, issue))
+            .collect();
         epics.sort_by(|a, b| (a.created, &a.id).cmp(&(b.created, &b.id)));
         let mut dirty = Dirty::default();
         // Another branch may have used numbers this one has not seen yet.
-        if let Some(highest) = issues.keys().next_back().filter(|highest| **highest >= config.next) {
-            problems.push(format!("next number was {}, but {}-{highest} exists; now {}", config.next, config.prefix, highest + 1));
+        if let Some(highest) = issues
+            .keys()
+            .next_back()
+            .filter(|highest| **highest >= config.next)
+        {
+            problems.push(format!(
+                "next number was {}, but {}-{highest} exists; now {}",
+                config.next,
+                config.prefix,
+                highest + 1
+            ));
             config.next = highest + 1;
             dirty.config = true;
         }
-        let mut tracker = Self { config, issues, epics, dirty };
+        let mut tracker = Self {
+            config,
+            issues,
+            epics,
+            dirty,
+        };
         let numbers: Vec<u64> = tracker.issues.keys().copied().collect();
         for number in numbers {
             let parent = tracker.issues[&number].parent;
-            if parent.is_some_and(|parent| parent == number || !tracker.issues.contains_key(&parent) || tracker.is_under(parent, number)) {
-                problems.push(format!("{}: parent {} is missing or loops back; made a top-level issue", tracker.key(number), parent.unwrap_or(0)));
-                tracker.issues.get_mut(&number).expect("listed above").parent = None;
+            if parent.is_some_and(|parent| {
+                parent == number
+                    || !tracker.issues.contains_key(&parent)
+                    || tracker.is_under(parent, number)
+            }) {
+                problems.push(format!(
+                    "{}: parent {} is missing or loops back; made a top-level issue",
+                    tracker.key(number),
+                    parent.unwrap_or(0)
+                ));
+                tracker
+                    .issues
+                    .get_mut(&number)
+                    .expect("listed above")
+                    .parent = None;
             }
         }
         (tracker, problems)
@@ -607,7 +753,9 @@ impl Tracker {
 
     /// The sub-issues of `number`, by number.
     pub fn children(&self, number: u64) -> impl Iterator<Item = &Issue> {
-        self.issues.values().filter(move |issue| issue.parent == Some(number))
+        self.issues
+            .values()
+            .filter(move |issue| issue.parent == Some(number))
     }
 
     /// Everything under `number`, at any depth.
@@ -649,22 +797,33 @@ impl Tracker {
 
     /// The sub-issues of `number` at every depth, done and in all.
     pub fn progress(&self, number: u64) -> Progress {
-        Progress::of(self.descendants(number).iter().filter_map(|n| self.issues.get(n)))
+        Progress::of(
+            self.descendants(number)
+                .iter()
+                .filter_map(|n| self.issues.get(n)),
+        )
     }
 
     pub fn epic_progress(&self, epic: &str) -> Progress {
-        Progress::of(self.issues.values().filter(|issue| issue.epic.as_deref() == Some(epic)))
+        Progress::of(
+            self.issues
+                .values()
+                .filter(|issue| issue.epic.as_deref() == Some(epic)),
+        )
     }
 
     pub fn milestone_progress(&self, epic: &str, milestone: &str) -> Progress {
-        Progress::of(self.issues.values().filter(|issue| issue.epic.as_deref() == Some(epic) && issue.milestone.as_deref() == Some(milestone)))
+        Progress::of(self.issues.values().filter(|issue| {
+            issue.epic.as_deref() == Some(epic) && issue.milestone.as_deref() == Some(milestone)
+        }))
     }
 
     /// Adds an issue to the backlog, and returns its number.
     pub fn create(&mut self, title: &str, now: u64) -> u64 {
         let number = self.config.next;
         self.config.next += 1;
-        self.issues.insert(number, Issue::new(number, title.trim().to_string(), now));
+        self.issues
+            .insert(number, Issue::new(number, title.trim().to_string(), now));
         self.dirty.config = true;
         self.dirty.issues.insert(number);
         self.dirty.created.insert(number);
@@ -678,7 +837,9 @@ impl Tracker {
         let new = self.config.next.max(floor);
         self.config.next = new + 1;
         self.dirty.config = true;
-        let Some(mut issue) = self.issues.remove(&old) else { return old };
+        let Some(mut issue) = self.issues.remove(&old) else {
+            return old;
+        };
         issue.number = new;
         self.issues.insert(new, issue);
         let kids: Vec<u64> = self.children(old).map(|child| child.number).collect();
@@ -701,7 +862,10 @@ impl Tracker {
         if found.is_none() {
             *epic = None;
         }
-        if milestone.as_deref().is_some_and(|id| found.is_none_or(|epic| epic.milestone(id).is_none())) {
+        if milestone
+            .as_deref()
+            .is_some_and(|id| found.is_none_or(|epic| epic.milestone(id).is_none()))
+        {
             *milestone = None;
         }
     }
@@ -710,7 +874,9 @@ impl Tracker {
     /// update. A parent that doesn't exist or would make a loop, and an epic or milestone that
     /// doesn't exist, are put back as they were. Returns whether anything changed.
     pub fn update(&mut self, number: u64, now: u64, change: impl FnOnce(&mut Issue)) -> bool {
-        let Some(old) = self.issues.get(&number) else { return false };
+        let Some(old) = self.issues.get(&number) else {
+            return false;
+        };
         let mut new = old.clone();
         change(&mut new);
         new.number = number;
@@ -718,8 +884,13 @@ impl Tracker {
         new.updated = old.updated;
         new.title = new.title.trim().to_string();
         let mut seen = BTreeSet::new();
-        new.labels.retain(|label| !label.is_empty() && seen.insert(label.clone()));
-        if new.parent != old.parent && new.parent.is_some_and(|parent| !self.issues.contains_key(&parent) || self.is_under(parent, number)) {
+        new.labels
+            .retain(|label| !label.is_empty() && seen.insert(label.clone()));
+        if new.parent != old.parent
+            && new.parent.is_some_and(|parent| {
+                !self.issues.contains_key(&parent) || self.is_under(parent, number)
+            })
+        {
             new.parent = old.parent;
         }
         let (mut epic, mut milestone) = (new.epic.take(), new.milestone.take());
@@ -754,7 +925,8 @@ impl Tracker {
     /// Adds an epic, and returns its id.
     pub fn create_epic(&mut self, name: &str, now: u64) -> String {
         let id = unique(slug(name, "epic"), |id| self.epic(id).is_some());
-        self.epics.push(Epic::new(id.clone(), name.trim().to_string(), now));
+        self.epics
+            .push(Epic::new(id.clone(), name.trim().to_string(), now));
         self.dirty.epics.insert(id.clone());
         id
     }
@@ -762,7 +934,9 @@ impl Tracker {
     /// Lets `change` edit an epic, as [`Tracker::update`] does an issue. A milestone it takes away
     /// is taken off the issues that were in it.
     pub fn update_epic(&mut self, id: &str, now: u64, change: impl FnOnce(&mut Epic)) -> bool {
-        let Some(old) = self.epic(id) else { return false };
+        let Some(old) = self.epic(id) else {
+            return false;
+        };
         let mut new = old.clone();
         change(&mut new);
         new.id = old.id.clone();
@@ -770,15 +944,23 @@ impl Tracker {
         new.updated = old.updated;
         new.name = new.name.trim().to_string();
         let mut seen = BTreeSet::new();
-        new.milestones.retain(|m| is_id(&m.id) && seen.insert(m.id.clone()));
+        new.milestones
+            .retain(|m| is_id(&m.id) && seen.insert(m.id.clone()));
         if new == *old {
             return false;
         }
         new.updated = now;
         // Only a milestone that went can leave an issue pointing at nothing; looking at every
         // issue for each letter typed in an epic's name would be wasted work.
-        let lost_milestone = old.milestones.iter().any(|before| new.milestones.iter().all(|after| after.id != before.id));
-        let at = self.epics.iter().position(|epic| epic.id == id).expect("found above");
+        let lost_milestone = old
+            .milestones
+            .iter()
+            .any(|before| new.milestones.iter().all(|after| after.id != before.id));
+        let at = self
+            .epics
+            .iter()
+            .position(|epic| epic.id == id)
+            .expect("found above");
         self.epics[at] = new;
         self.dirty.epics.insert(id.to_string());
         if lost_milestone {
@@ -789,7 +971,9 @@ impl Tracker {
 
     /// Deletes an epic, and takes its issues out of it.
     pub fn remove_epic(&mut self, id: &str, now: u64) {
-        let Some(at) = self.epics.iter().position(|epic| epic.id == id) else { return };
+        let Some(at) = self.epics.iter().position(|epic| epic.id == id) else {
+            return;
+        };
         self.epics.remove(at);
         self.dirty.epics.remove(id);
         self.dirty.removed_epics.insert(id.to_string());
@@ -811,10 +995,18 @@ impl Tracker {
         if name.is_empty() {
             return;
         }
-        match self.config.labels.iter_mut().find(|label| label.name == name) {
+        match self
+            .config
+            .labels
+            .iter_mut()
+            .find(|label| label.name == name)
+        {
             Some(label) if label.color == color => return,
             Some(label) => label.color = color.to_string(),
-            None => self.config.labels.push(Label { name: name.to_string(), color: color.to_string() }),
+            None => self.config.labels.push(Label {
+                name: name.to_string(),
+                color: color.to_string(),
+            }),
         }
         self.dirty.config = true;
     }
@@ -824,9 +1016,16 @@ impl Tracker {
         let before = self.config.labels.len();
         self.config.labels.retain(|label| label.name != name);
         self.dirty.config |= self.config.labels.len() != before;
-        let tagged: Vec<u64> = self.issues.values().filter(|issue| issue.labels.iter().any(|label| label == name)).map(|issue| issue.number).collect();
+        let tagged: Vec<u64> = self
+            .issues
+            .values()
+            .filter(|issue| issue.labels.iter().any(|label| label == name))
+            .map(|issue| issue.number)
+            .collect();
         for number in tagged {
-            self.update(number, now, |issue| issue.labels.retain(|label| label != name));
+            self.update(number, now, |issue| {
+                issue.labels.retain(|label| label != name)
+            });
         }
     }
 }
@@ -854,7 +1053,10 @@ mod tests {
         assert_eq!(Status::from_slug("shipped"), None);
         assert_eq!(Status::InReview.category(), Category::Started);
         assert!(Status::Todo.is_open() && !Status::Done.is_open() && !Status::Canceled.is_open());
-        assert!(Priority::Urgent.rank() < Priority::Low.rank() && Priority::Low.rank() < Priority::None.rank());
+        assert!(
+            Priority::Urgent.rank() < Priority::Low.rank()
+                && Priority::Low.rank() < Priority::None.rank()
+        );
     }
 
     #[test]
@@ -880,7 +1082,8 @@ mod tests {
         let a = t.create("a", 1);
         t.dirty = Dirty::default();
         assert!(!t.update(a, 5, |issue| issue.title = "a".into()));
-        assert!(t.update(a, 5, |issue| issue.labels = vec!["x".into(), "x".into(), String::new()]));
+        assert!(t.update(a, 5, |issue| issue.labels =
+            vec!["x".into(), "x".into(), String::new()]));
         assert_eq!(t.issue(a).unwrap().labels, ["x"]);
         t.dirty = Dirty::default();
         assert!(t.update(a, 9, |issue| issue.status = Status::Todo));
@@ -888,8 +1091,13 @@ mod tests {
         assert_eq!(t.issue(a).unwrap().created, 1);
         assert_eq!(t.dirty.issues.iter().collect::<Vec<_>>(), [&a]);
         // The number and creation time are not the caller's to change.
-        t.update(a, 10, |issue| (issue.number, issue.created, issue.priority) = (99, 99, Priority::High));
-        assert_eq!((t.issue(a).unwrap().number, t.issue(a).unwrap().created), (a, 1));
+        t.update(a, 10, |issue| {
+            (issue.number, issue.created, issue.priority) = (99, 99, Priority::High)
+        });
+        assert_eq!(
+            (t.issue(a).unwrap().number, t.issue(a).unwrap().created),
+            (a, 1)
+        );
     }
 
     #[test]
@@ -905,7 +1113,14 @@ mod tests {
         assert_eq!(t.descendants(a), [b, c]);
         t.update(c, 4, |issue| issue.status = Status::Done);
         t.update(b, 4, |issue| issue.status = Status::InProgress);
-        assert_eq!(t.progress(a), Progress { done: 1, started: 1, all: 2 });
+        assert_eq!(
+            t.progress(a),
+            Progress {
+                done: 1,
+                started: 1,
+                all: 2
+            }
+        );
         // As if all were written, so the deletion has a file to delete.
         t.dirty = Dirty::default();
         t.remove(a, 5);
@@ -926,13 +1141,23 @@ mod tests {
         t.update(numbers[1], 3, |issue| issue.status = Status::Canceled);
         t.update(numbers[2], 3, |issue| issue.status = Status::InReview);
         let progress = t.epic_progress(&e);
-        assert_eq!(progress, Progress { done: 1, started: 1, all: 3 });
+        assert_eq!(
+            progress,
+            Progress {
+                done: 1,
+                started: 1,
+                all: 3
+            }
+        );
     }
 
     #[test]
     fn epics_get_unique_ids_and_milestones_belong_to_one() {
         let mut t = tracker();
-        let (a, b) = (t.create_epic("Launch v2!", 1), t.create_epic("launch v2", 2));
+        let (a, b) = (
+            t.create_epic("Launch v2!", 1),
+            t.create_epic("launch v2", 2),
+        );
         assert_eq!((a.as_str(), b.as_str()), ("launch-v2", "launch-v2-2"));
         assert_eq!(t.create_epic("!!!", 3), "epic");
         let mut beta = String::new();
@@ -943,12 +1168,28 @@ mod tests {
         assert_eq!(beta, "beta");
         let n = t.create("x", 5);
         // A milestone must be of the issue's own epic, and an epic must exist.
-        t.update(n, 6, |issue| (issue.epic, issue.milestone) = (Some(b.clone()), Some(beta.clone())));
-        assert_eq!((t.issue(n).unwrap().epic.as_ref(), t.issue(n).unwrap().milestone.as_ref()), (Some(&b), None));
-        t.update(n, 7, |issue| (issue.epic, issue.milestone) = (Some(a.clone()), Some(beta.clone())));
+        t.update(n, 6, |issue| {
+            (issue.epic, issue.milestone) = (Some(b.clone()), Some(beta.clone()))
+        });
+        assert_eq!(
+            (
+                t.issue(n).unwrap().epic.as_ref(),
+                t.issue(n).unwrap().milestone.as_ref()
+            ),
+            (Some(&b), None)
+        );
+        t.update(n, 7, |issue| {
+            (issue.epic, issue.milestone) = (Some(a.clone()), Some(beta.clone()))
+        });
         assert_eq!(t.milestone_progress(&a, &beta).all, 1);
         t.update(n, 8, |issue| issue.epic = Some("nope".into()));
-        assert_eq!((t.issue(n).unwrap().epic.as_ref(), t.issue(n).unwrap().milestone.as_ref()), (None, None));
+        assert_eq!(
+            (
+                t.issue(n).unwrap().epic.as_ref(),
+                t.issue(n).unwrap().milestone.as_ref()
+            ),
+            (None, None)
+        );
     }
 
     #[test]
@@ -958,10 +1199,15 @@ mod tests {
         let mut beta = String::new();
         t.update_epic(&e, 2, |epic| beta = epic.add_milestone("Beta", None));
         let n = t.create("x", 3);
-        t.update(n, 4, |issue| (issue.epic, issue.milestone) = (Some(e.clone()), Some(beta.clone())));
+        t.update(n, 4, |issue| {
+            (issue.epic, issue.milestone) = (Some(e.clone()), Some(beta.clone()))
+        });
         t.update_epic(&e, 5, |epic| epic.milestones.clear());
         let issue = t.issue(n).unwrap();
-        assert_eq!((issue.epic.as_deref(), issue.milestone.as_deref()), (Some("launch"), None));
+        assert_eq!(
+            (issue.epic.as_deref(), issue.milestone.as_deref()),
+            (Some("launch"), None)
+        );
         assert_eq!(issue.updated, 5);
         t.remove_epic(&e, 6);
         assert_eq!(t.issue(n).unwrap().epic, None);
@@ -985,7 +1231,13 @@ mod tests {
     #[test]
     fn an_issue_survives_its_json_and_leaves_out_what_is_empty() {
         let mut issue = Issue::new(12, "Fix it".into(), 5);
-        let mut keys: Vec<_> = issue.to_json().as_object().unwrap().keys().cloned().collect();
+        let mut keys: Vec<_> = issue
+            .to_json()
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect();
         keys.sort();
         assert_eq!(keys, ["created", "status", "title", "updated", "version"]);
         assert_eq!(Issue::from_json(12, &issue.to_json()), Some(issue.clone()));
@@ -999,19 +1251,33 @@ mod tests {
         issue.milestone = Some("beta".into());
         issue.due = Some(day(2026, 11, 2));
         issue.estimate = Some(3);
-        issue.links = vec![Link::Thread("s-1".into()), Link::Branch("po-12-fix-it".into()), Link::Pr(40)];
+        issue.links = vec![
+            Link::Thread("s-1".into()),
+            Link::Branch("po-12-fix-it".into()),
+            Link::Pr(40),
+        ];
         issue.updated = 9;
         assert_eq!(Issue::from_json(12, &issue.to_json()), Some(issue));
         // Only a title is needed; what is not understood takes its default.
-        let odd = Issue::from_json(1, &json!({ "title": "t", "status": "shipped", "due": "soon", "links": [{ "x": 1 }] })).unwrap();
-        assert_eq!((odd.status, odd.due, odd.links.len()), (Status::Backlog, None, 0));
+        let odd = Issue::from_json(
+            1,
+            &json!({ "title": "t", "status": "shipped", "due": "soon", "links": [{ "x": 1 }] }),
+        )
+        .unwrap();
+        assert_eq!(
+            (odd.status, odd.due, odd.links.len()),
+            (Status::Backlog, None, 0)
+        );
         assert_eq!(Issue::from_json(1, &json!({ "status": "done" })), None);
     }
 
     #[test]
     fn an_epic_and_a_config_survive_their_json() {
         let mut epic = Epic::new("launch".into(), "Launch".into(), 5);
-        assert_eq!(Epic::from_json("launch".into(), &epic.to_json()), Some(epic.clone()));
+        assert_eq!(
+            Epic::from_json("launch".into(), &epic.to_json()),
+            Some(epic.clone())
+        );
         epic.description = "Ship it".into();
         epic.status = EpicStatus::Active;
         epic.lead = Some("arpit".into());
@@ -1019,13 +1285,28 @@ mod tests {
         epic.target = Some(day(2026, 12, 15));
         epic.add_milestone("Beta", Some(day(2026, 12, 1)));
         epic.add_milestone("GA", None);
-        assert_eq!(Epic::from_json("launch".into(), &epic.to_json()), Some(epic));
+        assert_eq!(
+            Epic::from_json("launch".into(), &epic.to_json()),
+            Some(epic)
+        );
         let mut config = Config::new("PO".into());
         config.next = 8;
-        config.labels = vec![Label { name: "bug".into(), color: "#e5484d".into() }, Label { name: "ui".into(), color: String::new() }];
+        config.labels = vec![
+            Label {
+                name: "bug".into(),
+                color: "#e5484d".into(),
+            },
+            Label {
+                name: "ui".into(),
+                color: String::new(),
+            },
+        ];
         assert_eq!(Config::from_json(&config.to_json(), "XX"), config);
         // A prefix that couldn't be in a key is replaced.
-        assert_eq!(Config::from_json(&json!({ "prefix": "a-b" }), "XX").prefix, "XX");
+        assert_eq!(
+            Config::from_json(&json!({ "prefix": "a-b" }), "XX").prefix,
+            "XX"
+        );
     }
 
     #[test]
@@ -1042,14 +1323,32 @@ mod tests {
     fn what_a_merge_left_inconsistent_is_mended_on_load() {
         let mut config = Config::new("PO".into());
         config.next = 3;
-        let issue = |n: u64, parent: Option<u64>| Issue { parent, ..Issue::new(n, format!("i{n}"), 1) };
+        let issue = |n: u64, parent: Option<u64>| Issue {
+            parent,
+            ..Issue::new(n, format!("i{n}"), 1)
+        };
         // Numbers beyond `next`, a parent that is gone, and two that are each other's parent.
-        let issues = vec![issue(1, Some(9)), issue(5, Some(6)), issue(6, Some(5)), issue(7, None)];
+        let issues = vec![
+            issue(1, Some(9)),
+            issue(5, Some(6)),
+            issue(6, Some(5)),
+            issue(7, None),
+        ];
         let (t, problems) = Tracker::from_parts(config, issues, vec![]);
         assert_eq!(t.config.next, 8);
-        assert!(t.dirty.config && t.dirty.issues.is_empty(), "mended in memory; written when something changes");
+        assert!(
+            t.dirty.config && t.dirty.issues.is_empty(),
+            "mended in memory; written when something changes"
+        );
         // Of the two in a loop, the first found is let go and the other is left under it.
-        assert_eq!((t.issue(1).unwrap().parent, t.issue(5).unwrap().parent, t.issue(6).unwrap().parent), (None, None, Some(5)));
+        assert_eq!(
+            (
+                t.issue(1).unwrap().parent,
+                t.issue(5).unwrap().parent,
+                t.issue(6).unwrap().parent
+            ),
+            (None, None, Some(5))
+        );
         assert_eq!(problems.len(), 3, "{problems:?}");
     }
 }

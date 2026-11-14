@@ -152,7 +152,9 @@ pub struct ThreadInfo {
 
 /// Whether `a` and `b` are threads of one project, given each project's thread ids.
 pub fn share_project(projects: &[Vec<u64>], a: u64, b: u64) -> bool {
-    projects.iter().any(|threads| threads.contains(&a) && threads.contains(&b))
+    projects
+        .iter()
+        .any(|threads| threads.contains(&a) && threads.contains(&b))
 }
 
 /// A session's context use, as an agent's `usage_update` reports it.
@@ -168,7 +170,10 @@ impl Usage {
         if update["sessionUpdate"] != "usage_update" {
             return None;
         }
-        Some(Self { used: update["used"].as_u64()?, size: update["size"].as_u64()? })
+        Some(Self {
+            used: update["used"].as_u64()?,
+            size: update["size"].as_u64()?,
+        })
     }
 }
 
@@ -339,7 +344,15 @@ mod tests {
         ready: bool,
         busy: bool,
     ) -> Facts {
-        Facts { approval, asking, failed, asleep, started, ready, busy }
+        Facts {
+            approval,
+            asking,
+            failed,
+            asleep,
+            started,
+            ready,
+            busy,
+        }
     }
 
     // The derivation order is what an orchestrator needs: a question outranks a failure, a
@@ -349,20 +362,64 @@ mod tests {
         let idle = facts(false, false, false, false, true, true, false);
         assert_eq!(state(&idle), ThreadState::Ready);
         assert_eq!(state(&Facts { busy: true, ..idle }), ThreadState::Running);
-        assert_eq!(state(&Facts { ready: false, ..idle }), ThreadState::Starting);
+        assert_eq!(
+            state(&Facts {
+                ready: false,
+                ..idle
+            }),
+            ThreadState::Starting
+        );
         // Nothing is running at all (never started): it reads ready, which a caller can tell
         // from a live one by `started`'s facts; only a thread an agent started is ever blank, and it
         // has a client while it waits.
-        assert_eq!(state(&facts(false, false, false, false, false, false, false)), ThreadState::Ready);
+        assert_eq!(
+            state(&facts(false, false, false, false, false, false, false)),
+            ThreadState::Ready
+        );
         // A question outranks the failure that may sit behind it in the transcript.
-        assert_eq!(state(&Facts { asking: true, failed: true, ..idle }), ThreadState::Asking);
+        assert_eq!(
+            state(&Facts {
+                asking: true,
+                failed: true,
+                ..idle
+            }),
+            ThreadState::Asking
+        );
         // An approval outranks a question: the user has to say yes before anything else.
-        assert_eq!(state(&Facts { approval: true, asking: true, failed: true, ..idle }), ThreadState::Approval);
+        assert_eq!(
+            state(&Facts {
+                approval: true,
+                asking: true,
+                failed: true,
+                ..idle
+            }),
+            ThreadState::Approval
+        );
         // A failure outranks a sleep, so a crash is not tidied away as "asleep".
-        assert_eq!(state(&Facts { failed: true, asleep: true, ..idle }), ThreadState::Failed);
-        assert_eq!(state(&Facts { asleep: true, ..idle }), ThreadState::Asleep);
+        assert_eq!(
+            state(&Facts {
+                failed: true,
+                asleep: true,
+                ..idle
+            }),
+            ThreadState::Failed
+        );
+        assert_eq!(
+            state(&Facts {
+                asleep: true,
+                ..idle
+            }),
+            ThreadState::Asleep
+        );
         // A busy turn with a question open is asking, not running.
-        assert_eq!(state(&Facts { asking: true, busy: true, ..idle }), ThreadState::Asking);
+        assert_eq!(
+            state(&Facts {
+                asking: true,
+                busy: true,
+                ..idle
+            }),
+            ThreadState::Asking
+        );
     }
 
     #[test]
@@ -377,15 +434,36 @@ mod tests {
     #[test]
     fn usage_is_read_from_a_usage_update_only() {
         let update = json!({ "sessionUpdate": "usage_update", "used": 53000, "size": 200000 });
-        assert_eq!(Usage::from_update(&update), Some(Usage { used: 53000, size: 200_000 }));
-        assert_eq!(Usage::from_update(&json!({ "sessionUpdate": "agent_message_chunk" })), None);
+        assert_eq!(
+            Usage::from_update(&update),
+            Some(Usage {
+                used: 53000,
+                size: 200_000
+            })
+        );
+        assert_eq!(
+            Usage::from_update(&json!({ "sessionUpdate": "agent_message_chunk" })),
+            None
+        );
         // A usage update missing a number is not guessed at.
-        assert_eq!(Usage::from_update(&json!({ "sessionUpdate": "usage_update", "used": 1 })), None);
+        assert_eq!(
+            Usage::from_update(&json!({ "sessionUpdate": "usage_update", "used": 1 })),
+            None
+        );
     }
 
     #[test]
     fn a_state_name_round_trips() {
-        for state in [ThreadState::Starting, ThreadState::Approval, ThreadState::Ready, ThreadState::Running, ThreadState::Asking, ThreadState::Failed, ThreadState::Asleep, ThreadState::Closed] {
+        for state in [
+            ThreadState::Starting,
+            ThreadState::Approval,
+            ThreadState::Ready,
+            ThreadState::Running,
+            ThreadState::Asking,
+            ThreadState::Failed,
+            ThreadState::Asleep,
+            ThreadState::Closed,
+        ] {
             assert_eq!(ThreadState::from_name(state.name()), Some(state));
         }
         assert_eq!(ThreadState::from_name("gone"), None);
@@ -407,12 +485,22 @@ mod tests {
             preview: "Running tests".into(),
             queued: 1,
             dropped: vec!["hello".into()],
-            asking: Some(AskInfo { title: "Run tests".into(), options: vec![AskOption { id: "a".into(), name: "Allow once".into(), kind: "allow_once".into() }] }),
+            asking: Some(AskInfo {
+                title: "Run tests".into(),
+                options: vec![AskOption {
+                    id: "a".into(),
+                    name: "Allow once".into(),
+                    kind: "allow_once".into(),
+                }],
+            }),
             parent: Some(3),
             children: vec![],
             active_at: 1234,
             on_screen: false,
-            usage: Some(Usage { used: 1200, size: 200_000 }),
+            usage: Some(Usage {
+                used: 1200,
+                size: 200_000,
+            }),
         };
         let json = info.json();
         assert_eq!(json["usage"]["used"], 1200);

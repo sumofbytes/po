@@ -6,7 +6,10 @@ use std::collections::{BTreeMap, HashSet};
 /// A sort key that puts `path` where the tree lists it: folders before files at every level.
 pub fn order(path: &str) -> Vec<(bool, String)> {
     let last = path.matches('/').count();
-    path.split('/').enumerate().map(|(ix, part)| (ix == last, part.to_string())).collect()
+    path.split('/')
+        .enumerate()
+        .map(|(ix, part)| (ix == last, part.to_string()))
+        .collect()
 }
 
 /// A visible row of the tree.
@@ -49,7 +52,12 @@ pub struct FileTree {
 
 impl FileTree {
     pub fn new(open_by_default: bool) -> Self {
-        Self { paths: vec![], flipped: HashSet::new(), open_by_default, selected: None }
+        Self {
+            paths: vec![],
+            flipped: HashSet::new(),
+            open_by_default,
+            selected: None,
+        }
     }
 
     fn is_open(&self, id: &str) -> bool {
@@ -68,7 +76,9 @@ impl FileTree {
     #[hotpath::measure(impl_type = "FileTree")]
     pub fn set_paths(&mut self, paths: &[String], selected: Option<&str>) {
         self.paths = paths.to_vec();
-        self.selected = selected.filter(|id| self.paths.iter().any(|p| p == id)).map(str::to_string);
+        self.selected = selected
+            .filter(|id| self.paths.iter().any(|p| p == id))
+            .map(str::to_string);
     }
 
     /// Selects `id`, if it is shown.
@@ -80,12 +90,16 @@ impl FileTree {
 
     /// The selected file, not a folder.
     pub fn selected_file(&self) -> Option<&str> {
-        self.selected.as_deref().filter(|id| self.paths.iter().any(|p| p == id))
+        self.selected
+            .as_deref()
+            .filter(|id| self.paths.iter().any(|p| p == id))
     }
 
     /// Selects the row `id`, and flips it if it is a folder.
     pub fn click(&mut self, id: &str) {
-        let Some(row) = self.rows().into_iter().find(|row| row.id == id) else { return };
+        let Some(row) = self.rows().into_iter().find(|row| row.id == id) else {
+            return;
+        };
         self.selected = Some(row.id.clone());
         if row.folder {
             self.set_open(&row.id, !row.expanded);
@@ -95,10 +109,16 @@ impl FileTree {
     /// Moves the selection, or opens or closes the selected folder.
     pub fn step(&mut self, step: Step) {
         let rows = self.rows();
-        let at = self.selected.as_ref().and_then(|id| rows.iter().position(|row| &row.id == id));
+        let at = self
+            .selected
+            .as_ref()
+            .and_then(|id| rows.iter().position(|row| &row.id == id));
         match step {
             Step::Up => {
-                let ix = at.unwrap_or(0).checked_sub(1).unwrap_or(rows.len().saturating_sub(1));
+                let ix = at
+                    .unwrap_or(0)
+                    .checked_sub(1)
+                    .unwrap_or(rows.len().saturating_sub(1));
                 self.selected = rows.get(ix).map(|row| row.id.clone());
             }
             Step::Down => {
@@ -107,7 +127,12 @@ impl FileTree {
                 self.selected = rows.get(ix).map(|row| row.id.clone());
             }
             Step::Left | Step::Right => {
-                let Some(row) = at.map(|ix| &rows[ix]).filter(|row| row.folder && row.expanded == (step == Step::Left)) else { return };
+                let Some(row) = at
+                    .map(|ix| &rows[ix])
+                    .filter(|row| row.folder && row.expanded == (step == Step::Left))
+                else {
+                    return;
+                };
                 self.set_open(&row.id, !row.expanded);
             }
         }
@@ -138,7 +163,14 @@ impl FileTree {
             let id = format!("{prefix}{name}");
             let expanded = self.is_open(&id);
             let selected = self.selected.as_deref() == Some(&id);
-            out.push(Row { id: id.clone(), name: name.clone(), depth, folder: true, expanded, selected });
+            out.push(Row {
+                id: id.clone(),
+                name: name.clone(),
+                depth,
+                folder: true,
+                expanded,
+                selected,
+            });
             if expanded {
                 self.walk(child, &format!("{id}/"), depth + 1, out);
             }
@@ -146,7 +178,14 @@ impl FileTree {
         for path in &dir.files {
             let name = path.rsplit('/').next().unwrap_or(path).to_string();
             let selected = self.selected.as_deref() == Some(path);
-            out.push(Row { id: path.clone(), name, depth, folder: false, expanded: false, selected });
+            out.push(Row {
+                id: path.clone(),
+                name,
+                depth,
+                folder: false,
+                expanded: false,
+                selected,
+            });
         }
     }
 }

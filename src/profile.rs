@@ -9,12 +9,12 @@
 #[global_allocator]
 static ALLOCATOR: hotpath::CountingAllocator = hotpath::CountingAllocator::new();
 
+#[cfg(not(feature = "hotpath"))]
+pub use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender};
 /// The channel types `hotpath::channel!` hands back: hotpath's wrappers in a profiled build,
 /// the channels themselves otherwise.
 #[cfg(feature = "hotpath")]
 pub use hotpath::wrap::futures_channel::mpsc::{UnboundedReceiver, UnboundedSender};
-#[cfg(not(feature = "hotpath"))]
-pub use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender};
 
 #[cfg(feature = "hotpath")]
 static GUARD: std::sync::Mutex<Option<hotpath::HotpathGuard>> = std::sync::Mutex::new(None);
@@ -26,9 +26,17 @@ static GUARD: std::sync::Mutex<Option<hotpath::HotpathGuard>> = std::sync::Mutex
 pub fn start() {
     #[cfg(feature = "hotpath")]
     {
-        let guard = hotpath::HotpathGuardBuilder::new("po").percentiles(&[50.0, 95.0, 99.0]).build();
-        *GUARD.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(guard);
-        if let Some(ms) = std::env::var("HOTPATH_SHUTDOWN_MS").ok().and_then(|ms| ms.parse::<u64>().ok()).filter(|ms| *ms > 0) {
+        let guard = hotpath::HotpathGuardBuilder::new("po")
+            .percentiles(&[50.0, 95.0, 99.0])
+            .build();
+        *GUARD
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(guard);
+        if let Some(ms) = std::env::var("HOTPATH_SHUTDOWN_MS")
+            .ok()
+            .and_then(|ms| ms.parse::<u64>().ok())
+            .filter(|ms| *ms > 0)
+        {
             std::thread::Builder::new()
                 .name("profile-timer".into())
                 .spawn(move || {
@@ -47,7 +55,12 @@ pub fn start() {
 /// out that skips the end of `main`: quitting the app, `PO_TRACE=exit`, Ctrl+C.
 pub fn finish() {
     #[cfg(feature = "hotpath")]
-    drop(GUARD.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take());
+    drop(
+        GUARD
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take(),
+    );
 }
 
 /// Ctrl+C or a `kill` in the terminal Po was started from would end it without a report: the
@@ -62,7 +75,8 @@ fn finish_on_interrupt() {
     // SAFETY: the handler only stores to an atomic, which is async-signal-safe.
     let set = unsafe {
         libc::signal(libc::SIGINT, caught as *const () as libc::sighandler_t) != libc::SIG_ERR
-            && libc::signal(libc::SIGTERM, caught as *const () as libc::sighandler_t) != libc::SIG_ERR
+            && libc::signal(libc::SIGTERM, caught as *const () as libc::sighandler_t)
+                != libc::SIG_ERR
     };
     if !set {
         return;

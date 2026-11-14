@@ -1,8 +1,8 @@
 //! Po's colour schemes as a Rune kit. The schemes are in
 //! [`crate::schemes`].
 use rune::{Color, color};
-use rune_kit::{Kit, PaletteFocus, PaletteSeed};
 use rune_kit::kit::StateColors;
+use rune_kit::{Kit, PaletteFocus, PaletteSeed};
 use serde_json::Value;
 
 /// What the theme was not given.
@@ -19,7 +19,12 @@ pub fn kit(theme: &Value) -> (Kit, bool) {
     let mut kit = Kit::from_palette_focus(PaletteSeed { bg, fg, accent }, PaletteFocus::Accent);
     // The status roles come from the scheme's own red, green and yellow, not the kit's fixed ones.
     let role = |name: &str, old: StateColors| match get(&format!("{name}.background")) {
-        Some(c) => StateColors { bg: bg.mix(c, 0.12), fg: c, border: bg.mix(c, 0.35), icon: c },
+        Some(c) => StateColors {
+            bg: bg.mix(c, 0.12),
+            fg: c,
+            border: bg.mix(c, 0.35),
+            icon: c,
+        },
         None => old,
     };
     kit.c.success = role("success", kit.c.success);
@@ -39,5 +44,7 @@ pub fn kit(theme: &Value) -> (Kit, bool) {
 
 /// The bundled scheme `name`, else [`DEFAULT`].
 pub fn load(name: &str) -> Value {
-    crate::schemes::load(name).or_else(|| crate::schemes::load(DEFAULT)).expect("the default scheme is bundled")
+    crate::schemes::load(name)
+        .or_else(|| crate::schemes::load(DEFAULT))
+        .expect("the default scheme is bundled")
 }

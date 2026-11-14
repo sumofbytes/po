@@ -27,7 +27,12 @@ pub struct View {
 
 impl View {
     fn empty() -> Self {
-        Self { root: None, name: String::new(), tracker: Tracker::new(Config::new("ISS".into())), problems: vec![] }
+        Self {
+            root: None,
+            name: String::new(),
+            tracker: Tracker::new(Config::new("ISS".into())),
+            problems: vec![],
+        }
     }
 }
 
@@ -53,8 +58,18 @@ pub struct Overview {
 impl Overview {
     /// How many issues are open, and how many of those are due before `today`.
     pub fn counts(&self, today: Date) -> (usize, usize) {
-        let open = || self.repos.iter().flat_map(|repo| repo.tracker.issues()).filter(|issue| issue.status.is_open());
-        (open().count(), open().filter(|issue| issue.due.is_some_and(|due| due < today)).count())
+        let open = || {
+            self.repos
+                .iter()
+                .flat_map(|repo| repo.tracker.issues())
+                .filter(|issue| issue.status.is_open())
+        };
+        (
+            open().count(),
+            open()
+                .filter(|issue| issue.due.is_some_and(|due| due < today))
+                .count(),
+        )
     }
 }
 
@@ -69,9 +84,15 @@ struct Held {
     checkouts: BTreeMap<PathBuf, Vec<PathBuf>>,
 }
 
-static HELD: Mutex<Held> = Mutex::new(Held { stores: BTreeMap::new(), shown: None, wanted: Vec::new(), checkouts: BTreeMap::new() });
+static HELD: Mutex<Held> = Mutex::new(Held {
+    stores: BTreeMap::new(),
+    shown: None,
+    wanted: Vec::new(),
+    checkouts: BTreeMap::new(),
+});
 static VIEW: LazyLock<watch::Sender<View>> = LazyLock::new(|| watch::Sender::new(View::empty()));
-static OVERVIEW: LazyLock<watch::Sender<Overview>> = LazyLock::new(|| watch::Sender::new(Overview::default()));
+static OVERVIEW: LazyLock<watch::Sender<Overview>> =
+    LazyLock::new(|| watch::Sender::new(Overview::default()));
 static POLLER: OnceLock<Thread> = OnceLock::new();
 
 const POLL_EVERY: Duration = Duration::from_millis(1500);
@@ -82,8 +103,17 @@ fn lock() -> MutexGuard<'static, Held> {
 
 #[hotpath::measure]
 fn publish_view(store: &Store) {
-    let name = store.root().file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
-    let view = View { root: Some(store.root().to_path_buf()), name, tracker: store.tracker.clone(), problems: store.problems.clone() };
+    let name = store
+        .root()
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let view = View {
+        root: Some(store.root().to_path_buf()),
+        name,
+        tracker: store.tracker.clone(),
+        problems: store.problems.clone(),
+    };
     VIEW.send_if_modified(|now| {
         let changed = *now != view;
         if changed {
@@ -97,13 +127,17 @@ fn publish_view(store: &Store) {
 /// copy and compare all the others. A repo the overview doesn't list yet goes through
 /// [`publish_overview`].
 fn publish_repo(held: &Held, root: &Path) {
-    let Some(store) = held.stores.get(root) else { return };
+    let Some(store) = held.stores.get(root) else {
+        return;
+    };
     let listed = OVERVIEW.borrow().repos.iter().any(|repo| repo.root == root);
     if !listed {
         return publish_overview(held);
     }
     OVERVIEW.send_if_modified(|now| {
-        let Some(repo) = now.repos.iter_mut().find(|repo| repo.root == root) else { return false };
+        let Some(repo) = now.repos.iter_mut().find(|repo| repo.root == root) else {
+            return false;
+        };
         if repo.tracker == store.tracker && repo.problems == store.problems {
             return false;
         }
@@ -122,13 +156,20 @@ fn publish_overview(held: &Held) {
         .filter_map(|root| held.stores.get(root))
         .map(|store| RepoView {
             root: store.root().to_path_buf(),
-            name: store.root().file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default(),
+            name: store
+                .root()
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default(),
             tracker: store.tracker.clone(),
             problems: store.problems.clone(),
         })
         .collect();
     repos.sort_by(|a, b| (&a.name, &a.root).cmp(&(&b.name, &b.root)));
-    let overview = Overview { checkouts: held.checkouts.clone(), repos };
+    let overview = Overview {
+        checkouts: held.checkouts.clone(),
+        repos,
+    };
     OVERVIEW.send_if_modified(|now| {
         let changed = *now != overview;
         if changed {
@@ -184,7 +225,10 @@ pub fn set_project(project: &Path) {
     let root = primary_root(project);
     let (shown, known) = {
         let held = lock();
-        (held.shown.as_ref() == Some(&root), held.stores.contains_key(&root))
+        (
+            held.shown.as_ref() == Some(&root),
+            held.stores.contains_key(&root),
+        )
     };
     if shown {
         return;
@@ -210,13 +254,24 @@ pub fn set_project(project: &Path) {
 pub(crate) fn poll() {
     let (wanted, known, states) = {
         let held = lock();
-        (held.wanted.clone(), held.stores.keys().cloned().collect::<Vec<_>>(), held.stores.values().map(Store::watch_state).collect::<Vec<_>>())
+        (
+            held.wanted.clone(),
+            held.stores.keys().cloned().collect::<Vec<_>>(),
+            held.stores
+                .values()
+                .map(Store::watch_state)
+                .collect::<Vec<_>>(),
+        )
     };
     let mut checkouts: BTreeMap<PathBuf, Vec<PathBuf>> = BTreeMap::new();
     for path in wanted {
         checkouts.entry(primary_root(&path)).or_default().push(path);
     }
-    let opened: Vec<Store> = checkouts.keys().filter(|root| !known.contains(root)).map(|root| Store::open(root)).collect();
+    let opened: Vec<Store> = checkouts
+        .keys()
+        .filter(|root| !known.contains(root))
+        .map(|root| Store::open(root))
+        .collect();
     let readings: Vec<_> = states
         .into_iter()
         .filter(|(_, dir, _, seen)| fingerprint(dir) != *seen)
@@ -230,7 +285,9 @@ pub(crate) fn poll() {
     let held = &mut *guard;
     let mut changed = !opened.is_empty() || held.checkouts != checkouts;
     for store in opened {
-        held.stores.entry(store.root().to_path_buf()).or_insert(store);
+        held.stores
+            .entry(store.root().to_path_buf())
+            .or_insert(store);
     }
     // By the repo and not the folder: two clones share a folder, and each has a store of its own.
     for (root, loaded, seen, read_at) in readings {
@@ -244,7 +301,8 @@ pub(crate) fn poll() {
         }
     }
     let shown = held.shown.clone();
-    held.stores.retain(|root, _| checkouts.contains_key(root) || shown.as_ref() == Some(root));
+    held.stores
+        .retain(|root, _| checkouts.contains_key(root) || shown.as_ref() == Some(root));
     held.checkouts = checkouts;
     if changed {
         publish_overview(held);
@@ -262,8 +320,14 @@ pub fn change<R>(f: impl FnOnce(&mut Tracker, u64) -> R) -> Option<R> {
 }
 
 /// Changes the store of `root` and tells whoever follows it; gives `f` back if it isn't held.
-fn change_held<R, F: FnOnce(&mut Tracker, u64) -> R>(held: &mut Held, root: &Path, f: F) -> Result<R, F> {
-    let Some(store) = held.stores.get_mut(root) else { return Err(f) };
+fn change_held<R, F: FnOnce(&mut Tracker, u64) -> R>(
+    held: &mut Held,
+    root: &Path,
+    f: F,
+) -> Result<R, F> {
+    let Some(store) = held.stores.get_mut(root) else {
+        return Err(f);
+    };
     let out = apply(store, f);
     if held.shown.as_deref() == Some(root) {
         publish_view(&held.stores[root]);
@@ -321,25 +385,39 @@ static NUDGE: LazyLock<watch::Sender<u64>> = LazyLock::new(|| watch::Sender::new
 
 /// Asks the page to go to `nav`, as soon as it is on screen.
 pub fn navigate(nav: Nav) {
-    *PENDING.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(nav);
+    *PENDING
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(nav);
     NUDGE.send_modify(|count| *count += 1);
 }
 
 /// The request waiting for the page, if there is one; the page takes it once.
 pub fn take_nav() -> Option<Nav> {
-    PENDING.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take()
+    PENDING
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .take()
 }
 
 /// Moves the issues linked to `branch` to Done: the branch was merged.
 pub fn branch_merged(project: &Path, branch: &str) {
     change_repo(project, |tracker, now| {
-        let linked: Vec<u64> = tracker.issues().filter(|issue| issue.status.is_open() && issue.links.iter().any(|link| matches!(link, super::Link::Branch(name) if name == branch))).map(|issue| issue.number).collect();
+        let linked: Vec<u64> = tracker
+            .issues()
+            .filter(|issue| {
+                issue.status.is_open()
+                    && issue
+                        .links
+                        .iter()
+                        .any(|link| matches!(link, super::Link::Branch(name) if name == branch))
+            })
+            .map(|issue| issue.number)
+            .collect();
         for number in linked {
             tracker.update(number, now, |issue| issue.status = super::Status::Done);
         }
     });
 }
-
 
 #[cfg(test)]
 pub(crate) mod testing {
@@ -357,7 +435,8 @@ pub(crate) mod testing {
 
     impl Repo {
         pub fn new(name: &str) -> Self {
-            let base = std::env::temp_dir().join(format!("po-shared-{}-{}", std::process::id(), name));
+            let base =
+                std::env::temp_dir().join(format!("po-shared-{}-{}", std::process::id(), name));
             let path = base.join(name);
             std::fs::create_dir_all(path.join(".git")).unwrap();
             Self(std::fs::canonicalize(path).unwrap())
@@ -385,13 +464,26 @@ mod tests {
         change(|t, now| t.create("mine", now)).unwrap();
         let prefix = VIEW.borrow().tracker.config.prefix.clone();
         // Another window made PO-5 and has not been heard from yet.
-        std::fs::write(repo.0.join(format!(".po/issues/{prefix}-5.json")), r#"{"title":"theirs"}"#).unwrap();
+        std::fs::write(
+            repo.0.join(format!(".po/issues/{prefix}-5.json")),
+            r#"{"title":"theirs"}"#,
+        )
+        .unwrap();
         assert_eq!(change(|t, now| t.create("next", now)), Some(6));
         let view = VIEW.borrow().clone();
-        assert_eq!(view.tracker.issues().map(|i| i.title.as_str()).collect::<Vec<_>>(), ["mine", "theirs", "next"]);
+        assert_eq!(
+            view.tracker
+                .issues()
+                .map(|i| i.title.as_str())
+                .collect::<Vec<_>>(),
+            ["mine", "theirs", "next"]
+        );
         // Changing a repo that is not the one shown works on its own copy.
         let other = Repo::new("shared-d");
-        assert_eq!(change_repo(&other.0, |t, now| t.create("elsewhere", now)), 1);
+        assert_eq!(
+            change_repo(&other.0, |t, now| t.create("elsewhere", now)),
+            1
+        );
         assert_eq!(VIEW.borrow().tracker.issues().count(), 3);
     }
 
@@ -399,7 +491,11 @@ mod tests {
     fn changes_are_saved_and_followed_and_a_merged_branch_finishes_its_issues() {
         let _turn = turn();
         let repo = Repo::new("shared-a");
-        assert_eq!(change(|_, _| ()).is_some(), VIEW.borrow().root.is_some(), "no project shown yet means nothing to change");
+        assert_eq!(
+            change(|_, _| ()).is_some(),
+            VIEW.borrow().root.is_some(),
+            "no project shown yet means nothing to change"
+        );
         set_project(&repo.0);
         let mut seen = watch();
         let (a, b) = change(|t, now| {
@@ -411,10 +507,23 @@ mod tests {
         .unwrap();
         assert!(seen.has_changed().unwrap());
         assert_eq!(seen.borrow_and_update().tracker.issues().count(), 2);
-        assert!(repo.0.join(format!(".po/issues/{}-1.json", seen.borrow().tracker.config.prefix)).exists());
+        assert!(
+            repo.0
+                .join(format!(
+                    ".po/issues/{}-1.json",
+                    seen.borrow().tracker.config.prefix
+                ))
+                .exists()
+        );
         branch_merged(&repo.0, "po/x");
         let view = VIEW.borrow().clone();
-        assert_eq!((view.tracker.issue(a).unwrap().status, view.tracker.issue(b).unwrap().status), (Status::Done, Status::Backlog));
+        assert_eq!(
+            (
+                view.tracker.issue(a).unwrap().status,
+                view.tracker.issue(b).unwrap().status
+            ),
+            (Status::Done, Status::Backlog)
+        );
         // Showing the same repo again keeps what is there; another repo replaces it.
         set_project(&repo.0);
         assert_eq!(VIEW.borrow().tracker.issues().count(), 2);
@@ -433,7 +542,20 @@ mod tests {
 
     /// The titles of the open issues of each repo, by repo name.
     fn titles(overview: &Overview) -> Vec<(String, Vec<String>)> {
-        overview.repos.iter().map(|repo| (repo.name.clone(), repo.tracker.issues().filter(|i| i.status.is_open()).map(|i| i.title.clone()).collect())).collect()
+        overview
+            .repos
+            .iter()
+            .map(|repo| {
+                (
+                    repo.name.clone(),
+                    repo.tracker
+                        .issues()
+                        .filter(|i| i.status.is_open())
+                        .map(|i| i.title.clone())
+                        .collect(),
+                )
+            })
+            .collect()
     }
 
     #[test]
@@ -443,16 +565,42 @@ mod tests {
         // Neither has been shown; what is on disk is read and what happens underneath is noticed.
         change_repo(&one.0, |t, now| t.create("first", now));
         let held = tracked(&[&one, &two]);
-        assert_eq!(titles(&held), [("over-one".to_string(), vec!["first".to_string()]), ("over-two".to_string(), vec![])]);
+        assert_eq!(
+            titles(&held),
+            [
+                ("over-one".to_string(), vec!["first".to_string()]),
+                ("over-two".to_string(), vec![])
+            ]
+        );
         assert_eq!(held.checkouts[&two.0], std::slice::from_ref(&two.0));
         change_repo(&two.0, |t, now| t.create("second", now));
-        assert_eq!(overview().borrow().counts(crate::date::today()).0, 2, "a change through the store is seen at once");
-        let prefix = std::fs::read_dir(two.0.join(".po/issues")).unwrap().next().unwrap().unwrap().file_name().to_string_lossy().split('-').next().unwrap().to_string();
-        std::fs::write(two.0.join(format!(".po/issues/{prefix}-2.json")), r#"{"title":"from git"}"#).unwrap();
+        assert_eq!(
+            overview().borrow().counts(crate::date::today()).0,
+            2,
+            "a change through the store is seen at once"
+        );
+        let prefix = std::fs::read_dir(two.0.join(".po/issues"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .split('-')
+            .next()
+            .unwrap()
+            .to_string();
+        std::fs::write(
+            two.0.join(format!(".po/issues/{prefix}-2.json")),
+            r#"{"title":"from git"}"#,
+        )
+        .unwrap();
         assert_eq!(tracked(&[&one, &two]).counts(crate::date::today()).0, 3);
 
         // What is finished is not counted; showing one repo on the page leaves the other alone.
-        change_repo(&one.0, |t, now| t.update(1, now, |i| i.status = Status::Done));
+        change_repo(&one.0, |t, now| {
+            t.update(1, now, |i| i.status = Status::Done)
+        });
         assert_eq!(overview().borrow().counts(crate::date::today()).0, 2);
         set_project(&two.0);
         assert_eq!(VIEW.borrow().name, "over-two");
@@ -469,7 +617,10 @@ mod tests {
         assert_eq!(change(|t, _| t.issues().count()), Some(2));
         set_project(&one.0);
         poll();
-        assert!(!lock().stores.contains_key(&two.0), "let go of once the page has moved on");
+        assert!(
+            !lock().stores.contains_key(&two.0),
+            "let go of once the page has moved on"
+        );
         track(vec![]);
         poll();
     }
@@ -484,7 +635,9 @@ mod tests {
             let (a, b, c) = (t.create("a", now), t.create("b", now), t.create("c", now));
             t.update(a, now, |i| i.due = Some(today.plus(-1)));
             t.update(b, now, |i| i.due = Some(today));
-            t.update(c, now, |i| (i.due, i.status) = (Some(today.plus(-3)), Status::Done));
+            t.update(c, now, |i| {
+                (i.due, i.status) = (Some(today.plus(-3)), Status::Done)
+            });
         });
         assert_eq!(overview().borrow().counts(today), (2, 1));
         track(vec![]);
@@ -499,7 +652,11 @@ mod tests {
         let git_dir = repo.0.join(".git/worktrees/linked");
         std::fs::create_dir_all(&git_dir).unwrap();
         std::fs::create_dir_all(&worktree).unwrap();
-        std::fs::write(worktree.join(".git"), format!("gitdir: {}\n", git_dir.display())).unwrap();
+        std::fs::write(
+            worktree.join(".git"),
+            format!("gitdir: {}\n", git_dir.display()),
+        )
+        .unwrap();
         std::fs::write(git_dir.join("commondir"), "../..\n").unwrap();
         change_repo(&repo.0, |t, now| t.create("one", now));
         track(vec![repo.0.clone(), worktree.clone()]);

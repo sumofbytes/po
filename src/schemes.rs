@@ -22,7 +22,8 @@ fn names() -> impl Iterator<Item = &'static str> {
 /// The bundled schemes with the colours that stand for each: its background, then the red,
 /// green, yellow, blue, magenta and cyan of its palette, as hex. Built once.
 pub fn previews() -> &'static [(&'static str, Vec<String>)] {
-    static CACHE: std::sync::OnceLock<Vec<(&'static str, Vec<String>)>> = std::sync::OnceLock::new();
+    static CACHE: std::sync::OnceLock<Vec<(&'static str, Vec<String>)>> =
+        std::sync::OnceLock::new();
     CACHE.get_or_init(|| {
         BUNDLE
             .split("@@ ")
@@ -31,7 +32,9 @@ pub fn previews() -> &'static [(&'static str, Vec<String>)] {
                 let (title, body) = section.split_once('\n')?;
                 let mut colors: Vec<Option<String>> = vec![None; 7];
                 for line in body.lines() {
-                    let Some((key, value)) = line.split_once('=') else { continue };
+                    let Some((key, value)) = line.split_once('=') else {
+                        continue;
+                    };
                     let (key, value) = (key.trim(), value.trim());
                     if key == "background" {
                         colors[0] = parse_hex(value).map(hex);
@@ -62,7 +65,11 @@ fn parse_hex(value: &str) -> Option<Rgb> {
     if hex.len() != 6 {
         return None;
     }
-    let byte = |i: usize| u8::from_str_radix(&hex[i..i + 2], 16).ok().map(|b| f32::from(b) / 255.);
+    let byte = |i: usize| {
+        u8::from_str_radix(&hex[i..i + 2], 16)
+            .ok()
+            .map(|b| f32::from(b) / 255.)
+    };
     Some([byte(0)?, byte(2)?, byte(4)?])
 }
 
@@ -85,7 +92,9 @@ fn convert(name: &str, source: &str) -> Option<Value> {
     let mut palette: [Option<Rgb>; 16] = [None; 16];
     let (mut bg, mut fg, mut cursor, mut selection) = (None, None, None, None);
     for line in source.lines() {
-        let Some((key, value)) = line.split_once('=') else { continue };
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
         let (key, value) = (key.trim(), value.trim());
         match key {
             "palette" => {
@@ -109,7 +118,8 @@ fn convert(name: &str, source: &str) -> Option<Value> {
     let ansi = |i: usize| palette[i].unwrap_or(fg);
     let tint = |amount: f32| mix(bg, fg, amount);
 
-    let (red, green, yellow, blue, magenta, cyan) = (ansi(1), ansi(2), ansi(3), ansi(4), ansi(5), ansi(6));
+    let (red, green, yellow, blue, magenta, cyan) =
+        (ansi(1), ansi(2), ansi(3), ansi(4), ansi(5), ansi(6));
     let accent = tint(0.12);
     let border = tint(0.15);
     let panel = tint(0.04);
@@ -214,7 +224,12 @@ mod tests {
         let mut count = 0;
         for name in names() {
             let theme = load(name).unwrap_or_else(|| panic!("{name} does not convert"));
-            assert!(theme["colors"]["background"].as_str().is_some_and(|c| c.len() == 7), "{name}");
+            assert!(
+                theme["colors"]["background"]
+                    .as_str()
+                    .is_some_and(|c| c.len() == 7),
+                "{name}"
+            );
             count += 1;
         }
         assert!(count > 400, "only {count} themes bundled");

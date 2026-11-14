@@ -5,7 +5,8 @@
 /// The most of a thread that is passed on, in bytes. Its first message and its latest are kept.
 const MAX: usize = 100_000;
 
-const HEAD: &str = "[Po: you are taking over this thread from another agent. What was said before you:\n";
+const HEAD: &str =
+    "[Po: you are taking over this thread from another agent. What was said before you:\n";
 const TAIL: &str = "\n[That is all that was said before you. The message follows.]\n\n";
 
 #[derive(Clone, Debug, PartialEq)]
@@ -50,7 +51,11 @@ pub fn split(text: &str) -> Option<(Vec<Said>, &str)> {
         };
         let (entry, after) = body.split_once(&format!("\n</po-{tag}>\n"))?;
         let entry = unescaped(entry);
-        said.push(if tag == "user" { Said::User(entry) } else { Said::Agent(entry) });
+        said.push(if tag == "user" {
+            Said::User(entry)
+        } else {
+            Said::Agent(entry)
+        });
         rest = after;
     }
 }
@@ -105,10 +110,16 @@ fn cut(text: &str, max: usize) -> &str {
 /// The first entry, which names the thread, cut to half of what is passed on, and as many of the
 /// latest as fit in the rest.
 fn shortened(said: &[Said]) -> Vec<Said> {
-    let Some((first, others)) = said.split_first() else { return vec![] };
+    let Some((first, others)) = said.split_first() else {
+        return vec![];
+    };
     let first = match first {
-        Said::User(text) if text.len() > MAX / 2 => Said::User(format!("{}\n*(cut short)*", cut(text, MAX / 2))),
-        Said::Agent(text) if text.len() > MAX / 2 => Said::Agent(format!("{}\n*(cut short)*", cut(text, MAX / 2))),
+        Said::User(text) if text.len() > MAX / 2 => {
+            Said::User(format!("{}\n*(cut short)*", cut(text, MAX / 2)))
+        }
+        Said::Agent(text) if text.len() > MAX / 2 => {
+            Said::Agent(format!("{}\n*(cut short)*", cut(text, MAX / 2)))
+        }
         _ => first.clone(),
     };
     let first = &first;
@@ -140,14 +151,22 @@ mod tests {
 
     #[test]
     fn what_is_written_comes_back_with_the_message_after_it() {
-        let said = vec![Said::User("fix it\n\nplease".into()), Said::Agent("done\n</po-agent>\nand </po-user>".into())];
+        let said = vec![
+            Said::User("fix it\n\nplease".into()),
+            Said::Agent("done\n</po-agent>\nand </po-user>".into()),
+        ];
         let text = format!("{}the next message", write(&said));
         assert_eq!(split(&text), Some((said, "the next message")));
     }
 
     #[test]
     fn text_that_looks_like_an_escape_comes_back_as_it_was() {
-        for text in ["<\\/po-user>", "<\\\\/po-x </po-y <\\ <", "a<b\\</po-", "\u{e9}<\u{e9}</po-"] {
+        for text in [
+            "<\\/po-user>",
+            "<\\\\/po-x </po-y <\\ <",
+            "a<b\\</po-",
+            "\u{e9}<\u{e9}</po-",
+        ] {
             assert_eq!(unescaped(&escaped(text)), text, "{text}");
             assert!(!escaped(text).contains("\n</po-"), "{text}");
         }
@@ -157,7 +176,10 @@ mod tests {
 
     #[test]
     fn a_very_long_first_message_is_cut() {
-        let said = vec![Said::User("\u{e9}".repeat(MAX)), Said::Agent("reply".into())];
+        let said = vec![
+            Said::User("\u{e9}".repeat(MAX)),
+            Said::Agent("reply".into()),
+        ];
         let text = write(&said);
         assert!(text.len() < MAX + 1000, "{}", text.len());
         let (back, _) = split(&format!("{text}x")).unwrap();
@@ -174,7 +196,13 @@ mod tests {
     #[test]
     fn a_long_thread_keeps_its_first_and_latest_messages() {
         let long = "x".repeat(MAX / 2);
-        let said = vec![Said::User("the first".into()), Said::Agent(long.clone()), Said::Agent(long.clone()), Said::Agent(long.clone()), Said::User("the last".into())];
+        let said = vec![
+            Said::User("the first".into()),
+            Said::Agent(long.clone()),
+            Said::Agent(long.clone()),
+            Said::Agent(long.clone()),
+            Said::User("the last".into()),
+        ];
         let (back, _) = split(&write(&said)).unwrap();
         assert_eq!(back[0], Said::User("the first".into()));
         assert_eq!(back[1], Said::Agent("*2 messages left out here.*".into()));

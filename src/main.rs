@@ -1,8 +1,8 @@
 #![recursion_limit = "1024"]
 mod acp;
-mod app;
 mod agent;
 mod alert;
+mod app;
 mod attach;
 #[cfg(feature = "hotpath")]
 mod bench;
@@ -10,6 +10,7 @@ mod command;
 mod config;
 mod control;
 mod ctl;
+mod date;
 mod dex;
 mod diff;
 mod explorer;
@@ -28,9 +29,8 @@ mod rt;
 mod rune_ui;
 mod schemes;
 mod settings;
-mod terminal;
 mod state;
-mod date;
+mod terminal;
 mod trace;
 mod update;
 mod workspace;
@@ -75,33 +75,39 @@ fn walker(dir: &Path) -> ignore::Walk {
 fn watch_dirs(watcher: &mut impl notify::Watcher, dir: &Path) {
     for entry in walker(dir).flatten() {
         if entry.file_type().is_some_and(|t| t.is_dir()) {
-            watcher.watch(entry.path(), notify::RecursiveMode::NonRecursive).ok();
+            watcher
+                .watch(entry.path(), notify::RecursiveMode::NonRecursive)
+                .ok();
         }
     }
 }
 
-type Watch = (notify::RecommendedWatcher, profile::UnboundedReceiver<notify::Event>);
+type Watch = (
+    notify::RecommendedWatcher,
+    profile::UnboundedReceiver<notify::Event>,
+);
 
 /// A watcher on every folder under `root`. Adding the watches costs a syscall per folder, which
 /// adds up to seconds on a big tree, so callers run this off the UI thread.
 #[hotpath::measure]
 fn start_watcher(root: &Path) -> Option<Watch> {
     let (tx, rx) = hotpath::channel!(futures::channel::mpsc::unbounded(), label = "file events");
-    let mut watcher = match notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
-        // Reads are no change, and whatever scans the tree (an indexer, `git status`) causes them
-        // by the hundred; each would wake the watcher for nothing.
-        if let Ok(event) = event
-            && !event.kind.is_access()
-        {
-            tx.unbounded_send(event).ok();
-        }
-    }) {
-        Ok(watcher) => watcher,
-        Err(error) => {
-            log::error!("watch: {error}");
-            return None;
-        }
-    };
+    let mut watcher =
+        match notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
+            // Reads are no change, and whatever scans the tree (an indexer, `git status`) causes them
+            // by the hundred; each would wake the watcher for nothing.
+            if let Ok(event) = event
+                && !event.kind.is_access()
+            {
+                tx.unbounded_send(event).ok();
+            }
+        }) {
+            Ok(watcher) => watcher,
+            Err(error) => {
+                log::error!("watch: {error}");
+                return None;
+            }
+        };
     watch_dirs(&mut watcher, root);
     Some((watcher, rx))
 }
@@ -117,19 +123,25 @@ struct Prefetch {
 impl Prefetch {
     fn start(root: PathBuf) -> Self {
         let scan = root.clone();
-        let files = std::thread::Builder::new().name("po-walk".into()).spawn(move || {
-            let mut files = Vec::new();
-            walk(&scan, &mut files);
-            trace::mark("walk (thread)");
-            files
-        }).expect("failed to spawn thread");
+        let files = std::thread::Builder::new()
+            .name("po-walk".into())
+            .spawn(move || {
+                let mut files = Vec::new();
+                walk(&scan, &mut files);
+                trace::mark("walk (thread)");
+                files
+            })
+            .expect("failed to spawn thread");
         let (done, watch) = futures::channel::oneshot::channel();
         let target = root.clone();
-        std::thread::Builder::new().name("po-watch".into()).spawn(move || {
-            let watch = start_watcher(&target);
-            trace::mark("watcher (thread)");
-            done.send(watch).ok();
-        }).expect("failed to spawn thread");
+        std::thread::Builder::new()
+            .name("po-watch".into())
+            .spawn(move || {
+                let watch = start_watcher(&target);
+                trace::mark("watcher (thread)");
+                done.send(watch).ok();
+            })
+            .expect("failed to spawn thread");
         Self { root, files, watch }
     }
 }
@@ -141,9 +153,10 @@ fn walk(root: &Path, out: &mut Vec<String>) {
             return;
         }
         if entry.file_type().is_some_and(|t| t.is_file())
-            && let Ok(rel) = entry.path().strip_prefix(root) {
-                out.push(rel.to_string_lossy().replace('\\', "/"));
-            }
+            && let Ok(rel) = entry.path().strip_prefix(root)
+        {
+            out.push(rel.to_string_lossy().replace('\\', "/"));
+        }
     }
 }
 
@@ -218,7 +231,13 @@ enum Block {
     /// Po wants to run an agent command that isn't one of its own, and waits to be told it may.
     /// `new_agent` is whether the agent's own command is the question; `mcp` are the config's MCP
     /// servers it would be handed.
-    Approve { agent: config::Agent, new_agent: bool, mcp: Vec<config::McpServer>, resume: bool, answered: Option<bool> },
+    Approve {
+        agent: config::Agent,
+        new_agent: bool,
+        mcp: Vec<config::McpServer>,
+        resume: bool,
+        answered: Option<bool>,
+    },
     /// The agent's to-do list; each update replaces the whole list.
     Plan(Vec<(String, Step)>),
 }
@@ -241,7 +260,9 @@ enum Origin {
 /// last was; `None` when it may be told now (never told, or long enough ago). A wait of nothing
 /// is not a wait: it would put the notice back for ever.
 fn notice_wait(since_last: Option<Duration>) -> Option<Duration> {
-    NOTICE_RATE.checked_sub(since_last?).filter(|left| !left.is_zero())
+    NOTICE_RATE
+        .checked_sub(since_last?)
+        .filter(|left| !left.is_zero())
 }
 
 /// What starts a message of Po's in a transcript, so that it isn't taken for the user's.
@@ -270,7 +291,11 @@ impl Outgoing {
     }
 
     fn user(text: String, images: Vec<Arc<Attachment>>) -> Self {
-        Self { text, origin: Origin::User, images }
+        Self {
+            text,
+            origin: Origin::User,
+            images,
+        }
     }
 
     /// What a daemon that takes only text is sent, and later tells back as accepted.
@@ -329,9 +354,22 @@ fn touched(update: &Value) -> Option<String> {
     let input = &update["rawInput"];
     update["locations"][0]["path"]
         .as_str()
-        .or_else(|| update["content"].as_array()?.iter().find_map(|item| item["path"].as_str()))
-        .or_else(|| input.as_str().filter(|text| !text.contains(char::is_whitespace)))
-        .or_else(|| ["path", "file_path", "filePath"].iter().find_map(|key| input[key].as_str()))
+        .or_else(|| {
+            update["content"]
+                .as_array()?
+                .iter()
+                .find_map(|item| item["path"].as_str())
+        })
+        .or_else(|| {
+            input
+                .as_str()
+                .filter(|text| !text.contains(char::is_whitespace))
+        })
+        .or_else(|| {
+            ["path", "file_path", "filePath"]
+                .iter()
+                .find_map(|key| input[key].as_str())
+        })
         .map(String::from)
 }
 
@@ -369,7 +407,15 @@ enum Where {
     Queue,
 }
 
-fn route(blank: bool, unstarted: bool, asleep: bool, starting: bool, busy: bool, takes_messages: bool, later: bool) -> Where {
+fn route(
+    blank: bool,
+    unstarted: bool,
+    asleep: bool,
+    starting: bool,
+    busy: bool,
+    takes_messages: bool,
+    later: bool,
+) -> Where {
     if blank || unstarted {
         Where::Start
     } else if !busy && (starting || asleep) {
@@ -385,7 +431,12 @@ fn route(blank: bool, unstarted: bool, asleep: bool, starting: bool, busy: bool,
 
 /// A thread out of a list of views, by its id: for reading, which never swaps one in.
 fn find_thread<'a>(views: &'a [View<'a>], id: u64) -> Option<(&'a View<'a>, &'a Thread)> {
-    views.iter().find_map(|view| view.threads.iter().find(|thread| thread.id == id).map(|thread| (view, *thread)))
+    views.iter().find_map(|view| {
+        view.threads
+            .iter()
+            .find(|thread| thread.id == id)
+            .map(|thread| (view, *thread))
+    })
 }
 
 /// The status of a thing that runs, as the read model says it.
@@ -406,7 +457,13 @@ fn transcript(thread: &Thread, full: bool) -> Vec<state::Entry> {
     let mut out = Vec::new();
     for msg in &thread.messages {
         match msg {
-            Msg::User(text, _) => out.push(state::Entry { index: out.len(), role: "user", text: text.clone(), tools: vec![], plan: None }),
+            Msg::User(text, _) => out.push(state::Entry {
+                index: out.len(),
+                role: "user",
+                text: text.clone(),
+                tools: vec![],
+                plan: None,
+            }),
             Msg::Agent(blocks) => {
                 let mut said = Vec::new();
                 let mut tools = Vec::new();
@@ -420,10 +477,22 @@ fn transcript(thread: &Thread, full: bool) -> Vec<state::Entry> {
                             arguments: full.then(|| tool.arguments.clone()),
                             result: full.then(|| tool.result.clone()),
                         }),
-                        Block::Plan(items) => plan = Some(items.iter().map(|(text, step)| (text.clone(), step_name(*step).into())).collect()),
+                        Block::Plan(items) => {
+                            plan = Some(
+                                items
+                                    .iter()
+                                    .map(|(text, step)| (text.clone(), step_name(*step).into()))
+                                    .collect(),
+                            )
+                        }
                         Block::Permission(ask) => tools.push(state::ToolCall {
                             title: ask.title.clone(),
-                            status: if ask.answered.is_none() { "waiting" } else { "done" }.into(),
+                            status: if ask.answered.is_none() {
+                                "waiting"
+                            } else {
+                                "done"
+                            }
+                            .into(),
                             arguments: None,
                             result: None,
                         }),
@@ -431,7 +500,13 @@ fn transcript(thread: &Thread, full: bool) -> Vec<state::Entry> {
                         Block::Approve { .. } => {}
                     }
                 }
-                out.push(state::Entry { index: out.len(), role: "agent", text: said.join("\n\n"), tools, plan });
+                out.push(state::Entry {
+                    index: out.len(),
+                    role: "agent",
+                    text: said.join("\n\n"),
+                    tools,
+                    plan,
+                });
             }
         }
     }
@@ -442,18 +517,39 @@ fn transcript(thread: &Thread, full: bool) -> Vec<state::Entry> {
 #[hotpath::measure]
 fn diff_text(item: &Value) -> String {
     const LIMIT: usize = 200;
-    let old: Vec<&str> = item["oldText"].as_str().unwrap_or_default().lines().collect();
-    let new: Vec<&str> = item["newText"].as_str().unwrap_or_default().lines().collect();
+    let old: Vec<&str> = item["oldText"]
+        .as_str()
+        .unwrap_or_default()
+        .lines()
+        .collect();
+    let new: Vec<&str> = item["newText"]
+        .as_str()
+        .unwrap_or_default()
+        .lines()
+        .collect();
     let head = old.iter().zip(&new).take_while(|(a, b)| a == b).count();
-    let tail = old[head..].iter().rev().zip(new[head..].iter().rev()).take_while(|(a, b)| a == b).count();
+    let tail = old[head..]
+        .iter()
+        .rev()
+        .zip(new[head..].iter().rev())
+        .take_while(|(a, b)| a == b)
+        .count();
     let removed = &old[head..old.len() - tail];
     let added = &new[head..new.len() - tail];
     let mut out = vec![format!("edit {}", item["path"].as_str().unwrap_or("?"))];
-    out.extend(removed.iter().chain(added).enumerate().take(LIMIT).map(|(i, line)| {
-        format!("{} {line}", if i < removed.len() { '-' } else { '+' })
-    }));
+    out.extend(
+        removed
+            .iter()
+            .chain(added)
+            .enumerate()
+            .take(LIMIT)
+            .map(|(i, line)| format!("{} {line}", if i < removed.len() { '-' } else { '+' })),
+    );
     if removed.len() + added.len() > LIMIT {
-        out.push(format!("… {} more lines", removed.len() + added.len() - LIMIT));
+        out.push(format!(
+            "… {} more lines",
+            removed.len() + added.len() - LIMIT
+        ));
     }
     out.join("\n")
 }
@@ -468,12 +564,22 @@ fn match_files(files: &[String], query: &str) -> Vec<String> {
     }
     let query = query.as_bytes();
     // Windows compared with eq_ignore_ascii_case, so no lowercase copy of each path is made.
-    let contains = |text: &str| text.as_bytes().windows(query.len()).any(|window| window.eq_ignore_ascii_case(query));
+    let contains = |text: &str| {
+        text.as_bytes()
+            .windows(query.len())
+            .any(|window| window.eq_ignore_ascii_case(query))
+    };
     let mut hits: Vec<(u8, usize, &String)> = files
         .iter()
         .filter_map(|file| {
             let name_start = file.rfind('/').map_or(0, |slash| slash + 1);
-            let rank = if contains(&file[name_start..]) { 0 } else if contains(file) { 1 } else { return None };
+            let rank = if contains(&file[name_start..]) {
+                0
+            } else if contains(file) {
+                1
+            } else {
+                return None;
+            };
             Some((rank, file.len() - name_start, file))
         })
         .collect();
@@ -526,7 +632,9 @@ enum Mode {
 }
 
 fn is_markdown(path: &str) -> bool {
-    path.rsplit_once('.').is_some_and(|(_, ext)| ext.eq_ignore_ascii_case("md") || ext.eq_ignore_ascii_case("markdown"))
+    path.rsplit_once('.').is_some_and(|(_, ext)| {
+        ext.eq_ignore_ascii_case("md") || ext.eq_ignore_ascii_case("markdown")
+    })
 }
 
 /// Everything about one checkout: its files and git state, and what the explorer, viewer and
@@ -592,9 +700,19 @@ impl Project {
         match &self.pr {
             Some(pr) => format!("PR #{} {}", pr.number, pr.title),
             None => {
-                let name = self.root.file_name().map_or_else(|| self.root.display().to_string(), |n| n.to_string_lossy().to_string());
+                let name = self.root.file_name().map_or_else(
+                    || self.root.display().to_string(),
+                    |n| n.to_string_lossy().to_string(),
+                );
                 match &self.worktree {
-                    Some(wt) => format!("{} ⎇ {}", wt.spec.repo.file_name().map_or(name, |n| n.to_string_lossy().to_string()), wt.spec.branch),
+                    Some(wt) => format!(
+                        "{} ⎇ {}",
+                        wt.spec
+                            .repo
+                            .file_name()
+                            .map_or(name, |n| n.to_string_lossy().to_string()),
+                        wt.spec.branch
+                    ),
                     None => name,
                 }
             }
@@ -696,12 +814,12 @@ struct Thread {
 }
 
 impl Thread {
-
     fn fail(&mut self, text: String) {
         self.busy = false;
         self.failed = true;
         self.last_error = Some(text.clone());
-        self.messages.push(Msg::Agent(vec![Block::Text(format!("**Error:** {text}"))]));
+        self.messages
+            .push(Msg::Agent(vec![Block::Text(format!("**Error:** {text}"))]));
         self.relist(self.messages.len() - 1);
     }
 
@@ -719,7 +837,15 @@ impl Thread {
                 }
             }
         }
-        crate::state::Facts { approval, asking, failed: self.failed, asleep: self.asleep(), started: self.client.is_some(), ready: self.ready, busy: self.busy }
+        crate::state::Facts {
+            approval,
+            asking,
+            failed: self.failed,
+            asleep: self.asleep(),
+            started: self.client.is_some(),
+            ready: self.ready,
+            busy: self.busy,
+        }
     }
 
     /// The conversation the screen draws takes the whole list of messages in every
@@ -744,7 +870,9 @@ impl Thread {
         }
         let id = update["toolCallId"].as_str().unwrap_or_default();
         self.messages.iter().rposition(|msg| match msg {
-            Msg::Agent(blocks) => blocks.iter().any(|b| matches!(b, Block::Tool(tool) if tool.id == id)),
+            Msg::Agent(blocks) => blocks
+                .iter()
+                .any(|b| matches!(b, Block::Tool(tool) if tool.id == id)),
             Msg::User(..) => false,
         })
     }
@@ -765,14 +893,18 @@ impl Thread {
                     None => text,
                 };
                 let text = without_context(text);
-                let picture = (update["content"]["type"] == "image").then(|| Attachment::from_block(&update["content"])).flatten().map(Arc::new);
+                let picture = (update["content"]["type"] == "image")
+                    .then(|| Attachment::from_block(&update["content"]))
+                    .flatten()
+                    .map(Arc::new);
                 match self.messages.last_mut() {
                     Some(Msg::User(body, pictures)) => {
                         body.push_str(text);
                         pictures.extend(picture);
                     }
                     _ => {
-                        self.messages.push(Msg::User(text.to_string(), picture.into_iter().collect()));
+                        self.messages
+                            .push(Msg::User(text.to_string(), picture.into_iter().collect()));
                         self.relist(self.messages.len() - 1);
                     }
                 }
@@ -786,7 +918,12 @@ impl Thread {
                     .as_array()
                     .into_iter()
                     .flatten()
-                    .map(|e| (e["content"].as_str().unwrap_or_default().to_string(), step(e["status"].as_str().unwrap_or("pending"))))
+                    .map(|e| {
+                        (
+                            e["content"].as_str().unwrap_or_default().to_string(),
+                            step(e["status"].as_str().unwrap_or("pending")),
+                        )
+                    })
                     .collect();
                 let blocks = self.blocks();
                 match blocks.iter_mut().find(|b| matches!(b, Block::Plan(_))) {
@@ -799,7 +936,10 @@ impl Thread {
                 let status = step(update["status"].as_str().unwrap_or("pending"));
                 let now = Instant::now();
                 self.blocks().push(Block::Tool(ToolBlock {
-                    id: update["toolCallId"].as_str().unwrap_or_default().to_string(),
+                    id: update["toolCallId"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_string(),
                     title: update["title"].as_str().unwrap_or("Tool").to_string(),
                     status,
                     kind: update["kind"].as_str().unwrap_or_default().to_string(),
@@ -923,22 +1063,35 @@ fn stale(now: u64, then: u64) -> bool {
 fn listed(now: u64, shown: u64, thread: &Thread) -> bool {
     thread.id == shown
         || matches!(thread.activity(), Activity::Running | Activity::Asking)
-        || (!stale(now, thread.active_at) && (thread.activity() != Activity::Idle || thread.client.is_some()))
+        || (!stale(now, thread.active_at)
+            && (thread.activity() != Activity::Idle || thread.client.is_some()))
 }
 
 /// `title` with its first letter in capitals when it opens with a plain word, as "fix the build"
 /// does. One that opens with a path, a command or an identifier (`src/main.rs`, `cargo test`,
 /// `snake_case`, `v2`) is left as typed.
 fn capitalized(title: String) -> String {
-    let word = title.split_whitespace().next().unwrap_or("").trim_end_matches([',', ':', ';', '.', '?', '!']);
+    let word = title
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .trim_end_matches([',', ':', ';', '.', '?', '!']);
     // A command (`cargo test`, `curl localhost`) opens with a plain word too, but is followed by
     // arguments: a flag, a path, a URL or a number. Prose is words and punctuation only.
-    let prose = title.split_whitespace().skip(1).all(|w| w.chars().all(|c| c.is_alphabetic() || "'’,:;.?!-".contains(c)));
+    let prose = title.split_whitespace().skip(1).all(|w| {
+        w.chars()
+            .all(|c| c.is_alphabetic() || "'’,:;.?!-".contains(c))
+    });
     // Bare subcommands (`cargo test`, `git status`) read as prose, so the usual tools are named.
     let tools = [
-        "cargo", "git", "npm", "npx", "pnpm", "yarn", "bun", "make", "cd", "ls", "cat", "rm", "grep", "sudo", "gh", "docker", "kubectl", "rustc", "python", "pip", "node", "go", "curl", "ssh",
+        "cargo", "git", "npm", "npx", "pnpm", "yarn", "bun", "make", "cd", "ls", "cat", "rm",
+        "grep", "sudo", "gh", "docker", "kubectl", "rustc", "python", "pip", "node", "go", "curl",
+        "ssh",
     ];
-    let plain = !word.is_empty() && word.chars().all(|c| c.is_lowercase()) && prose && !tools.contains(&word);
+    let plain = !word.is_empty()
+        && word.chars().all(|c| c.is_lowercase())
+        && prose
+        && !tools.contains(&word);
     match title.chars().next() {
         Some(_) if plain => crate::sentence(&title),
         _ => title,
@@ -947,7 +1100,9 @@ fn capitalized(title: String) -> String {
 
 /// The time now in milliseconds since the Unix epoch.
 fn now_ms() -> u64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64)
 }
 
 /// The most threads one thread may start (§5). With `max_live` at its default of 8, an
@@ -1018,9 +1173,13 @@ impl Thread {
 
     fn activity(&self) -> Activity {
         let asking = match self.messages.last() {
-            Some(Msg::Agent(blocks)) => blocks
-                .iter()
-                .any(|b| matches!(b, Block::Permission(Ask { answered: None, .. }) | Block::Approve { answered: None, .. })),
+            Some(Msg::Agent(blocks)) => blocks.iter().any(|b| {
+                matches!(
+                    b,
+                    Block::Permission(Ask { answered: None, .. })
+                        | Block::Approve { answered: None, .. }
+                )
+            }),
             _ => false,
         };
         if asking {
@@ -1051,9 +1210,16 @@ impl Thread {
             Some(line) => {
                 let line = line.trim();
                 let short: String = line.chars().take(72).collect();
-                if short.len() < line.len() { format!("{short}…") } else { short }
+                if short.len() < line.len() {
+                    format!("{short}…")
+                } else {
+                    short
+                }
             }
-            None => self.saved_title.clone().unwrap_or_else(|| "New thread".into()),
+            None => self
+                .saved_title
+                .clone()
+                .unwrap_or_else(|| "New thread".into()),
         }
     }
 
@@ -1123,8 +1289,11 @@ impl Thread {
         for msg in &self.messages {
             match msg {
                 Msg::User(text, pictures) => {
-                    let pictures = (!pictures.is_empty()).then(|| format!("({} pictures)", pictures.len()));
-                    said.push(handoff::Said::User(pictures.map_or(text.clone(), |note| format!("{text}\n{note}").trim().to_string())));
+                    let pictures =
+                        (!pictures.is_empty()).then(|| format!("({} pictures)", pictures.len()));
+                    said.push(handoff::Said::User(pictures.map_or(text.clone(), |note| {
+                        format!("{text}\n{note}").trim().to_string()
+                    })));
                 }
                 Msg::Agent(blocks) => {
                     let lines: Vec<String> = blocks
@@ -1152,12 +1321,20 @@ impl Thread {
 
     /// It is showing an agent's sessions to pick one from, and nothing has been picked.
     fn is_listing(&self) -> bool {
-        self.agent.is_some() && self.picking && !self.loading && self.messages.is_empty() && self.session.is_none()
+        self.agent.is_some()
+            && self.picking
+            && !self.loading
+            && self.messages.is_empty()
+            && self.session.is_none()
     }
 
     /// Whether stopping its agent would lose nothing: no turn, no question and nothing queued.
     fn restful(&self) -> bool {
-        self.client.is_some() && self.session.is_some() && self.activity() != Activity::Asking && !self.busy && self.queue.is_empty()
+        self.client.is_some()
+            && self.session.is_some()
+            && self.activity() != Activity::Asking
+            && !self.busy
+            && self.queue.is_empty()
     }
 
     /// Whether closing it would lose something: a turn is running, a question waits or
@@ -1171,7 +1348,9 @@ impl Thread {
     fn retire(mut thread: Self) {
         /// How long a stopped agent has to wind down before its process is killed.
         const WIND_DOWN: Duration = Duration::from_secs(1);
-        let Some(client) = thread.client.take() else { return };
+        let Some(client) = thread.client.take() else {
+            return;
+        };
         if thread.busy {
             client.cancel();
             std::thread::spawn(move || {
@@ -1187,13 +1366,24 @@ impl Thread {
             return None;
         }
         let (agent, session) = self.resumes_from()?;
-        Some(workspace::ThreadState { agent: agent.to_string(), session: session.to_string(), title: self.title(), active_at: self.active_at, parent_session: None, renamed: self.renamed.is_some() })
+        Some(workspace::ThreadState {
+            agent: agent.to_string(),
+            session: session.to_string(),
+            title: self.title(),
+            active_at: self.active_at,
+            parent_session: None,
+            renamed: self.renamed.is_some(),
+        })
     }
 
     /// Stops the agent, keeping what has been said so it can be shown and resumed.
     fn sleep(&mut self) {
         self.drop_agent();
-        self.status = if self.blank { String::new() } else { "asleep".into() };
+        self.status = if self.blank {
+            String::new()
+        } else {
+            "asleep".into()
+        };
     }
 
     /// Stops the agent and forgets what it was doing. A blank thread's session was never used,
@@ -1342,7 +1532,9 @@ impl<T: Copy + PartialEq> AgentChange<T> {
     /// The record after an agent moved `from` to `to`: an earlier move it builds on keeps the
     /// user's layout from before that one.
     fn after(earlier: Option<Self>, from: T, to: T) -> Self {
-        let before = earlier.filter(|change| change.left == from).map_or(from, |change| change.before);
+        let before = earlier
+            .filter(|change| change.left == from)
+            .map_or(from, |change| change.before);
         Self { before, left: to }
     }
 
@@ -1354,7 +1546,9 @@ impl<T: Copy + PartialEq> AgentChange<T> {
 
     /// What to save of `now`.
     fn saved(change: Option<&Self>, now: T) -> T {
-        change.filter(|change| change.left == now).map_or(now, |change| change.before)
+        change
+            .filter(|change| change.left == now)
+            .map_or(now, |change| change.before)
     }
 }
 
@@ -1536,7 +1730,9 @@ impl Reader {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let root = pr.as_ref().map_or_else(|| home.clone(), |pr| pr.worktree.clone());
+        let root = pr
+            .as_ref()
+            .map_or_else(|| home.clone(), |pr| pr.worktree.clone());
         let prefetch = Some(prefetch).filter(|prefetch| prefetch.root == root);
         let (files, watch) = match prefetch {
             Some(Prefetch { files, watch, .. }) => (files.join().unwrap_or_default(), Some(watch)),
@@ -1550,11 +1746,21 @@ impl Reader {
         let settings = plugin::effective_config();
         let mut agents = config::agents(&settings);
         let idle_minutes = settings["idle_minutes"].as_u64().unwrap_or(15);
-        if let Some(command) = command.as_ref().filter(|c| !agents.iter().any(|agent| agent.id == **c)) {
-            agents.push(config::Agent { id: command.clone(), name: "Custom".into(), command: command.clone(), daemon: None, vouched: true, plugin: None });
+        if let Some(command) = command
+            .as_ref()
+            .filter(|c| !agents.iter().any(|agent| agent.id == **c))
+        {
+            agents.push(config::Agent {
+                id: command.clone(),
+                name: "Custom".into(),
+                command: command.clone(),
+                daemon: None,
+                vouched: true,
+                plugin: None,
+            });
         }
         let project = Self::build_project(root, pr, files);
-            let thread = Thread::blank(0);
+        let thread = Thread::blank(0);
         let (control, requests) = control::start().unzip();
         let mut reader = Self {
             control,
@@ -1571,7 +1777,9 @@ impl Reader {
             notices: HashMap::new(),
             notice_scheduled: HashSet::new(),
             notice_sent_at: HashMap::new(),
-            last_input: Instant::now().checked_sub(QUIET).unwrap_or_else(Instant::now),
+            last_input: Instant::now()
+                .checked_sub(QUIET)
+                .unwrap_or_else(Instant::now),
             pending_move: None,
             agent_panes: None,
             agent_modes: HashMap::new(),
@@ -1614,7 +1822,10 @@ impl Reader {
             left_open: true,
             tree_hidden: false,
             widths: Widths::default(),
-            term_theme: (terminal::Rgb(0xdd, 0xdd, 0xdd), terminal::Rgb(0x12, 0x12, 0x12)),
+            term_theme: (
+                terminal::Rgb(0xdd, 0xdd, 0xdd),
+                terminal::Rgb(0x12, 0x12, 0x12),
+            ),
             threads_expanded: HashSet::new(),
             projects_collapsed: HashSet::new(),
             project_order: vec![],
@@ -1638,7 +1849,8 @@ impl Reader {
         trace::mark("reader built");
         reader.refresh_tree();
         trace::mark("tree");
-        let resumed = workspace::Workspace::load(&reader.home).is_some_and(|saved| reader.restore(saved, cx));
+        let resumed =
+            workspace::Workspace::load(&reader.home).is_some_and(|saved| reader.restore(saved, cx));
         reader.known_projects = reader.workspace().known();
         trace::mark("restore");
         let landing = command.is_none();
@@ -1697,7 +1909,13 @@ fn pieces_of(text: &str) -> Vec<&str> {
         // stand for one that ended before [`PIECE`] bytes was already pushed, so the boundary is
         // taken once what was gathered since the piece's start passes [`PIECE`]. A list or a
         // quote goes on past a blank line, so what comes after it must open a block of its own.
-        if fence.is_none() && line.trim().is_empty() && at - from >= PIECE && lines.get(ix + 1).is_some_and(|next| next.ends_with('\n') && starts_block(next)) {
+        if fence.is_none()
+            && line.trim().is_empty()
+            && at - from >= PIECE
+            && lines
+                .get(ix + 1)
+                .is_some_and(|next| next.ends_with('\n') && starts_block(next))
+        {
             pieces.push(&text[from..at]);
             from = at;
         }
@@ -1715,7 +1933,9 @@ fn fence_after(fence: Option<(char, usize)>, line: &str) -> Option<(char, usize)
     let indent = line.len() - line.trim_start_matches(' ').len();
     let rest = line[indent..].trim_end();
     let mark = rest.chars().next().filter(|c| matches!(c, '`' | '~'));
-    let Some(mark) = mark.filter(|_| indent < 4) else { return fence };
+    let Some(mark) = mark.filter(|_| indent < 4) else {
+        return fence;
+    };
     let run = rest.chars().take_while(|c| *c == mark).count();
     match fence {
         Some((open, len)) if mark == open && run >= len && rest.len() == run => None,
@@ -1741,7 +1961,10 @@ fn starts_block(line: &str) -> bool {
 /// Whether the line defines a link reference (`[name]: url`).
 fn reference_definition(line: &str) -> bool {
     let line = line.trim_start_matches(' ');
-    line.strip_prefix('[').is_some_and(|rest| rest.find("]:").is_some_and(|end| !rest[..end].contains(']')))
+    line.strip_prefix('[').is_some_and(|rest| {
+        rest.find("]:")
+            .is_some_and(|end| !rest[..end].contains(']'))
+    })
 }
 
 /// A step of the agent's work, as against what it says to the user or asks of them: a tool call
@@ -1754,22 +1977,41 @@ fn is_step(block: &Block) -> bool {
 /// of them, a tool call among them (that is where the fold is kept).
 fn step_run(blocks: &[Block], at: usize) -> (usize, bool) {
     let len = blocks[at..].iter().take_while(|b| is_step(b)).count();
-    let foldable = len >= MIN_RUN && blocks[at..at + len].iter().any(|b| matches!(b, Block::Tool(_)));
+    let foldable = len >= MIN_RUN
+        && blocks[at..at + len]
+            .iter()
+            .any(|b| matches!(b, Block::Tool(_)));
     (len, foldable)
 }
 
 /// The tool call of the run that starts at `at` which keeps whether the run is folded.
 fn fold_keeper(blocks: &mut [Block], at: usize) -> Option<&mut ToolBlock> {
     let len = blocks.get(at..)?.iter().take_while(|b| is_step(b)).count();
-    blocks[at..at + len].iter_mut().find_map(|b| if let Block::Tool(tool) = b { Some(tool) } else { None })
+    blocks[at..at + len].iter_mut().find_map(|b| {
+        if let Block::Tool(tool) = b {
+            Some(tool)
+        } else {
+            None
+        }
+    })
 }
 
 /// Whether a run of steps shows as one line. A run the user hasn't clicked starts folded,
 /// whether its calls are still going or not, and opens only if it ended in failure: `open` says
 /// it has not ended (see [`run_open`]), so a failure the next call may get past moves no rows.
 fn run_folded(run: &[Block], open: bool) -> bool {
-    let Some(first) = run.iter().find_map(|b| if let Block::Tool(tool) = b { Some(tool) } else { None }) else { return false };
-    first.fold.unwrap_or(open || run_outcome(run).0 != Step::Failed)
+    let Some(first) = run.iter().find_map(|b| {
+        if let Block::Tool(tool) = b {
+            Some(tool)
+        } else {
+            None
+        }
+    }) else {
+        return false;
+    };
+    first
+        .fold
+        .unwrap_or(open || run_outcome(run).0 != Step::Failed)
 }
 
 /// Whether the run of `len` steps at `at` is still going, though no call of it may be: `live` says
@@ -1782,9 +2024,21 @@ fn run_open(blocks: &[Block], at: usize, len: usize, live: bool) -> bool {
 /// How a run of tool calls went, and how many of its calls failed. A failure the later calls got
 /// past is only counted; the run is failed when none of them went well or the last one failed.
 fn run_outcome(run: &[Block]) -> (Step, usize) {
-    let steps: Vec<Step> = run.iter().filter_map(|b| if let Block::Tool(t) = b { Some(t.status) } else { None }).collect();
+    let steps: Vec<Step> = run
+        .iter()
+        .filter_map(|b| {
+            if let Block::Tool(t) = b {
+                Some(t.status)
+            } else {
+                None
+            }
+        })
+        .collect();
     let failed = steps.iter().filter(|s| **s == Step::Failed).count();
-    let step = if steps.iter().any(|s| matches!(s, Step::Waiting | Step::Working)) {
+    let step = if steps
+        .iter()
+        .any(|s| matches!(s, Step::Waiting | Step::Working))
+    {
         Step::Working
     } else if failed == steps.len() || steps.last() == Some(&Step::Failed) {
         Step::Failed
@@ -1812,7 +2066,6 @@ fn folded_runs(blocks: &[Block], live: bool) -> Vec<usize> {
     starts
 }
 
-
 /// Opens every block `flag` picks out, or closes them all when none is left to open. Returns
 /// the first message that changed, if any.
 fn toggle_all(messages: &mut [Msg], flag: fn(&mut Block) -> Option<&mut bool>) -> Option<usize> {
@@ -1833,11 +2086,6 @@ fn toggle_all(messages: &mut [Msg], flag: fn(&mut Block) -> Option<&mut bool>) -
     first
 }
 
-
-
-
-
-
 /// The one option in a permission request rendered as the filled button: the first way of saying
 /// yes, however the agent orders the rest. Options that describe themselves in `kind` (ACP) are
 /// picked by it; agents that send no kinds at all get their first "allow" in the name honoured.
@@ -1845,26 +2093,29 @@ fn primary_option(options: &[PermissionOption]) -> Option<usize> {
     if options.iter().any(|o| !o.kind.is_empty()) {
         options.iter().position(|o| o.kind == "allow_once")
     } else {
-        options.iter().position(|o| o.name.to_lowercase().contains("allow"))
+        options
+            .iter()
+            .position(|o| o.name.to_lowercase().contains("allow"))
     }
 }
-
-
-
-
 
 fn file_of(uri: &str) -> Option<String> {
     let rest = uri.strip_prefix("file://")?;
     // What follows the host (empty or `localhost`) is the path, with its leading slash.
     let path = match rest.find('/') {
-        Some(at) if rest[..at].is_empty() || rest[..at].eq_ignore_ascii_case("localhost") => &rest[at..],
+        Some(at) if rest[..at].is_empty() || rest[..at].eq_ignore_ascii_case("localhost") => {
+            &rest[at..]
+        }
         _ => return None,
     };
     let bytes = path.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut at = 0;
     while at < bytes.len() {
-        let decoded = (bytes[at] == b'%').then(|| bytes.get(at + 1..at + 3)).flatten().and_then(|hex| u8::from_str_radix(std::str::from_utf8(hex).ok()?, 16).ok());
+        let decoded = (bytes[at] == b'%')
+            .then(|| bytes.get(at + 1..at + 3))
+            .flatten()
+            .and_then(|hex| u8::from_str_radix(std::str::from_utf8(hex).ok()?, 16).ok());
         match decoded {
             Some(byte) => {
                 out.push(byte);
@@ -1887,19 +2138,36 @@ fn chat_items(messages: &[Msg], busy: bool) -> Vec<model::chat::Item> {
     // every message in the history (the engine compares each message's blocks itself, and the
     // pieces here are a byte-for-byte match, so nothing shows twice).
     let now = model::chat::shown();
-    messages.iter().enumerate().map(|(ix, msg)| match msg {
-        Msg::User(text, pictures) => model::chat::Item::User {
-            text: text.clone(),
-            pictures: pictures.iter().map(|a| model::chat::Picture { uri: a.data_uri(), size: a.size }).collect(),
-        },
-        Msg::Agent(blocks) => {
-            let held = match now.items.get(ix) {
-                Some(model::chat::Item::Agent { blocks, .. }) => &**blocks,
-                _ => &[] as &[model::chat::Block],
-            };
-            model::chat::Item::Agent { index: ix, blocks: std::sync::Arc::new(chat_blocks(blocks, busy && ix + 1 == messages.len(), held)) }
-        }
-    }).collect()
+    messages
+        .iter()
+        .enumerate()
+        .map(|(ix, msg)| match msg {
+            Msg::User(text, pictures) => model::chat::Item::User {
+                text: text.clone(),
+                pictures: pictures
+                    .iter()
+                    .map(|a| model::chat::Picture {
+                        uri: a.data_uri(),
+                        size: a.size,
+                    })
+                    .collect(),
+            },
+            Msg::Agent(blocks) => {
+                let held = match now.items.get(ix) {
+                    Some(model::chat::Item::Agent { blocks, .. }) => &**blocks,
+                    _ => &[] as &[model::chat::Block],
+                };
+                model::chat::Item::Agent {
+                    index: ix,
+                    blocks: std::sync::Arc::new(chat_blocks(
+                        blocks,
+                        busy && ix + 1 == messages.len(),
+                        held,
+                    )),
+                }
+            }
+        })
+        .collect()
 }
 
 /// Whether the run's calls waited, were all told to go, all went well, or one failed.
@@ -1915,18 +2183,41 @@ fn chat_phase(step: Step) -> model::chat::Phase {
 /// The plan entry in progress in the latest plan, which a call that begins now works towards.
 fn task_in_progress(messages: &[Msg]) -> Option<String> {
     let entries = messages.iter().rev().find_map(|msg| match msg {
-        Msg::Agent(blocks) => blocks.iter().find_map(|b| if let Block::Plan(entries) = b { Some(entries) } else { None }),
+        Msg::Agent(blocks) => blocks.iter().find_map(|b| {
+            if let Block::Plan(entries) = b {
+                Some(entries)
+            } else {
+                None
+            }
+        }),
         _ => None,
     })?;
-    entries.iter().find(|(_, step)| *step == Step::Working).map(|(text, _)| text.clone())
+    entries
+        .iter()
+        .find(|(_, step)| *step == Step::Working)
+        .map(|(text, _)| text.clone())
 }
 
 /// How long a finished run of steps took: from its first call's start to its last one's end. Nothing
 /// while a call is still going.
 fn run_took(run: &[Block]) -> Option<Duration> {
-    let tools: Vec<&ToolBlock> = run.iter().filter_map(|b| if let Block::Tool(t) = b { Some(t) } else { None }).collect();
+    let tools: Vec<&ToolBlock> = run
+        .iter()
+        .filter_map(|b| {
+            if let Block::Tool(t) = b {
+                Some(t)
+            } else {
+                None
+            }
+        })
+        .collect();
     let start = tools.iter().map(|t| t.started).min()?;
-    let end = tools.iter().map(|t| t.ended).collect::<Option<Vec<_>>>()?.into_iter().max()?;
+    let end = tools
+        .iter()
+        .map(|t| t.ended)
+        .collect::<Option<Vec<_>>>()?
+        .into_iter()
+        .max()?;
     Some(end.saturating_duration_since(start))
 }
 
@@ -1942,7 +2233,14 @@ fn tool_kind(tool: &ToolBlock) -> model::chat::Kind {
         "fetch" => return Kind::Fetch,
         _ => {}
     }
-    match tool.title.split_whitespace().next().unwrap_or_default().to_lowercase().as_str() {
+    match tool
+        .title
+        .split_whitespace()
+        .next()
+        .unwrap_or_default()
+        .to_lowercase()
+        .as_str()
+    {
         "read" | "cat" | "view" | "open" => Kind::Read,
         "grep" | "glob" | "find" | "search" | "list" | "ls" | "rg" => Kind::Search,
         "edit" | "write" | "patch" | "apply_patch" | "multiedit" | "delete" | "move" => Kind::Edit,
@@ -1956,7 +2254,13 @@ fn tool_kind(tool: &ToolBlock) -> model::chat::Kind {
 fn run_kinds(run: &[Block]) -> (Vec<(model::chat::Kind, usize)>, Vec<String>) {
     let mut kinds: Vec<(model::chat::Kind, usize)> = vec![];
     let mut edits: Vec<String> = vec![];
-    for tool in run.iter().filter_map(|b| if let Block::Tool(t) = b { Some(t) } else { None }) {
+    for tool in run.iter().filter_map(|b| {
+        if let Block::Tool(t) = b {
+            Some(t)
+        } else {
+            None
+        }
+    }) {
         let kind = tool_kind(tool);
         match kinds.iter_mut().find(|(k, _)| *k == kind) {
             Some((_, n)) => *n += 1,
@@ -1974,15 +2278,31 @@ fn run_kinds(run: &[Block]) -> (Vec<(model::chat::Kind, usize)>, Vec<String>) {
 
 /// What a run of steps is at: the call going now, else the last one made.
 fn run_latest(run: &[Block]) -> Option<String> {
-    let mut tools = run.iter().filter_map(|b| if let Block::Tool(t) = b { Some(t) } else { None });
+    let mut tools = run.iter().filter_map(|b| {
+        if let Block::Tool(t) = b {
+            Some(t)
+        } else {
+            None
+        }
+    });
     let all: Vec<&ToolBlock> = tools.by_ref().collect();
-    all.iter().rev().find(|t| matches!(t.status, Step::Waiting | Step::Working)).or(all.last()).map(|t| t.title.clone())
+    all.iter()
+        .rev()
+        .find(|t| matches!(t.status, Step::Waiting | Step::Working))
+        .or(all.last())
+        .map(|t| t.title.clone())
 }
 
 /// The plan task a run of calls worked towards: the one task its calls name, none when they name
 /// no task or span several.
 fn run_task(run: &[Block]) -> Option<String> {
-    let mut tasks = run.iter().filter_map(|b| if let Block::Tool(tool) = b { tool.task.as_deref() } else { None });
+    let mut tasks = run.iter().filter_map(|b| {
+        if let Block::Tool(tool) = b {
+            tool.task.as_deref()
+        } else {
+            None
+        }
+    });
     let first = tasks.next()?;
     tasks.all(|task| task == first).then(|| first.to_string())
 }
@@ -1990,13 +2310,21 @@ fn run_task(run: &[Block]) -> Option<String> {
 /// One agent message's blocks for the conversation drawn by NSH. Runs of [`MIN_RUN`] or more steps
 /// (tool calls and thoughts) that hold a call also carry the row that folds them; the steps stay in place
 /// either way, so the indexes their answers are told by hold. `live` as in [`run_open`].
-fn chat_blocks(blocks: &[Block], live: bool, held: &[model::chat::Block]) -> Vec<model::chat::Block> {
+fn chat_blocks(
+    blocks: &[Block],
+    live: bool,
+    held: &[model::chat::Block],
+) -> Vec<model::chat::Block> {
     let mut out: Vec<model::chat::Block> = Vec::with_capacity(blocks.len());
     let mut n = 0;
     while n < blocks.len() {
         // A step in the middle of a run too short to fold is not the start of another.
         let inside = n > 0 && is_step(&blocks[n - 1]);
-        let (len, foldable) = if is_step(&blocks[n]) && !inside { step_run(blocks, n) } else { (0, false) };
+        let (len, foldable) = if is_step(&blocks[n]) && !inside {
+            step_run(blocks, n)
+        } else {
+            (0, false)
+        };
         if foldable {
             let run = &blocks[n..n + len];
             let open = run_open(blocks, n, len, live);
@@ -2005,11 +2333,27 @@ fn chat_blocks(blocks: &[Block], live: bool, held: &[model::chat::Block]) -> Vec
             let task = run_task(run);
             let calls = run.iter().filter(|b| matches!(b, Block::Tool(_))).count();
             let (kinds, edits) = run_kinds(run);
-            out.push(model::chat::Block::Run { index: n, count: len, calls, failed, phase: chat_phase(phase), folded: run_folded(run, open), task, took: run_took(run), latest: run_latest(run), kinds, edits });
+            out.push(model::chat::Block::Run {
+                index: n,
+                count: len,
+                calls,
+                failed,
+                phase: chat_phase(phase),
+                folded: run_folded(run, open),
+                task,
+                took: run_took(run),
+                latest: run_latest(run),
+                kinds,
+                edits,
+            });
             for (k, block) in run.iter().enumerate() {
                 out.push(match block {
                     Block::Tool(tool) => model::chat::Block::Tool(chat_tool(n + k, tool)),
-                    Block::Thought(text, open) => model::chat::Block::Thought { index: n + k, text: text.clone(), open: *open },
+                    Block::Thought(text, open) => model::chat::Block::Thought {
+                        index: n + k,
+                        text: text.clone(),
+                        open: *open,
+                    },
                     _ => continue,
                 });
             }
@@ -2023,31 +2367,61 @@ fn chat_blocks(blocks: &[Block], live: bool, held: &[model::chat::Block]) -> Vec
                 // that could be built again exactly as it is keeps `held`'s (see `chat_items`).
                 for (stitch, piece) in pieces_of(text).into_iter().enumerate() {
                     let piece_text = match held.get(out.len()) {
-                        Some(model::chat::Block::Markdown { text, .. }) if text.as_ref() == piece => text.clone(),
+                        Some(model::chat::Block::Markdown { text, .. })
+                            if text.as_ref() == piece =>
+                        {
+                            text.clone()
+                        }
                         _ => piece.into(),
                     };
-                    out.push(model::chat::Block::Markdown { text: piece_text, stitch: stitch > 0 });
+                    out.push(model::chat::Block::Markdown {
+                        text: piece_text,
+                        stitch: stitch > 0,
+                    });
                 }
                 n += 1;
                 continue;
             }
-            Block::Thought(text, open) => model::chat::Block::Thought { index: n, text: text.clone(), open: *open },
+            Block::Thought(text, open) => model::chat::Block::Thought {
+                index: n,
+                text: text.clone(),
+                open: *open,
+            },
             Block::Tool(tool) => model::chat::Block::Tool(chat_tool(n, tool)),
             Block::Permission(ask) => {
                 let primary = primary_option(&ask.options);
                 model::chat::Block::Ask {
                     index: n,
                     title: ask.title.clone(),
-                    options: ask.options.iter().enumerate().map(|(at, option)| model::chat::AskOption {
-                        at,
-                        label: option.name.clone(),
-                        primary: primary == Some(at),
-                    }).collect(),
+                    options: ask
+                        .options
+                        .iter()
+                        .enumerate()
+                        .map(|(at, option)| model::chat::AskOption {
+                            at,
+                            label: option.name.clone(),
+                            primary: primary == Some(at),
+                        })
+                        .collect(),
                     answered: ask.answered.clone(),
                 }
             }
-            Block::Plan(entries) => model::chat::Block::Plan(entries.iter().map(|(text, step)| model::chat::Entry { text: text.clone(), phase: chat_phase(*step) }).collect()),
-            Block::Approve { agent, new_agent, mcp, resume: _, answered } => {
+            Block::Plan(entries) => model::chat::Block::Plan(
+                entries
+                    .iter()
+                    .map(|(text, step)| model::chat::Entry {
+                        text: text.clone(),
+                        phase: chat_phase(*step),
+                    })
+                    .collect(),
+            ),
+            Block::Approve {
+                agent,
+                new_agent,
+                mcp,
+                resume: _,
+                answered,
+            } => {
                 let (question, lines) = approval_text(agent, *new_agent, mcp);
                 model::chat::Block::Approve {
                     index: n,
@@ -2080,8 +2454,16 @@ fn chat_tool(at: usize, tool: &ToolBlock) -> model::chat::Tool {
 }
 
 /// What the approval card says: the question Po asks, and the commands it would hand over.
-fn approval_text(agent: &config::Agent, new_agent: bool, mcp: &[config::McpServer]) -> (String, Vec<String>) {
-    let from = |plugin: &Option<String>| plugin.as_ref().map_or_else(String::new, |id| format!("  (plugin {id})"));
+fn approval_text(
+    agent: &config::Agent,
+    new_agent: bool,
+    mcp: &[config::McpServer],
+) -> (String, Vec<String>) {
+    let from = |plugin: &Option<String>| {
+        plugin
+            .as_ref()
+            .map_or_else(String::new, |id| format!("  (plugin {id})"))
+    };
     let mut lines = Vec::new();
     if new_agent {
         let source = from(&agent.plugin);
@@ -2090,8 +2472,14 @@ fn approval_text(agent: &config::Agent, new_agent: bool, mcp: &[config::McpServe
             None => format!("{}{source}", agent.command),
         });
     }
-    lines.extend(mcp.iter().map(|server| format!("{}: {}{}", server.name, server.line(), from(&server.plugin))));
-    let agent_source = agent.plugin.as_ref().map_or_else(|| "your config".to_string(), |id| format!("the plugin {id}"));
+    lines.extend(
+        mcp.iter()
+            .map(|server| format!("{}: {}{}", server.name, server.line(), from(&server.plugin))),
+    );
+    let agent_source = agent.plugin.as_ref().map_or_else(
+        || "your config".to_string(),
+        |id| format!("the plugin {id}"),
+    );
     let question = match (new_agent, mcp.is_empty()) {
         (true, true) => format!("“{}” is not one of Po's own agents: it comes from {agent_source}. Run this command?", agent.name),
         (true, false) => format!("“{}” is not one of Po's own agents, and your config or plugins list MCP servers for it. Run these commands?", agent.name),
@@ -2116,7 +2504,10 @@ fn detach(root: &Path, command: &Option<String>, pr: &Option<pr::Pr>) -> std::io
         .unwrap_or_else(std::env::temp_dir)
         .join("po");
     std::fs::create_dir_all(&log_dir)?;
-    let log = std::fs::OpenOptions::new().create(true).append(true).open(log_dir.join("po.log"))?;
+    let log = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_dir.join("po.log"))?;
     let mut child = Command::new(std::env::current_exe()?);
     child.arg("--foreground");
     if let Some(command) = command {
@@ -2137,13 +2528,20 @@ fn detach(root: &Path, command: &Option<String>, pr: &Option<pr::Pr>) -> std::io
             child.arg("--pr-source").arg(source);
         }
     }
-    child.arg(root).stdin(Stdio::null()).stdout(log.try_clone()?).stderr(log);
+    child
+        .arg(root)
+        .stdin(Stdio::null())
+        .stdout(log.try_clone()?)
+        .stderr(log);
     #[cfg(unix)]
     std::os::unix::process::CommandExt::process_group(&mut child, 0);
     #[cfg(windows)]
     {
         // DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
-        std::os::windows::process::CommandExt::creation_flags(&mut child, 0x0000_0008 | 0x0000_0200);
+        std::os::windows::process::CommandExt::creation_flags(
+            &mut child,
+            0x0000_0008 | 0x0000_0200,
+        );
     }
     child.spawn()?;
     Ok(())
@@ -2169,7 +2567,9 @@ fn main() {
     }
     if cli.len() == 1 && cli[0] == "update" {
         if std::path::Path::new("update").exists() {
-            eprintln!("po-update: running self-update (use `po ./update` to open the local path 'update')");
+            eprintln!(
+                "po-update: running self-update (use `po ./update` to open the local path 'update')"
+            );
         }
         match update::update() {
             Ok(message) => println!("{message}"),
@@ -2188,7 +2588,8 @@ fn main() {
     let mut command = std::env::var("PO_AGENT").ok();
     let mut spec = None;
     // Set only by a parent that already checked the PR out.
-    let (mut worktree, mut base, mut number, mut title, mut source) = (None, None, 0, String::new(), None);
+    let (mut worktree, mut base, mut number, mut title, mut source) =
+        (None, None, 0, String::new(), None);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--foreground" | "-f" => foreground = true,
@@ -2205,7 +2606,9 @@ fn main() {
     let root = path.unwrap_or_else(|| std::env::current_dir().expect("cwd"));
     let root = root.canonicalize().expect("project path");
     let pr = match (worktree, base, spec) {
-        (Some(worktree), Some(base), _) => Some(pr::Pr::adopt(worktree, base, number, title, source)),
+        (Some(worktree), Some(base), _) => {
+            Some(pr::Pr::adopt(worktree, base, number, title, source))
+        }
         (_, _, Some(spec)) => {
             eprintln!("po: checking out PR {spec}…");
             match pr::Pr::open(&root, &spec) {
@@ -2233,7 +2636,10 @@ fn main() {
         .format_timestamp_millis()
         .init();
     trace::mark("args parsed");
-    let prefetch = Prefetch::start(pr.as_ref().map_or_else(|| root.clone(), |pr| pr.worktree.clone()));
+    let prefetch = Prefetch::start(
+        pr.as_ref()
+            .map_or_else(|| root.clone(), |pr| pr.worktree.clone()),
+    );
     app::run(root, pr, command, prefetch);
     // Where the event loop returns rather than ending the process; the app's quit already did it.
     profile::finish();
@@ -2251,8 +2657,23 @@ fn preview_of(messages: &[Msg], busy: bool) -> String {
             return format!("Approve: {}", ask.title);
         }
         if let Some(what) = blocks.iter().find_map(|b| match b {
-            Block::Approve { agent, new_agent: true, answered: None, .. } => Some(agent.command.clone()),
-            Block::Approve { mcp, answered: None, .. } => Some(format!("MCP servers: {}", mcp.iter().map(|server| server.name.as_str()).collect::<Vec<_>>().join(", "))),
+            Block::Approve {
+                agent,
+                new_agent: true,
+                answered: None,
+                ..
+            } => Some(agent.command.clone()),
+            Block::Approve {
+                mcp,
+                answered: None,
+                ..
+            } => Some(format!(
+                "MCP servers: {}",
+                mcp.iter()
+                    .map(|server| server.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )),
             _ => None,
         }) {
             return format!("Approve running: {what}");
@@ -2272,7 +2693,11 @@ fn preview_of(messages: &[Msg], busy: bool) -> String {
             }
         }
     }
-    if busy { "Working…".into() } else { String::new() }
+    if busy {
+        "Working…".into()
+    } else {
+        String::new()
+    }
 }
 
 #[cfg(test)]
@@ -2307,7 +2732,15 @@ mod tests {
         assert_eq!(cap("fix the build"), "Fix the build");
         assert_eq!(cap("why, though?"), "Why, though?");
         assert_eq!(cap("Already fine"), "Already fine");
-        for as_typed in ["src/main.rs is slow", "cargo test fails", "snake_case rename", "v2 plan", "#115 review", "…", ""] {
+        for as_typed in [
+            "src/main.rs is slow",
+            "cargo test fails",
+            "snake_case rename",
+            "v2 plan",
+            "#115 review",
+            "…",
+            "",
+        ] {
             assert_eq!(cap(as_typed), as_typed);
         }
     }
@@ -2330,24 +2763,40 @@ mod tests {
         let pieces = pieces_of(&long);
         assert!(pieces.len() > 4, "pieces: {}", pieces.len());
         assert_eq!(pieces.concat(), long);
-        assert!(pieces.iter().all(|piece| piece.len() < 2 * super::PIECE), "a piece is not a small run of paragraphs, longest was {}", pieces.iter().map(|p| p.len()).max().unwrap_or(0));
+        assert!(
+            pieces.iter().all(|piece| piece.len() < 2 * super::PIECE),
+            "a piece is not a small run of paragraphs, longest was {}",
+            pieces.iter().map(|p| p.len()).max().unwrap_or(0)
+        );
         // No piece sits inside a fence: every fence a piece opens, that piece also shuts.
         for piece in &pieces {
             let opens = piece.match_indices("```rust\n").count();
-            let shuts = piece.lines().filter(|line| line.trim_end() == "```").count();
-            assert_eq!(shuts, opens, "a piece holds a fence not its other: {:?}", piece);
+            let shuts = piece
+                .lines()
+                .filter(|line| line.trim_end() == "```")
+                .count();
+            assert_eq!(
+                shuts, opens,
+                "a piece holds a fence not its other: {:?}",
+                piece
+            );
         }
     }
 
     #[test]
     fn pieces_keep_what_markdown_reads_across_a_blank_line_together() {
-        let filler = "A paragraph about a value and who owns it meanwhile, long enough to count.\n\n".repeat(10);
+        let filler =
+            "A paragraph about a value and who owns it meanwhile, long enough to count.\n\n"
+                .repeat(10);
         let kept = |block: &str| {
             let text = format!("{filler}{block}{filler}");
             let pieces = pieces_of(&text);
             assert_eq!(pieces.concat(), text);
             assert!(pieces.len() > 1, "the text was not split at all");
-            assert!(pieces.iter().any(|piece| piece.contains(block)), "a piece cut {block:?}");
+            assert!(
+                pieces.iter().any(|piece| piece.contains(block)),
+                "a piece cut {block:?}"
+            );
         };
         kept("~~~\nfn a() {}\n\n\nfn b() {}\n~~~\n\n");
         kept("````md\n```\n\nnested\n```\n````\n\n");
@@ -2359,7 +2808,8 @@ mod tests {
         let spaced = "A paragraph about a value and who owns it meanwhile.\n  \n".repeat(40);
         assert!(pieces_of(&spaced).len() > 1);
         // A reference may be defined after the piece that uses it, so the text is not split.
-        let linked = format!("See [the book].\n\n{filler}[the book]: https://doc.rust-lang.org/book/\n");
+        let linked =
+            format!("See [the book].\n\n{filler}[the book]: https://doc.rust-lang.org/book/\n");
         assert_eq!(pieces_of(&linked), [linked.as_str()]);
     }
 
@@ -2391,15 +2841,26 @@ mod tests {
 
     #[test]
     fn a_project_remembers_the_threads_closed_in_it_newest_first_once_each_and_not_too_many() {
-        let mut project = super::Reader::build_project(std::path::PathBuf::from("/x"), None, vec![]);
-        let state = |session: &str| crate::workspace::ThreadState { agent: "a".into(), session: session.into(), title: String::new(), active_at: 0, parent_session: None, renamed: false };
+        let mut project =
+            super::Reader::build_project(std::path::PathBuf::from("/x"), None, vec![]);
+        let state = |session: &str| crate::workspace::ThreadState {
+            agent: "a".into(),
+            session: session.into(),
+            title: String::new(),
+            active_at: 0,
+            parent_session: None,
+            renamed: false,
+        };
         for n in 0..15 {
             project.remember(state(&format!("s{n}")));
         }
         project.remember(state("s10"));
         assert_eq!(project.closed.len(), crate::workspace::CLOSED_KEPT);
         assert_eq!(project.closed[0].session, "s10");
-        assert_eq!(project.closed.iter().filter(|c| c.session == "s10").count(), 1);
+        assert_eq!(
+            project.closed.iter().filter(|c| c.session == "s10").count(),
+            1
+        );
         assert_eq!(project.closed[1].session, "s14");
     }
 
@@ -2411,7 +2872,10 @@ mod tests {
         thread.agent = Some("a".into());
         assert!(thread.closed_state().is_none(), "no session");
         thread.session = Some("s".into());
-        assert_eq!(thread.closed_state().map(|c| c.session), Some("s".to_string()));
+        assert_eq!(
+            thread.closed_state().map(|c| c.session),
+            Some("s".to_string())
+        );
     }
 
     #[test]
@@ -2424,7 +2888,11 @@ mod tests {
         let kept = thread.closed_state().unwrap();
         assert_eq!((kept.title.as_str(), kept.renamed), ("the retry bug", true));
         thread.renamed = None;
-        assert_eq!(thread.title(), "fix it", "taking the name away gives the first message back");
+        assert_eq!(
+            thread.title(),
+            "fix it",
+            "taking the name away gives the first message back"
+        );
     }
 
     fn started_thread() -> super::Thread {
@@ -2432,8 +2900,12 @@ mod tests {
         thread.blank = false;
         thread.agent = Some("a".into());
         thread.session = Some("s".into());
-        thread.messages.push(super::Msg::User("fix it".into(), vec![]));
-        thread.messages.push(super::Msg::Agent(vec![super::Block::Text("fixed".into())]));
+        thread
+            .messages
+            .push(super::Msg::User("fix it".into(), vec![]));
+        thread
+            .messages
+            .push(super::Msg::Agent(vec![super::Block::Text("fixed".into())]));
         thread
     }
 
@@ -2463,26 +2935,53 @@ mod tests {
                 "status": "failed"
             }),
         );
-        let Some(super::Msg::Agent(blocks)) = thread.messages.last() else { unreachable!("agent work") };
-        let Some(super::Block::Tool(tool)) = blocks.iter().find(|b| matches!(b, super::Block::Tool(t) if t.id == "t1")) else {
+        let Some(super::Msg::Agent(blocks)) = thread.messages.last() else {
+            unreachable!("agent work")
+        };
+        let Some(super::Block::Tool(tool)) = blocks
+            .iter()
+            .find(|b| matches!(b, super::Block::Tool(t) if t.id == "t1"))
+        else {
             unreachable!("the call was recorded")
         };
-        assert!(matches!(tool.status, super::Step::Failed), "the settled status was taken in");
-        assert_eq!(tool.path.as_deref(), Some("src/a.rs"), "the file the call touches is known for the chip");
-        super::record(&mut thread, &serde_json::json!({ "sessionUpdate": "usage_update", "used": 100, "size": 1000 }));
-        assert_eq!(thread.usage, Some(crate::state::Usage { used: 100, size: 1000 }));
+        assert!(
+            matches!(tool.status, super::Step::Failed),
+            "the settled status was taken in"
+        );
+        assert_eq!(
+            tool.path.as_deref(),
+            Some("src/a.rs"),
+            "the file the call touches is known for the chip"
+        );
+        super::record(
+            &mut thread,
+            &serde_json::json!({ "sessionUpdate": "usage_update", "used": 100, "size": 1000 }),
+        );
+        assert_eq!(
+            thread.usage,
+            Some(crate::state::Usage {
+                used: 100,
+                size: 1000
+            })
+        );
     }
 
     #[test]
     fn a_thread_switches_agent_only_with_nothing_under_way_and_something_to_pass_on() {
         assert!(started_thread().can_switch_agent());
-        assert!(!super::Thread::blank(1).can_switch_agent(), "blank: picking starts it instead");
+        assert!(
+            !super::Thread::blank(1).can_switch_agent(),
+            "blank: picking starts it instead"
+        );
         let mut busy = started_thread();
         busy.busy = true;
         assert!(!busy.can_switch_agent());
         let mut unloaded = started_thread();
         unloaded.messages.clear();
-        assert!(!unloaded.can_switch_agent(), "its conversation hasn't been replayed");
+        assert!(
+            !unloaded.can_switch_agent(),
+            "its conversation hasn't been replayed"
+        );
         let mut no_session = started_thread();
         no_session.session = None;
         assert!(!no_session.can_switch_agent());
@@ -2491,12 +2990,23 @@ mod tests {
     #[test]
     fn a_switch_the_new_agent_has_not_heard_of_comes_back_to_the_agent_it_left() {
         let mut thread = started_thread();
-        thread.switch = Some(super::Switch { agent: "a".into(), session: "s".into(), earlier: String::new() });
+        thread.switch = Some(super::Switch {
+            agent: "a".into(),
+            session: "s".into(),
+            earlier: String::new(),
+        });
         thread.agent = Some("b".into());
         thread.session = Some("empty".into());
-        assert_eq!(thread.closed_state().map(|c| (c.agent, c.session)), Some(("a".to_string(), "s".to_string())));
+        assert_eq!(
+            thread.closed_state().map(|c| (c.agent, c.session)),
+            Some(("a".to_string(), "s".to_string()))
+        );
         thread.session = None;
-        assert_eq!(thread.resumes_from(), Some(("a", "s")), "kept even if the new agent failed to start");
+        assert_eq!(
+            thread.resumes_from(),
+            Some(("a", "s")),
+            "kept even if the new agent failed to start"
+        );
         assert!(thread.can_switch_agent(), "and the user can pick again");
         thread.switch = None;
         assert_eq!(thread.resumes_from(), None);
@@ -2505,17 +3015,35 @@ mod tests {
     #[test]
     fn a_replayed_handoff_brings_the_earlier_messages_back() {
         let mut said = started_thread();
-        said.messages.push(super::Msg::Agent(vec![super::Block::Text("*Switched to B.*".into())]));
+        said.messages
+            .push(super::Msg::Agent(vec![super::Block::Text(
+                "*Switched to B.*".into(),
+            )]));
         let earlier = super::handoff::write(&said.said());
         let mut thread = super::Thread::blank(1);
         thread.blank = false;
         thread.loading = true;
         let prompt = format!("{earlier}[The user has `a.rs` open in the viewer.]\n\nand now?");
         thread.update(&serde_json::json!({ "sessionUpdate": "user_message_chunk", "content": { "type": "text", "text": prompt } }));
-        let users: Vec<&str> = thread.messages.iter().filter_map(|msg| match msg { super::Msg::User(text, _) => Some(text.as_str()), _ => None }).collect();
+        let users: Vec<&str> = thread
+            .messages
+            .iter()
+            .filter_map(|msg| match msg {
+                super::Msg::User(text, _) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
         assert_eq!(users, ["fix it", "and now?"]);
-        assert_eq!(thread.messages.len(), 4, "the two messages, the note and the new message");
-        assert_eq!(thread.title(), "fix it", "still named for what it was first asked");
+        assert_eq!(
+            thread.messages.len(),
+            4,
+            "the two messages, the note and the new message"
+        );
+        assert_eq!(
+            thread.title(),
+            "fix it",
+            "still named for what it was first asked"
+        );
     }
 
     #[test]
@@ -2531,7 +3059,14 @@ mod tests {
             thread.update(&serde_json::json!({ "sessionUpdate": "user_message_chunk", "content": { "type": "text", "text": piece } }));
         }
         thread.unfold_handoffs();
-        let users: Vec<&str> = thread.messages.iter().filter_map(|msg| match msg { super::Msg::User(text, _) => Some(text.as_str()), _ => None }).collect();
+        let users: Vec<&str> = thread
+            .messages
+            .iter()
+            .filter_map(|msg| match msg {
+                super::Msg::User(text, _) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
         assert_eq!(users, ["fix it", "again", "and now?"]);
         assert_eq!(thread.title(), "fix it");
     }
@@ -2541,15 +3076,28 @@ mod tests {
     fn closed_with(busy: bool) -> String {
         let path = std::env::temp_dir().join(format!("po-retire-{}-{busy}", std::process::id()));
         std::fs::write(&path, "").unwrap();
-        let (client, _events) = crate::acp::Client::spawn(&format!("tee {}", path.display()), &std::env::temp_dir(), false, None, |_| vec![]).expect("spawns tee");
+        let (client, _events) = crate::acp::Client::spawn(
+            &format!("tee {}", path.display()),
+            &std::env::temp_dir(),
+            false,
+            None,
+            |_| vec![],
+        )
+        .expect("spawns tee");
         client.load("s1");
         let mut thread = super::Thread::blank(1);
         thread.busy = busy;
         thread.client = Some(crate::agent::Client::Acp(client));
         super::Thread::retire(thread);
         // Waits for the cancel to arrive; when none is expected, long enough to have seen it.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(if busy { 3000 } else { 400 });
-        while std::time::Instant::now() < deadline && !(busy && std::fs::read_to_string(&path).unwrap().contains("session/cancel")) {
+        let deadline = std::time::Instant::now()
+            + std::time::Duration::from_millis(if busy { 3000 } else { 400 });
+        while std::time::Instant::now() < deadline
+            && !(busy
+                && std::fs::read_to_string(&path)
+                    .unwrap()
+                    .contains("session/cancel"))
+        {
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
         let sent = std::fs::read_to_string(&path).unwrap();
@@ -2572,7 +3120,14 @@ mod tests {
         thread.busy = true;
         assert!(thread.at_risk(), "running");
         thread.busy = false;
-        thread.queue.push(super::Queued { out: super::Outgoing { text: "next".into(), origin: super::Origin::User, images: vec![] }, kind: None });
+        thread.queue.push(super::Queued {
+            out: super::Outgoing {
+                text: "next".into(),
+                origin: super::Origin::User,
+                images: vec![],
+            },
+            kind: None,
+        });
         assert!(thread.at_risk(), "queued");
     }
 
@@ -2580,16 +3135,51 @@ mod tests {
     // busy for an agent that takes messages mid-turn (dex) and one that doesn't (ACP).
     #[test]
     fn a_message_goes_where_its_thread_is() {
-        assert_eq!(route(true, false, false, false, false, false, false), Where::Start, "blank");
-        assert_eq!(route(false, true, false, false, false, false, false), Where::Start, "unstarted");
-        assert_eq!(route(false, false, false, true, false, false, false), Where::Wait, "starting");
-        assert_eq!(route(false, false, true, false, false, false, false), Where::Wait, "asleep");
-        assert_eq!(route(false, false, false, false, false, false, false), Where::Dispatch, "ready");
-        assert_eq!(route(false, false, false, false, true, true, false), Where::Take(Queue::Steer), "dex mid-turn");
-        assert_eq!(route(false, false, false, false, true, true, true), Where::Take(Queue::Followup), "dex follow-up");
-        assert_eq!(route(false, false, false, false, true, false, false), Where::Queue, "ACP mid-turn");
+        assert_eq!(
+            route(true, false, false, false, false, false, false),
+            Where::Start,
+            "blank"
+        );
+        assert_eq!(
+            route(false, true, false, false, false, false, false),
+            Where::Start,
+            "unstarted"
+        );
+        assert_eq!(
+            route(false, false, false, true, false, false, false),
+            Where::Wait,
+            "starting"
+        );
+        assert_eq!(
+            route(false, false, true, false, false, false, false),
+            Where::Wait,
+            "asleep"
+        );
+        assert_eq!(
+            route(false, false, false, false, false, false, false),
+            Where::Dispatch,
+            "ready"
+        );
+        assert_eq!(
+            route(false, false, false, false, true, true, false),
+            Where::Take(Queue::Steer),
+            "dex mid-turn"
+        );
+        assert_eq!(
+            route(false, false, false, false, true, true, true),
+            Where::Take(Queue::Followup),
+            "dex follow-up"
+        );
+        assert_eq!(
+            route(false, false, false, false, true, false, false),
+            Where::Queue,
+            "ACP mid-turn"
+        );
         // A thread that is busy is not starting anything, however the rest stands.
-        assert_eq!(route(false, false, false, true, true, false, false), Where::Queue);
+        assert_eq!(
+            route(false, false, false, true, true, false, false),
+            Where::Queue
+        );
     }
 
     #[test]
@@ -2629,35 +3219,63 @@ mod tests {
     fn an_agents_own_view_show_does_not_drop_its_pending_move() {
         use super::{Mode, PendingMove, Screen};
         use crate::command::Command;
-        let from = Screen { side_open: false, agent_open: false, mode: Mode::Source, current: None, picked: None, shown: None };
+        let from = Screen {
+            side_open: false,
+            agent_open: false,
+            mode: Mode::Source,
+            current: None,
+            picked: None,
+            shown: None,
+        };
         // The agent shows a view on the thread whose file open waits: the move follows what the
         // agent touched, so it applies once the pause comes.
         let mut pending = PendingMove {
             thread: 1,
-            command: Command::FileOpen { path: "a.rs".into(), line: None },
+            command: Command::FileOpen {
+                path: "a.rs".into(),
+                line: None,
+            },
             from: from.clone(),
         };
-        let shown = Screen { side_open: true, agent_open: true, mode: Mode::Source, current: None, picked: None, shown: Some("v".into()) };
+        let shown = Screen {
+            side_open: true,
+            agent_open: true,
+            mode: Mode::Source,
+            current: None,
+            picked: None,
+            shown: Some("v".into()),
+        };
         pending.follows_agent(1, &shown);
         assert_eq!(pending.from.shown.as_deref(), Some("v"));
         assert!(pending.from.side_open && pending.from.agent_open);
         // What the agent did not touch stays as deferred, so a user's change to it still counts.
         assert!(matches!(pending.from.mode, Mode::Source));
         // A move of another thread does not follow: it drops when its thread goes off screen.
-        let mut other = PendingMove { thread: 2, command: Command::ViewerClose, from };
+        let mut other = PendingMove {
+            thread: 2,
+            command: Command::ViewerClose,
+            from,
+        };
         other.follows_agent(1, &shown);
         assert_eq!(other.from.shown, None);
     }
 
     fn thought_flag(b: &mut Block) -> Option<&mut bool> {
-        if let Block::Thought(_, shown) = b { Some(shown) } else { None }
+        if let Block::Thought(_, shown) = b {
+            Some(shown)
+        } else {
+            None
+        }
     }
 
     #[test]
     fn toggling_opens_all_then_folds_all() {
         let mut messages = vec![
             Msg::User("hi".into(), vec![]),
-            Msg::Agent(vec![Block::Thought("a".into(), true), Block::Text("t".into())]),
+            Msg::Agent(vec![
+                Block::Thought("a".into(), true),
+                Block::Text("t".into()),
+            ]),
             Msg::Agent(vec![Block::Thought("b".into(), false)]),
         ];
         assert_eq!(toggle_all(&mut messages, thought_flag), Some(2));
@@ -2665,10 +3283,16 @@ mod tests {
         assert!(matches!(&messages[2], Msg::Agent(b) if matches!(b[0], Block::Thought(_, true))));
         assert_eq!(toggle_all(&mut messages, thought_flag), Some(1));
         assert!(matches!(&messages[1], Msg::Agent(b) if matches!(b[0], Block::Thought(_, false))));
-        assert_eq!(toggle_all(&mut [Msg::User("x".into(), vec![])], thought_flag), None);
+        assert_eq!(
+            toggle_all(&mut [Msg::User("x".into(), vec![])], thought_flag),
+            None
+        );
     }
 
-    use super::{NOTICE_RATE, notice_wait, Activity, Block, Msg, PermissionOption, Step, ToolBlock, folded_runs, preview_of, language, run_folded, toggle_all, match_files, primary_option};
+    use super::{
+        Activity, Block, Msg, NOTICE_RATE, PermissionOption, Step, ToolBlock, folded_runs,
+        language, match_files, notice_wait, preview_of, primary_option, run_folded, toggle_all,
+    };
 
     #[test]
     fn file_matches_rank_names_before_paths() {
@@ -2682,7 +3306,12 @@ mod tests {
         // Name hits first (shorter names first), then path-only hits, each in walk order.
         assert_eq!(
             match_files(&files, "needle"),
-            vec!["needle.rs", "deep/needlemod.rs", "src/Needle-ish.rs", "needle/lib/a.rs"]
+            vec![
+                "needle.rs",
+                "deep/needlemod.rs",
+                "src/Needle-ish.rs",
+                "needle/lib/a.rs"
+            ]
         );
         assert!(match_files(&files, "needs").is_empty());
         // An empty query lists everything in walk order.
@@ -2696,68 +3325,146 @@ mod tests {
     }
 
     fn option(name: &str, kind: &str) -> PermissionOption {
-        PermissionOption { id: name.to_lowercase(), name: name.into(), kind: kind.into() }
+        PermissionOption {
+            id: name.to_lowercase(),
+            name: name.into(),
+            kind: kind.into(),
+        }
     }
 
     // “Always allow” listed first is not the first way of saying yes: the once-option is.
     #[test]
     fn allow_always_first_is_not_primary() {
-        let options = vec![option("Always allow", "allow_always"), option("Allow once", "allow_once"), option("Deny", "reject_once")];
+        let options = vec![
+            option("Always allow", "allow_always"),
+            option("Allow once", "allow_once"),
+            option("Deny", "reject_once"),
+        ];
         assert_eq!(primary_option(&options), Some(1));
     }
 
     #[test]
     fn first_of_several_allow_once_wins() {
-        let options = vec![option("Allow once", "allow_once"), option("Allow once (this project)", "allow_once"), option("Deny", "reject_once")];
+        let options = vec![
+            option("Allow once", "allow_once"),
+            option("Allow once (this project)", "allow_once"),
+            option("Deny", "reject_once"),
+        ];
         assert_eq!(primary_option(&options), Some(0));
     }
 
     // No option says yes once, so nothing is primary and all buttons stay plain.
     #[test]
     fn kinds_without_allow_once_leave_nothing_primary() {
-        let options = vec![option("Always allow", "allow_always"), option("Deny once", "reject_once"), option("Always deny", "reject_always")];
+        let options = vec![
+            option("Always allow", "allow_always"),
+            option("Deny once", "reject_once"),
+            option("Always deny", "reject_always"),
+        ];
         assert_eq!(primary_option(&options), None);
     }
 
     // Agents from before `kind` was in the protocol describe options in names only.
     #[test]
     fn names_only_fall_back_to_the_first_allow() {
-        let options = vec![option("Allow once", ""), option("Allow for session", ""), option("Deny", "")];
+        let options = vec![
+            option("Allow once", ""),
+            option("Allow for session", ""),
+            option("Deny", ""),
+        ];
         assert_eq!(primary_option(&options), Some(0));
     }
 
     fn tool_for(task: Option<&str>) -> Block {
-        Block::Tool(ToolBlock { id: String::new(), title: "call".into(), status: Step::Done, kind: String::new(), started: std::time::Instant::now(), ended: None, open: false, fold: None, task: task.map(str::to_string), arguments: String::new(), result: String::new(), path: None })
+        Block::Tool(ToolBlock {
+            id: String::new(),
+            title: "call".into(),
+            status: Step::Done,
+            kind: String::new(),
+            started: std::time::Instant::now(),
+            ended: None,
+            open: false,
+            fold: None,
+            task: task.map(str::to_string),
+            arguments: String::new(),
+            result: String::new(),
+            path: None,
+        })
     }
 
     #[test]
     fn a_run_is_named_by_the_one_task_its_calls_work_towards() {
-        assert_eq!(run_task(&[tool_for(None), tool_for(Some("Fix it")), tool_for(Some("Fix it"))]), Some("Fix it".to_string()));
+        assert_eq!(
+            run_task(&[
+                tool_for(None),
+                tool_for(Some("Fix it")),
+                tool_for(Some("Fix it"))
+            ]),
+            Some("Fix it".to_string())
+        );
         assert_eq!(run_task(&[tool_for(None), tool_for(None)]), None);
-        assert_eq!(run_task(&[tool_for(Some("A")), tool_for(Some("B")), tool_for(Some("B"))]), None);
+        assert_eq!(
+            run_task(&[
+                tool_for(Some("A")),
+                tool_for(Some("B")),
+                tool_for(Some("B"))
+            ]),
+            None
+        );
     }
 
     #[test]
     fn a_call_takes_the_task_in_progress_in_the_latest_plan() {
-        let mut messages = vec![Msg::Agent(vec![Block::Plan(vec![("Read".into(), Step::Done), ("Fix it".into(), Step::Working)])])];
+        let mut messages = vec![Msg::Agent(vec![Block::Plan(vec![
+            ("Read".into(), Step::Done),
+            ("Fix it".into(), Step::Working),
+        ])])];
         assert_eq!(task_in_progress(&messages), Some("Fix it".to_string()));
         messages.push(Msg::User("go on".into(), vec![]));
-        messages.push(Msg::Agent(vec![Block::Plan(vec![("Fix it".into(), Step::Done)])]));
+        messages.push(Msg::Agent(vec![Block::Plan(vec![(
+            "Fix it".into(),
+            Step::Done,
+        )])]));
         assert_eq!(task_in_progress(&messages), None);
         assert_eq!(task_in_progress(&[]), None);
     }
 
     fn tool(title: &str, status: Step) -> Block {
-        Block::Tool(ToolBlock { id: String::new(), title: title.into(), status, kind: String::new(), started: std::time::Instant::now(), ended: None, open: false, fold: None, task: None, arguments: String::new(), result: String::new(), path: None })
+        Block::Tool(ToolBlock {
+            id: String::new(),
+            title: title.into(),
+            status,
+            kind: String::new(),
+            started: std::time::Instant::now(),
+            ended: None,
+            open: false,
+            fold: None,
+            task: None,
+            arguments: String::new(),
+            result: String::new(),
+            path: None,
+        })
     }
 
     #[test]
     fn a_run_of_calls_starts_folded_even_while_it_runs_or_fails() {
-        let run = vec![tool("a", Step::Done), tool("b", Step::Done), tool("c", Step::Done)];
+        let run = vec![
+            tool("a", Step::Done),
+            tool("b", Step::Done),
+            tool("c", Step::Done),
+        ];
         assert!(run_folded(&run, false));
-        let failed = vec![tool("a", Step::Done), tool("b", Step::Failed), tool("c", Step::Done)];
+        let failed = vec![
+            tool("a", Step::Done),
+            tool("b", Step::Failed),
+            tool("c", Step::Done),
+        ];
         assert!(run_folded(&failed, false));
-        let running = vec![tool("a", Step::Done), tool("b", Step::Working), tool("c", Step::Waiting)];
+        let running = vec![
+            tool("a", Step::Done),
+            tool("b", Step::Working),
+            tool("c", Step::Waiting),
+        ];
         assert!(run_folded(&running, false));
     }
 
@@ -2766,19 +3473,37 @@ mod tests {
         use std::time::Duration;
         assert_eq!(notice_wait(None), None);
         assert_eq!(notice_wait(Some(NOTICE_RATE)), None);
-        assert_eq!(notice_wait(Some(NOTICE_RATE + Duration::from_secs(1))), None);
+        assert_eq!(
+            notice_wait(Some(NOTICE_RATE + Duration::from_secs(1))),
+            None
+        );
         assert_eq!(notice_wait(Some(Duration::ZERO)), Some(NOTICE_RATE));
-        assert_eq!(notice_wait(Some(Duration::from_secs(4))), Some(NOTICE_RATE - Duration::from_secs(4)));
+        assert_eq!(
+            notice_wait(Some(Duration::from_secs(4))),
+            Some(NOTICE_RATE - Duration::from_secs(4))
+        );
     }
 
     #[test]
     fn a_click_on_a_run_overrides_the_default() {
-        let mut run = vec![tool("a", Step::Done), tool("b", Step::Done), tool("c", Step::Done)];
-        let Block::Tool(first) = &mut run[0] else { unreachable!() };
+        let mut run = vec![
+            tool("a", Step::Done),
+            tool("b", Step::Done),
+            tool("c", Step::Done),
+        ];
+        let Block::Tool(first) = &mut run[0] else {
+            unreachable!()
+        };
         first.fold = Some(false);
         assert!(!run_folded(&run, false));
-        let mut failed = vec![tool("a", Step::Failed), tool("b", Step::Done), tool("c", Step::Done)];
-        let Block::Tool(first) = &mut failed[0] else { unreachable!() };
+        let mut failed = vec![
+            tool("a", Step::Failed),
+            tool("b", Step::Done),
+            tool("c", Step::Done),
+        ];
+        let Block::Tool(first) = &mut failed[0] else {
+            unreachable!()
+        };
         first.fold = Some(true);
         assert!(run_folded(&failed, false));
     }
@@ -2797,20 +3522,49 @@ mod tests {
     #[test]
     fn thoughts_between_calls_fold_into_the_run_and_text_ends_it() {
         let thought = || Block::Thought("hm".into(), false);
-        let blocks = vec![thought(), tool("a", Step::Done), thought(), tool("b", Step::Done), Block::Text("x".into()), thought(), thought(), thought()];
+        let blocks = vec![
+            thought(),
+            tool("a", Step::Done),
+            thought(),
+            tool("b", Step::Done),
+            Block::Text("x".into()),
+            thought(),
+            thought(),
+            thought(),
+        ];
         assert_eq!(folded_runs(&blocks, false), vec![0]);
         let out = super::chat_blocks(&blocks, false, &[]);
-        assert!(matches!(out[0], crate::model::chat::Block::Run { index: 0, count: 4, calls: 2, .. }));
-        assert_eq!(out.iter().filter(|b| matches!(b, crate::model::chat::Block::Run { .. })).count(), 1);
+        assert!(matches!(
+            out[0],
+            crate::model::chat::Block::Run {
+                index: 0,
+                count: 4,
+                calls: 2,
+                ..
+            }
+        ));
+        assert_eq!(
+            out.iter()
+                .filter(|b| matches!(b, crate::model::chat::Block::Run { .. }))
+                .count(),
+            1
+        );
         // Thoughts alone have no call to keep the fold, so they stay as they are.
-        assert_eq!(out.iter().filter(|b| matches!(b, crate::model::chat::Block::Thought { .. })).count(), 5);
+        assert_eq!(
+            out.iter()
+                .filter(|b| matches!(b, crate::model::chat::Block::Thought { .. }))
+                .count(),
+            5
+        );
     }
 
     #[test]
     fn calls_are_counted_by_the_kind_the_agent_gave_or_their_title() {
         use crate::model::chat::Kind;
         let call = |title: &str, kind: &str, path: Option<&str>| {
-            let Block::Tool(mut t) = tool(title, Step::Done) else { unreachable!() };
+            let Block::Tool(mut t) = tool(title, Step::Done) else {
+                unreachable!()
+            };
             t.kind = kind.into();
             t.path = path.map(str::to_string);
             Block::Tool(t)
@@ -2824,17 +3578,29 @@ mod tests {
             call("mystery", "", None),
         ];
         let (kinds, edits) = super::run_kinds(&run);
-        assert_eq!(kinds, vec![(Kind::Read, 1), (Kind::Search, 1), (Kind::Command, 1), (Kind::Edit, 2), (Kind::Other, 1)]);
+        assert_eq!(
+            kinds,
+            vec![
+                (Kind::Read, 1),
+                (Kind::Search, 1),
+                (Kind::Command, 1),
+                (Kind::Edit, 2),
+                (Kind::Other, 1)
+            ]
+        );
         // A file read (it has a path too) is no edit, and one edited twice is chipped once.
         assert_eq!(edits, vec!["b.rs".to_string()]);
     }
 
     /// The phase and fold of the one run in `blocks`.
     fn run_row(blocks: &[Block], live: bool) -> (crate::model::chat::Phase, bool) {
-        super::chat_blocks(blocks, live, &[]).iter().find_map(|b| match b {
-            crate::model::chat::Block::Run { phase, folded, .. } => Some((*phase, *folded)),
-            _ => None,
-        }).expect("the blocks hold a run")
+        super::chat_blocks(blocks, live, &[])
+            .iter()
+            .find_map(|b| match b {
+                crate::model::chat::Block::Run { phase, folded, .. } => Some((*phase, *folded)),
+                _ => None,
+            })
+            .expect("the blocks hold a run")
     }
 
     #[test]
@@ -2849,7 +3615,11 @@ mod tests {
     #[test]
     fn text_after_a_run_ends_it_while_the_turn_goes_on() {
         use crate::model::chat::Phase;
-        let blocks = vec![tool("a", Step::Done), tool("b", Step::Done), Block::Text("x".into())];
+        let blocks = vec![
+            tool("a", Step::Done),
+            tool("b", Step::Done),
+            Block::Text("x".into()),
+        ];
         assert_eq!(run_row(&blocks, true).0, Phase::Done);
     }
 
@@ -2866,7 +3636,9 @@ mod tests {
     #[test]
     fn a_click_holds_on_a_run_still_going() {
         let mut run = vec![tool("a", Step::Done), tool("b", Step::Done)];
-        let Block::Tool(first) = &mut run[0] else { unreachable!() };
+        let Block::Tool(first) = &mut run[0] else {
+            unreachable!()
+        };
         first.fold = Some(false);
         assert!(!run_folded(&run, true));
     }
@@ -2876,11 +3648,18 @@ mod tests {
         use crate::model::chat::{Item, Phase};
         let run = || Msg::Agent(vec![tool("a", Step::Done), tool("b", Step::Done)]);
         let phases = |busy| -> Vec<Phase> {
-            super::chat_items(&[run(), run()], busy).iter().map(|item| {
-                let Item::Agent { blocks, .. } = item else { unreachable!() };
-                let crate::model::chat::Block::Run { phase, .. } = blocks[0] else { unreachable!() };
-                phase
-            }).collect()
+            super::chat_items(&[run(), run()], busy)
+                .iter()
+                .map(|item| {
+                    let Item::Agent { blocks, .. } = item else {
+                        unreachable!()
+                    };
+                    let crate::model::chat::Block::Run { phase, .. } = blocks[0] else {
+                        unreachable!()
+                    };
+                    phase
+                })
+                .collect()
         };
         assert_eq!(phases(true), [Phase::Done, Phase::Working]);
         assert_eq!(phases(false), [Phase::Done, Phase::Done]);
@@ -2888,20 +3667,31 @@ mod tests {
 
     #[test]
     fn a_run_followed_by_text_folds_in_the_latest_message() {
-        let blocks = vec![tool("a", Step::Done), tool("b", Step::Done), tool("c", Step::Done), Block::Text("x".into())];
+        let blocks = vec![
+            tool("a", Step::Done),
+            tool("b", Step::Done),
+            tool("c", Step::Done),
+            Block::Text("x".into()),
+        ];
         assert_eq!(folded_runs(&blocks, false), vec![0]);
         assert_eq!(folded_runs(&blocks[..3], false), vec![0]);
     }
 
     #[test]
     fn a_running_tool_is_the_preview_even_when_text_follows_it() {
-        let messages = vec![Msg::Agent(vec![tool("Run tests", Step::Working), Block::Text("Looking at the output\n".into())])];
+        let messages = vec![Msg::Agent(vec![
+            tool("Run tests", Step::Working),
+            Block::Text("Looking at the output\n".into()),
+        ])];
         assert_eq!(preview_of(&messages, true), "Run tests");
     }
 
     #[test]
     fn the_preview_falls_back_to_the_last_line_then_to_working() {
-        let said = vec![Msg::Agent(vec![tool("Read", Step::Done), Block::Text("first\n\nlast line  \n\n".into())])];
+        let said = vec![Msg::Agent(vec![
+            tool("Read", Step::Done),
+            Block::Text("first\n\nlast line  \n\n".into()),
+        ])];
         assert_eq!(preview_of(&said, true), "last line");
         let silent = vec![Msg::Agent(vec![tool("Read", Step::Done)])];
         assert_eq!(preview_of(&silent, true), "Working…");
@@ -2923,8 +3713,14 @@ mod file_url_tests {
 
     #[test]
     fn file_urls_become_absolute_paths() {
-        assert_eq!(file_of("file:///home/aks/a.png").as_deref(), Some("/home/aks/a.png"));
-        assert_eq!(file_of("file://localhost/tmp/a%20b.png").as_deref(), Some("/tmp/a b.png"));
+        assert_eq!(
+            file_of("file:///home/aks/a.png").as_deref(),
+            Some("/home/aks/a.png")
+        );
+        assert_eq!(
+            file_of("file://localhost/tmp/a%20b.png").as_deref(),
+            Some("/tmp/a b.png")
+        );
         assert_eq!(file_of("file://other/tmp/a.png"), None);
         assert_eq!(file_of("https://example.com/a.png"), None);
     }
@@ -2933,5 +3729,7 @@ mod file_url_tests {
 /// `text` with its first letter in capitals, as a sentence starts.
 pub(crate) fn sentence(text: &str) -> String {
     let mut chars = text.chars();
-    chars.next().map_or_else(String::new, |first| first.to_uppercase().chain(chars).collect())
+    chars.next().map_or_else(String::new, |first| {
+        first.to_uppercase().chain(chars).collect()
+    })
 }

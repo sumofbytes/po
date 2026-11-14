@@ -87,9 +87,8 @@ pub fn update() -> Result<String, String> {
         }
     };
 
-    let current = parse_version(VERSION).ok_or_else(|| {
-        format!("this build's version '{VERSION}' is not a plain vX.Y.Z release")
-    })?;
+    let current = parse_version(VERSION)
+        .ok_or_else(|| format!("this build's version '{VERSION}' is not a plain vX.Y.Z release"))?;
     if pinned.is_none() && latest <= current {
         return Ok(format!("po {VERSION} is up to date (latest release {tag})"));
     }
@@ -137,10 +136,11 @@ fn download_verify_and_install(
         .and_then(|resp| resp.into_body().read_to_string())
         .map_err(|e| format!("download failed ({base}/SHA256SUMS): {e}"))?;
 
-    let expected = checksum_for(&sums, &asset)
-        .ok_or_else(|| format!("no SHA256SUMS entry for {asset}"))?;
+    let expected =
+        checksum_for(&sums, &asset).ok_or_else(|| format!("no SHA256SUMS entry for {asset}"))?;
     let actual = sha256_of(&archive).ok_or_else(|| {
-        "no sha256 tool (sha256sum, shasum or certutil) is available to verify the download".to_string()
+        "no sha256 tool (sha256sum, shasum or certutil) is available to verify the download"
+            .to_string()
     })?;
     if !actual.eq_ignore_ascii_case(&expected) {
         return Err(format!(
@@ -173,7 +173,10 @@ fn download_verify_and_install(
 /// An HTTP client with the one timeout work it is given: short for the small
 /// requests, long for the tarball.
 fn agent(timeout: Duration) -> ureq::Agent {
-    ureq::Agent::config_builder().timeout_global(Some(timeout)).build().into()
+    ureq::Agent::config_builder()
+        .timeout_global(Some(timeout))
+        .build()
+        .into()
 }
 
 /// Download a URL to a file, so a tens-of-MB tarball never sits in memory.
@@ -183,9 +186,9 @@ fn fetch_file(client: &ureq::Agent, url: &str, to: &Path) -> Result<(), String> 
         .call()
         .map_err(|e| format!("download failed ({url}): {e}"))?;
     let mut reader = resp.into_body().into_reader();
-    let mut out = fs::File::create(to).map_err(|e| format!("cannot write {}: {e}", to.display()))?;
-    io::copy(&mut reader, &mut out)
-        .map_err(|e| format!("download failed ({url}): {e}"))?;
+    let mut out =
+        fs::File::create(to).map_err(|e| format!("cannot write {}: {e}", to.display()))?;
+    io::copy(&mut reader, &mut out).map_err(|e| format!("download failed ({url}): {e}"))?;
     Ok(())
 }
 
@@ -212,7 +215,10 @@ fn install(new_bin: &Path, exe: &Path) -> Result<String, String> {
         .ok_or_else(|| "binary has no parent directory".to_string())?;
     let staged_path = dir.join(format!(".po.new-{}", std::process::id()));
     let _ = fs::remove_file(&staged_path);
-    let mut staged = Staged { path: &staged_path, armed: true };
+    let mut staged = Staged {
+        path: &staged_path,
+        armed: true,
+    };
     fs::copy(new_bin, &staged_path).map_err(|e| {
         format!(
             "cannot stage the new binary in {} (is the install directory writable?): {e}",
@@ -281,10 +287,11 @@ fn check_install_source(exe: &Path) -> Result<(), String> {
 /// bare `target` directory name elsewhere (`/opt/target/po`) does not count.
 fn is_cargo_build_path(exe: &Path) -> bool {
     let parts: Vec<_> = exe.components().map(|c| c.as_os_str()).collect();
-    parts
-        .iter()
-        .position(|p| *p == "target")
-        .is_some_and(|i| parts[i + 1..].iter().any(|p| *p == "debug" || *p == "release"))
+    parts.iter().position(|p| *p == "target").is_some_and(|i| {
+        parts[i + 1..]
+            .iter()
+            .any(|p| *p == "debug" || *p == "release")
+    })
 }
 
 /// Does `~/.cargo/.crates.toml` (v1 or v2 format) track a package named po?
@@ -354,28 +361,38 @@ fn checksum_for(sums: &str, asset: &str) -> Option<String> {
 fn sha256_of(path: &Path) -> Option<String> {
     if cfg!(windows) {
         // `certutil -hashfile` prints the hash on its own line (older versions space-separate bytes).
-        let output = Command::new("certutil").arg("-hashfile").arg(path).arg("SHA256").output().ok()?;
+        let output = Command::new("certutil")
+            .arg("-hashfile")
+            .arg(path)
+            .arg("SHA256")
+            .output()
+            .ok()?;
         if !output.status.success() {
             return None;
         }
-        return String::from_utf8_lossy(&output.stdout).lines().find_map(|line| {
-            let hash: String = line.split_whitespace().collect();
-            (hash.len() == 64 && hash.chars().all(|c| c.is_ascii_hexdigit())).then(|| hash.to_ascii_lowercase())
-        });
+        return String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .find_map(|line| {
+                let hash: String = line.split_whitespace().collect();
+                (hash.len() == 64 && hash.chars().all(|c| c.is_ascii_hexdigit()))
+                    .then(|| hash.to_ascii_lowercase())
+            });
     }
-    for mut command in [
-        Command::new("sha256sum"),
-        {
-            let mut shasum = Command::new("shasum");
-            shasum.arg("-a").arg("256");
-            shasum
-        },
-    ] {
-        let Ok(output) = command.arg(path).output() else { continue };
+    for mut command in [Command::new("sha256sum"), {
+        let mut shasum = Command::new("shasum");
+        shasum.arg("-a").arg("256");
+        shasum
+    }] {
+        let Ok(output) = command.arg(path).output() else {
+            continue;
+        };
         if !output.status.success() {
             continue;
         }
-        if let Some(hash) = String::from_utf8_lossy(&output.stdout).split_whitespace().next() {
+        if let Some(hash) = String::from_utf8_lossy(&output.stdout)
+            .split_whitespace()
+            .next()
+        {
             return Some(hash.to_ascii_lowercase());
         }
     }
@@ -441,14 +458,20 @@ mod tests {
     #[test]
     fn checksum_parsing_handles_binary_mode_and_uppercase() {
         let sums = "ABC123 *po-v1.0.0-t.tar.gz\n";
-        assert_eq!(checksum_for(sums, "po-v1.0.0-t.tar.gz").as_deref(), Some("abc123"));
+        assert_eq!(
+            checksum_for(sums, "po-v1.0.0-t.tar.gz").as_deref(),
+            Some("abc123")
+        );
     }
 
     #[test]
     fn release_targets_are_the_ones_release_yml_builds() {
         let yml = include_str!("../.github/workflows/release.yml");
         if let Ok(target) = release_target() {
-            assert!(yml.contains(&format!("target: {target}")), "{target} not in release.yml");
+            assert!(
+                yml.contains(&format!("target: {target}")),
+                "{target} not in release.yml"
+            );
         }
         // The archive layout `download_verify_and_install` unpacks.
         assert!(yml.contains(r#"name="po-${TAG}-${{ matrix.target }}""#));
@@ -458,7 +481,9 @@ mod tests {
     #[test]
     fn cargo_build_paths_are_detected_narrowly() {
         assert!(is_cargo_build_path(Path::new("/src/po/target/debug/po")));
-        assert!(is_cargo_build_path(Path::new("/src/po/target/x86_64-unknown-linux-gnu/release/po")));
+        assert!(is_cargo_build_path(Path::new(
+            "/src/po/target/x86_64-unknown-linux-gnu/release/po"
+        )));
         assert!(!is_cargo_build_path(Path::new("/opt/target/po")));
         assert!(!is_cargo_build_path(Path::new("/home/u/target/bin/po")));
     }
@@ -471,7 +496,10 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            assert_eq!(fs::metadata(&a).unwrap().permissions().mode() & 0o777, 0o700);
+            assert_eq!(
+                fs::metadata(&a).unwrap().permissions().mode() & 0o777,
+                0o700
+            );
         }
         let _ = fs::remove_dir_all(a);
         let _ = fs::remove_dir_all(b);

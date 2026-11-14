@@ -8,8 +8,8 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, mpsc::Sender};
 
-use anyhow::Result;
 use crate::profile::UnboundedReceiver;
+use anyhow::Result;
 use serde_json::Value;
 
 use crate::command::{Caller, Command, Reply};
@@ -63,7 +63,13 @@ impl Control {
         if let Some(pid) = agent {
             self.agents.lock().expect("agents lock").insert(pid);
         }
-        vec![("PO_SOCKET".into(), self.socket.0.to_string_lossy().into_owned()), ("PO_TOKEN".into(), token)]
+        vec![
+            (
+                "PO_SOCKET".into(),
+                self.socket.0.to_string_lossy().into_owned(),
+            ),
+            ("PO_TOKEN".into(), token),
+        ]
     }
 }
 
@@ -71,7 +77,9 @@ fn token() -> String {
     use std::io::Read;
     let mut bytes = [0u8; 16];
     // Without a random source there is no token worth handing out, so there is no socket.
-    std::fs::File::open("/dev/urandom").and_then(|mut file| file.read_exact(&mut bytes)).expect("random token");
+    std::fs::File::open("/dev/urandom")
+        .and_then(|mut file| file.read_exact(&mut bytes))
+        .expect("random token");
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
@@ -105,7 +113,13 @@ impl Peer {
 
 /// Who a connection is, judged by what it claims and by the process it comes from. Pure, so it
 /// is testable. `our_uid` is this process's.
-fn classify(token: Option<&str>, peer: Peer, tokens: &HashMap<String, Registered>, agents: &HashSet<u32>, our_uid: u32) -> std::result::Result<Caller, String> {
+fn classify(
+    token: Option<&str>,
+    peer: Peer,
+    tokens: &HashMap<String, Registered>,
+    agents: &HashSet<u32>,
+    our_uid: u32,
+) -> std::result::Result<Caller, String> {
     classify_with(token, peer, tokens, agents, our_uid, &peer::parent)
 }
 
@@ -127,8 +141,14 @@ fn classify_with(
                 // Bound to an agent, and the platform can't read the peer: nothing to prove
                 // the chain with, so refuse rather than take the token at its word.
                 (Some(_), None) => Err("cannot tell who is asking".into()),
-                (Some(_), Some(_)) if peer.chain_with(parent).contains(&registered.agent.unwrap()) => Ok(Caller::Thread(registered.thread)),
-                (Some(_), Some(_)) => Err("this token works only inside its own thread's agent".into()),
+                (Some(_), Some(_))
+                    if peer.chain_with(parent).contains(&registered.agent.unwrap()) =>
+                {
+                    Ok(Caller::Thread(registered.thread))
+                }
+                (Some(_), Some(_)) => {
+                    Err("this token works only inside its own thread's agent".into())
+                }
             }
         }
         None => {
@@ -158,13 +178,28 @@ fn classify_with(
 /// What `reply` should say about `line`, the request as the client wrote it, coming `from` the
 /// process the kernel named.
 #[cfg(test)]
-fn answer(line: &str, from: Peer, tokens: &Tokens, agents: &Agents, our_uid: u32, send: &dyn Fn(Request) -> Result<(), String>) -> Reply {
+fn answer(
+    line: &str,
+    from: Peer,
+    tokens: &Tokens,
+    agents: &Agents,
+    our_uid: u32,
+    send: &dyn Fn(Request) -> Result<(), String>,
+) -> Reply {
     answer_stream(line, from, tokens, agents, our_uid, send, &|| true).0
 }
 
 /// [`answer`], and for a command that goes on talking (`events.subscribe`) the channel the
 /// window sends the rest on, which ends when the window drops its end.
-fn answer_stream(line: &str, from: Peer, tokens: &Tokens, agents: &Agents, our_uid: u32, send: &dyn Fn(Request) -> Result<(), String>, alive: &dyn Fn() -> bool) -> (Reply, Option<std::sync::mpsc::Receiver<Reply>>) {
+fn answer_stream(
+    line: &str,
+    from: Peer,
+    tokens: &Tokens,
+    agents: &Agents,
+    our_uid: u32,
+    send: &dyn Fn(Request) -> Result<(), String>,
+    alive: &dyn Fn() -> bool,
+) -> (Reply, Option<std::sync::mpsc::Receiver<Reply>>) {
     match ask(line, from, tokens, agents, our_uid, send, alive) {
         Ok((first, rest, streams)) => {
             let rest = (streams && first.is_ok()).then_some(rest);
@@ -176,8 +211,17 @@ fn answer_stream(line: &str, from: Peer, tokens: &Tokens, agents: &Agents, our_u
 
 /// Judges who is asking, hands the command to the window and waits for its first answer, with
 /// whether the command goes on streaming after it.
-fn ask(line: &str, from: Peer, tokens: &Tokens, agents: &Agents, our_uid: u32, send: &dyn Fn(Request) -> Result<(), String>, alive: &dyn Fn() -> bool) -> Result<(Reply, std::sync::mpsc::Receiver<Reply>, bool), String> {
-    let request: Value = serde_json::from_str(line).map_err(|error| format!("not JSON: {error}"))?;
+fn ask(
+    line: &str,
+    from: Peer,
+    tokens: &Tokens,
+    agents: &Agents,
+    our_uid: u32,
+    send: &dyn Fn(Request) -> Result<(), String>,
+    alive: &dyn Fn() -> bool,
+) -> Result<(Reply, std::sync::mpsc::Receiver<Reply>, bool), String> {
+    let request: Value =
+        serde_json::from_str(line).map_err(|error| format!("not JSON: {error}"))?;
     // Who is asking, before what they want: a refusal says nothing about the command.
     let caller = classify(
         request["token"].as_str(),
@@ -190,7 +234,11 @@ fn ask(line: &str, from: Peer, tokens: &Tokens, agents: &Agents, our_uid: u32, s
     let streams = matches!(command, Command::EventsSubscribe);
     let (reply, answer) = std::sync::mpsc::channel();
     let wait = command.timeout();
-    send(Request { caller, command, reply })?;
+    send(Request {
+        caller,
+        command,
+        reply,
+    })?;
     // Each command says how long it may take; the client's read timeout is a little longer.
     // A margin past the command's own timeout, which the window starts counting a little later:
     // a wait that runs out answers `timed_out`, instead of being given up on here first.
@@ -198,7 +246,9 @@ fn ask(line: &str, from: Peer, tokens: &Tokens, agents: &Agents, our_uid: u32, s
     // connection (and, once the window drops the waiter, its share of waits).
     let end = std::time::Instant::now() + wait + std::time::Duration::from_secs(2);
     let first = loop {
-        let slice = end.saturating_duration_since(std::time::Instant::now()).min(std::time::Duration::from_secs(1));
+        let slice = end
+            .saturating_duration_since(std::time::Instant::now())
+            .min(std::time::Duration::from_secs(1));
         match answer.recv_timeout(slice) {
             Ok(first) => break first,
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) if std::time::Instant::now() < end => {
@@ -215,11 +265,11 @@ fn ask(line: &str, from: Peer, tokens: &Tokens, agents: &Agents, our_uid: u32, s
 #[cfg(unix)]
 mod server {
     use std::io::{BufRead, BufReader, Write};
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::os::unix::{fs::PermissionsExt, net::UnixListener};
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use futures::channel::mpsc::unbounded;
     use crate::profile::UnboundedSender;
+    use futures::channel::mpsc::unbounded;
     use serde_json::json;
 
     use super::*;
@@ -238,16 +288,23 @@ mod server {
 
     /// Every window's socket, as files: some may be left from a window that is gone.
     pub fn sockets() -> Vec<std::path::PathBuf> {
-        let Ok(entries) = std::fs::read_dir(directory()) else { return vec![] };
-        let mut sockets: Vec<_> = entries.filter_map(Result::ok).map(|entry| entry.path()).filter(|path| path.extension().is_some_and(|ext| ext == "sock")).collect();
+        let Ok(entries) = std::fs::read_dir(directory()) else {
+            return vec![];
+        };
+        let mut sockets: Vec<_> = entries
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "sock"))
+            .collect();
         sockets.sort();
         sockets
     }
 
     pub fn start() -> Option<(Control, UnboundedReceiver<Request>)> {
         let directory = directory();
-        let made = std::fs::create_dir_all(&directory)
-            .and_then(|()| std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)));
+        let made = std::fs::create_dir_all(&directory).and_then(|()| {
+            std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))
+        });
         if let Err(error) = made {
             log::warn!("control: {}: {error}", directory.display());
             return None;
@@ -269,26 +326,51 @@ mod server {
         let agents = Agents::default();
         let (requests, receiver) = hotpath::channel!(unbounded(), label = "control requests");
         let (shared_tokens, shared_agents) = (tokens.clone(), agents.clone());
-        std::thread::Builder::new().name("control-accept".into()).spawn(move || {
-            let open = Arc::new(AtomicUsize::new(0));
-            for stream in listener.incoming().map_while(Result::ok) {
-                // A client that connects and says nothing holds a thread for the read timeout.
-                if open.fetch_add(1, Ordering::SeqCst) >= MAX_CONNECTIONS {
-                    open.fetch_sub(1, Ordering::SeqCst);
-                    continue;
+        std::thread::Builder::new()
+            .name("control-accept".into())
+            .spawn(move || {
+                let open = Arc::new(AtomicUsize::new(0));
+                for stream in listener.incoming().map_while(Result::ok) {
+                    // A client that connects and says nothing holds a thread for the read timeout.
+                    if open.fetch_add(1, Ordering::SeqCst) >= MAX_CONNECTIONS {
+                        open.fetch_sub(1, Ordering::SeqCst);
+                        continue;
+                    }
+                    let (tokens, agents, requests, open) = (
+                        shared_tokens.clone(),
+                        shared_agents.clone(),
+                        requests.clone(),
+                        open.clone(),
+                    );
+                    std::thread::Builder::new()
+                        .name("control-serve".into())
+                        .spawn(move || {
+                            serve(stream, &tokens, &agents, &requests);
+                            open.fetch_sub(1, Ordering::SeqCst);
+                        })
+                        .expect("failed to spawn thread");
                 }
-                let (tokens, agents, requests, open) = (shared_tokens.clone(), shared_agents.clone(), requests.clone(), open.clone());
-                std::thread::Builder::new().name("control-serve".into()).spawn(move || {
-                    serve(stream, &tokens, &agents, &requests);
-                    open.fetch_sub(1, Ordering::SeqCst);
-                }).expect("failed to spawn thread");
-            }
-        }).expect("failed to spawn thread");
-        Some((Control { tokens, agents, socket: Arc::new(SocketFile(socket)) }, receiver))
+            })
+            .expect("failed to spawn thread");
+        Some((
+            Control {
+                tokens,
+                agents,
+                socket: Arc::new(SocketFile(socket)),
+            },
+            receiver,
+        ))
     }
 
-    fn serve(stream: std::os::unix::net::UnixStream, tokens: &Tokens, agents: &Agents, requests: &UnboundedSender<Request>) {
-        stream.set_read_timeout(Some(std::time::Duration::from_secs(5))).ok();
+    fn serve(
+        stream: std::os::unix::net::UnixStream,
+        tokens: &Tokens,
+        agents: &Agents,
+        requests: &UnboundedSender<Request>,
+    ) {
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .ok();
         let from = peer::of(&stream);
         let (reply, rest) = match read_request(&stream) {
             Ok(line) => answer_stream(
@@ -297,7 +379,11 @@ mod server {
                 tokens,
                 agents,
                 unsafe { libc::getuid() as u32 },
-                &|request| requests.unbounded_send(request).map_err(|_| "Po is closing".to_string()),
+                &|request| {
+                    requests
+                        .unbounded_send(request)
+                        .map_err(|_| "Po is closing".to_string())
+                },
                 &|| !hung_up(&stream),
             ),
             Err(error) => (Err(error), None),
@@ -306,7 +392,10 @@ mod server {
             Ok(value) => json!({ "ok": value }),
             Err(error) => json!({ "error": error }),
         };
-        if (&stream).write_all(format!("{}\n", line(reply)).as_bytes()).is_err() {
+        if (&stream)
+            .write_all(format!("{}\n", line(reply)).as_bytes())
+            .is_err()
+        {
             return;
         }
         // A subscription goes on until the client hangs up, which a failed write finds out, or
@@ -315,7 +404,10 @@ mod server {
         loop {
             match rest.recv_timeout(std::time::Duration::from_secs(2)) {
                 Ok(next) => {
-                    if (&stream).write_all(format!("{}\n", line(next)).as_bytes()).is_err() {
+                    if (&stream)
+                        .write_all(format!("{}\n", line(next)).as_bytes())
+                        .is_err()
+                    {
                         break;
                     }
                 }
@@ -360,7 +452,14 @@ mod server {
     pub(super) fn hung_up(stream: &std::os::unix::net::UnixStream) -> bool {
         use std::os::unix::io::AsRawFd;
         let mut byte = 0u8;
-        let got = unsafe { libc::recv(stream.as_raw_fd(), &mut byte as *mut u8 as *mut libc::c_void, 1, libc::MSG_PEEK | libc::MSG_DONTWAIT) };
+        let got = unsafe {
+            libc::recv(
+                stream.as_raw_fd(),
+                &mut byte as *mut u8 as *mut libc::c_void,
+                1,
+                libc::MSG_PEEK | libc::MSG_DONTWAIT,
+            )
+        };
         match got {
             0 => true,
             n if n > 0 => false,
@@ -370,12 +469,18 @@ mod server {
 
     /// Sends `request` and calls `each` with every line the window answers with, until it hangs
     /// up or `each` says stop.
-    pub fn watch_at(socket: &str, request: &Value, mut each: impl FnMut(Value) -> bool) -> Result<()> {
+    pub fn watch_at(
+        socket: &str,
+        request: &Value,
+        mut each: impl FnMut(Value) -> bool,
+    ) -> Result<()> {
         use anyhow::Context;
-        let mut stream = std::os::unix::net::UnixStream::connect(socket).with_context(|| format!("could not reach Po at {socket}"))?;
+        let mut stream = std::os::unix::net::UnixStream::connect(socket)
+            .with_context(|| format!("could not reach Po at {socket}"))?;
         stream.write_all(format!("{request}\n").as_bytes())?;
         for line in BufReader::new(&stream).lines() {
-            let value: Value = serde_json::from_str(&line?).context("Po sent something that is not JSON")?;
+            let value: Value =
+                serde_json::from_str(&line?).context("Po sent something that is not JSON")?;
             if !each(value) {
                 break;
             }
@@ -386,15 +491,19 @@ mod server {
     /// Sends one request to the window named by `PO_SOCKET` and returns its answer.
     pub fn call(request: &Value) -> Result<Value> {
         use anyhow::Context;
-        let socket = std::env::var("PO_SOCKET").context("PO_SOCKET is not set: `po mcp` works when Po starts it for an agent")?;
+        let socket = std::env::var("PO_SOCKET")
+            .context("PO_SOCKET is not set: `po mcp` works when Po starts it for an agent")?;
         call_at(&socket, request)
     }
 
     pub fn call_at(socket: &str, request: &Value) -> Result<Value> {
         use anyhow::Context;
-        let mut stream = std::os::unix::net::UnixStream::connect(socket).with_context(|| format!("could not reach Po at {socket}"))?;
+        let mut stream = std::os::unix::net::UnixStream::connect(socket)
+            .with_context(|| format!("could not reach Po at {socket}"))?;
         // The window's own timeout for the command, plus a little for the way there and back.
-        let wait = Command::parse(request).map(|command| command.timeout() + std::time::Duration::from_secs(5)).unwrap_or(std::time::Duration::from_secs(15));
+        let wait = Command::parse(request)
+            .map(|command| command.timeout() + std::time::Duration::from_secs(5))
+            .unwrap_or(std::time::Duration::from_secs(15));
         stream.set_read_timeout(Some(wait)).ok();
         stream.write_all(format!("{request}\n").as_bytes())?;
         let mut line = String::new();
@@ -435,7 +544,9 @@ pub fn start() -> Option<(Control, UnboundedReceiver<Request>)> {
 /// returns what it answered or why it refused.
 pub fn send(mut request: Value) -> Result<Value> {
     use anyhow::Context;
-    request["token"] = std::env::var("PO_TOKEN").context("PO_TOKEN is not set")?.into();
+    request["token"] = std::env::var("PO_TOKEN")
+        .context("PO_TOKEN is not set")?
+        .into();
     let mut reply = call(&request)?;
     match reply["error"].as_str() {
         Some(error) => anyhow::bail!("{error}"),
@@ -461,7 +572,10 @@ mod peer {
                 #[cfg(not(target_os = "macos"))]
                 uid: None,
             },
-            None => Peer { pid: None, uid: None },
+            None => Peer {
+                pid: None,
+                uid: None,
+            },
         }
     }
 
@@ -478,10 +592,20 @@ mod peer {
             uid: libc::uid_t,
             gid: libc::gid_t,
         }
-        let mut cred = Ucred { pid: 0, uid: 0, gid: 0 };
+        let mut cred = Ucred {
+            pid: 0,
+            uid: 0,
+            gid: 0,
+        };
         let mut len = std::mem::size_of::<Ucred>() as libc::socklen_t;
         let ok = unsafe {
-            libc::getsockopt(stream.as_raw_fd(), libc::SOL_SOCKET, SO_PEERCRED, &mut cred as *mut Ucred as *mut libc::c_void, &mut len)
+            libc::getsockopt(
+                stream.as_raw_fd(),
+                libc::SOL_SOCKET,
+                SO_PEERCRED,
+                &mut cred as *mut Ucred as *mut libc::c_void,
+                &mut len,
+            )
         };
         (ok == 0 && cred.pid > 0).then_some(cred.pid as u32)
     }
@@ -492,14 +616,22 @@ mod peer {
         let mut pid: libc::c_int = 0;
         let mut len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
         let ok = unsafe {
-            libc::getsockopt(stream.as_raw_fd(), libc::SOL_SOCKET, libc::LOCAL_PEERPID, &mut pid as *mut _ as *mut libc::c_void, &mut len)
+            libc::getsockopt(
+                stream.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::LOCAL_PEERPID,
+                &mut pid as *mut _ as *mut libc::c_void,
+                &mut len,
+            )
         };
         (ok == 0 && pid > 0).then_some(pid as u32)
     }
 
     /// The parent of `pid`. Linux reads it from `/proc`; macOS from the process table.
     pub fn parent(pid: u32) -> Option<u32> {
-        bsd(pid).map(|info| info.ppid).filter(|ppid| *ppid > 0 && *ppid != pid)
+        bsd(pid)
+            .map(|info| info.ppid)
+            .filter(|ppid| *ppid > 0 && *ppid != pid)
     }
 
     /// What the process table says of `pid`: its parent, and its user where it can be read.
@@ -527,7 +659,10 @@ mod peer {
                 std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int,
             )
         };
-        (got as usize >= std::mem::size_of::<libc::proc_bsdinfo>()).then_some(Process { ppid: info.pbi_ppid, uid: Some(info.pbi_uid as u32) })
+        (got as usize >= std::mem::size_of::<libc::proc_bsdinfo>()).then_some(Process {
+            ppid: info.pbi_ppid,
+            uid: Some(info.pbi_uid as u32),
+        })
     }
 
     struct Process {
@@ -548,7 +683,10 @@ mod peer {
     // Only where there are unix sockets to ask about; Windows has no server to call it.
     #[cfg(unix)]
     pub fn of(_: &std::os::unix::net::UnixStream) -> Peer {
-        Peer { pid: None, uid: None }
+        Peer {
+            pid: None,
+            uid: None,
+        }
     }
 
     pub fn parent(_: u32) -> Option<u32> {
@@ -581,7 +719,17 @@ mod tests {
         let agents = Arc::new(Mutex::new(agents(&[])));
         let none = peer(None, None);
         assert!(answer("not json", none, &tokens, &agents, UID, &refuse).is_err());
-        assert!(answer(r#"{"token":"bad","command":"view.close","id":"v1"}"#, none, &tokens, &agents, UID, &refuse).is_err());
+        assert!(
+            answer(
+                r#"{"token":"bad","command":"view.close","id":"v1"}"#,
+                none,
+                &tokens,
+                &agents,
+                UID,
+                &refuse
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -589,13 +737,26 @@ mod tests {
         let send = |request: Request| -> Result<(), String> {
             assert_eq!(request.caller, Caller::Thread(7));
             assert_eq!(request.command, Command::ViewClose { id: "v1".into() });
-            request.reply.send(Ok(serde_json::json!({ "id": "v1" }))).unwrap();
+            request
+                .reply
+                .send(Ok(serde_json::json!({ "id": "v1" })))
+                .unwrap();
             Ok(())
         };
         let tokens = Arc::new(Mutex::new(registered(None)));
         let agents = Arc::new(Mutex::new(agents(&[])));
         let none = peer(None, None);
-        assert_eq!(answer(r#"{"token":"good","command":"view.close","id":"v1"}"#, none, &tokens, &agents, UID, &send), Ok(serde_json::json!({ "id": "v1" })));
+        assert_eq!(
+            answer(
+                r#"{"token":"good","command":"view.close","id":"v1"}"#,
+                none,
+                &tokens,
+                &agents,
+                UID,
+                &send
+            ),
+            Ok(serde_json::json!({ "id": "v1" }))
+        );
     }
 
     #[cfg(unix)]
@@ -614,48 +775,107 @@ mod tests {
     fn a_subscription_goes_on_after_its_first_answer() {
         let tokens = Tokens::default();
         let agents = Agents::default();
-        let me = Peer { pid: Some(std::process::id()), uid: Some(UID) };
+        let me = Peer {
+            pid: Some(std::process::id()),
+            uid: Some(UID),
+        };
         // The window keeps the sender and says more later.
         let kept = std::sync::Mutex::new(None);
         let send = |request: Request| -> Result<(), String> {
-            request.reply.send(Ok(serde_json::json!({ "subscribed": true }))).unwrap();
+            request
+                .reply
+                .send(Ok(serde_json::json!({ "subscribed": true })))
+                .unwrap();
             *kept.lock().unwrap() = Some(request.reply);
             Ok(())
         };
-        let (first, rest) = answer_stream(r#"{"command":"events.subscribe"}"#, me, &tokens, &agents, UID, &send, &|| true);
+        let (first, rest) = answer_stream(
+            r#"{"command":"events.subscribe"}"#,
+            me,
+            &tokens,
+            &agents,
+            UID,
+            &send,
+            &|| true,
+        );
         assert_eq!(first, Ok(serde_json::json!({ "subscribed": true })));
         let rest = rest.expect("a stream");
-        kept.lock().unwrap().as_ref().unwrap().send(Ok(serde_json::json!({ "event": "thread.state" }))).unwrap();
-        assert_eq!(rest.recv().unwrap(), Ok(serde_json::json!({ "event": "thread.state" })));
+        kept.lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .send(Ok(serde_json::json!({ "event": "thread.state" })))
+            .unwrap();
+        assert_eq!(
+            rest.recv().unwrap(),
+            Ok(serde_json::json!({ "event": "thread.state" }))
+        );
         // A command that answers once has no stream.
         let once = |request: Request| -> Result<(), String> {
             request.reply.send(Ok(serde_json::json!({}))).unwrap();
             Ok(())
         };
-        assert!(answer_stream(r#"{"command":"window.info"}"#, me, &tokens, &agents, UID, &once, &|| true).1.is_none());
+        assert!(
+            answer_stream(
+                r#"{"command":"window.info"}"#,
+                me,
+                &tokens,
+                &agents,
+                UID,
+                &once,
+                &|| true
+            )
+            .1
+            .is_none()
+        );
         // Nor does a subscription the window refused.
         let refuse = |request: Request| -> Result<(), String> {
             request.reply.send(Err("no".into())).unwrap();
             Ok(())
         };
-        assert!(answer_stream(r#"{"command":"events.subscribe"}"#, me, &tokens, &agents, UID, &refuse, &|| true).1.is_none());
+        assert!(
+            answer_stream(
+                r#"{"command":"events.subscribe"}"#,
+                me,
+                &tokens,
+                &agents,
+                UID,
+                &refuse,
+                &|| true
+            )
+            .1
+            .is_none()
+        );
     }
 
     #[test]
     fn a_wait_that_runs_out_answers_instead_of_being_given_up_on() {
         // A thread with no agent pid of its own, so its token alone says who it is.
         let tokens: Tokens = Arc::new(Mutex::new(registered(None)));
-        let me = Peer { pid: Some(std::process::id()), uid: Some(UID) };
+        let me = Peer {
+            pid: Some(std::process::id()),
+            uid: Some(UID),
+        };
         // The wait's own timeout is 0 s; the window answers a second later, past it but within
         // the margin the server allows, since the window starts its timer a little after.
         let late = |request: Request| -> Result<(), String> {
             std::thread::spawn(move || {
                 std::thread::sleep(std::time::Duration::from_millis(1000));
-                request.reply.send(Ok(serde_json::json!({ "timed_out": true }))).ok();
+                request
+                    .reply
+                    .send(Ok(serde_json::json!({ "timed_out": true })))
+                    .ok();
             });
             Ok(())
         };
-        let reply = answer(r#"{"command":"thread.wait","timeout":0,"token":"good"}"#, me, &tokens, &Agents::default(), UID, &late);
+        let reply = answer(
+            r#"{"command":"thread.wait","timeout":0,"token":"good"}"#,
+            me,
+            &tokens,
+            &Agents::default(),
+            UID,
+            &late,
+        );
         assert_eq!(reply, Ok(serde_json::json!({ "timed_out": true })));
     }
 
@@ -663,7 +883,10 @@ mod tests {
     fn a_client_that_hangs_up_mid_wait_is_noticed() {
         let tokens = Tokens::default();
         let agents = Agents::default();
-        let me = Peer { pid: Some(std::process::id()), uid: Some(UID) };
+        let me = Peer {
+            pid: Some(std::process::id()),
+            uid: Some(UID),
+        };
         // The window takes the request and never answers; the client is gone.
         let keep = std::sync::Mutex::new(vec![]);
         let hold = |request: Request| -> Result<(), String> {
@@ -671,7 +894,15 @@ mod tests {
             Ok(())
         };
         let started = std::time::Instant::now();
-        let (reply, rest) = answer_stream(r#"{"command":"events.subscribe"}"#, me, &tokens, &agents, UID, &hold, &|| false);
+        let (reply, rest) = answer_stream(
+            r#"{"command":"events.subscribe"}"#,
+            me,
+            &tokens,
+            &agents,
+            UID,
+            &hold,
+            &|| false,
+        );
         assert_eq!(reply, Err("the client hung up".into()));
         assert!(rest.is_none() && started.elapsed() < std::time::Duration::from_secs(5));
     }
@@ -682,8 +913,13 @@ mod tests {
         use std::io::Write;
         let (server, mut client) = std::os::unix::net::UnixStream::pair().unwrap();
         assert!(!server::hung_up(&server));
-        client.write_all(b"{\"command\":\"window.info\"}\n").unwrap();
-        assert_eq!(server::read_request(&server).unwrap().trim(), "{\"command\":\"window.info\"}");
+        client
+            .write_all(b"{\"command\":\"window.info\"}\n")
+            .unwrap();
+        assert_eq!(
+            server::read_request(&server).unwrap().trim(),
+            "{\"command\":\"window.info\"}"
+        );
         drop(client);
         assert!(server::hung_up(&server));
         // A request longer than any body is refused rather than read to the end.
@@ -696,7 +932,10 @@ mod tests {
                 }
             }
         });
-        assert_eq!(server::read_request(&server), Err("request too long".into()));
+        assert_eq!(
+            server::read_request(&server),
+            Err("request too long".into())
+        );
         drop(server);
         writer.join().unwrap();
     }
@@ -708,14 +947,38 @@ mod tests {
         let tokens = registered(Some(100));
         let agents = agents(&[100]);
         assert_eq!(
-            classify(Some("good"), peer(Some(500), Some(UID)), &tokens, &agents, UID),
+            classify(
+                Some("good"),
+                peer(Some(500), Some(UID)),
+                &tokens,
+                &agents,
+                UID
+            ),
             Err("this token works only inside its own thread's agent".into())
         );
         // With no agent pid registered (a shared daemon, say), the token alone counts.
         let tokens = registered(None);
-        assert_eq!(classify(Some("good"), peer(Some(500), Some(UID)), &tokens, &agents, UID), Ok(Caller::Thread(7)));
+        assert_eq!(
+            classify(
+                Some("good"),
+                peer(Some(500), Some(UID)),
+                &tokens,
+                &agents,
+                UID
+            ),
+            Ok(Caller::Thread(7))
+        );
         // An unknown token is refused whatever the process says.
-        assert!(classify(Some("other"), peer(Some(100), Some(UID)), &tokens, &agents, UID).is_err());
+        assert!(
+            classify(
+                Some("other"),
+                peer(Some(100), Some(UID)),
+                &tokens,
+                &agents,
+                UID
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -727,12 +990,52 @@ mod tests {
         // 500 is a shell under init; 600 sits under the agent at 100, which is under init too.
         let table = tree(&[(500, 1), (600, 100), (100, 1)]);
         // A process of this user's, none of whose chain is an agent's: the user.
-        assert_eq!(classify_with(None, peer(Some(500), Some(UID)), &tokens, &no_agent, UID, &table), Ok(Caller::User));
+        assert_eq!(
+            classify_with(
+                None,
+                peer(Some(500), Some(UID)),
+                &tokens,
+                &no_agent,
+                UID,
+                &table
+            ),
+            Ok(Caller::User)
+        );
         // A process under an agent's is refused, whatever it claims.
-        assert_eq!(classify_with(None, peer(Some(600), Some(UID)), &tokens, &agents(&[100]), UID, &table), Err("no control from inside an agent's process".into()));
-        assert_eq!(classify_with(None, peer(Some(100), Some(UID)), &tokens, &agents(&[100]), UID, &table), Err("no control from inside an agent's process".into()));
+        assert_eq!(
+            classify_with(
+                None,
+                peer(Some(600), Some(UID)),
+                &tokens,
+                &agents(&[100]),
+                UID,
+                &table
+            ),
+            Err("no control from inside an agent's process".into())
+        );
+        assert_eq!(
+            classify_with(
+                None,
+                peer(Some(100), Some(UID)),
+                &tokens,
+                &agents(&[100]),
+                UID,
+                &table
+            ),
+            Err("no control from inside an agent's process".into())
+        );
         // Another user's connection is refused out of hand.
-        assert!(classify_with(None, peer(Some(500), Some(UID + 1)), &tokens, &no_agent, UID, &table).is_err());
+        assert!(
+            classify_with(
+                None,
+                peer(Some(500), Some(UID + 1)),
+                &tokens,
+                &no_agent,
+                UID,
+                &table
+            )
+            .is_err()
+        );
     }
 
     // A chain that can't be followed to init proves nothing about the peer: a client that wrote
@@ -743,13 +1046,35 @@ mod tests {
         let tokens = registered(Some(100));
         let none = agents(&[100]);
         let gone = tree(&[]);
-        assert!(classify_with(None, peer(Some(500), Some(UID)), &tokens, &none, UID, &gone).is_err());
+        assert!(
+            classify_with(None, peer(Some(500), Some(UID)), &tokens, &none, UID, &gone).is_err()
+        );
         // Broken halfway: 500's parent is 700, which is not in the table.
         let halfway = tree(&[(500, 700)]);
-        assert!(classify_with(None, peer(Some(500), Some(UID)), &tokens, &none, UID, &halfway).is_err());
+        assert!(
+            classify_with(
+                None,
+                peer(Some(500), Some(UID)),
+                &tokens,
+                &none,
+                UID,
+                &halfway
+            )
+            .is_err()
+        );
         // A peer that is init's own child reaches 1 and is judged by its chain as usual.
         let whole = tree(&[(500, 1)]);
-        assert_eq!(classify_with(None, peer(Some(500), Some(UID)), &tokens, &none, UID, &whole), Ok(Caller::User));
+        assert_eq!(
+            classify_with(
+                None,
+                peer(Some(500), Some(UID)),
+                &tokens,
+                &none,
+                UID,
+                &whole
+            ),
+            Ok(Caller::User)
+        );
     }
 
     #[test]
@@ -758,7 +1083,10 @@ mod tests {
         let agents = agents(&[]);
         let unreadable = peer(None, None);
         // A token still counts where there is no agent pid to check against.
-        assert_eq!(classify(Some("good"), unreadable, &tokens, &agents, UID), Ok(Caller::Thread(7)));
+        assert_eq!(
+            classify(Some("good"), unreadable, &tokens, &agents, UID),
+            Ok(Caller::Thread(7))
+        );
         // Without one, there is nothing to go by.
         assert!(classify(None, unreadable, &tokens, &agents, UID).is_err());
         // With an agent pid to check against, neither works: the token can't prove its chain.
@@ -768,7 +1096,12 @@ mod tests {
 
     fn tree(pairs: &[(u32, u32)]) -> impl Fn(u32) -> Option<u32> + use<> {
         let pairs = pairs.to_vec();
-        move |pid| pairs.iter().find(|(child, _)| *child == pid).map(|(_, parent)| *parent)
+        move |pid| {
+            pairs
+                .iter()
+                .find(|(child, _)| *child == pid)
+                .map(|(_, parent)| *parent)
+        }
     }
 
     #[test]
@@ -786,16 +1119,30 @@ mod tests {
         let pump = std::thread::spawn(move || {
             let request = futures::executor::block_on(requests.next()).expect("a request");
             assert_eq!(request.caller, Caller::Thread(5));
-            request.reply.send(Ok(serde_json::json!({ "id": "v9" }))).unwrap();
+            request
+                .reply
+                .send(Ok(serde_json::json!({ "id": "v9" })))
+                .unwrap();
         });
-        let reply = server::call_at(&socket, &serde_json::json!({ "token": token, "command": "view.close", "id": "v9" })).unwrap();
+        let reply = server::call_at(
+            &socket,
+            &serde_json::json!({ "token": token, "command": "view.close", "id": "v9" }),
+        )
+        .unwrap();
         assert_eq!(reply, serde_json::json!({ "ok": { "id": "v9" } }));
         pump.join().unwrap();
-        let bad = server::call_at(&socket, &serde_json::json!({ "token": "nope", "command": "view.close", "id": "v9" })).unwrap();
+        let bad = server::call_at(
+            &socket,
+            &serde_json::json!({ "token": "nope", "command": "view.close", "id": "v9" }),
+        )
+        .unwrap();
         assert_eq!(bad["error"], "unknown token");
         use std::os::unix::fs::PermissionsExt;
         let directory = std::path::Path::new(&socket).parent().unwrap();
-        assert_eq!(std::fs::metadata(directory).unwrap().permissions().mode() & 0o777, 0o700);
+        assert_eq!(
+            std::fs::metadata(directory).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
     }
 
     /// The child that connects for the chain test. Runs as a test in its own right, and only
@@ -803,8 +1150,18 @@ mod tests {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn control_chain_helper() {
-        let (Ok(socket), Ok(token), Ok(out)) = (std::env::var("PO_TEST_SOCKET"), std::env::var("PO_TEST_TOKEN"), std::env::var("PO_TEST_OUT")) else { return };
-        let reply = server::call_at(&socket, &serde_json::json!({ "token": token, "command": "view.close", "id": "v1" })).unwrap();
+        let (Ok(socket), Ok(token), Ok(out)) = (
+            std::env::var("PO_TEST_SOCKET"),
+            std::env::var("PO_TEST_TOKEN"),
+            std::env::var("PO_TEST_OUT"),
+        ) else {
+            return;
+        };
+        let reply = server::call_at(
+            &socket,
+            &serde_json::json!({ "token": token, "command": "view.close", "id": "v1" }),
+        )
+        .unwrap();
         std::fs::write(out, serde_json::to_string(&reply).unwrap()).unwrap();
     }
 
@@ -825,7 +1182,10 @@ mod tests {
             // by the server, before the window hears of it.
             let request = futures::executor::block_on(requests.next()).expect("a request");
             assert_eq!(request.caller, Caller::Thread(5));
-            request.reply.send(Ok(serde_json::json!({ "id": "v1" }))).unwrap();
+            request
+                .reply
+                .send(Ok(serde_json::json!({ "id": "v1" })))
+                .unwrap();
         });
         let run = |token: String, out: std::path::PathBuf| {
             let status = Command::new(std::env::current_exe().unwrap())
@@ -835,20 +1195,31 @@ mod tests {
                 .env("PO_TEST_OUT", &out)
                 .status()
                 .expect("child");
-            let answer = std::fs::read_to_string(&out).unwrap_or_else(|_| format!("{status} said nothing"));
+            let answer =
+                std::fs::read_to_string(&out).unwrap_or_else(|_| format!("{status} said nothing"));
             serde_json::from_str::<Value>(&answer).expect("the helper answered")
         };
         let scratch = std::env::temp_dir();
         // Through the chain: let in, and answered by the window as thread 5.
-        assert_eq!(run(mine, scratch.join("po-chain-mine")), serde_json::json!({ "ok": { "id": "v1" } }));
+        assert_eq!(
+            run(mine, scratch.join("po-chain-mine")),
+            serde_json::json!({ "ok": { "id": "v1" } })
+        );
         // Off the chain: refused by the server, without reaching the window.
-        assert_eq!(run(others, scratch.join("po-chain-others"))["error"], "this token works only inside its own thread's agent");
+        assert_eq!(
+            run(others, scratch.join("po-chain-others"))["error"],
+            "this token works only inside its own thread's agent"
+        );
         pump.join().unwrap();
     }
 
     #[test]
     fn registering_again_revokes_the_old_token() {
-        let control = Control { tokens: Tokens::default(), agents: Agents::default(), socket: Arc::new(SocketFile(std::path::PathBuf::from("/nonexistent/po.sock"))) };
+        let control = Control {
+            tokens: Tokens::default(),
+            agents: Agents::default(),
+            socket: Arc::new(SocketFile(std::path::PathBuf::from("/nonexistent/po.sock"))),
+        };
         let first = control.register(3, None)[1].1.clone();
         let second = control.register(3, None)[1].1.clone();
         let tokens = control.tokens.lock().unwrap();
@@ -858,7 +1229,11 @@ mod tests {
 
     #[test]
     fn registering_an_agent_marks_its_process() {
-        let control = Control { tokens: Tokens::default(), agents: Agents::default(), socket: Arc::new(SocketFile(std::path::PathBuf::from("/nonexistent/po.sock"))) };
+        let control = Control {
+            tokens: Tokens::default(),
+            agents: Agents::default(),
+            socket: Arc::new(SocketFile(std::path::PathBuf::from("/nonexistent/po.sock"))),
+        };
         control.register(3, Some(4242));
         assert!(control.agents.lock().unwrap().contains(&4242));
     }

@@ -10,7 +10,12 @@ impl Reader {
         if prompt.is_empty() && self.thread.attachments.is_empty() {
             return;
         }
-        self.submit(Outgoing::user(prompt, self.thread.attachments.clone()), later, window, cx);
+        self.submit(
+            Outgoing::user(prompt, self.thread.attachments.clone()),
+            later,
+            window,
+            cx,
+        );
     }
 
     /// Takes a message headed for the agent wherever the thread is: a blank or unstarted one
@@ -18,12 +23,28 @@ impl Reader {
     /// (dex) or queued; a ready idle one dispatches now. The draft is cleared exactly where it
     /// was before, so a message that can't be sent yet stays where the user can edit it.
     #[hotpath::measure(impl_type = "Reader")]
-    pub(crate) fn submit(&mut self, out: Outgoing, later: bool, window: &mut Window, cx: &mut Context<Self>) -> Where {
+    pub(crate) fn submit(
+        &mut self,
+        out: Outgoing,
+        later: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Where {
         let thread = &self.thread;
         let starting = thread.client.is_some()
-            && (thread.applying.is_some() || !thread.ready && !thread.loading && !thread.picking && thread.restore.is_none());
-        let takes_messages = thread.client.as_ref().is_some_and(|client| client.queues()) && thread.pending.is_none();
-        let where_ = route(thread.blank, thread.unstarted(), thread.asleep(), starting, thread.busy, takes_messages, later);
+            && (thread.applying.is_some()
+                || !thread.ready && !thread.loading && !thread.picking && thread.restore.is_none());
+        let takes_messages = thread.client.as_ref().is_some_and(|client| client.queues())
+            && thread.pending.is_none();
+        let where_ = route(
+            thread.blank,
+            thread.unstarted(),
+            thread.asleep(),
+            starting,
+            thread.busy,
+            takes_messages,
+            later,
+        );
         // Only the user's text is taken out of the draft; text from a thread or from Po was
         // never in it, and their draft is theirs.
         let from_user = matches!(out.origin, Origin::User);
@@ -57,11 +78,17 @@ impl Reader {
                     self.clear_draft();
                 }
                 // `route` only takes a message mid-turn when the agent's client takes them.
-                debug_assert!(self.thread.client.is_some(), "a message routed to `Take` needs a client");
+                debug_assert!(
+                    self.thread.client.is_some(),
+                    "a message routed to `Take` needs a client"
+                );
                 if let Some(client) = self.thread.client.as_ref() {
                     client.enqueue(&out.queued_text(), kind);
                 }
-                self.thread.queue.push(Queued { out, kind: Some(kind) });
+                self.thread.queue.push(Queued {
+                    out,
+                    kind: Some(kind),
+                });
                 cx.notify();
                 Where::Take(kind)
             }
@@ -150,9 +177,15 @@ impl Reader {
             client.recall(&item.out.queued_text(), kind);
         }
         let draft = self.thread.draft.clone();
-        self.thread.attachments.splice(0..0, item.out.images.iter().cloned());
+        self.thread
+            .attachments
+            .splice(0..0, item.out.images.iter().cloned());
         self.thread.attachments.truncate(attach::MAX_PER_MESSAGE);
-        let text = if draft.trim().is_empty() { item.out.text } else { format!("{}\n{draft}", item.out.text) };
+        let text = if draft.trim().is_empty() {
+            item.out.text
+        } else {
+            format!("{}\n{draft}", item.out.text)
+        };
         self.update_draft(&text);
         cx.notify();
     }
@@ -163,9 +196,14 @@ impl Reader {
         if self.thread.busy {
             return;
         }
-        let Some(at) = self.thread.queue.iter().position(|q| q.kind.is_none()) else { return };
+        let Some(at) = self.thread.queue.iter().position(|q| q.kind.is_none()) else {
+            return;
+        };
         let mut next = self.thread.queue.remove(at);
-        if !self.dispatch(std::mem::replace(&mut next.out, Outgoing::user(String::new(), vec![])), cx) {
+        if !self.dispatch(
+            std::mem::replace(&mut next.out, Outgoing::user(String::new(), vec![])),
+            cx,
+        ) {
             self.thread.queue.insert(0, next);
             self.restore_queue(cx);
         }
@@ -185,7 +223,9 @@ impl Reader {
                 client.recall(&item.out.queued_text(), kind);
             }
             if matches!(item.out.origin, Origin::User) {
-                self.thread.attachments.splice(0..0, item.out.images.iter().cloned());
+                self.thread
+                    .attachments
+                    .splice(0..0, item.out.images.iter().cloned());
                 self.thread.attachments.truncate(attach::MAX_PER_MESSAGE);
                 text.push(item.out.text);
             } else {
@@ -209,7 +249,11 @@ impl Reader {
     /// Sends `out` as a new turn; false if it could not be sent (the error is in the thread).
     pub(crate) fn dispatch(&mut self, out: Outgoing, cx: &mut Context<Self>) -> bool {
         if !self.thread.ready || !self.send_to_agent(&out) {
-            let why = if self.thread.client.is_some() && self.thread.ready { "The agent has no session yet." } else { "The agent is not ready yet." };
+            let why = if self.thread.client.is_some() && self.thread.ready {
+                "The agent has no session yet."
+            } else {
+                "The agent is not ready yet."
+            };
             self.thread.fail(why.into());
             cx.notify();
             return false;
@@ -224,10 +268,18 @@ impl Reader {
     /// file is in view (the thread on screen's project; that is where they type), a thread's
     /// messages say which thread sent them, and Po's say they are Po's.
     pub(crate) fn send_to_agent(&self, out: &Outgoing) -> bool {
-        let Some(client) = &self.thread.client else { return false };
+        let Some(client) = &self.thread.client else {
+            return false;
+        };
         let context = match (&self.project.current, &out.origin) {
-            (Some(file), Origin::User) => format!("[The user has `{file}` open in the viewer.]\n\n{}", out.text),
-            (_, Origin::Thread { id, title }) => format!("[From thread \"{title}\" (#{id}), sent through Po.]\n\n{}", out.text),
+            (Some(file), Origin::User) => format!(
+                "[The user has `{file}` open in the viewer.]\n\n{}",
+                out.text
+            ),
+            (_, Origin::Thread { id, title }) => format!(
+                "[From thread \"{title}\" (#{id}), sent through Po.]\n\n{}",
+                out.text
+            ),
             (_, Origin::Po) => format!("[Po]\n\n{}", out.text),
             (None, Origin::User) => out.text.clone(),
         };
@@ -252,22 +304,27 @@ impl Reader {
         // The message that was last stops being so: it loses its bottom padding and folds its
         // finished runs of tool calls, so it is laid out again too.
         let was_last = self.thread.messages.len().saturating_sub(1);
-        self.thread.messages.push(Msg::User(out.shown(), out.images.clone()));
+        self.thread
+            .messages
+            .push(Msg::User(out.shown(), out.images.clone()));
         self.thread.messages.push(Msg::Agent(vec![]));
         self.thread.relist(was_last);
     }
 
     pub(crate) fn stop(&mut self, cx: &mut Context<Self>) {
-        let Some(client) = &self.thread.client else { return };
+        let Some(client) = &self.thread.client else {
+            return;
+        };
         client.cancel();
         for msg in &mut self.thread.messages {
             let Msg::Agent(blocks) = msg else { continue };
             for block in blocks {
                 if let Block::Permission(ask) = block
-                    && ask.answered.is_none() {
-                        client.answer(ask.request.clone(), None);
-                        ask.answered = Some("Cancelled".into());
-                    }
+                    && ask.answered.is_none()
+                {
+                    client.answer(ask.request.clone(), None);
+                    ask.answered = Some("Cancelled".into());
+                }
             }
         }
         self.thread.relist(0);
@@ -277,25 +334,43 @@ impl Reader {
     }
 
     pub(crate) fn toggle_tool(&mut self, msg: usize, block: usize, cx: &mut Context<Self>) {
-        let Some(Msg::Agent(blocks)) = self.thread.messages.get_mut(msg) else { return };
-        let Some(Block::Tool(tool)) = blocks.get_mut(block) else { return };
+        let Some(Msg::Agent(blocks)) = self.thread.messages.get_mut(msg) else {
+            return;
+        };
+        let Some(Block::Tool(tool)) = blocks.get_mut(block) else {
+            return;
+        };
         tool.open = !tool.open;
         self.thread.relist(msg);
         cx.notify();
     }
 
     /// Folds or unfolds the run of steps that starts at `block`.
-    pub(crate) fn fold_run(&mut self, msg: usize, block: usize, folded: bool, cx: &mut Context<Self>) {
-        let Some(Msg::Agent(blocks)) = self.thread.messages.get_mut(msg) else { return };
-        let Some(tool) = fold_keeper(blocks, block) else { return };
+    pub(crate) fn fold_run(
+        &mut self,
+        msg: usize,
+        block: usize,
+        folded: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(Msg::Agent(blocks)) = self.thread.messages.get_mut(msg) else {
+            return;
+        };
+        let Some(tool) = fold_keeper(blocks, block) else {
+            return;
+        };
         tool.fold = Some(folded);
         self.thread.relist(msg);
         cx.notify();
     }
 
     pub(crate) fn toggle_thought(&mut self, msg: usize, block: usize, cx: &mut Context<Self>) {
-        let Some(Msg::Agent(blocks)) = self.thread.messages.get_mut(msg) else { return };
-        let Some(Block::Thought(_, open)) = blocks.get_mut(block) else { return };
+        let Some(Msg::Agent(blocks)) = self.thread.messages.get_mut(msg) else {
+            return;
+        };
+        let Some(Block::Thought(_, open)) = blocks.get_mut(block) else {
+            return;
+        };
         *open = !*open;
         self.thread.relist(msg);
         cx.notify();
@@ -305,11 +380,16 @@ impl Reader {
     /// to a line count as something left to open: they are unfolded, details and all.
     pub(crate) fn toggle_tools(&mut self, cx: &mut Context<Self>) {
         let mut from = None;
-        let (busy, last) = (self.thread.busy, self.thread.messages.len().saturating_sub(1));
+        let (busy, last) = (
+            self.thread.busy,
+            self.thread.messages.len().saturating_sub(1),
+        );
         for (ix, msg) in self.thread.messages.iter_mut().enumerate() {
             let Msg::Agent(blocks) = msg else { continue };
             for start in folded_runs(blocks, busy && ix == last) {
-                let Some(tool) = fold_keeper(blocks, start) else { continue };
+                let Some(tool) = fold_keeper(blocks, start) else {
+                    continue;
+                };
                 tool.fold = Some(false);
                 from.get_or_insert(ix);
             }
@@ -327,7 +407,13 @@ impl Reader {
             cx.notify();
             return;
         }
-        if let Some(from) = toggle_all(&mut self.thread.messages, |b| if let Block::Tool(tool) = b { Some(&mut tool.open) } else { None }) {
+        if let Some(from) = toggle_all(&mut self.thread.messages, |b| {
+            if let Block::Tool(tool) = b {
+                Some(&mut tool.open)
+            } else {
+                None
+            }
+        }) {
             self.thread.relist(from);
             cx.notify();
         }
@@ -335,7 +421,13 @@ impl Reader {
 
     /// Opens every thought, or folds them all when none is left to open.
     pub(crate) fn toggle_thoughts(&mut self, cx: &mut Context<Self>) {
-        if let Some(from) = toggle_all(&mut self.thread.messages, |b| if let Block::Thought(_, shown) = b { Some(shown) } else { None }) {
+        if let Some(from) = toggle_all(&mut self.thread.messages, |b| {
+            if let Block::Thought(_, shown) = b {
+                Some(shown)
+            } else {
+                None
+            }
+        }) {
             self.thread.relist(from);
             cx.notify();
         }

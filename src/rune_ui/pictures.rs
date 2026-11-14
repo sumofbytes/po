@@ -7,7 +7,6 @@ use base64::Engine;
 use rune::image::ImageCache;
 use rune::{El, SurfaceFit};
 
-
 /// A thumbnail in the transcript's user row, and the picture shown large over the window.
 pub const THUMB: (f32, f32) = (56.0, 42.0);
 pub const PREVIEW: (f32, f32) = (900.0, 640.0);
@@ -18,7 +17,10 @@ static IMAGES: OnceLock<Mutex<Option<ImageCache>>> = OnceLock::new();
 
 /// Takes the setup waker, so a decode finishing wakes the frame it belongs to.
 pub fn set(waker: rune::Waker) {
-    *IMAGES.get_or_init(|| Mutex::new(None)).lock().unwrap_or_else(|e| e.into_inner()) = Some(ImageCache::new(waker));
+    *IMAGES
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = Some(ImageCache::new(waker));
 }
 
 /// The box the picture fills, as large as fits `large` without a larger side than it has.
@@ -32,9 +34,18 @@ fn fit(size: (u32, u32), large: (f32, f32)) -> (f32, f32) {
 /// the URI is not a `data:` URI that decodes.
 pub fn el(uri: &str, size: (u32, u32), large: (f32, f32)) -> El {
     let (w, h) = fit(size, large);
-    let mut e = rune::el().key(format!("picture-{}-{}", w as u32, h as u32)).size(w, h);
-    let Some((mime, data)) = uri.strip_prefix("data:").and_then(|rest| rest.rsplit_once(";base64,")) else { return e };
-    let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(data) else { return e };
+    let mut e = rune::el()
+        .key(format!("picture-{}-{}", w as u32, h as u32))
+        .size(w, h);
+    let Some((mime, data)) = uri
+        .strip_prefix("data:")
+        .and_then(|rest| rest.rsplit_once(";base64,"))
+    else {
+        return e;
+    };
+    let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(data) else {
+        return e;
+    };
     if let Some(images) = IMAGES.get() {
         let cache = images.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(cache) = cache.as_ref() {

@@ -24,7 +24,11 @@ fn scenario() -> Option<Scenario> {
         return None;
     }
     let mut number = |default: u64| parts.next().and_then(|n| n.parse().ok()).unwrap_or(default);
-    Some(Scenario { history: number(20) as usize, chunks: number(600) as usize, interval: Duration::from_millis(number(25)) })
+    Some(Scenario {
+        history: number(20) as usize,
+        chunks: number(600) as usize,
+        interval: Duration::from_millis(number(25)),
+    })
 }
 
 /// Markdown like an agent writes it, with headings, prose, a list and a code block, at least
@@ -33,7 +37,9 @@ fn markdown(seed: usize, len: usize) -> String {
     let mut out = String::new();
     let mut part = 0;
     while out.len() < len {
-        out.push_str(&format!("## Part {seed}.{part}: ownership and borrowing\n\n"));
+        out.push_str(&format!(
+            "## Part {seed}.{part}: ownership and borrowing\n\n"
+        ));
         out.push_str("Rust's ownership model gives every value a single owner, so the compiler can tell when it is freed and who may touch it meanwhile. A **shared** borrow lets many readers look at a value; a *mutable* borrow lets exactly one writer change it, and never both at once.\n\n");
         out.push_str("- A value has one owner at a time\n- Borrows are checked at compile time, with `&T` and `&mut T`\n- Lifetimes say how long a borrow may live\n\n");
         out.push_str("```rust\nfn longest<'a>(a: &'a str, b: &'a str) -> &'a str {\n    if a.len() >= b.len() { a } else { b }\n}\n```\n\n");

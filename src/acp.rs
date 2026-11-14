@@ -50,7 +50,10 @@ fn parse_options(list: &Value) -> Vec<ConfigOption> {
     fn choices(list: &Value, into: &mut Vec<(String, String)>) {
         for entry in list.as_array().into_iter().flatten() {
             if let Some(value) = entry["value"].as_str() {
-                into.push((value.to_string(), entry["name"].as_str().unwrap_or(value).to_string()));
+                into.push((
+                    value.to_string(),
+                    entry["name"].as_str().unwrap_or(value).to_string(),
+                ));
             } else {
                 choices(&entry["options"], into);
             }
@@ -61,7 +64,10 @@ fn parse_options(list: &Value) -> Vec<ConfigOption> {
         .flatten()
         .filter(|entry| entry["type"].as_str().is_none_or(|kind| kind == "select"))
         .filter_map(|entry| {
-            let id = entry["id"].as_str().or(entry["configId"].as_str())?.to_string();
+            let id = entry["id"]
+                .as_str()
+                .or(entry["configId"].as_str())?
+                .to_string();
             let current = entry["currentValue"].as_str()?.to_string();
             let mut all = Vec::new();
             choices(&entry["options"], &mut all);
@@ -80,22 +86,41 @@ pub enum Event {
     /// The session's settings, when it opens and whenever they change.
     Options(Vec<ConfigOption>),
     /// The agent accepted a change to a session setting.
-    OptionSet { id: String, value: String },
+    OptionSet {
+        id: String,
+        value: String,
+    },
     /// The agent refused a change to session setting `id`.
-    Refused { id: String, text: String },
+    Refused {
+        id: String,
+        text: String,
+    },
     /// A session is open: a new one, or a loaded one once its history has been replayed. `fresh`
     /// is false for a resumed one, whose settings the agent restored.
-    Ready { agent: String, fresh: bool },
+    Ready {
+        agent: String,
+        fresh: bool,
+    },
     /// The agent's resumable sessions for this project, newest first.
     Sessions(Vec<SessionInfo>),
     /// A `session/update` payload.
     Update(Value),
-    Permission { request: Value, title: String, options: Vec<PermissionOption> },
+    Permission {
+        request: Value,
+        title: String,
+        options: Vec<PermissionOption>,
+    },
     Stopped(String),
     /// The agent took a steering or follow-up message into the turn (dex daemon only).
-    Accepted { content: String, queue: crate::dex::Queue },
+    Accepted {
+        content: String,
+        queue: crate::dex::Queue,
+    },
     /// The daemon had no turn to add a steering or follow-up message to (dex daemon only).
-    Rejected { content: String, queue: crate::dex::Queue },
+    Rejected {
+        content: String,
+        queue: crate::dex::Queue,
+    },
     Failed(String),
     Exited(String),
 }
@@ -108,7 +133,10 @@ enum Pending {
     /// A page of `session/list`, counting from 0.
     List(u8),
     Load,
-    SetOption { id: String, value: String },
+    SetOption {
+        id: String,
+        value: String,
+    },
 }
 
 /// `session/list` pages followed before giving up on the rest.
@@ -144,9 +172,14 @@ impl Shared {
     fn mcp_servers(&self) -> Value {
         let mut servers = vec![];
         servers.extend(self.po_mcp.clone());
-        if let Value::Array(config) = crate::config::mcp_servers(&crate::plugin::effective_config()) {
+        if let Value::Array(config) = crate::config::mcp_servers(&crate::plugin::effective_config())
+        {
             // A config server named `po` would hide Po's own from the agent.
-            servers.extend(config.into_iter().filter(|server| self.po_mcp.is_none() || server["name"] != "po"));
+            servers.extend(
+                config
+                    .into_iter()
+                    .filter(|server| self.po_mcp.is_none() || server["name"] != "po"),
+            );
         }
         Value::Array(servers)
     }
@@ -170,7 +203,9 @@ impl Shared {
     }
 
     fn respond_error(&self, id: Value, code: i64, message: &str) {
-        self.write(&json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } }));
+        self.write(
+            &json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } }),
+        );
     }
 
     fn list_sessions(&self, cursor: Option<&str>, page: u8) {
@@ -200,7 +235,10 @@ impl Shared {
 
     #[hotpath::measure(impl_type = "Shared")]
     fn handle(&self, message: Value) {
-        let method = message.get("method").and_then(Value::as_str).map(String::from);
+        let method = message
+            .get("method")
+            .and_then(Value::as_str)
+            .map(String::from);
         let id = message.get("id").cloned();
         match (method, id) {
             (Some(method), Some(id)) => self.on_request(&method, id, &message["params"]),
@@ -220,14 +258,20 @@ impl Shared {
     }
 
     fn on_response(&self, id: Value, message: &Value) {
-        let Some(kind) = id.as_u64().and_then(|id| self.pending.lock().expect("pending lock").remove(&id)) else {
+        let Some(kind) = id
+            .as_u64()
+            .and_then(|id| self.pending.lock().expect("pending lock").remove(&id))
+        else {
             return;
         };
         if let Some(error) = message.get("error") {
             if let Pending::SetOption { id, .. } = kind {
                 log::warn!("acp: setting refused: {error}");
                 let text = error["message"].as_str().unwrap_or("the agent refused");
-                self.emit(Event::Refused { id, text: format!("setting not changed: {text}") });
+                self.emit(Event::Refused {
+                    id,
+                    text: format!("setting not changed: {text}"),
+                });
                 return;
             }
             // -32000 is ACP's `authRequired`.
@@ -239,7 +283,10 @@ impl Shared {
                 return;
             }
             let text = error["message"].as_str().unwrap_or("agent error");
-            let detail = error["data"].as_str().or(error["data"]["details"].as_str()).unwrap_or("");
+            let detail = error["data"]
+                .as_str()
+                .or(error["data"]["details"].as_str())
+                .unwrap_or("");
             self.emit(Event::Failed(format!("{text} {detail}").trim().to_string()));
             return;
         }
@@ -249,12 +296,20 @@ impl Shared {
                 if let Some(name) = result["agentInfo"]["name"].as_str() {
                     *self.agent.lock().expect("agent lock") = name.to_string();
                 }
-                self.images.store(result["agentCapabilities"]["promptCapabilities"]["image"].as_bool() == Some(true), Ordering::Relaxed);
+                self.images.store(
+                    result["agentCapabilities"]["promptCapabilities"]["image"].as_bool()
+                        == Some(true),
+                    Ordering::Relaxed,
+                );
                 if self.resume {
                     let caps = &result["agentCapabilities"];
-                    if caps["loadSession"].as_bool() != Some(true) || !caps["sessionCapabilities"]["list"].is_object() {
+                    if caps["loadSession"].as_bool() != Some(true)
+                        || !caps["sessionCapabilities"]["list"].is_object()
+                    {
                         let agent = self.agent.lock().expect("agent lock").clone();
-                        self.emit(Event::Failed(format!("{agent} can't list and resume sessions.")));
+                        self.emit(Event::Failed(format!(
+                            "{agent} can't list and resume sessions."
+                        )));
                         return;
                     }
                     if let Some(id) = &self.wanted {
@@ -267,19 +322,32 @@ impl Shared {
                     return;
                 }
                 let cwd = self.cwd.to_string_lossy().to_string();
-                self.request("session/new", json!({ "cwd": cwd, "mcpServers": self.mcp_servers() }), Pending::Session);
+                self.request(
+                    "session/new",
+                    json!({ "cwd": cwd, "mcpServers": self.mcp_servers() }),
+                    Pending::Session,
+                );
             }
             Pending::List(page) => {
                 let mut listed = self.listed.lock().expect("listed lock");
                 for entry in result["sessions"].as_array().into_iter().flatten() {
-                    let Some(id) = entry["sessionId"].as_str() else { continue };
+                    let Some(id) = entry["sessionId"].as_str() else {
+                        continue;
+                    };
                     listed.push(SessionInfo {
                         id: id.to_string(),
-                        title: entry["title"].as_str().unwrap_or_default().trim().to_string(),
+                        title: entry["title"]
+                            .as_str()
+                            .unwrap_or_default()
+                            .trim()
+                            .to_string(),
                         updated: entry["updatedAt"].as_str().unwrap_or_default().to_string(),
                     });
                 }
-                match result["nextCursor"].as_str().filter(|cursor| !cursor.is_empty()) {
+                match result["nextCursor"]
+                    .as_str()
+                    .filter(|cursor| !cursor.is_empty())
+                {
                     Some(cursor) if page + 1 < MAX_PAGES => {
                         drop(listed);
                         self.list_sessions(Some(cursor), page + 1);
@@ -300,16 +368,25 @@ impl Shared {
             Pending::Load => {
                 self.emit_options(result);
                 let agent = self.agent.lock().expect("agent lock").clone();
-                self.emit(Event::Ready { agent, fresh: false });
+                self.emit(Event::Ready {
+                    agent,
+                    fresh: false,
+                });
             }
             Pending::Session => {
-                *self.session.lock().expect("session lock") = result["sessionId"].as_str().map(String::from);
+                *self.session.lock().expect("session lock") =
+                    result["sessionId"].as_str().map(String::from);
                 self.emit_options(result);
                 let agent = self.agent.lock().expect("agent lock").clone();
                 self.emit(Event::Ready { agent, fresh: true });
             }
             Pending::Prompt => {
-                self.emit(Event::Stopped(result["stopReason"].as_str().unwrap_or("end_turn").to_string()));
+                self.emit(Event::Stopped(
+                    result["stopReason"]
+                        .as_str()
+                        .unwrap_or("end_turn")
+                        .to_string(),
+                ));
             }
         }
     }
@@ -331,8 +408,15 @@ impl Shared {
                             .collect()
                     })
                     .unwrap_or_default();
-                let title = params["toolCall"]["title"].as_str().unwrap_or("Run a tool").to_string();
-                self.emit(Event::Permission { request: id, title, options });
+                let title = params["toolCall"]["title"]
+                    .as_str()
+                    .unwrap_or("Run a tool")
+                    .to_string();
+                self.emit(Event::Permission {
+                    request: id,
+                    title,
+                    options,
+                });
             }
             "fs/read_text_file" => match self.read_file(params) {
                 Ok(content) => self.respond(id, json!({ "content": content })),
@@ -348,12 +432,19 @@ impl Shared {
         let root = self.cwd.canonicalize().context("bad project root")?;
         anyhow::ensure!(path.starts_with(&root), "outside the project");
         let text = std::fs::read_to_string(&path).context("not a text file")?;
-        let start = params["line"].as_u64().map_or(0, |l| l.saturating_sub(1) as usize);
+        let start = params["line"]
+            .as_u64()
+            .map_or(0, |l| l.saturating_sub(1) as usize);
         let limit = params["limit"].as_u64().map_or(usize::MAX, |l| l as usize);
         if start == 0 && limit == usize::MAX {
             return Ok(text);
         }
-        Ok(text.lines().skip(start).take(limit).collect::<Vec<_>>().join("\n"))
+        Ok(text
+            .lines()
+            .skip(start)
+            .take(limit)
+            .collect::<Vec<_>>()
+            .join("\n"))
     }
 }
 
@@ -368,7 +459,13 @@ impl Client {
     /// The child's pid is known once it is started, and `control` is then asked for the
     /// environment Po's MCP server for this thread gets; the agent itself does not.
     /// With `resume` and `wanted`, loads that session without listing the others.
-    pub fn spawn(command: &str, cwd: &Path, resume: bool, wanted: Option<&str>, control: impl FnOnce(u32) -> Vec<(String, String)>) -> Result<(Self, UnboundedReceiver<Event>)> {
+    pub fn spawn(
+        command: &str,
+        cwd: &Path,
+        resume: bool,
+        wanted: Option<&str>,
+        control: impl FnOnce(u32) -> Vec<(String, String)>,
+    ) -> Result<(Self, UnboundedReceiver<Event>)> {
         let mut parts = command.split_whitespace();
         let program = parts.next().context("empty agent command")?;
         let mut child = Command::new(program)
@@ -395,23 +492,33 @@ impl Client {
             wanted: wanted.filter(|_| resume).map(String::from),
             listed: Mutex::new(Vec::new()),
             images: AtomicBool::new(false),
-            po_mcp: if control.is_empty() { None } else { crate::mcp::server(&control) },
+            po_mcp: if control.is_empty() {
+                None
+            } else {
+                crate::mcp::server(&control)
+            },
         });
         let child = Arc::new(Mutex::new(child));
         let (reader, reaper) = (shared.clone(), child.clone());
-        std::thread::Builder::new().name("acp-read".into()).spawn(move || {
-            for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-                match hotpath::measure_block!("acp parse", serde_json::from_str::<Value>(&line)) {
-                    Ok(message) => {
-                        log::debug!("acp <- {line}");
-                        reader.handle(message)
+        std::thread::Builder::new()
+            .name("acp-read".into())
+            .spawn(move || {
+                for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                    match hotpath::measure_block!("acp parse", serde_json::from_str::<Value>(&line))
+                    {
+                        Ok(message) => {
+                            log::debug!("acp <- {line}");
+                            reader.handle(message)
+                        }
+                        Err(error) => log::debug!("acp: skipped non-JSON line: {error}"),
                     }
-                    Err(error) => log::debug!("acp: skipped non-JSON line: {error}"),
                 }
-            }
-            let status = reaper.lock().expect("child lock").wait();
-            reader.emit(Event::Exited(status.map_or_else(|e| e.to_string(), |s| s.to_string())));
-        }).expect("failed to spawn thread");
+                let status = reaper.lock().expect("child lock").wait();
+                reader.emit(Event::Exited(
+                    status.map_or_else(|e| e.to_string(), |s| s.to_string()),
+                ));
+            })
+            .expect("failed to spawn thread");
         shared.request(
             "initialize",
             json!({
@@ -435,7 +542,11 @@ impl Client {
             return false;
         };
         // An empty text block is refused by the API, so a picture sent alone goes without one.
-        let mut blocks = if text.is_empty() { vec![] } else { vec![json!({ "type": "text", "text": text })] };
+        let mut blocks = if text.is_empty() {
+            vec![]
+        } else {
+            vec![json!({ "type": "text", "text": text })]
+        };
         blocks.extend_from_slice(images);
         self.shared.request(
             "session/prompt",
@@ -453,7 +564,10 @@ impl Client {
         self.shared.request(
             "session/set_config_option",
             json!({ "sessionId": session, "configId": id, "value": value }),
-            Pending::SetOption { id: id.to_string(), value: value.to_string() },
+            Pending::SetOption {
+                id: id.to_string(),
+                value: value.to_string(),
+            },
         );
         true
     }
@@ -462,7 +576,11 @@ impl Client {
     pub fn load(&self, id: &str) -> bool {
         *self.shared.session.lock().expect("session lock") = Some(id.to_string());
         let cwd = self.shared.cwd.to_string_lossy().to_string();
-        self.shared.request("session/load", json!({ "sessionId": id, "cwd": cwd, "mcpServers": self.shared.mcp_servers() }), Pending::Load);
+        self.shared.request(
+            "session/load",
+            json!({ "sessionId": id, "cwd": cwd, "mcpServers": self.shared.mcp_servers() }),
+            Pending::Load,
+        );
         true
     }
 

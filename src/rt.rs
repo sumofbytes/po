@@ -40,7 +40,14 @@ pub struct Window {
 
 impl Window {
     pub fn new(host: Host<Core>) -> Self {
-        Self { host, active: true, focus_asked: false, close_asked: false, folder_asked: false, urls: vec![] }
+        Self {
+            host,
+            active: true,
+            focus_asked: false,
+            close_asked: false,
+            folder_asked: false,
+            urls: vec![],
+        }
     }
 
     pub fn is_window_active(&self) -> bool {
@@ -48,7 +55,9 @@ impl Window {
     }
 
     pub fn window_handle(&self) -> WindowHandle {
-        WindowHandle { host: self.host.clone() }
+        WindowHandle {
+            host: self.host.clone(),
+        }
     }
 
     pub fn remove_window(&mut self) {
@@ -80,7 +89,10 @@ pub struct Context<T> {
 
 impl Context<Reader> {
     pub fn new(host: Host<Core>) -> Self {
-        Self { host, _of: PhantomData }
+        Self {
+            host,
+            _of: PhantomData,
+        }
     }
 
     /// The view is stale: the window polls and draws.
@@ -93,7 +105,10 @@ impl Context<Reader> {
     }
 
     pub fn weak_entity(&self) -> WeakEntity<Reader> {
-        WeakEntity { host: self.host.clone(), _of: PhantomData }
+        WeakEntity {
+            host: self.host.clone(),
+            _of: PhantomData,
+        }
     }
 
     /// Runs `f` on a thread of its own, with a way back to the reader. Dropping the task stops it.
@@ -102,19 +117,28 @@ impl Context<Reader> {
         F: AsyncFnOnce(WeakEntity<Reader>, &mut AsyncApp) -> R + Send + 'static,
         R: Send + 'static,
     {
-        let (weak, mut app) = (self.weak_entity(), AsyncApp { host: self.host.clone() });
+        let (weak, mut app) = (
+            self.weak_entity(),
+            AsyncApp {
+                host: self.host.clone(),
+            },
+        );
         spawn_thread(move || async move { f(weak, &mut app).await })
     }
 
     /// The window's own thread, as a task reaches it.
     pub fn window_handle(&self) -> WindowHandle {
-        WindowHandle { host: self.host.clone() }
+        WindowHandle {
+            host: self.host.clone(),
+        }
     }
 
-    pub fn background_spawn<R: Send + 'static>(&self, work: impl Future<Output = R> + Send + 'static) -> Task<R> {
+    pub fn background_spawn<R: Send + 'static>(
+        &self,
+        work: impl Future<Output = R> + Send + 'static,
+    ) -> Task<R> {
         Executor.spawn(work)
     }
-
 }
 
 /// What an async task holds to reach the reader.
@@ -133,7 +157,9 @@ impl AsyncApp {
         F: AsyncFnOnce(&mut AsyncApp) -> R + Send + 'static,
         R: Send + 'static,
     {
-        let mut app = AsyncApp { host: self.host.clone() };
+        let mut app = AsyncApp {
+            host: self.host.clone(),
+        };
         spawn_thread(move || async move { f(&mut app).await })
     }
 }
@@ -154,7 +180,11 @@ unsafe impl<T> Send for Lent<T> {}
 /// Something a [`WeakEntity`] is updated through: from a task (waits for the window's thread) or
 /// from the window's thread (runs at once).
 pub trait Reach {
-    fn reach<R>(&mut self, host: &Host<Core>, f: impl FnOnce(&mut Reader, &mut Window, &mut Context<Reader>) -> R) -> Result<R, Gone>;
+    fn reach<R>(
+        &mut self,
+        host: &Host<Core>,
+        f: impl FnOnce(&mut Reader, &mut Window, &mut Context<Reader>) -> R,
+    ) -> Result<R, Gone>;
 }
 
 /// Runs `job` on the window's thread and waits for what it answers.
@@ -172,14 +202,24 @@ fn on_window<R>(host: &Host<Core>, job: impl FnOnce(&mut Core) -> R) -> Result<R
 }
 
 impl Reach for AsyncApp {
-    fn reach<R>(&mut self, host: &Host<Core>, f: impl FnOnce(&mut Reader, &mut Window, &mut Context<Reader>) -> R) -> Result<R, Gone> {
+    fn reach<R>(
+        &mut self,
+        host: &Host<Core>,
+        f: impl FnOnce(&mut Reader, &mut Window, &mut Context<Reader>) -> R,
+    ) -> Result<R, Gone> {
         let own = host.clone();
-        on_window(host, move |core| f(&mut core.reader, &mut core.window, &mut Context::new(own)))
+        on_window(host, move |core| {
+            f(&mut core.reader, &mut core.window, &mut Context::new(own))
+        })
     }
 }
 
 impl Reach for App {
-    fn reach<R>(&mut self, host: &Host<Core>, f: impl FnOnce(&mut Reader, &mut Window, &mut Context<Reader>) -> R) -> Result<R, Gone> {
+    fn reach<R>(
+        &mut self,
+        host: &Host<Core>,
+        f: impl FnOnce(&mut Reader, &mut Window, &mut Context<Reader>) -> R,
+    ) -> Result<R, Gone> {
         // Already on the window's thread, inside one of its jobs: they hold what they reach.
         let (reader, window) = unsafe { (&mut *self.reader, &mut *self.window) };
         Ok(f(reader, window, &mut Context::new(host.clone())))
@@ -194,19 +234,30 @@ pub struct WeakEntity<T> {
 
 impl<T> Clone for WeakEntity<T> {
     fn clone(&self) -> Self {
-        Self { host: self.host.clone(), _of: PhantomData }
+        Self {
+            host: self.host.clone(),
+            _of: PhantomData,
+        }
     }
 }
 
 impl WeakEntity<Reader> {
     /// Runs `f` on the window's thread with the reader; waits for what it returned unless already
     /// there. An error once the window is gone.
-    pub fn update<C: Reach, R>(&self, cx: &mut C, f: impl FnOnce(&mut Reader, &mut Context<Reader>) -> R) -> Result<R, Gone> {
+    pub fn update<C: Reach, R>(
+        &self,
+        cx: &mut C,
+        f: impl FnOnce(&mut Reader, &mut Context<Reader>) -> R,
+    ) -> Result<R, Gone> {
         cx.reach(&self.host, move |reader, _, cx| f(reader, cx))
     }
 
     /// Reads the reader the same way.
-    pub fn read_with<C: Reach, R>(&self, cx: &mut C, f: impl FnOnce(&Reader, &()) -> R) -> Result<R, Gone> {
+    pub fn read_with<C: Reach, R>(
+        &self,
+        cx: &mut C,
+        f: impl FnOnce(&Reader, &()) -> R,
+    ) -> Result<R, Gone> {
         cx.reach(&self.host, move |reader, _, _| f(reader, &()))
     }
 }
@@ -219,9 +270,16 @@ pub struct WindowHandle {
 
 impl WindowHandle {
     /// Runs `f` on the window's thread, with the window and a way to the reader from there.
-    pub fn update<R>(&self, _: &mut AsyncApp, f: impl FnOnce(&mut (), &mut Window, &mut App) -> R) -> Result<R, Gone> {
+    pub fn update<R>(
+        &self,
+        _: &mut AsyncApp,
+        f: impl FnOnce(&mut (), &mut Window, &mut App) -> R,
+    ) -> Result<R, Gone> {
         on_window(&self.host, move |core| {
-            let mut app = App { reader: &mut core.reader, window: &mut core.window };
+            let mut app = App {
+                reader: &mut core.reader,
+                window: &mut core.window,
+            };
             f(&mut (), unsafe { &mut *app.window }, &mut app)
         })
     }
@@ -232,7 +290,10 @@ impl WindowHandle {
 pub struct Executor;
 
 impl Executor {
-    pub fn spawn<R: Send + 'static>(&self, work: impl Future<Output = R> + Send + 'static) -> Task<R> {
+    pub fn spawn<R: Send + 'static>(
+        &self,
+        work: impl Future<Output = R> + Send + 'static,
+    ) -> Task<R> {
         spawn_thread(move || work)
     }
 
@@ -276,7 +337,9 @@ impl<R> Future for Task<R> {
 
 /// Runs what `make` builds on a thread of its own. The future is built there, so it need not be
 /// `Send`: only what it is made from does.
-fn spawn_thread<W: Future<Output = R>, R: Send + 'static>(make: impl FnOnce() -> W + Send + 'static) -> Task<R> {
+fn spawn_thread<W: Future<Output = R>, R: Send + 'static>(
+    make: impl FnOnce() -> W + Send + 'static,
+) -> Task<R> {
     let (tx, done) = oneshot::channel();
     let (abort, registration) = AbortHandle::new_pair();
     std::thread::Builder::new()
@@ -287,5 +350,8 @@ fn spawn_thread<W: Future<Output = R>, R: Send + 'static>(make: impl FnOnce() ->
             }
         })
         .expect("a thread for the task");
-    Task { done, abort: Some(abort) }
+    Task {
+        done,
+        abort: Some(abort),
+    }
 }
