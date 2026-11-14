@@ -51,6 +51,44 @@ pub(crate) fn form_view_snapshot(form: &crate::ipc::command::AgentForm) -> model
     }
 }
 
+/// The heading a thread last used at `used_at` (ms since the epoch) sits under in the flat list: within the
+/// day a thread keeps its row, within a week of it, or older. A time never recorded is the oldest.
+fn age_of(now: u64, used_at: u64) -> model::sidebar::Age {
+    use model::sidebar::Age;
+    if used_at < 1_000_000_000_000 {
+        Age::Earlier
+    } else if !stale(now, used_at) {
+        Age::Day
+    } else if now.saturating_sub(used_at) <= 7 * STALE_MS {
+        Age::Week
+    } else {
+        Age::Earlier
+    }
+}
+
+#[cfg(test)]
+mod age_tests {
+    use super::*;
+    use model::sidebar::Age;
+
+    #[test]
+    fn a_thread_sits_under_the_heading_of_when_it_was_used() {
+        let now = 1_800_000_000_000;
+        let hours = |h: u64| now - h * 3_600_000;
+        assert_eq!(age_of(now, hours(1)), Age::Day);
+        assert_eq!(age_of(now, hours(30)), Age::Week);
+        assert_eq!(age_of(now, hours(24 * 6)), Age::Week);
+        assert_eq!(age_of(now, hours(24 * 9)), Age::Earlier);
+    }
+
+    #[test]
+    fn a_time_never_recorded_is_the_oldest() {
+        assert_eq!(age_of(1_800_000_000_000, 0), Age::Earlier);
+        // A counter from before the time was kept.
+        assert_eq!(age_of(1_800_000_000_000, 42), Age::Earlier);
+    }
+}
+
 /// The threads a project always lists, most recent first, before the rest fold under "more".
 const MIN_THREADS: usize = 3;
 
@@ -216,19 +254,14 @@ impl Reader {
                 kept(i - 1, view, t)
             });
         }
-        let recent_fold = (hidden > 0).then_some((recent_expanded, hidden));
+        // A search shows every match, so there is nothing to fold or unfold.
+        let recent_fold = (hidden > 0 && !searching).then_some((recent_expanded, hidden));
         let recent = flat
             .into_iter()
             .map(|(view, t)| side::Recent {
                 thread: thread_row(view.id, t),
                 project: view.project.name(),
-                age: if !stale(now, t.used_at) {
-                    side::Age::Day
-                } else if now.saturating_sub(t.used_at) <= 7 * STALE_MS {
-                    side::Age::Week
-                } else {
-                    side::Age::Earlier
-                },
+                age: age_of(now, t.used_at),
             })
             .collect();
         let choices = views
