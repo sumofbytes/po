@@ -8,9 +8,9 @@ po already runs on "the app is a shell and the features are programs talking
 to it":
 
 - An **agent** is any program speaking [ACP](https://agentclientprotocol.com)
-  (or a dex daemon) over stdio, listed in `agents.json` (`src/config.rs:agents`).
+  (or a dex daemon) over stdio, listed in `agents.json` (`src/config/mod.rs:agents`).
 - **Tools** are MCP servers handed to every agent session (`mcp_servers`),
-  plus po's own control server (`src/control.rs`).
+  plus po's own control server (`src/ipc/control.rs`).
 - **Themes** are JSON files in `<config>/themes/`, watched and applied without
   a restart (`src/theme.rs:watch`).
 - **Screens** are NSH apps: po embeds the engine with `nsh::mount`
@@ -80,7 +80,7 @@ resolution, and po's plugins have no shared in-process libraries to duplicate.
 - `id` is required: letters, digits, `.`, `_`, `-`. It is what the approval card
   shows and what `disabled_plugins` will name.
 - `agents` and `mcp_servers` reuse config.json's shapes, read by
-  `src/plugin.rs`. `${PLUGIN_DIR}` in a command, its arguments or its `env` is
+  `src/config/plugin.rs`. `${PLUGIN_DIR}` in a command, its arguments or its `env` is
   the plugin's folder. Other relative paths are refused, because commands run
   from the project and would mean something else in each one.
 - A plugin's `themes/` folder is searched after the config folder's own and

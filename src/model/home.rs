@@ -4,7 +4,7 @@
 use std::path::{Path, PathBuf};
 
 use super::sidebar::{Mark, Snapshot};
-use crate::date::Date;
+use crate::issues::date::Date;
 use crate::issues::shared::{self, Overview};
 use crate::issues::{Priority, Status};
 
@@ -96,18 +96,50 @@ pub fn model(overview: &Overview, snapshot: &Snapshot, today: Date) -> Model {
             }
         }
     }
-    let bucket = |task: &Task| if task.late(today) { 0 } else if task.due == Some(today) { 1 } else if task.status == Status::InProgress { 2 } else { 3 };
-    tasks.sort_by(|a, b| (bucket(a), rank(a.priority), a.due, &a.project, a.number).cmp(&(bucket(b), rank(b.priority), b.due, &b.project, b.number)));
+    let bucket = |task: &Task| {
+        if task.late(today) {
+            0
+        } else if task.due == Some(today) {
+            1
+        } else if task.status == Status::InProgress {
+            2
+        } else {
+            3
+        }
+    };
+    tasks.sort_by(|a, b| {
+        (bucket(a), rank(a.priority), a.due, &a.project, a.number).cmp(&(
+            bucket(b),
+            rank(b.priority),
+            b.due,
+            &b.project,
+            b.number,
+        ))
+    });
     let due_today = tasks.iter().filter(|task| task.due == Some(today)).count();
     let late = tasks.iter().filter(|task| task.late(today)).count();
-    let in_progress = tasks.iter().filter(|task| task.status == Status::InProgress).count();
+    let in_progress = tasks
+        .iter()
+        .filter(|task| task.status == Status::InProgress)
+        .count();
 
     // Threads waiting on the user come first, then the ones at work or with news; a thread in both
     // lists is one thread.
     let mut seen = std::collections::HashSet::new();
-    let owned = snapshot.projects.iter().flat_map(|project| project.threads.iter().map(|thread| (project.name.as_str(), thread)));
-    let waiting = snapshot.waiting.iter().map(|item| (item.project.as_str(), &item.thread));
-    let all: Vec<_> = waiting.chain(owned).filter(|(_, thread)| seen.insert((thread.project, thread.id))).collect();
+    let owned = snapshot.projects.iter().flat_map(|project| {
+        project
+            .threads
+            .iter()
+            .map(|thread| (project.name.as_str(), thread))
+    });
+    let waiting = snapshot
+        .waiting
+        .iter()
+        .map(|item| (item.project.as_str(), &item.thread));
+    let all: Vec<_> = waiting
+        .chain(owned)
+        .filter(|(_, thread)| seen.insert((thread.project, thread.id)))
+        .collect();
     let weight = |mark: Mark| match mark {
         Mark::Asking => 0,
         Mark::Failed => 1,
@@ -117,12 +149,30 @@ pub fn model(overview: &Overview, snapshot: &Snapshot, today: Date) -> Model {
     };
     let mut threads: Vec<Pickup> = all
         .iter()
-        .map(|(owner, thread)| Pickup { project: thread.project, id: thread.id, label: thread.label.clone(), owner: owner.to_string(), mark: thread.mark, ago: thread.ago.clone() })
+        .map(|(owner, thread)| Pickup {
+            project: thread.project,
+            id: thread.id,
+            label: thread.label.clone(),
+            owner: owner.to_string(),
+            mark: thread.mark,
+            ago: thread.ago.clone(),
+        })
         .collect();
     threads.sort_by_key(|thread| weight(thread.mark));
-    let active_threads = threads.iter().filter(|thread| matches!(thread.mark, Mark::Running | Mark::Asking)).count();
+    let active_threads = threads
+        .iter()
+        .filter(|thread| matches!(thread.mark, Mark::Running | Mark::Asking))
+        .count();
     threads.truncate(THREADS);
-    Model { tasks, due_today, late, in_progress, week, threads, active_threads }
+    Model {
+        tasks,
+        due_today,
+        late,
+        in_progress,
+        week,
+        threads,
+        active_threads,
+    }
 }
 
 /// Good morning, afternoon or evening.
@@ -144,8 +194,8 @@ pub fn complete(repo: &Path, number: u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::issues::{Config, Tracker};
     use crate::issues::shared::RepoView;
+    use crate::issues::{Config, Tracker};
 
     #[test]
     fn the_greeting_follows_the_hour() {
@@ -160,7 +210,9 @@ mod tests {
         let mut tracker = Tracker::new(Config::new("PO".into()));
         let mut add = |title: &str, status: Status, priority: Priority, due: Option<Date>| {
             let number = tracker.create(title, 1);
-            tracker.update(number, 2, |issue| (issue.status, issue.priority, issue.due) = (status, priority, due));
+            tracker.update(number, 2, |issue| {
+                (issue.status, issue.priority, issue.due) = (status, priority, due)
+            });
         };
         add("later", Status::Todo, Priority::Urgent, Some(day.plus(3)));
         add("started", Status::InProgress, Priority::None, None);
@@ -169,7 +221,15 @@ mod tests {
         add("done", Status::Done, Priority::High, Some(day));
         add("undated", Status::Todo, Priority::Urgent, None);
         add("shelved", Status::Backlog, Priority::Urgent, None);
-        let overview = Overview { checkouts: Default::default(), repos: vec![RepoView { root: "/r/po".into(), name: "po".into(), tracker, problems: vec![] }] };
+        let overview = Overview {
+            checkouts: Default::default(),
+            repos: vec![RepoView {
+                root: "/r/po".into(),
+                name: "po".into(),
+                tracker,
+                problems: vec![],
+            }],
+        };
         let model = model(&overview, &Snapshot::default(), day);
         let titles: Vec<&str> = model.tasks.iter().map(|task| task.title.as_str()).collect();
         assert_eq!(titles, ["late", "due", "started", "undated"]);
@@ -178,20 +238,56 @@ mod tests {
         assert_eq!(model.week.len(), 7);
         assert_eq!(model.week[0].0, day.plus(-3));
         assert_eq!(model.week[3].1, 1, "the one due today is on its day");
-        assert_eq!(model.week.iter().map(|d| d.1).sum::<usize>(), 3, "every open issue due in the week is counted, done ones are not");
+        assert_eq!(
+            model.week.iter().map(|d| d.1).sum::<usize>(),
+            3,
+            "every open issue due in the week is counted, done ones are not"
+        );
     }
 
     #[test]
     fn threads_that_need_the_user_come_first_and_none_is_listed_twice() {
         use crate::model::sidebar::{Project, Thread, Waiting};
-        let thread = |id, mark| Thread { project: 1, id, label: format!("t{id}"), name: format!("t{id}"), mark, selected: false, controlled: false, ago: None, closing: false };
+        let thread = |id, mark| Thread {
+            project: 1,
+            id,
+            label: format!("t{id}"),
+            name: format!("t{id}"),
+            mark,
+            selected: false,
+            controlled: false,
+            ago: None,
+            closing: false,
+        };
         let snapshot = Snapshot {
-            waiting: vec![Waiting { thread: thread(3, Mark::Asking), project: "po".into() }],
-            projects: vec![Project { id: 1, name: "po".into(), active: true, collapsed: false, closable: false, threads: vec![thread(1, Mark::Idle), thread(2, Mark::Running), thread(3, Mark::Asking)], fold: None }],
+            waiting: vec![Waiting {
+                thread: thread(3, Mark::Asking),
+                project: "po".into(),
+            }],
+            projects: vec![Project {
+                id: 1,
+                name: "po".into(),
+                active: true,
+                collapsed: false,
+                closable: false,
+                threads: vec![
+                    thread(1, Mark::Idle),
+                    thread(2, Mark::Running),
+                    thread(3, Mark::Asking),
+                ],
+                fold: None,
+            }],
             ..Snapshot::default()
         };
-        let model = model(&Overview::default(), &snapshot, Date::from_ymd(2026, 11, 5).unwrap());
-        assert_eq!(model.threads.iter().map(|t| t.id).collect::<Vec<_>>(), [3, 2, 1]);
+        let model = model(
+            &Overview::default(),
+            &snapshot,
+            Date::from_ymd(2026, 11, 5).unwrap(),
+        );
+        assert_eq!(
+            model.threads.iter().map(|t| t.id).collect::<Vec<_>>(),
+            [3, 2, 1]
+        );
         assert_eq!(model.active_threads, 2);
     }
 }

@@ -1,4 +1,4 @@
-//! The diff screen's data: what [`crate::Reader`] publishes and what it sends back. No view code.
+//! The diff screen's data: what [`crate::reader::state::Reader`] publishes and what it sends back. No view code.
 #![allow(unused_imports)]
 use std::sync::{Arc, LazyLock};
 
@@ -17,7 +17,11 @@ pub enum Body {
     /// The file has no textual changes.
     NoChanges,
     /// The file's two versions, `path` naming the language.
-    Versions { path: String, old: Shared, new: Shared },
+    Versions {
+        path: String,
+        old: Shared,
+        new: Shared,
+    },
 }
 
 #[derive(Clone, PartialEq, Debug)]
@@ -34,11 +38,19 @@ pub struct Snapshot {
 
 impl Default for Snapshot {
     fn default() -> Self {
-        Self { title: String::new(), lead: vec![], trail: vec![], split: true, counts: (0, 0), body: Body::Loading }
+        Self {
+            title: String::new(),
+            lead: vec![],
+            trail: vec![],
+            split: true,
+            counts: (0, 0),
+            body: Body::Loading,
+        }
     }
 }
 
-pub(crate) static SNAPSHOT: LazyLock<watch::Sender<Snapshot>> = LazyLock::new(|| watch::Sender::new(Snapshot::default()));
+pub(crate) static SNAPSHOT: LazyLock<watch::Sender<Snapshot>> =
+    LazyLock::new(|| watch::Sender::new(Snapshot::default()));
 
 /// Shows `snapshot`; nothing is redrawn when it is what the screen already has.
 #[hotpath::measure]

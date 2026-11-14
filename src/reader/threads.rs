@@ -1,15 +1,45 @@
 //! Methods of [`Reader`], grouped by what they do.
 
-use crate::*;
+use crate::files::watch::*;
+use crate::reader::state::*;
+use crate::session::chat::*;
+use crate::session::project::*;
+use crate::session::thread::*;
+use std::collections::{HashMap, HashSet};
+use std::time::{Duration, Instant};
+
+use crate::agent::Client;
+use crate::agent::acp::{ConfigOption, Event};
+use crate::host::rt::{Context, Window};
+use crate::{config, model};
+use futures::StreamExt;
 
 /// The longest name a user can give a thread, in characters.
 const RENAME_MAX: usize = 120;
 
 impl Reader {
     /// The user's answer to a command Po asked about: remember it and start the agent, or leave it stopped.
-    pub(crate) fn answer_approval(&mut self, ix: usize, n: usize, yes: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(Msg::Agent(blocks)) = self.thread.messages.get_mut(ix) else { return };
-        let Some(Block::Approve { agent, new_agent, mcp, resume, answered }) = blocks.get_mut(n) else { return };
+    pub(crate) fn answer_approval(
+        &mut self,
+        ix: usize,
+        n: usize,
+        yes: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(Msg::Agent(blocks)) = self.thread.messages.get_mut(ix) else {
+            return;
+        };
+        let Some(Block::Approve {
+            agent,
+            new_agent,
+            mcp,
+            resume,
+            answered,
+        }) = blocks.get_mut(n)
+        else {
+            return;
+        };
         if answered.is_some() {
             return;
         }
@@ -36,7 +66,12 @@ impl Reader {
 
     /// Watches the workspace: refreshes the explorer when files come or go, and
     /// reloads the open file when it changes on disk.
-    pub(crate) fn watch(&mut self, prepared: Option<futures::channel::oneshot::Receiver<Option<Watch>>>, window: &Window, cx: &mut Context<Self>) {
+    pub(crate) fn watch(
+        &mut self,
+        prepared: Option<futures::channel::oneshot::Receiver<Option<Watch>>>,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
         use notify::Watcher;
         let root = self.project.root.clone();
         let handle = window.window_handle();
@@ -47,17 +82,23 @@ impl Reader {
                 Some(prepared) => prepared.await.ok().flatten(),
                 None => {
                     let target = root.clone();
-                    cx.background_executor().spawn(async move { start_watcher(&target) }).await
+                    cx.background_executor()
+                        .spawn(async move { start_watcher(&target) })
+                        .await
                 }
             };
             // Moved in so the watcher lives as long as this task.
-            let Some((mut watcher, mut rx)) = watch else { return };
+            let Some((mut watcher, mut rx)) = watch else {
+                return;
+            };
             // Read again only when the file changes: batches come often in a busy tree.
             let ignore_file = root.join(".gitignore");
             let mut gitignore = (ignore::gitignore::Gitignore::empty(), None);
             while let Some(first) = rx.next().await {
                 // Let a burst of events settle, then handle them together.
-                cx.background_executor().timer(Duration::from_millis(100)).await;
+                cx.background_executor()
+                    .timer(Duration::from_millis(100))
+                    .await;
                 let mut events = vec![first];
                 while let Ok(event) = rx.try_recv() {
                     events.push(event);
@@ -74,16 +115,25 @@ impl Reader {
                     let gitignore = &gitignore.0;
                     for event in events.iter().filter(|e| !e.kind.is_access()) {
                         for path in &event.paths {
-                            let Ok(rel) = path.strip_prefix(&root) else { continue };
-                            if rel.components().any(|c| ignored(&c.as_os_str().to_string_lossy()))
-                                || gitignore.matched_path_or_any_parents(rel, path.is_dir()).is_ignore()
+                            let Ok(rel) = path.strip_prefix(&root) else {
+                                continue;
+                            };
+                            if rel
+                                .components()
+                                .any(|c| ignored(&c.as_os_str().to_string_lossy()))
+                                || gitignore
+                                    .matched_path_or_any_parents(rel, path.is_dir())
+                                    .is_ignore()
                             {
                                 continue;
                             }
                             changed = true;
                             moved |= !matches!(
                                 event.kind,
-                                notify::EventKind::Modify(notify::event::ModifyKind::Data(_) | notify::event::ModifyKind::Metadata(_))
+                                notify::EventKind::Modify(
+                                    notify::event::ModifyKind::Data(_)
+                                        | notify::event::ModifyKind::Metadata(_)
+                                )
                             );
                             touched.insert(rel.to_string_lossy().replace('\\', "/"));
                             if path.is_dir() {
@@ -96,9 +146,14 @@ impl Reader {
                 if !changed {
                     continue;
                 }
-                let Ok(current) = this.read_with(cx, |reader, _| reader.project.current.clone()) else { break };
+                let Ok(current) = this.read_with(cx, |reader, _| reader.project.current.clone())
+                else {
+                    break;
+                };
                 let scan_root = root.clone();
-                let Ok(base) = this.read_with(cx, |reader, _| reader.project.base.clone()) else { break };
+                let Ok(base) = this.read_with(cx, |reader, _| reader.project.base.clone()) else {
+                    break;
+                };
                 let (files, seen, changes) = cx
                     .background_executor()
                     .spawn(async move {
@@ -107,8 +162,10 @@ impl Reader {
                             walk(&scan_root, &mut files);
                             files
                         });
-                        let seen = current.as_ref().and_then(|path| stamp(&scan_root.join(path)));
-                        (files, seen, diff::changes(&scan_root, &base))
+                        let seen = current
+                            .as_ref()
+                            .and_then(|path| stamp(&scan_root.join(path)));
+                        (files, seen, crate::vcs::diff::changes(&scan_root, &base))
                     })
                     .await;
                 let alive = handle.update(cx, |_, window, cx| {
@@ -116,13 +173,18 @@ impl Reader {
                         if let Some(files) = files {
                             reader.set_files(files, cx);
                         }
-                        let rediff = reader.project.picked.as_ref().is_some_and(|path| touched.contains(path));
+                        let rediff = reader
+                            .project
+                            .picked
+                            .as_ref()
+                            .is_some_and(|path| touched.contains(path));
                         reader.apply_changes(changes, false, rediff, cx);
                         if let (Some(path), Some(seen)) = (reader.project.current.clone(), seen)
-                            && reader.project.stamp != Some(seen) {
-                                log::info!("reloading {path}");
-                                reader.open(&path, window, cx);
-                            }
+                            && reader.project.stamp != Some(seen)
+                        {
+                            log::info!("reloading {path}");
+                            reader.open(&path, window, cx);
+                        }
                     })
                 });
                 if !matches!(alive, Ok(Ok(()))) {
@@ -137,7 +199,13 @@ impl Reader {
     /// agent's session list to resume from when `resume`. A thread changing agent keeps what is
     /// on screen, which is all the new agent has to go on.
     #[hotpath::measure(impl_type = "Reader")]
-    pub(crate) fn connect(&mut self, key: &str, resume: bool, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn connect(
+        &mut self,
+        key: &str,
+        resume: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.thread.generation += 1;
         self.thread.failed = false;
         self.thread.last_error = None;
@@ -162,34 +230,69 @@ impl Reader {
         // Listing sessions to resume is not a blank thread, even before one is picked.
         self.thread.blank &= !resume;
         self.thread.sessions = None;
-        let agent = self.agents.iter().find(|agent| agent.id == key).cloned().unwrap_or_else(|| config::Agent {
-            id: key.to_string(),
-            name: key.to_string(),
-            command: key.to_string(),
-            daemon: None,
-            vouched: false,
-            plugin: None,
-        });
+        let agent = self
+            .agents
+            .iter()
+            .find(|agent| agent.id == key)
+            .cloned()
+            .unwrap_or_else(|| config::Agent {
+                id: key.to_string(),
+                name: key.to_string(),
+                command: key.to_string(),
+                daemon: None,
+                vouched: false,
+                plugin: None,
+            });
         let new_agent = !config::trusted(&agent);
         // A dex daemon is not handed MCP servers.
-        let mcp = if agent.daemon.is_none() { config::unapproved_mcp(&plugin::effective_config()) } else { vec![] };
+        let mcp = if agent.daemon.is_none() {
+            config::unapproved_mcp(&crate::config::plugin::effective_config())
+        } else {
+            vec![]
+        };
         if new_agent || !mcp.is_empty() {
             // Nothing is started until the user has seen the commands and said yes.
             self.thread.status = "waiting for approval".into();
-            self.thread.messages.push(Msg::Agent(vec![Block::Approve { agent, new_agent, mcp, resume, answered: None }]));
+            self.thread.messages.push(Msg::Agent(vec![Block::Approve {
+                agent,
+                new_agent,
+                mcp,
+                resume,
+                answered: None,
+            }]));
             self.thread.relist(0);
             cx.notify();
             return;
         }
-        self.thread.status = if resume { "listing sessions…" } else { "starting…" }.into();
+        self.thread.status = if resume {
+            "listing sessions…"
+        } else {
+            "starting…"
+        }
+        .into();
         // The token the agent's MCP server gets is made once the child exists, so that it is
         // bound to the child's process: from then on it works only from that process and its
         // descendants (see `control`).
         let control = self.control.clone();
-        let registered = move |pid: Option<u32>| control.as_ref().map(|control| control.register(id, pid)).unwrap_or_default();
+        let registered = move |pid: Option<u32>| {
+            control
+                .as_ref()
+                .map(|control| control.register(id, pid))
+                .unwrap_or_default()
+        };
         // A thread being woken knows its session: the agent loads it without listing the rest.
-        let wanted = self.thread.restore.clone().filter(|_| resume && agent.daemon.is_none());
-        match Client::spawn(&agent, &self.project.root, resume, wanted.as_deref(), registered) {
+        let wanted = self
+            .thread
+            .restore
+            .clone()
+            .filter(|_| resume && agent.daemon.is_none());
+        match Client::spawn(
+            &agent,
+            &self.project.root,
+            resume,
+            wanted.as_deref(),
+            registered,
+        ) {
             Ok((client, mut events)) => {
                 self.thread.client = Some(client);
                 if wanted.is_some() {
@@ -198,7 +301,12 @@ impl Reader {
                     self.thread.picking = false;
                     self.thread.status = "loading session…".into();
                 }
-                self.thread.started_grant = Some(self.grants.get(&id).copied().unwrap_or_else(command::Grant::initial));
+                self.thread.started_grant = Some(
+                    self.grants
+                        .get(&id)
+                        .copied()
+                        .unwrap_or_else(crate::ipc::command::Grant::initial),
+                );
                 let handle = window.window_handle();
                 cx.spawn(async move |this, cx| {
                     // An agent that never answers the handshake would leave the thread on "starting…".
@@ -288,13 +396,19 @@ impl Reader {
 
     /// The agent a new thread would start with.
     pub(crate) fn chosen(&self) -> Option<&config::Agent> {
-        self.chosen_agent.as_ref().and_then(|key| self.agents.iter().find(|agent| agent.id == *key)).or(self.agents.first())
+        self.chosen_agent
+            .as_ref()
+            .and_then(|key| self.agents.iter().find(|agent| agent.id == *key))
+            .or(self.agents.first())
     }
 
     /// Sets a new session's settings to what was last chosen for its agent, in the order of
     /// [`Thread::ordered`]. A first message waits until they are taken.
     pub(crate) fn apply_choices(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.thread.applying = Some(Applying { carrying: true, ..Default::default() });
+        self.thread.applying = Some(Applying {
+            carrying: true,
+            ..Default::default()
+        });
         self.apply_next(window, cx);
     }
 
@@ -314,35 +428,60 @@ impl Reader {
     /// message goes.
     pub(crate) fn apply_next(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let thread = &mut self.thread;
-        let (Some(applying), Some(key), Some(client)) = (thread.applying.as_mut(), &thread.agent, &thread.client) else {
+        let (Some(applying), Some(key), Some(client)) =
+            (thread.applying.as_mut(), &thread.agent, &thread.client)
+        else {
             thread.applying = None;
             return self.send_pending(cx);
         };
         let chosen = self.choices.get(key);
-        let options: Vec<&ConfigOption> = thread.options.iter().filter(|option| !applying.settled.contains(&option.id)).collect();
+        let options: Vec<&ConfigOption> = thread
+            .options
+            .iter()
+            .filter(|option| !applying.settled.contains(&option.id))
+            .collect();
         for option in Thread::ordered(options) {
             applying.settled.insert(option.id.clone());
             // What the API asked for beats what was carried over; when this session was woken
             // only for the API's settings, carried choices don't come in at all.
             // Never a mode, though: see `thread.set_option`.
-            let asked = thread.overrides.get(&option.id).filter(|_| option.category != "mode");
-            let want = if applying.carrying { asked.or(chosen.and_then(|chosen| chosen.get(&option.id))) } else { asked };
+            let asked = thread
+                .overrides
+                .get(&option.id)
+                .filter(|_| option.category != "mode");
+            let want = if applying.carrying {
+                asked.or(chosen.and_then(|chosen| chosen.get(&option.id)))
+            } else {
+                asked
+            };
             let Some(value) = want.cloned() else { continue };
-            if value != option.current && option.choices.iter().any(|(choice, _)| *choice == value) && client.set_option(&option.id, &value) {
+            if value != option.current
+                && option.choices.iter().any(|(choice, _)| *choice == value)
+                && client.set_option(&option.id, &value)
+            {
                 applying.asked = Some(option.id.clone());
                 applying.asks += 1;
                 // An agent that never answers would hold the first message back for good.
-                let (id, generation, asked, ask, handle) =
-                    (thread.id, thread.generation, option.id.clone(), applying.asks, window.window_handle());
+                let (id, generation, asked, ask, handle) = (
+                    thread.id,
+                    thread.generation,
+                    option.id.clone(),
+                    applying.asks,
+                    window.window_handle(),
+                );
                 cx.spawn(async move |this, cx| {
-                    cx.background_executor().timer(Duration::from_secs(20)).await;
+                    cx.background_executor()
+                        .timer(Duration::from_secs(20))
+                        .await;
                     handle
                         .update(cx, |_, window, cx| {
                             this.update(cx, |reader, cx| {
                                 reader.with_thread(id, |reader, _| {
                                     let thread = &mut reader.thread;
                                     let waiting = thread.generation == generation
-                                        && thread.applying.as_ref().is_some_and(|applying| applying.asks == ask && applying.asked.is_some());
+                                        && thread.applying.as_ref().is_some_and(|applying| {
+                                            applying.asks == ask && applying.asked.is_some()
+                                        });
                                     if waiting {
                                         log::warn!("agent: no answer to the setting {asked}");
                                         thread.unanswered.insert(asked);
@@ -381,8 +520,17 @@ impl Reader {
 
     /// The agent answered a change of setting `id`. If it was the one being carried over, the
     /// next follows; true then, as the choice it carried over is already remembered.
-    pub(crate) fn took_setting(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        let carried = self.thread.applying.as_ref().is_some_and(|applying| applying.asked.as_deref() == Some(id));
+    pub(crate) fn took_setting(
+        &mut self,
+        id: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let carried = self
+            .thread
+            .applying
+            .as_ref()
+            .is_some_and(|applying| applying.asked.as_deref() == Some(id));
         if carried {
             self.apply_next(window, cx);
         }
@@ -414,18 +562,35 @@ impl Reader {
             return;
         }
         self.chosen_agent = Some(key.to_string());
-        if thread.switch.as_ref().is_some_and(|switch| switch.agent == key) {
+        if thread
+            .switch
+            .as_ref()
+            .is_some_and(|switch| switch.agent == key)
+        {
             return self.switch_back(window, cx);
         }
         log::info!("agent: thread switches to {key}");
-        let name = self.agents.iter().find(|agent| agent.id == key).map_or(key, |agent| agent.name.as_str());
-        thread.messages.push(Msg::Agent(vec![Block::Text(format!("*Switched to {name}.*"))]));
-        let earlier = handoff::write(&thread.said());
+        let name = self
+            .agents
+            .iter()
+            .find(|agent| agent.id == key)
+            .map_or(key, |agent| agent.name.as_str());
+        thread.messages.push(Msg::Agent(vec![Block::Text(format!(
+            "*Switched to {name}.*"
+        ))]));
+        let earlier = crate::agent::handoff::write(&thread.said());
         match &mut thread.switch {
             Some(switch) => switch.earlier = earlier,
             None => {
-                let (agent, session) = thread.resumes_from().map(|(agent, session)| (agent.to_string(), session.to_string())).expect("checked by can_switch_agent");
-                thread.switch = Some(Switch { agent, session, earlier });
+                let (agent, session) = thread
+                    .resumes_from()
+                    .map(|(agent, session)| (agent.to_string(), session.to_string()))
+                    .expect("checked by can_switch_agent");
+                thread.switch = Some(Switch {
+                    agent,
+                    session,
+                    earlier,
+                });
             }
         }
         // These were for the agent it leaves.
@@ -441,7 +606,9 @@ impl Reader {
     /// Gives up a change of agent the new agent has not heard of: the thread goes back to the
     /// session it left.
     pub(crate) fn switch_back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(switch) = self.thread.switch.take() else { return };
+        let Some(switch) = self.thread.switch.take() else {
+            return;
+        };
         log::info!("agent: thread goes back to {}", switch.agent);
         self.thread.drop_agent();
         self.chosen_agent = Some(switch.agent.clone());
@@ -468,7 +635,14 @@ impl Reader {
     /// Lists an agent's sessions in a new thread, to resume one: those of the agent the thread on
     /// screen is running, or of the chosen one if it has not started.
     pub(crate) fn resume_thread(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(key) = self.thread.agent.clone().or_else(|| self.chosen().map(|agent| agent.id.clone())) else { return };
+        let Some(key) = self
+            .thread
+            .agent
+            .clone()
+            .or_else(|| self.chosen().map(|agent| agent.id.clone()))
+        else {
+            return;
+        };
         log::info!("agent: resuming with {key}");
         self.add_thread();
         self.connect(&key, true, window, cx);
@@ -477,8 +651,19 @@ impl Reader {
     /// Starts the blank thread on screen with `out` as its first message: in the session its
     /// agent already has open, or in a worktree of its own if that was asked for. `later` is as
     /// for [`Self::send`].
-    pub(crate) fn start_thread(&mut self, out: Outgoing, later: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(key) = self.thread.agent.clone().or_else(|| self.chosen().map(|agent| agent.id.clone())) else {
+    pub(crate) fn start_thread(
+        &mut self,
+        out: Outgoing,
+        later: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(key) = self
+            .thread
+            .agent
+            .clone()
+            .or_else(|| self.chosen().map(|agent| agent.id.clone()))
+        else {
             self.thread.fail("No agents are configured.".into());
             cx.notify();
             return;
@@ -494,8 +679,12 @@ impl Reader {
         // Sending the draft "Work on this" wrote is what starts the issue.
         // It is kept until the send has gone through, so a start that fails and is tried again
         // still starts the issue.
-        let issue = self.issue_draft.as_ref().filter(|(tid, ..)| *tid == self.thread.id && matches!(out.origin, Origin::User)).map(|(_, root, number)| (root.clone(), *number));
-        if self.thread.isolate && worktree::in_repo(&self.project.root) {
+        let issue = self
+            .issue_draft
+            .as_ref()
+            .filter(|(tid, ..)| *tid == self.thread.id && matches!(out.origin, Origin::User))
+            .map(|(_, root, number)| (root.clone(), *number));
+        if self.thread.isolate && crate::vcs::worktree::in_repo(&self.project.root) {
             self.issue_for_worktree = issue;
             // The draft stays until the worktree exists, so a failure loses nothing.
             let blank = (self.project_id, self.thread.id);
@@ -529,12 +718,26 @@ impl Reader {
     /// Starts a child of the thread `id`: parked in its project, never shown, its grant
     /// Viewer, its first message waiting for the agent. The reply says where it got to: a
     /// thread with an agent that isn't approved says `approval` until the user has clicked.
-    pub(crate) fn create_thread(&mut self, id: u64, command: command::Command, window: &mut Window, cx: &mut Context<Self>) -> command::Reply {
-        let command::Command::ThreadCreate { prompt, agent, options, notify } = command else {
+    pub(crate) fn create_thread(
+        &mut self,
+        id: u64,
+        command: crate::ipc::command::Command,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> crate::ipc::command::Reply {
+        let crate::ipc::command::Command::ThreadCreate {
+            prompt,
+            agent,
+            options,
+            notify,
+        } = command
+        else {
             return Err("not a thread.create".into());
         };
         let key = self.child_agent(id, agent)?;
-        let Some(project) = self.project_of(id) else { return Err("that thread is gone".into()) };
+        let Some(project) = self.project_of(id) else {
+            return Err("that thread is gone".into());
+        };
         self.start_child(id, project, key, prompt, options, notify, window, cx)
     }
 
@@ -543,13 +746,24 @@ impl Reader {
     pub(crate) fn child_agent(&self, id: u64, agent: Option<String>) -> Result<String, String> {
         let key = match agent {
             Some(key) => key,
-            None => self.threads_all().find(|thread| thread.id == id).and_then(|thread| thread.agent.clone()).unwrap_or_default(),
+            None => self
+                .threads_all()
+                .find(|thread| thread.id == id)
+                .and_then(|thread| thread.agent.clone())
+                .unwrap_or_default(),
         };
         if self.agents.iter().all(|known| known.id != key) {
             return Err(format!("no agent `{key}`; agent.list has the ids"));
         }
-        if self.threads_all().filter(|thread| thread.parent == Some(id)).count() >= MAX_CHILDREN {
-            return Err(format!("a thread starts at most {MAX_CHILDREN} others; close one first"));
+        if self
+            .threads_all()
+            .filter(|thread| thread.parent == Some(id))
+            .count()
+            >= MAX_CHILDREN
+        {
+            return Err(format!(
+                "a thread starts at most {MAX_CHILDREN} others; close one first"
+            ));
         }
         Ok(key)
     }
@@ -557,15 +771,41 @@ impl Reader {
     /// Starts a thread of parent `id`'s in project `project`, parked, with `prompt` as its
     /// first message.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn start_child(&mut self, id: u64, project: u64, key: String, prompt: String, options: Vec<(String, String)>, notify: Option<String>, window: &mut Window, cx: &mut Context<Self>) -> command::Reply {
+    pub(crate) fn start_child(
+        &mut self,
+        id: u64,
+        project: u64,
+        key: String,
+        prompt: String,
+        options: Vec<(String, String)>,
+        notify: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> crate::ipc::command::Reply {
         // The parent may have gone, or started others, since the request was made: a worktree
         // takes a while, and this is where it comes to a thread.
-        let Some(title) = self.title_of(id) else { return Err("that thread is gone".into()) };
-        if self.threads_all().filter(|thread| thread.parent == Some(id)).count() >= MAX_CHILDREN {
-            return Err(format!("a thread starts at most {MAX_CHILDREN} others; close one first"));
+        let Some(title) = self.title_of(id) else {
+            return Err("that thread is gone".into());
+        };
+        if self
+            .threads_all()
+            .filter(|thread| thread.parent == Some(id))
+            .count()
+            >= MAX_CHILDREN
+        {
+            return Err(format!(
+                "a thread starts at most {MAX_CHILDREN} others; close one first"
+            ));
         }
-        let level = notify.as_deref().and_then(Notify::from_name).unwrap_or_default();
-        let out = Outgoing { text: prompt, origin: Origin::Thread { id, title }, images: vec![] };
+        let level = notify
+            .as_deref()
+            .and_then(Notify::from_name)
+            .unwrap_or_default();
+        let out = Outgoing {
+            text: prompt,
+            origin: Origin::Thread { id, title },
+            images: vec![],
+        };
         let mut fresh = self.blank_thread();
         fresh.blank = false;
         fresh.parent = Some(id);
@@ -595,17 +835,23 @@ impl Reader {
                     reader.thread.pending = Some(out);
                 }
             });
-            crate::state::state(&reader.thread.facts()).name().to_string()
+            crate::session::state::state(&reader.thread.facts())
+                .name()
+                .to_string()
         });
         self.request_save(cx);
         cx.notify();
-        Ok(serde_json::json!({ "thread": fresh_id, "state": state.unwrap_or_else(|| "starting".into()) }))
+        Ok(
+            serde_json::json!({ "thread": fresh_id, "state": state.unwrap_or_else(|| "starting".into()) }),
+        )
     }
 
     /// Puts a first message back in the queue after the agent failed before it could be sent,
     /// still labelled by where it came from.
     pub(crate) fn return_pending(&mut self) {
-        let Some(out) = self.thread.pending.take() else { return };
+        let Some(out) = self.thread.pending.take() else {
+            return;
+        };
         let prompt = out.shown();
         let shown = matches!(self.thread.messages.as_slice(), [.., Msg::User(text, _), Msg::Agent(blocks)] if *text == prompt && blocks.is_empty());
         if shown {
@@ -635,11 +881,17 @@ impl Reader {
 
     /// Runs `work` with thread `id` as [`Self::thread`] (in whichever project it belongs to), and
     /// whether it is the one on screen. `None` if there is no such thread.
-    pub(crate) fn with_thread<R>(&mut self, id: u64, work: impl FnOnce(&mut Self, bool) -> R) -> Option<R> {
+    pub(crate) fn with_thread<R>(
+        &mut self,
+        id: u64,
+        work: impl FnOnce(&mut Self, bool) -> R,
+    ) -> Option<R> {
         if self.thread.id == id || self.parked.iter().any(|thread| thread.id == id) {
             return self.with_thread_here(id, work);
         }
-        let at = self.slots.iter().position(|slot| slot.thread.id == id || slot.parked.iter().any(|thread| thread.id == id))?;
+        let at = self.slots.iter().position(|slot| {
+            slot.thread.id == id || slot.parked.iter().any(|thread| thread.id == id)
+        })?;
         self.swap_slot(at);
         let out = self.with_thread_here(id, |reader, _| work(reader, false));
         self.swap_slot(at);
@@ -647,7 +899,11 @@ impl Reader {
     }
 
     /// [`Self::with_thread`] for a thread of the project on screen.
-    pub(crate) fn with_thread_here<R>(&mut self, id: u64, work: impl FnOnce(&mut Self, bool) -> R) -> Option<R> {
+    pub(crate) fn with_thread_here<R>(
+        &mut self,
+        id: u64,
+        work: impl FnOnce(&mut Self, bool) -> R,
+    ) -> Option<R> {
         if self.thread.id == id {
             return Some(work(self, true));
         }
@@ -683,7 +939,10 @@ impl Reader {
         if !self.thread.asleep() {
             return;
         }
-        let (Some(key), Some(session)) = (self.thread.agent.clone(), self.thread.session.clone()) else { return };
+        let (Some(key), Some(session)) = (self.thread.agent.clone(), self.thread.session.clone())
+        else {
+            return;
+        };
         // A session that has been told nothing may not be there to load; the new agent starts
         // another, with the conversation still to pass on.
         if self.thread.switch.is_some() {
@@ -704,7 +963,11 @@ impl Reader {
     pub(crate) fn start_blank(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.thread.blank
             && self.thread.client.is_none()
-            && let Some(key) = self.thread.agent.clone().or_else(|| self.chosen().map(|agent| agent.id.clone()))
+            && let Some(key) = self
+                .thread
+                .agent
+                .clone()
+                .or_else(|| self.chosen().map(|agent| agent.id.clone()))
         {
             self.connect(&key, false, window, cx);
         }
@@ -712,15 +975,23 @@ impl Reader {
 
     /// The threads not on screen, in every project.
     pub(crate) fn background_threads(&mut self) -> impl Iterator<Item = &mut Thread> {
-        self.parked.iter_mut().chain(self.slots.iter_mut().flat_map(|slot| std::iter::once(&mut slot.thread).chain(slot.parked.iter_mut())))
+        self.parked.iter_mut().chain(
+            self.slots
+                .iter_mut()
+                .flat_map(|slot| std::iter::once(&mut slot.thread).chain(slot.parked.iter_mut())),
+        )
     }
 
     /// A thread with no agent running, to be resumed from `saved`'s session when it is shown.
-    pub(crate) fn sleeping_thread(&mut self, saved: workspace::ThreadState) -> Thread {
+    pub(crate) fn sleeping_thread(
+        &mut self,
+        saved: crate::session::workspace::ThreadState,
+    ) -> Thread {
         let mut thread = self.blank_thread();
         thread.agent = Some(saved.agent);
         thread.session = Some(saved.session);
-        thread.renamed = Some(saved.title.clone()).filter(|title| saved.renamed && !title.is_empty());
+        thread.renamed =
+            Some(saved.title.clone()).filter(|title| saved.renamed && !title.is_empty());
         thread.saved_title = Some(saved.title).filter(|title| !title.is_empty());
         thread.blank = false;
         thread.active_at = saved.active_at;
@@ -733,7 +1004,11 @@ impl Reader {
     /// screen is the one `po` was started on; the others wait in the background and the
     /// threads sleep until shown. True if the project on screen got its threads back.
     #[hotpath::measure(impl_type = "Reader")]
-    pub(crate) fn restore(&mut self, saved: workspace::Workspace, _cx: &mut Context<Self>) -> bool {
+    pub(crate) fn restore(
+        &mut self,
+        saved: crate::session::workspace::Workspace,
+        _cx: &mut Context<Self>,
+    ) -> bool {
         let mut resumed = false;
         let mut seen = HashSet::new();
         // The projects as they were saved, which the ids they get here may not be in the order of.
@@ -744,25 +1019,41 @@ impl Reader {
         // The Settings page's choice wins over the layout the last window saved.
         self.swapped = config::viewer_left(&config::load()).unwrap_or(saved.swapped);
         self.agent_open = saved.agent_open;
-        self.widths = Widths { left: saved.left_width, right: saved.right_width, explorer: saved.explorer_width };
+        self.widths = Widths {
+            left: saved.left_width,
+            right: saved.right_width,
+            explorer: saved.explorer_width,
+        };
         self.chosen_agent = saved.agent.clone().or(self.chosen_agent.take());
         for state in saved.projects {
             let worktree = match state.worktree {
                 Some(spec) => {
                     let branch = spec.branch.clone();
-                    match worktree::Worktree::adopt(spec) {
+                    match crate::vcs::worktree::Worktree::adopt(spec) {
                         Some(wt) => Some(wt),
                         None => {
-                            log::warn!("worktree {} could not be restored; branch {branch} is left in its repository", state.root.display());
-                            self.worktree_status = Some(format!("A worktree could not be restored; its branch {branch} is left in the repository"));
+                            log::warn!(
+                                "worktree {} could not be restored; branch {branch} is left in its repository",
+                                state.root.display()
+                            );
+                            self.worktree_status = Some(format!(
+                                "A worktree could not be restored; its branch {branch} is left in the repository"
+                            ));
                             continue;
                         }
                     }
                 }
                 None => None,
             };
-            let start = worktree.is_none() && self.project.pr.is_none() && self.project.worktree.is_none() && state.root == self.project.root;
-            if !start && (!state.root.is_dir() || !seen.insert(state.root.clone()) || state.root == self.project.root) {
+            let start = worktree.is_none()
+                && self.project.pr.is_none()
+                && self.project.worktree.is_none()
+                && state.root == self.project.root;
+            if !start
+                && (!state.root.is_dir()
+                    || !seen.insert(state.root.clone())
+                    || state.root == self.project.root)
+            {
                 continue;
             }
             // Files saved before the time was kept list the threads oldest first.
@@ -780,7 +1071,8 @@ impl Reader {
                     thread
                 })
                 .collect();
-            let shown = (!threads.is_empty()).then(|| threads.remove(state.active.min(threads.len() - 1)));
+            let shown =
+                (!threads.is_empty()).then(|| threads.remove(state.active.min(threads.len() - 1)));
             if start {
                 order.push(self.project_id);
                 self.project.closed = state.closed;
@@ -804,8 +1096,18 @@ impl Reader {
             let id = self.next_project;
             self.next_project += 1;
             order.push(id);
-            let mode = if state.review { Mode::Diff } else { Mode::Source };
-            self.slots.push(Slot { id, mode, project, thread, parked: threads });
+            let mode = if state.review {
+                Mode::Diff
+            } else {
+                Mode::Source
+            };
+            self.slots.push(Slot {
+                id,
+                mode,
+                project,
+                thread,
+                parked: threads,
+            });
         }
         self.project_order = order;
         self.relink_children(linked);
@@ -815,8 +1117,15 @@ impl Reader {
     /// Links each `(child, parent session)` to the thread of this window that has that session.
     /// A parent that is not here leaves its child an ordinary thread.
     pub(crate) fn relink_children(&mut self, linked: Vec<(u64, String)>) {
-        let parents: HashMap<String, u64> = self.threads_all().filter_map(|thread| Some((thread.session.clone()?, thread.id))).collect();
-        let mut wanted: HashMap<u64, u64> = linked.into_iter().filter_map(|(child, session)| Some((child, *parents.get(&session)?))).filter(|(child, parent)| child != parent).collect();
+        let parents: HashMap<String, u64> = self
+            .threads_all()
+            .filter_map(|thread| Some((thread.session.clone()?, thread.id)))
+            .collect();
+        let mut wanted: HashMap<u64, u64> = linked
+            .into_iter()
+            .filter_map(|(child, session)| Some((child, *parents.get(&session)?)))
+            .filter(|(child, parent)| child != parent)
+            .collect();
         // The file can be written by an agent, so it is not trusted to keep the plan's shape:
         // depth stays at 1 (a child of a child is left ordinary, which also rules out cycles),
         // and a parent keeps at most MAX_CHILDREN.
@@ -835,7 +1144,8 @@ impl Reader {
         if wanted.is_empty() {
             return;
         }
-        let link = |thread: &mut Thread| thread.parent = wanted.get(&thread.id).copied().or(thread.parent);
+        let link =
+            |thread: &mut Thread| thread.parent = wanted.get(&thread.id).copied().or(thread.parent);
         link(&mut self.thread);
         self.background_threads().for_each(link);
     }
@@ -857,7 +1167,15 @@ impl Reader {
             shown: slot.thread.id,
             threads: std::iter::once(&slot.thread).chain(&slot.parked).collect(),
         }));
-        views.sort_by_key(|view| (self.project_order.iter().position(|id| *id == view.id).unwrap_or(usize::MAX), view.id));
+        views.sort_by_key(|view| {
+            (
+                self.project_order
+                    .iter()
+                    .position(|id| *id == view.id)
+                    .unwrap_or(usize::MAX),
+                view.id,
+            )
+        });
         // The thread on screen is first among them; lists keep the order they were made in.
         for view in &mut views {
             view.threads.sort_by_key(|thread| thread.id);
@@ -867,7 +1185,7 @@ impl Reader {
 
     /// What is worth keeping of the projects and threads: those with an agent session.
     #[hotpath::measure(impl_type = "Reader")]
-    pub(crate) fn workspace(&self) -> workspace::Workspace {
+    pub(crate) fn workspace(&self) -> crate::session::workspace::Workspace {
         // A PR is a throwaway checkout; it is not brought back.
         let all: Vec<&Thread> = self.threads_all().collect();
         let projects = self
@@ -875,28 +1193,62 @@ impl Reader {
             .into_iter()
             .filter(|view| view.project.pr.is_none())
             .map(|view| {
-                let mut threads: Vec<&Thread> = view.threads.into_iter().filter(|t| !t.blank && t.resumes_from().is_some()).collect();
+                let mut threads: Vec<&Thread> = view
+                    .threads
+                    .into_iter()
+                    .filter(|t| !t.blank && t.resumes_from().is_some())
+                    .collect();
                 threads.sort_by_key(|t| t.id);
-                let open: HashSet<&str> = all.iter().filter_map(|t| t.resumes_from().map(|(_, session)| session)).collect();
-                workspace::ProjectState {
-                    closed: view.project.closed.iter().filter(|c| !open.contains(c.session.as_str())).cloned().collect(),
+                let open: HashSet<&str> = all
+                    .iter()
+                    .filter_map(|t| t.resumes_from().map(|(_, session)| session))
+                    .collect();
+                crate::session::workspace::ProjectState {
+                    closed: view
+                        .project
+                        .closed
+                        .iter()
+                        .filter(|c| !open.contains(c.session.as_str()))
+                        .cloned()
+                        .collect(),
                     root: view.project.root.clone(),
-                    review: AgentChange::saved(self.agent_modes.get(&view.id), view.mode) == Mode::Diff,
+                    review: AgentChange::saved(self.agent_modes.get(&view.id), view.mode)
+                        == Mode::Diff,
                     worktree: view.project.worktree.as_ref().map(|wt| wt.spec.clone()),
                     active: threads.iter().position(|t| t.id == view.shown).unwrap_or(0),
                     threads: threads
                         .into_iter()
                         .filter_map(|t| {
-                            let parent_session = t.parent.and_then(|parent| all.iter().find(|p| p.id == parent)).and_then(|p| p.resumes_from()).map(|(_, session)| session.to_string());
+                            let parent_session = t
+                                .parent
+                                .and_then(|parent| all.iter().find(|p| p.id == parent))
+                                .and_then(|p| p.resumes_from())
+                                .map(|(_, session)| session.to_string());
                             let (agent, session) = t.resumes_from()?;
-                            Some(workspace::ThreadState { agent: agent.to_string(), session: session.to_string(), title: t.title(), active_at: t.active_at, parent_session, renamed: t.renamed.is_some() })
+                            Some(crate::session::workspace::ThreadState {
+                                agent: agent.to_string(),
+                                session: session.to_string(),
+                                title: t.title(),
+                                active_at: t.active_at,
+                                parent_session,
+                                renamed: t.renamed.is_some(),
+                            })
                         })
                         .collect(),
                 }
             })
             .collect();
         let panes = AgentChange::saved(self.agent_panes.as_ref(), self.panes());
-        workspace::Workspace { projects, viewer_open: panes.viewer, agent_open: panes.agent, swapped: self.swapped, agent: self.chosen_agent.clone(), explorer_width: self.widths.explorer, left_width: self.widths.left, right_width: self.widths.right }
+        crate::session::workspace::Workspace {
+            projects,
+            viewer_open: panes.viewer,
+            agent_open: panes.agent,
+            swapped: self.swapped,
+            agent: self.chosen_agent.clone(),
+            explorer_width: self.widths.explorer,
+            left_width: self.widths.left,
+            right_width: self.widths.right,
+        }
     }
 
     /// Saves the workspace once the current change has settled, so that a thread that is
@@ -923,14 +1275,17 @@ impl Reader {
     pub(crate) fn sleep_idle(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(after) = self.idle_after else { return };
         let mut slept: Vec<u64> = vec![];
-        for thread in self.background_threads().filter(|t| t.restful() && t.touched.elapsed() > after) {
+        for thread in self
+            .background_threads()
+            .filter(|t| t.restful() && t.touched.elapsed() > after)
+        {
             log::info!("agent: stopping idle thread {}", thread.id);
             thread.sleep();
             slept.push(thread.id);
         }
         for id in slept {
             // The parent of a sleeping child hears, so it can wait or wake it.
-            self.changed(id, crate::state::ThreadState::Asleep, window, cx);
+            self.changed(id, crate::session::state::ThreadState::Asleep, window, cx);
             cx.notify();
         }
     }
@@ -938,19 +1293,28 @@ impl Reader {
     /// Stops the longest idle agents in the background while more than `max_live` run.
     pub(crate) fn enforce_cap(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let mut live = usize::from(self.thread.client.is_some());
-        live += self.background_threads().filter(|t| t.client.is_some()).count();
-        let Some(excess) = live.checked_sub(self.max_live).filter(|n| *n > 0) else { return };
-        let mut idle: Vec<&mut Thread> = self.background_threads().filter(|t| t.restful()).collect();
+        live += self
+            .background_threads()
+            .filter(|t| t.client.is_some())
+            .count();
+        let Some(excess) = live.checked_sub(self.max_live).filter(|n| *n > 0) else {
+            return;
+        };
+        let mut idle: Vec<&mut Thread> =
+            self.background_threads().filter(|t| t.restful()).collect();
         // Blank threads lose nothing by stopping, so they go first.
         idle.sort_by_key(|t| (!t.blank, t.touched));
         let mut slept = vec![];
         for thread in idle.into_iter().take(excess) {
-            log::info!("agent: stopping thread {} to stay under the limit", thread.id);
+            log::info!(
+                "agent: stopping thread {} to stay under the limit",
+                thread.id
+            );
             thread.sleep();
             slept.push(thread.id);
         }
         for id in slept {
-            self.changed(id, crate::state::ThreadState::Asleep, window, cx);
+            self.changed(id, crate::session::state::ThreadState::Asleep, window, cx);
         }
     }
 
@@ -958,16 +1322,26 @@ impl Reader {
     pub(crate) fn alert(&self, window: &Window, visible: bool, what: &str) {
         if self.notifications && !(visible && window.is_window_active()) {
             let (project, thread) = (self.project_id, self.thread.id);
-            alert::send(&format!("{} · {}", self.project.name(), self.thread.title()), what, move |token| {
-                // In this order: raising the window is what wakes it to run the command.
-                model::bus::send(model::bus::Cmd::OpenThread(project, thread));
-                crate::app::raise(token);
-            });
+            crate::system::alert::send(
+                &format!("{} · {}", self.project.name(), self.thread.title()),
+                what,
+                move |token| {
+                    // In this order: raising the window is what wakes it to run the command.
+                    model::bus::send(model::bus::Cmd::OpenThread(project, thread));
+                    crate::host::app::raise(token);
+                },
+            );
         }
     }
 
     /// Brings up thread `tid` of project `pid`, whichever is on screen.
-    pub(crate) fn open_thread(&mut self, pid: u64, tid: u64, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open_thread(
+        &mut self,
+        pid: u64,
+        tid: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         // The issues page stands in for the conversation, so a thread picked from the sidebar closes it.
         self.hide_issues(window, cx);
         if pid == self.project_id {
@@ -978,18 +1352,33 @@ impl Reader {
     }
 
     /// Ends thread `tid` of project `pid`, whichever is on screen.
-    pub(crate) fn close_any_thread(&mut self, pid: u64, tid: u64, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn close_any_thread(
+        &mut self,
+        pid: u64,
+        tid: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if pid == self.project_id {
             return self.close_thread(tid, window, cx);
         }
-        let before = self.threads_all().find(|thread| thread.id == tid).map(|thread| crate::state::state(&thread.facts()));
-        if before.is_some() && before != Some(crate::state::ThreadState::Closed) {
-            self.changed(tid, crate::state::ThreadState::Closed, window, cx);
+        let before = self
+            .threads_all()
+            .find(|thread| thread.id == tid)
+            .map(|thread| crate::session::state::state(&thread.facts()));
+        if before.is_some() && before != Some(crate::session::state::ThreadState::Closed) {
+            self.changed(tid, crate::session::state::ThreadState::Closed, window, cx);
         }
         self.remember_closed(pid, tid);
-        let last = self.slots.iter().find(|slot| slot.id == pid).is_some_and(|slot| slot.thread.id == tid && slot.parked.is_empty());
+        let last = self
+            .slots
+            .iter()
+            .find(|slot| slot.id == pid)
+            .is_some_and(|slot| slot.thread.id == tid && slot.parked.is_empty());
         let blank = last.then(|| self.blank_thread());
-        let Some(slot) = self.slots.iter_mut().find(|slot| slot.id == pid) else { return };
+        let Some(slot) = self.slots.iter_mut().find(|slot| slot.id == pid) else {
+            return;
+        };
         if let Some(at) = slot.parked.iter().position(|thread| thread.id == tid) {
             Thread::retire(slot.parked.remove(at));
         } else if slot.thread.id == tid
@@ -1003,7 +1392,13 @@ impl Reader {
 
     /// Notes thread `tid` in project `pid` as closed there, for the session picker to offer back.
     fn remember_closed(&mut self, pid: u64, tid: u64) {
-        let Some(closed) = self.threads_all().find(|thread| thread.id == tid).and_then(|thread| thread.closed_state()) else { return };
+        let Some(closed) = self
+            .threads_all()
+            .find(|thread| thread.id == tid)
+            .and_then(|thread| thread.closed_state())
+        else {
+            return;
+        };
         if pid == self.project_id {
             self.project.remember(closed);
         } else if let Some(slot) = self.slots.iter_mut().find(|slot| slot.id == pid) {
@@ -1018,7 +1413,11 @@ impl Reader {
         let mut queue = vec![tid];
         while let Some(parent) = queue.pop() {
             for view in self.views() {
-                for thread in view.threads.iter().filter(|thread| thread.parent == Some(parent)) {
+                for thread in view
+                    .threads
+                    .iter()
+                    .filter(|thread| thread.parent == Some(parent))
+                {
                     if !found.iter().any(|(_, known)| *known == thread.id) && thread.id != tid {
                         found.push((view.id, thread.id));
                         queue.push(thread.id);
@@ -1033,12 +1432,22 @@ impl Reader {
     /// Whether closing `tid`, with the threads it started, would lose work.
     pub(crate) fn close_loses_work(&self, tid: u64) -> bool {
         let children = self.children_of(tid);
-        self.threads_all().filter(|thread| thread.id == tid || children.iter().any(|(_, child)| *child == thread.id)).any(|thread| thread.at_risk())
+        self.threads_all()
+            .filter(|thread| {
+                thread.id == tid || children.iter().any(|(_, child)| *child == thread.id)
+            })
+            .any(|thread| thread.at_risk())
     }
 
     /// The user pressed close on a thread. It goes with the threads it started, which have no
     /// parent left to report to. The sidebar has already asked the user to confirm.
-    pub(crate) fn close_asked(&mut self, pid: u64, tid: u64, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn close_asked(
+        &mut self,
+        pid: u64,
+        tid: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         for (child_project, child) in self.children_of(tid) {
             self.close_any_thread(child_project, child, window, cx);
         }
@@ -1052,9 +1461,18 @@ impl Reader {
         let name: String = name.chars().take(RENAME_MAX).collect();
         let name = Some(name).filter(|name| !name.is_empty());
         let thread = if pid == self.project_id {
-            std::iter::once(&mut self.thread).chain(self.parked.iter_mut()).find(|t| t.id == tid)
+            std::iter::once(&mut self.thread)
+                .chain(self.parked.iter_mut())
+                .find(|t| t.id == tid)
         } else {
-            self.slots.iter_mut().find(|slot| slot.id == pid).and_then(|slot| std::iter::once(&mut slot.thread).chain(slot.parked.iter_mut()).find(|t| t.id == tid))
+            self.slots
+                .iter_mut()
+                .find(|slot| slot.id == pid)
+                .and_then(|slot| {
+                    std::iter::once(&mut slot.thread)
+                        .chain(slot.parked.iter_mut())
+                        .find(|t| t.id == tid)
+                })
         };
         let Some(thread) = thread else { return };
         if thread.renamed == name {
@@ -1066,7 +1484,12 @@ impl Reader {
     }
 
     /// Opens a blank thread in project `pid`.
-    pub(crate) fn start_thread_in(&mut self, pid: u64, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn start_thread_in(
+        &mut self,
+        pid: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if pid != self.project_id {
             self.show_project(pid, window, cx);
         }
@@ -1077,9 +1500,12 @@ impl Reader {
     pub(crate) fn close_thread(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
         // Whoever waited on it hears, as does its parent: while it is still here to be looked
         // up, since they find its parent by it.
-        let before = self.threads_all().find(|thread| thread.id == id).map(|thread| crate::state::state(&thread.facts()));
-        if before.is_some() && before != Some(crate::state::ThreadState::Closed) {
-            self.changed(id, crate::state::ThreadState::Closed, window, cx);
+        let before = self
+            .threads_all()
+            .find(|thread| thread.id == id)
+            .map(|thread| crate::session::state::state(&thread.facts()));
+        if before.is_some() && before != Some(crate::session::state::ThreadState::Closed) {
+            self.changed(id, crate::session::state::ThreadState::Closed, window, cx);
         }
         self.remember_closed(self.project_id, id);
         if let Some(at) = self.parked.iter().position(|thread| thread.id == id) {
@@ -1101,14 +1527,23 @@ impl Reader {
     pub(crate) fn resume_session(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
         // A session already open in a thread is shown rather than opened a second time, and the
         // listing it was picked from goes away.
-        let open = self
-            .views()
-            .iter()
-            .find_map(|view| view.threads.iter().find(|t| t.session.as_deref() == Some(id) || t.resumes_from().is_some_and(|(_, session)| session == id)).map(|t| (view.id, t.id)));
+        let open = self.views().iter().find_map(|view| {
+            view.threads
+                .iter()
+                .find(|t| {
+                    t.session.as_deref() == Some(id)
+                        || t.resumes_from().is_some_and(|(_, session)| session == id)
+                })
+                .map(|t| (view.id, t.id))
+        });
         if let Some((pid, tid)) = open {
             let listing = (self.project_id, self.thread.id);
             self.open_thread(pid, tid, window, cx);
-            if self.views().iter().any(|v| v.id == listing.0 && v.threads.iter().any(|t| t.id == listing.1)) {
+            if self
+                .views()
+                .iter()
+                .any(|v| v.id == listing.0 && v.threads.iter().any(|t| t.id == listing.1))
+            {
                 self.close_any_thread(listing.0, listing.1, window, cx);
             }
             return;
@@ -1122,11 +1557,19 @@ impl Reader {
             .and_then(|sessions| sessions.iter().find(|session| session.id == id))
             .map(|session| session.title.clone())
             .filter(|title| !title.is_empty())
-            .or_else(|| self.project.closed.iter().find(|closed| closed.session == id).and_then(|closed| (!closed.title.is_empty()).then(|| closed.title.clone())));
+            .or_else(|| {
+                self.project
+                    .closed
+                    .iter()
+                    .find(|closed| closed.session == id)
+                    .and_then(|closed| (!closed.title.is_empty()).then(|| closed.title.clone()))
+            });
         if let Some(name) = name {
             self.thread.saved_title = Some(name);
         }
-        let Some(client) = &self.thread.client else { return };
+        let Some(client) = &self.thread.client else {
+            return;
+        };
         if self.thread.loading || !client.load(id) {
             return;
         }
@@ -1136,16 +1579,29 @@ impl Reader {
         cx.notify();
     }
 
-
     /// `visible`: this thread is the one on screen, so its edits may move the viewer.
     #[hotpath::measure(impl_type = "Reader")]
-    pub(crate) fn on_event(&mut self, event: Event, visible: bool, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn on_event(
+        &mut self,
+        event: Event,
+        visible: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         // Most events change the last message; a tool call update may change an earlier one.
         let mut changed = self.thread.messages.len().saturating_sub(1);
         self.thread.touched = Instant::now();
         // Only the agent's work counts as activity, not a session opening or its settings, and
         // not a resumed session replaying its history.
-        if !self.thread.loading && matches!(event, Event::Update(_) | Event::Permission { .. } | Event::Stopped(_) | Event::Accepted { .. }) {
+        if !self.thread.loading
+            && matches!(
+                event,
+                Event::Update(_)
+                    | Event::Permission { .. }
+                    | Event::Stopped(_)
+                    | Event::Accepted { .. }
+            )
+        {
             self.thread.active_at = now_ms();
         }
         match event {
@@ -1162,7 +1618,11 @@ impl Reader {
                     }
                 },
                 None => {
-                    self.thread.status = if sessions.is_empty() { "no sessions".into() } else { "pick a session".into() };
+                    self.thread.status = if sessions.is_empty() {
+                        "no sessions".into()
+                    } else {
+                        "pick a session".into()
+                    };
                     self.thread.sessions = Some(sessions);
                 }
             },
@@ -1174,8 +1634,12 @@ impl Reader {
                     && !self.thread.api_options.contains(&id)
                     && let Some(key) = self.thread.agent.clone()
                 {
-                    self.choices.entry(key.clone()).or_default().insert(id.clone(), value.clone());
-                    cx.background_spawn(async move { config::save_choice(&key, &id, &value) }).detach();
+                    self.choices
+                        .entry(key.clone())
+                        .or_default()
+                        .insert(id.clone(), value.clone());
+                    cx.background_spawn(async move { config::save_choice(&key, &id, &value) })
+                        .detach();
                 }
             }
             Event::Refused { id, text } => {
@@ -1188,7 +1652,11 @@ impl Reader {
                 self.thread.picking = false;
                 log::info!("agent: {agent} ready");
                 self.thread.status = "ready".into();
-                self.thread.session = self.thread.client.as_ref().and_then(|client| client.session());
+                self.thread.session = self
+                    .thread
+                    .client
+                    .as_ref()
+                    .and_then(|client| client.session());
                 self.request_save(cx);
                 if fresh {
                     self.apply_choices(window, cx);
@@ -1203,13 +1671,22 @@ impl Reader {
                 }
             }
             Event::Update(update) => {
-                if let Some(ix) = crate::record(&mut self.thread, &update) {
+                if let Some(ix) = crate::session::thread::record(&mut self.thread, &update) {
                     changed = changed.min(ix);
                 }
             }
-            Event::Permission { request, title, options } => {
+            Event::Permission {
+                request,
+                title,
+                options,
+            } => {
                 self.alert(window, visible, &format!("Needs your approval: {title}"));
-                self.thread.blocks().push(Block::Permission(Ask { request, title, options, answered: None }));
+                self.thread.blocks().push(Block::Permission(Ask {
+                    request,
+                    title,
+                    options,
+                    answered: None,
+                }));
             }
             Event::Stopped(reason) => {
                 self.thread.busy = false;
@@ -1223,12 +1700,18 @@ impl Reader {
                 // Not while the terminal is shown: it keeps the keyboard it was given, so a finished
                 // turn doesn't pull typing away from the shell. Nor over another input (a search, the
                 // finder, the issues page or settings).
-                if visible && !self.project.terminal_shown && !self.settings_open && !self.finder_open && !self.issues_open {
+                if visible
+                    && !self.project.terminal_shown
+                    && !self.settings_open
+                    && !self.finder_open
+                    && !self.issues_open
+                {
                     self.focus_draft(window, cx);
                 }
                 // A child's parent is told instead; the desktop hears of it only when nobody
                 // is waiting on the child.
-                let parent_hears = self.thread.parent.is_some() && self.thread.notify != Notify::Never;
+                let parent_hears =
+                    self.thread.parent.is_some() && self.thread.notify != Notify::Never;
                 if !(parent_hears || visible) {
                     self.alert(window, visible, "Finished");
                 }
@@ -1245,17 +1728,30 @@ impl Reader {
                 }
                 // The order of the thread list is saved with the time the turn ended.
                 self.request_save(cx);
-                self.drop_waiters(command::Caller::Thread(self.thread.id), "the turn ended");
+                self.drop_waiters(
+                    crate::ipc::command::Caller::Thread(self.thread.id),
+                    "the turn ended",
+                );
             }
             Event::Accepted { content, queue } => {
-                if let Some(at) = self.thread.queue.iter().position(|q| q.kind == Some(queue) && q.out.queued_text() == content) {
+                if let Some(at) = self
+                    .thread
+                    .queue
+                    .iter()
+                    .position(|q| q.kind == Some(queue) && q.out.queued_text() == content)
+                {
                     self.thread.queue.remove(at);
                 }
                 self.thread.messages.push(Msg::User(content, vec![]));
             }
             Event::Rejected { content, queue } => {
                 // No turn to join: it waits for the turn to end like any other queued message.
-                if let Some(item) = self.thread.queue.iter_mut().find(|q| q.kind == Some(queue) && q.out.queued_text() == content) {
+                if let Some(item) = self
+                    .thread
+                    .queue
+                    .iter_mut()
+                    .find(|q| q.kind == Some(queue) && q.out.queued_text() == content)
+                {
                     item.kind = None;
                 }
                 self.send_next(cx);
@@ -1271,7 +1767,10 @@ impl Reader {
                 self.restore_queue(cx);
                 self.thread.applying = None;
                 self.unstart();
-                self.drop_waiters(command::Caller::Thread(self.thread.id), "the turn failed");
+                self.drop_waiters(
+                    crate::ipc::command::Caller::Thread(self.thread.id),
+                    "the turn failed",
+                );
             }
             Event::Exited(status) => {
                 log::warn!("agent exited: {status}");
@@ -1285,7 +1784,10 @@ impl Reader {
                 }
                 self.thread.applying = None;
                 self.unstart();
-                self.drop_waiters(command::Caller::Thread(self.thread.id), "the agent exited");
+                self.drop_waiters(
+                    crate::ipc::command::Caller::Thread(self.thread.id),
+                    "the agent exited",
+                );
             }
         }
         self.thread.relist(changed);
@@ -1297,15 +1799,30 @@ impl Reader {
     /// agent is still held but never became ready, as it would never answer.
     pub(crate) fn unstart(&mut self) {
         let thread = &mut self.thread;
-        if thread.blank || thread.unstarted() || thread.session.is_none() && !thread.ready && !thread.picking && !thread.loading {
+        if thread.blank
+            || thread.unstarted()
+            || thread.session.is_none() && !thread.ready && !thread.picking && !thread.loading
+        {
             thread.drop_agent();
         }
     }
 
-    pub(crate) fn answer(&mut self, msg: usize, block: usize, option: usize, cx: &mut Context<Self>) {
-        let Some(Msg::Agent(blocks)) = self.thread.messages.get_mut(msg) else { return };
-        let Some(Block::Permission(ask)) = blocks.get_mut(block) else { return };
-        let (Some(choice), None) = (ask.options.get(option), &ask.answered) else { return };
+    pub(crate) fn answer(
+        &mut self,
+        msg: usize,
+        block: usize,
+        option: usize,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(Msg::Agent(blocks)) = self.thread.messages.get_mut(msg) else {
+            return;
+        };
+        let Some(Block::Permission(ask)) = blocks.get_mut(block) else {
+            return;
+        };
+        let (Some(choice), None) = (ask.options.get(option), &ask.answered) else {
+            return;
+        };
         if let Some(client) = &self.thread.client {
             client.answer(ask.request.clone(), Some(&choice.id));
         }

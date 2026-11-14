@@ -83,7 +83,9 @@ fn make_release(tag: &'static str, corrupt_sums: bool) -> Release {
     let bin = dir.join(&name).join("po");
     fs::write(&bin, format!("#!/bin/sh\necho '{NEW_BINARY_OUTPUT}'\n")).unwrap();
     let asset = format!("{name}.tar.gz");
-    run(Command::new("tar").args(["-czf", &asset, &name]).current_dir(&dir));
+    run(Command::new("tar")
+        .args(["-czf", &asset, &name])
+        .current_dir(&dir));
     let archive = fs::read(dir.join(&asset)).unwrap();
     let mut hash = if cfg!(target_os = "linux") {
         let mut c = Command::new("sha256sum");
@@ -121,7 +123,11 @@ fn serve(release: Release) -> String {
                 let archive_path = format!("/releases/download/{tag}/po-{tag}-{TARGET}.tar.gz");
                 let sums_path = format!("/releases/download/{tag}/SHA256SUMS");
                 let (status, extra, body): (&str, String, Vec<u8>) = if path == "/releases/latest" {
-                    ("302 Found", format!("Location: /releases/tag/{tag}\r\n"), vec![])
+                    (
+                        "302 Found",
+                        format!("Location: /releases/tag/{tag}\r\n"),
+                        vec![],
+                    )
                 } else if path == format!("/releases/tag/{tag}") {
                     ("200 OK", String::new(), b"release page".to_vec())
                 } else if path == archive_path {
@@ -181,7 +187,11 @@ fn updates_the_running_binary_from_the_latest_release() {
     let base = serve(make_release("v99.0.0", false));
     let (exe, out) = run_update(&dir, &base, &[]);
     assert!(out.status.success(), "stderr: {}", text(&out.stderr));
-    assert!(text(&out.stdout).contains("-> v99.0.0"), "stdout: {}", text(&out.stdout));
+    assert!(
+        text(&out.stdout).contains("-> v99.0.0"),
+        "stdout: {}",
+        text(&out.stdout)
+    );
 
     let replaced = run(&mut Command::new(&exe));
     assert_eq!(text(&replaced.stdout).trim(), NEW_BINARY_OUTPUT);
@@ -191,7 +201,10 @@ fn updates_the_running_binary_from_the_latest_release() {
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
         .filter(|n| n.starts_with(".po.new"))
         .collect();
-    assert!(leftovers.is_empty(), "staged files left behind: {leftovers:?}");
+    assert!(
+        leftovers.is_empty(),
+        "staged files left behind: {leftovers:?}"
+    );
 }
 
 #[test]
@@ -200,8 +213,15 @@ fn reports_up_to_date_when_latest_is_not_newer() {
     let base = serve(make_release("v0.0.1", false));
     let (exe, out) = run_update(&dir, &base, &[]);
     assert!(out.status.success(), "stderr: {}", text(&out.stderr));
-    assert!(text(&out.stdout).contains("up to date"), "stdout: {}", text(&out.stdout));
-    assert_eq!(fs::read(&exe).unwrap(), fs::read(env!("CARGO_BIN_EXE_po")).unwrap());
+    assert!(
+        text(&out.stdout).contains("up to date"),
+        "stdout: {}",
+        text(&out.stdout)
+    );
+    assert_eq!(
+        fs::read(&exe).unwrap(),
+        fs::read(env!("CARGO_BIN_EXE_po")).unwrap()
+    );
 }
 
 #[test]
@@ -210,8 +230,15 @@ fn checksum_mismatch_fails_and_leaves_the_binary_untouched() {
     let base = serve(make_release("v99.0.0", true));
     let (exe, out) = run_update(&dir, &base, &[]);
     assert!(!out.status.success());
-    assert!(text(&out.stderr).contains("checksum mismatch"), "stderr: {}", text(&out.stderr));
-    assert_eq!(fs::read(&exe).unwrap(), fs::read(env!("CARGO_BIN_EXE_po")).unwrap());
+    assert!(
+        text(&out.stderr).contains("checksum mismatch"),
+        "stderr: {}",
+        text(&out.stderr)
+    );
+    assert_eq!(
+        fs::read(&exe).unwrap(),
+        fs::read(env!("CARGO_BIN_EXE_po")).unwrap()
+    );
 }
 
 #[test]
@@ -231,8 +258,15 @@ fn refuses_to_update_a_dev_build() {
     fs::create_dir_all(&bin_dir).unwrap();
     let (exe, out) = run_update(&bin_dir, "http://127.0.0.1:1", &[]);
     assert!(!out.status.success());
-    assert!(text(&out.stderr).contains("dev build"), "stderr: {}", text(&out.stderr));
-    assert_eq!(fs::read(&exe).unwrap(), fs::read(env!("CARGO_BIN_EXE_po")).unwrap());
+    assert!(
+        text(&out.stderr).contains("dev build"),
+        "stderr: {}",
+        text(&out.stderr)
+    );
+    assert_eq!(
+        fs::read(&exe).unwrap(),
+        fs::read(env!("CARGO_BIN_EXE_po")).unwrap()
+    );
 }
 
 #[test]
@@ -240,13 +274,24 @@ fn refuses_to_update_a_cargo_installed_binary() {
     let dir = scratch("cargo");
     let cargo_home = dir.join("cargo-home");
     fs::create_dir_all(cargo_home.join("bin")).unwrap();
-    fs::write(cargo_home.join(".crates.toml"), "[[package]]\nname = \"po\"\n").unwrap();
+    fs::write(
+        cargo_home.join(".crates.toml"),
+        "[[package]]\nname = \"po\"\n",
+    )
+    .unwrap();
     let (exe, out) = run_update(
         &cargo_home.join("bin"),
         "http://127.0.0.1:1",
         &[("CARGO_HOME", cargo_home.to_str().unwrap())],
     );
     assert!(!out.status.success());
-    assert!(text(&out.stderr).contains("installed via cargo"), "stderr: {}", text(&out.stderr));
-    assert_eq!(fs::read(&exe).unwrap(), fs::read(env!("CARGO_BIN_EXE_po")).unwrap());
+    assert!(
+        text(&out.stderr).contains("installed via cargo"),
+        "stderr: {}",
+        text(&out.stderr)
+    );
+    assert_eq!(
+        fs::read(&exe).unwrap(),
+        fs::read(env!("CARGO_BIN_EXE_po")).unwrap()
+    );
 }

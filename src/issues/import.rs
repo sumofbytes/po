@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 
 use super::{Status, Tracker};
-use crate::date::Date;
+use crate::issues::date::Date;
 
 /// One line of the old list: a todo, or a header that grouped the todos under it.
 #[derive(Clone, Debug, PartialEq)]
@@ -41,8 +41,12 @@ fn items(list: &Value, top: bool) -> Vec<Item> {
 
 /// The old list in `path`; nothing if there is none or it can't be read.
 pub fn read(path: &Path) -> Vec<Item> {
-    let Ok(text) = std::fs::read_to_string(path) else { return vec![] };
-    serde_json::from_str::<Value>(&text).map(|value| items(&value["items"], true)).unwrap_or_default()
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return vec![];
+    };
+    serde_json::from_str::<Value>(&text)
+        .map(|value| items(&value["items"], true))
+        .unwrap_or_default()
 }
 
 /// Where it is noted that the old list has been dealt with: imported somewhere, or dismissed. It
@@ -55,7 +59,11 @@ pub fn marker() -> PathBuf {
 /// again.
 pub fn handled(how: &str) {
     let marker = marker();
-    if let Err(error) = marker.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|()| std::fs::write(&marker, how)) {
+    if let Err(error) = marker
+        .parent()
+        .map_or(Ok(()), std::fs::create_dir_all)
+        .and_then(|()| std::fs::write(&marker, how))
+    {
         log::warn!("writing {}: {error}", marker.display());
     }
 }
@@ -64,7 +72,13 @@ pub fn handled(how: &str) {
 /// the due date is kept, a todo under another is its sub-issue, and a header becomes the label of
 /// the todos under it. Returns how many issues were made. The old list is left as it is.
 pub fn from_items(old: &[Item], tracker: &mut Tracker, now: u64) -> usize {
-    fn add(items: &[Item], parent: Option<u64>, label: Option<&str>, tracker: &mut Tracker, now: u64) -> usize {
+    fn add(
+        items: &[Item],
+        parent: Option<u64>,
+        label: Option<&str>,
+        tracker: &mut Tracker,
+        now: u64,
+    ) -> usize {
         let mut made = 0;
         for item in items {
             if item.header {
@@ -77,7 +91,11 @@ pub fn from_items(old: &[Item], tracker: &mut Tracker, now: u64) -> usize {
             let number = tracker.create(&item.text, now);
             made += 1;
             tracker.update(number, now, |issue| {
-                issue.status = if item.done { Status::Done } else { Status::Todo };
+                issue.status = if item.done {
+                    Status::Done
+                } else {
+                    Status::Todo
+                };
                 issue.due = item.due;
                 issue.parent = parent;
                 if let Some(label) = label.filter(|label| !label.is_empty()) {
@@ -112,10 +130,19 @@ mod tests {
         assert_eq!(old.len(), 2);
         let mut tracker = Tracker::new(Config::new("PO".into()));
         assert_eq!(from_items(&old, &mut tracker, 5), 3);
-        let by_title = |title: &str| tracker.issues().find(|issue| issue.title == title).cloned().unwrap();
+        let by_title = |title: &str| {
+            tracker
+                .issues()
+                .find(|issue| issue.title == title)
+                .cloned()
+                .unwrap()
+        };
         let (ship, tag, milk) = (by_title("Ship"), by_title("Tag"), by_title("Milk"));
         let due = Date::from_ymd(2026, 11, 2).unwrap();
-        assert_eq!((ship.status, ship.due, ship.labels.as_slice()), (Status::Todo, Some(due), ["Work".to_string()].as_slice()));
+        assert_eq!(
+            (ship.status, ship.due, ship.labels.as_slice()),
+            (Status::Todo, Some(due), ["Work".to_string()].as_slice())
+        );
         assert_eq!((tag.parent, tag.status), (Some(ship.number), Status::Done));
         assert_eq!((milk.parent, milk.labels.len()), (None, 0));
         assert_eq!(tracker.config.labels.len(), 1);

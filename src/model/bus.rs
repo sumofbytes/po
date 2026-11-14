@@ -1,6 +1,6 @@
 //! What the NSH screens ask of Po. A screen only draws a snapshot Po publishes (the way
 //! [`crate::issues::shared`]'s store is read); everything the user does on it comes back here as a [`Cmd`],
-//! which the [`crate::Reader`] runs where it has the window and the agents.
+//! which the [`crate::reader::state::Reader`] runs where it has the window and the agents.
 use std::sync::{LazyLock, Mutex};
 
 use tokio::sync::mpsc;
@@ -52,6 +52,8 @@ pub enum Cmd {
     ToggleFocus,
     /// The files, or the changes (true), in the viewer; or the terminal.
     Show(bool),
+    /// Hides the file tree beside the file, or shows it again.
+    ToggleTree,
     Terminal,
     /// Markdown shown rendered, or as its source.
     ToggleRendered,
@@ -61,7 +63,7 @@ pub enum Cmd {
     /// A row of the explorer's tree was pressed: a file to open, or a folder to flip.
     TreeClick(String),
     /// An arrow key in the explorer's tree.
-    TreeStep(crate::explorer::Step),
+    TreeStep(crate::files::explorer::Step),
     /// The diff shown side by side (true) or inline.
     SetSplit(bool),
     /// The finder's query changed.

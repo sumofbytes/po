@@ -3,5 +3,6 @@ mod compose;
 mod layout;
 mod projects;
 pub(crate) mod render;
-mod threads;
+pub(crate) mod state;
 mod tasks;
+mod threads;

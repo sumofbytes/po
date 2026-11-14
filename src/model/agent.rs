@@ -1,4 +1,4 @@
-//! The agent screen's data: what [`crate::Reader`] publishes and what it sends back. No view code.
+//! The agent screen's data: what [`crate::reader::state::Reader`] publishes and what it sends back. No view code.
 #![allow(unused_imports)]
 use std::sync::{Arc, LazyLock};
 
@@ -27,7 +27,13 @@ pub enum Body {
     /// Only the header: the terminal, which the app draws below it.
     Bare,
     Markdown(Shared),
-    Form { id: String, fields: Vec<Field>, submit: String, answered: bool, doc: Option<Shared> },
+    Form {
+        id: String,
+        fields: Vec<Field>,
+        submit: String,
+        answered: bool,
+        doc: Option<Shared>,
+    },
 }
 
 impl Default for Body {
@@ -44,7 +50,8 @@ pub struct Snapshot {
     pub body: Body,
 }
 
-pub(crate) static SNAPSHOT: LazyLock<watch::Sender<Snapshot>> = LazyLock::new(|| watch::Sender::new(Snapshot::default()));
+pub(crate) static SNAPSHOT: LazyLock<watch::Sender<Snapshot>> =
+    LazyLock::new(|| watch::Sender::new(Snapshot::default()));
 
 /// Shows `snapshot`; nothing is redrawn when it is what the screen already has.
 pub fn publish(snapshot: Snapshot) {

@@ -1,4 +1,4 @@
-//! The tabs screen's data: what [`crate::Reader`] publishes. No view code.
+//! The tabs screen's data: what [`crate::reader::state::Reader`] publishes. No view code.
 #![allow(unused_imports)]
 use std::sync::LazyLock;
 
@@ -23,7 +23,8 @@ pub struct Snapshot {
     pub controls: (Vec<Control>, Vec<Control>),
 }
 
-pub(crate) static SNAPSHOT: LazyLock<watch::Sender<Snapshot>> = LazyLock::new(|| watch::Sender::new(Snapshot::default()));
+pub(crate) static SNAPSHOT: LazyLock<watch::Sender<Snapshot>> =
+    LazyLock::new(|| watch::Sender::new(Snapshot::default()));
 
 /// Shows `snapshot`; nothing is redrawn when it is what the screen already has.
 pub fn publish(snapshot: Snapshot) {

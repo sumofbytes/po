@@ -1,20 +1,23 @@
-//! The terminal pane on Rune. [`crate::terminal`] runs the shell and hands out frames; each row
+//! The terminal pane on Rune. [`crate::system::terminal`] runs the shell and hands out frames; each row
 //! of a frame is one mono text with a span per styled run, so Rune draws it like any text.
 use std::sync::Arc;
 
 use rune::tok::TextStyle;
-use rune::{WheelEvent, Color, El, Key as RuneKey, KeyEvent, Span, Tx, col, color, text};
+use rune::{Color, El, Key as RuneKey, KeyEvent, Span, Tx, WheelEvent, col, color, text};
 use rune_kit::Kit;
 
-use crate::terminal::{self, Frame, Key, KeyInput, Rgb, Session};
+use crate::system::terminal::{Frame, Key, KeyInput, Rgb, Session};
 
 const COLS: u16 = 100;
 const ROWS: u16 = 30;
 /// The grid's font at the configured monospace size, on a line of whole points: the shell is told
 /// its cells in whole pixels.
 fn font_style() -> TextStyle {
-    let style = crate::fonts::mono(13.0, 17.0);
-    TextStyle { line_height: style.line_height.round(), ..style }
+    let style = crate::config::fonts::mono(13.0, 17.0);
+    TextStyle {
+        line_height: style.line_height.round(),
+        ..style
+    }
 }
 
 /// Where the host keeps the terminal: handlers reach it through this.
@@ -30,7 +33,12 @@ pub struct Term {
 
 impl Default for Term {
     fn default() -> Self {
-        Self { session: None, frame: Arc::default(), size: (COLS, ROWS), cell: (0, 0) }
+        Self {
+            session: None,
+            frame: Arc::default(),
+            size: (COLS, ROWS),
+            cell: (0, 0),
+        }
     }
 }
 
@@ -40,18 +48,27 @@ fn c(rgb: Rgb) -> Color {
 
 impl Term {
     /// Starts the shell in `cwd`, with the colours (foreground, background) the shell is told it has.
-    pub fn start_with(&mut self, cwd: &std::path::Path, theme: (Rgb, Rgb), wake: impl Fn() + Send + 'static) {
+    pub fn start_with(
+        &mut self,
+        cwd: &std::path::Path,
+        theme: (Rgb, Rgb),
+        wake: impl Fn() + Send + 'static,
+    ) {
         self.session = Session::spawn(cwd, COLS, ROWS, theme, wake).ok();
     }
 
     /// The shell has ended.
     pub fn exited(&self) -> bool {
-        self.session.as_ref().is_some_and(|session| session.frame().exited.is_some())
+        self.session
+            .as_ref()
+            .is_some_and(|session| session.frame().exited.is_some())
     }
 
     /// True when the shell drew something new since the last call.
     pub fn poll(&mut self) -> bool {
-        let Some(session) = &self.session else { return false };
+        let Some(session) = &self.session else {
+            return false;
+        };
         let frame = session.frame();
         let changed = !Arc::ptr_eq(&frame, &self.frame);
         self.frame = frame;
@@ -62,7 +79,10 @@ impl Term {
     pub fn fit(&mut self, width: f32, height: f32) {
         let font = font_style();
         let cell = rune::text::advance("M", font).max(1.0);
-        let size = (((width / cell).floor() as u16).clamp(10, 500), ((height / font.line_height).floor() as u16).clamp(3, 200));
+        let size = (
+            ((width / cell).floor() as u16).clamp(10, 500),
+            ((height / font.line_height).floor() as u16).clamp(3, 200),
+        );
         let pixels = (cell as u32, font.line_height as u32);
         // A new font size changes the cell, and the shell is told, though the grid may stay as it is.
         if (size == self.size && pixels == self.cell) || width < 1.0 {
@@ -76,7 +96,9 @@ impl Term {
 
     /// The history moves by the wheel: `dy` points, positive showing earlier lines.
     pub fn wheel(&self, dy: f32) -> bool {
-        let Some(session) = &self.session else { return false };
+        let Some(session) = &self.session else {
+            return false;
+        };
         let lines = (dy / font_style().line_height).round() as isize;
         if lines != 0 {
             session.scroll(-lines);
@@ -93,7 +115,9 @@ impl Term {
 
     /// Sends a key to the shell; false when there is none to take it.
     pub fn key(&self, event: &KeyEvent) -> bool {
-        let Some(session) = &self.session else { return false };
+        let Some(session) = &self.session else {
+            return false;
+        };
         let m = event.mods;
         // Copy and paste are the window's: Ctrl+Shift+C and V (or the platform key), where Ctrl+C
         // and Ctrl+V are the shell's.
@@ -109,12 +133,22 @@ impl Term {
             && t.chars().nth(1).is_some()
         {
             for ch in t.chars() {
-                session.key(KeyInput { key: key_of(ch), text: Some(ch.to_string()), shift: m.shift, alt: m.alt, ctrl: m.ctrl, meta: false });
+                session.key(KeyInput {
+                    key: key_of(ch),
+                    text: Some(ch.to_string()),
+                    shift: m.shift,
+                    alt: m.alt,
+                    ctrl: m.ctrl,
+                    meta: false,
+                });
             }
             return true;
         }
         let (key, text) = match &event.key {
-            RuneKey::Text(t) => (t.chars().next().map(key_of).unwrap_or(Key::Unidentified), Some(t.clone())),
+            RuneKey::Text(t) => (
+                t.chars().next().map(key_of).unwrap_or(Key::Unidentified),
+                Some(t.clone()),
+            ),
             RuneKey::Command(ch) => (key_of(*ch), None),
             RuneKey::Enter => (Key::Enter, Some("\r".into())),
             RuneKey::Backspace => (Key::Backspace, None),
@@ -132,16 +166,48 @@ impl Term {
             RuneKey::Tab => (Key::Tab, None),
             _ => return false,
         };
-        session.key(KeyInput { key, text, shift: m.shift, alt: m.alt, ctrl: m.ctrl, meta: false });
+        session.key(KeyInput {
+            key,
+            text,
+            shift: m.shift,
+            alt: m.alt,
+            ctrl: m.ctrl,
+            meta: false,
+        });
         true
     }
 }
 
 /// The key the encoder names for a typed character.
 fn key_of(ch: char) -> Key {
-    use terminal::Key as K;
+    use crate::system::terminal::Key as K;
     const LETTERS: [K; 26] = [
-        K::A, K::B, K::C, K::D, K::E, K::F, K::G, K::H, K::I, K::J, K::K, K::L, K::M, K::N, K::O, K::P, K::Q, K::R, K::S, K::T, K::U, K::V, K::W, K::X, K::Y, K::Z,
+        K::A,
+        K::B,
+        K::C,
+        K::D,
+        K::E,
+        K::F,
+        K::G,
+        K::H,
+        K::I,
+        K::J,
+        K::K,
+        K::L,
+        K::M,
+        K::N,
+        K::O,
+        K::P,
+        K::Q,
+        K::R,
+        K::S,
+        K::T,
+        K::U,
+        K::V,
+        K::W,
+        K::X,
+        K::Y,
+        K::Z,
     ];
     match ch.to_ascii_lowercase() {
         l @ 'a'..='z' => LETTERS[l as usize - 'a' as usize],
@@ -186,16 +252,28 @@ fn row(frame: &Frame, kit: &Kit, y: usize) -> El {
         }
         // The cursor's cell is the n-th char of the line: cells and chars agree off wide glyphs.
         if let Some((start, ch)) = line.char_indices().nth(cursor.col as usize) {
-            spans.push(Span::new(start, start + ch.len_utf8()).bg(kit.c.text_base, 0.0).color(kit.c.bg_base).mono());
+            spans.push(
+                Span::new(start, start + ch.len_utf8())
+                    .bg(kit.c.text_base, 0.0)
+                    .color(kit.c.bg_base)
+                    .mono(),
+            );
         }
     }
-    text(line).font(font_style()).color(c(frame.foreground)).spans(spans).selectable(true).h(font_style().line_height).min_h(font_style().line_height)
+    text(line)
+        .font(font_style())
+        .color(c(frame.foreground))
+        .spans(spans)
+        .selectable(true)
+        .h(font_style().line_height)
+        .min_h(font_style().line_height)
 }
 
 /// The window's copy chord: the modifier key, or Ctrl+Shift+C elsewhere. Paste is handled by the
 /// window, so this takes the copy chord only.
 fn copy_chord(event: &KeyEvent) -> bool {
-    matches!(&event.key, RuneKey::Command('c')) && (event.mods.logo || (event.mods.ctrl && event.mods.shift))
+    matches!(&event.key, RuneKey::Command('c'))
+        && (event.mods.logo || (event.mods.ctrl && event.mods.shift))
 }
 
 /// The grid, focusable, sending its keys to the shell.
@@ -224,5 +302,13 @@ pub fn view<S: 'static>(term: &Term, kit: &Kit, at: At<S>) -> El {
     for y in 0..term.size.1 as usize {
         grid = grid.child(row(&term.frame, kit, y));
     }
-    col().w_full().h_full().min_h(0.0).fill(kit.c.bg_base).px(12.0).py(8.0).clip_soft(0.0).child(grid)
+    col()
+        .w_full()
+        .h_full()
+        .min_h(0.0)
+        .fill(kit.c.bg_base)
+        .px(12.0)
+        .py(8.0)
+        .clip_soft(0.0)
+        .child(grid)
 }

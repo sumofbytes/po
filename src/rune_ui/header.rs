@@ -28,6 +28,11 @@ static FOLDER_TREE: Icon = Icon {
     view: 16.0,
     body: r#"<path d="M3 3V12.5H13M3 7H8M3 12.5H8" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"/>"#,
 };
+static TREE_PANEL: Icon = Icon {
+    name: "po-tree-panel",
+    view: 16.0,
+    body: r#"<rect x="2" y="3" width="12" height="10" rx="1.5" stroke="currentColor"/><path d="M6 3V13M3.8 6H4.6M3.8 8H4.6M3.8 10H4.6" stroke="currentColor" stroke-linecap="round"/>"#,
+};
 static DIFF: Icon = Icon {
     name: "po-diff",
     view: 16.0,
@@ -58,16 +63,33 @@ fn of(control: Control) -> (&'static Icon, &'static str, bool, Cmd) {
         Control::ViewerLeft(on) => (&PANEL_LEFT, "Viewer (Ctrl+Shift+B)", on, Cmd::ToggleRight),
         Control::Files(on) => (&FOLDER_TREE, "Files (Ctrl+1)", on, Cmd::Show(false)),
         Control::Changes(on) => (&DIFF, "Changes (Ctrl+2)", on, Cmd::Show(true)),
+        Control::Tree(on) => (&TREE_PANEL, "File tree", on, Cmd::ToggleTree),
         Control::Terminal(on) => (&TERMINAL, "Terminal (Ctrl+`)", on, Cmd::Terminal),
-        Control::Focus(true) => (&MINIMIZE, "Show the conversation (Ctrl+Shift+F)", false, Cmd::ToggleFocus),
-        Control::Focus(false) => (&MAXIMIZE, "Focus the viewer (Ctrl+Shift+F)", false, Cmd::ToggleFocus),
+        Control::Focus(true) => (
+            &MINIMIZE,
+            "Show the conversation (Ctrl+Shift+F)",
+            false,
+            Cmd::ToggleFocus,
+        ),
+        Control::Focus(false) => (
+            &MAXIMIZE,
+            "Focus the viewer (Ctrl+Shift+F)",
+            false,
+            Cmd::ToggleFocus,
+        ),
     }
 }
 
 /// A pane's header bar with its bottom border drawn inside its height, so that every header
 /// (and the window's band, which has the same height) is ruled the same.
 pub fn ruled(k: &Kit, bar: El) -> El {
-    bar.child(rune::el().absolute(0.0, BAND - 1.0).w_full().h(1.0).fill(k.c.border_base))
+    bar.child(
+        rune::el()
+            .absolute(0.0, BAND - 1.0)
+            .w_full()
+            .h(1.0)
+            .fill(k.c.border_base),
+    )
 }
 
 /// A row of the controls given, in the order given but for the places (the files, the terminal,
@@ -76,22 +98,54 @@ pub fn ruled(k: &Kit, bar: El) -> El {
 pub fn controls<S: 'static>(k: &Kit, which: &[Control]) -> El {
     let button = |i: usize, control: Control, small: bool| {
         let (icon, help, on, cmd) = of(control);
-        let variant = if on { IconButtonVariant::Neutral } else { IconButtonVariant::Ghost };
-        let b = IconButton::new(icon).variant(variant).label(help).help(help).on_press(move |_: &mut S| send(cmd.clone()));
-        let b = if small { b.control_size(rune_kit::ControlSize::Small) } else { b };
+        let variant = if on {
+            IconButtonVariant::Neutral
+        } else {
+            IconButtonVariant::Ghost
+        };
+        let b = IconButton::new(icon)
+            .variant(variant)
+            .label(help)
+            .help(help)
+            .on_press(move |_: &mut S| send(cmd.clone()));
+        let b = if small {
+            b.control_size(rune_kit::ControlSize::Small)
+        } else {
+            b
+        };
         b.build(k).key(format!("control-{i}-{help}"))
     };
-    let place = |c: &Control| matches!(c, Control::Files(_) | Control::Terminal(_) | Control::Changes(_));
+    let place = |c: &Control| {
+        matches!(
+            c,
+            Control::Files(_) | Control::Terminal(_) | Control::Changes(_)
+        )
+    };
     let pill = |members: Vec<El>| {
-        let mut pill = row().items_center().gap(2.0).padding(2.0).radius(8.0).border(1.0, k.c.border_base);
+        let mut pill = row()
+            .items_center()
+            .gap(2.0)
+            .padding(2.0)
+            .radius(8.0)
+            .border(1.0, k.c.border_base);
         for member in members {
             pill = pill.child(member);
         }
         pill
     };
     let mut bar = row().items_center().gap(2.0);
-    let work: Vec<_> = which.iter().enumerate().filter(|(_, c)| matches!(c, Control::Files(_) | Control::Terminal(_))).map(|(i, c)| button(i, *c, true)).collect();
-    let record: Vec<_> = which.iter().enumerate().filter(|(_, c)| matches!(c, Control::Changes(_))).map(|(i, c)| button(i, *c, true)).collect();
+    let work: Vec<_> = which
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| matches!(c, Control::Files(_) | Control::Terminal(_)))
+        .map(|(i, c)| button(i, *c, true))
+        .collect();
+    let record: Vec<_> = which
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| matches!(c, Control::Changes(_)))
+        .map(|(i, c)| button(i, *c, true))
+        .collect();
     let both = !work.is_empty() && !record.is_empty();
     if !work.is_empty() {
         bar = bar.child(pill(work));

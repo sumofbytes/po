@@ -1,11 +1,14 @@
 //! The window: a sidebar, the main pane and a viewer pane, as Rune's `SplitView` lays them out.
-//! Counterpart of the layout half of `Reader::render` in `main.rs`. What fills the panes comes from
+//! Counterpart of the layout half of `Reader::render` (`src/reader/render.rs`). What fills the panes comes from
 //! the screens; this decides what is shown where.
 use rune::{El, Tx, col, row};
 use rune_kit::shell::SidebarToggle;
 use rune_kit::{Kit, PaneState, SplitView};
 
-use super::{agent, chat, diff, dropdown, explorer, finder, home, issues, settings, sidebar, source, tabs, terminal};
+use super::{
+    agent, chat, diff, dropdown, explorer, finder, home, issues, settings, sidebar, source, tabs,
+    terminal,
+};
 use crate::issues::shared;
 use crate::model;
 use crate::model::bus::{Cmd, send};
@@ -111,7 +114,9 @@ impl Shell {
             send(Cmd::ToggleLeft);
         }
         // The viewer is the right pane unless it fills the middle or the conversation is.
-        self.viewer.set_open(layout.side_open && layout.agent_open && !layout.home_open && !layout.issues_open);
+        self.viewer.set_open(
+            layout.side_open && layout.agent_open && !layout.home_open && !layout.issues_open,
+        );
         if layout.settings_open && self.settings.is_none() {
             self.settings = Some(settings::Page::load(layout.swapped));
         }
@@ -124,9 +129,13 @@ impl Shell {
             self.finder.at = 0;
         }
         self.finder_was_open = layout.finder_open;
-        let page = layout.finder_open || layout.settings_open || layout.home_open || layout.issues_open;
+        let page =
+            layout.finder_open || layout.settings_open || layout.home_open || layout.issues_open;
         let chat_shown = !page && (!layout.side_open || layout.agent_open);
-        self.side.rename.follow(layout.left_open, chat_shown.then_some(self.chat_feed.value.thread));
+        self.side.rename.follow(
+            layout.left_open,
+            chat_shown.then_some(self.chat_feed.value.thread),
+        );
         if layout.issues_open
             && let Some(nav) = shared::take_nav()
         {
@@ -139,7 +148,11 @@ impl Shell {
         let mut stale = self.sidebar_feed.poll();
         let overview = self.overview_feed.poll();
         if stale || overview {
-            self.home_model = model::home::model(&self.overview_feed.value, &self.sidebar_feed.value, crate::date::today());
+            self.home_model = model::home::model(
+                &self.overview_feed.value,
+                &self.sidebar_feed.value,
+                crate::issues::date::today(),
+            );
         }
         stale |= overview;
         // A name typed in place is kept when its line loses the keyboard.
@@ -162,7 +175,8 @@ impl Shell {
             stale = true;
         }
         if self.chat_feed.poll() {
-            self.chat.follow(&self.chat_feed.value, self.side.rename.editing.is_some());
+            self.chat
+                .follow(&self.chat_feed.value, self.side.rename.editing.is_some());
             stale = true;
         }
         self.explorer.follow(&self.strip_feed.value);
@@ -198,7 +212,7 @@ pub trait Host: 'static {
     /// The window has, or has lost, the user's attention.
     fn set_active(&mut self, active: bool);
     /// Files on the desk or the clipboard, pictures pasted: what the draft takes.
-    fn attach(&mut self, sources: Vec<crate::Source>);
+    fn attach(&mut self, sources: Vec<crate::session::thread::Source>);
 }
 
 fn sidebar_of<S: Host>(s: &mut S) -> &mut PaneState {
@@ -210,11 +224,15 @@ fn viewer_of<S: Host>(s: &mut S) -> &mut PaneState {
 }
 
 fn term_of<S: Host>(s: &mut S) -> &mut terminal::Term {
-    s.terminal_mut().expect("the terminal is drawn only where there is one")
+    s.terminal_mut()
+        .expect("the terminal is drawn only where there is one")
 }
 
 fn settings_of<S: Host>(s: &mut S) -> &mut settings::Page {
-    s.shell().settings.as_mut().expect("the settings page is open")
+    s.shell()
+        .settings
+        .as_mut()
+        .expect("the settings page is open")
 }
 
 fn side_of<S: Host>(s: &mut S) -> &mut sidebar::State {
@@ -269,16 +287,79 @@ fn viewer_content<S: Host>(shell: &Shell, host: &S, layout: &Layout, k: &Kit) ->
             Some(term) => terminal::view::<S>(term, k, term_of::<S>),
             None => col(),
         };
-        return col().w_full().h_full().min_h(0.0).children(tabs_bar).child(agent::view::<S>(&shell.agent_feed.value, &shell.agent, k, agent_of::<S>)).child(col().w_full().grow(1.0).min_h(0.0).child(body));
+        return col()
+            .w_full()
+            .h_full()
+            .min_h(0.0)
+            .children(tabs_bar)
+            .child(agent::view::<S>(
+                &shell.agent_feed.value,
+                &shell.agent,
+                k,
+                agent_of::<S>,
+            ))
+            .child(col().w_full().grow(1.0).min_h(0.0).child(body));
     }
     if layout.showing_agent {
-        return col().w_full().h_full().min_h(0.0).children(tabs_bar).child(col().w_full().grow(1.0).min_h(0.0).child(agent::view::<S>(&shell.agent_feed.value, &shell.agent, k, agent_of::<S>)));
+        return col().w_full().h_full().min_h(0.0).children(tabs_bar).child(
+            col().w_full().grow(1.0).min_h(0.0).child(agent::view::<S>(
+                &shell.agent_feed.value,
+                &shell.agent,
+                k,
+                agent_of::<S>,
+            )),
+        );
     }
-    let content = if layout.diff { diff::view::<S>(&shell.diff_feed.value, host, k, diff_ref::<S>, diff_mut::<S>) } else { source::view::<S>(&shell.source_feed.value, &shell.source, k) };
+    let content = if layout.diff {
+        diff::view::<S>(
+            &shell.diff_feed.value,
+            host,
+            k,
+            diff_ref::<S>,
+            diff_mut::<S>,
+        )
+    } else {
+        source::view::<S>(&shell.source_feed.value, &shell.source, k)
+    };
     // The files on the left, what is open on the right, as an editor lays them out.
-    let browser = col().w(220.0).h_full().min_h(0.0).child(explorer::tree::<S>(&shell.explorer_feed.value, k, explorer::strips::<S>(&shell.strip_feed.value, &shell.explorer, k, explorer_of::<S>)));
-    let split = row().w_full().grow(1.0).min_h(0.0).child(browser).child(rune::el().w(1.0).h_full().fill(k.c.border_muted)).child(col().grow(1.0).min_w(0.0).h_full().min_h(0.0).child(content));
-    col().w_full().h_full().min_h(0.0).children(tabs_bar).child(split)
+    // It takes a share of the viewer's width, within bounds, so a wide viewer (the sidebar closed)
+    // gives it more room instead of leaving it at a fixed width.
+    let pane = col()
+        .grow(1.0)
+        .min_w(0.0)
+        .h_full()
+        .min_h(0.0)
+        .child(content);
+    // The Files and Changes buttons hide the tree when pressed again; the file keeps the room.
+    let mut split = row().w_full().grow(1.0).min_h(0.0);
+    if !layout.tree_hidden {
+        let browser = col()
+            .w_frac(0.2)
+            .min_w(220.0)
+            .max_w(420.0)
+            .h_full()
+            .min_h(0.0)
+            .child(explorer::tree::<S>(
+                &shell.explorer_feed.value,
+                k,
+                explorer::strips::<S>(
+                    &shell.strip_feed.value,
+                    &shell.explorer,
+                    k,
+                    explorer_of::<S>,
+                ),
+            ));
+        split = split
+            .child(browser)
+            .child(rune::el().w(1.0).h_full().fill(k.c.border_muted));
+    }
+    let split = split.child(pane);
+    col()
+        .w_full()
+        .h_full()
+        .min_h(0.0)
+        .children(tabs_bar)
+        .child(split)
 }
 
 /// The whole window, laid out as the `Reader` says: the sidebar, a middle pane and a right pane
@@ -291,15 +372,40 @@ pub fn view<S: Host>(host: &S, k: &Kit, inset: f32) -> El {
     let layout = host.layout();
     // What floats over the window: the menus the chips open, the theme list.
     let mut layer = vec![];
-    let chat = |framed: bool| chat::view::<S>(&shell.chat_feed.value, &shell.chat, k, chat_of::<S>, framed, &shell.side.rename, rename_of::<S>);
+    let chat = |framed: bool| {
+        chat::view::<S>(
+            &shell.chat_feed.value,
+            &shell.chat,
+            k,
+            chat_of::<S>,
+            framed,
+            &shell.side.rename,
+            rename_of::<S>,
+        )
+    };
     let page = if layout.finder_open {
-        Some(finder::view::<S>(&shell.finder_feed.value, &shell.finder, k, finder_of::<S>))
+        Some(finder::view::<S>(
+            &shell.finder_feed.value,
+            &shell.finder,
+            k,
+            finder_of::<S>,
+        ))
     } else if let (true, Some(page)) = (layout.settings_open, &shell.settings) {
         Some(settings::view::<S>(page, k, settings_of::<S>, &mut layer))
     } else if layout.home_open {
-        Some(home::view::<S>(&shell.home_model, &shell.home, k, home_of::<S>))
+        Some(home::view::<S>(
+            &shell.home_model,
+            &shell.home,
+            k,
+            home_of::<S>,
+        ))
     } else if layout.issues_open {
-        Some(issues::view::<S>(&shell.overview_feed.value, &shell.issues, k, issues_of::<S>))
+        Some(issues::view::<S>(
+            &shell.overview_feed.value,
+            &shell.issues,
+            k,
+            issues_of::<S>,
+        ))
     } else {
         None
     };
@@ -318,25 +424,68 @@ pub fn view<S: Host>(host: &S, k: &Kit, inset: f32) -> El {
     // over the window's right edge instead, clear of the grip that resizes the pane, and the pane
     // itself is left empty.
     let beside = no_page && layout.side_open && !focus && !layout.swapped;
-    let right = if beside { Some(rune::el().w_full().h_full()) } else { right };
+    let right = if beside {
+        Some(rune::el().w_full().h_full())
+    } else {
+        right
+    };
     // The conversation in the middle pane puts its header in the window's toolbar.
-    let toolbar = (!layout.finder_open && !layout.settings_open && !layout.home_open && !layout.issues_open && !focus && (!layout.side_open || !layout.swapped)).then(|| chat::toolbar::<S>(k, &shell.chat_feed.value, &shell.side.rename, rename_of::<S>));
+    let toolbar = (!layout.finder_open
+        && !layout.settings_open
+        && !layout.home_open
+        && !layout.issues_open
+        && !focus
+        && (!layout.side_open || !layout.swapped))
+        .then(|| {
+            chat::toolbar::<S>(
+                k,
+                &shell.chat_feed.value,
+                &shell.side.rename,
+                rename_of::<S>,
+            )
+        });
     // The toolbar, and the toggle that floats over it, start past the window's buttons.
-    let mut split = SplitView::new(middle).frame_inset(0.0).titlebar_inset(inset);
+    let mut split = SplitView::new(middle)
+        .frame_inset(0.0)
+        .titlebar_inset(inset);
     if let Some(toolbar) = toolbar {
         split = split.toolbar(toolbar);
     }
     // The panes' own headers carry the sidebar's toggle (at the left of the title, as they did
     // before); the pages, which have none, take the kit's, at the end of the sidebar's band.
-    let split = if no_page { split.hide_sidebar_toggle() } else { split.sidebar_padding(0.0, sidebar::GUTTER).sidebar_toggle(SidebarToggle::new().in_header()) };
-    let split = split.sidebar::<S>(&shell.sidebar, sidebar_of::<S>, col().w(shell.sidebar.width()).min_w(shell.sidebar.width()).h_full().child(sidebar::view::<S>(&shell.sidebar_feed.value, &shell.side, k, side_of::<S>, rename_of::<S>, layout.settings_open, inset)));
+    let split = if no_page {
+        split.hide_sidebar_toggle()
+    } else {
+        split
+            .sidebar_padding(0.0, sidebar::GUTTER)
+            .sidebar_toggle(SidebarToggle::new().in_header())
+    };
+    let split = split.sidebar::<S>(
+        &shell.sidebar,
+        sidebar_of::<S>,
+        col()
+            .w(shell.sidebar.width())
+            .min_w(shell.sidebar.width())
+            .h_full()
+            .child(sidebar::view::<S>(
+                &shell.sidebar_feed.value,
+                &shell.side,
+                k,
+                side_of::<S>,
+                rename_of::<S>,
+                layout.settings_open,
+                inset,
+            )),
+    );
     // The kit draws the main pane as a bordered, rounded card; Po's panes sit flush, told apart by
     // their backgrounds, so the shell is built with a kit that has neither.
     let mut flat = k.clone();
     flat.radius.lg = 0.0;
     flat.c.border_muted = flat.c.bg_base;
     let root = match right {
-        Some(right) => split.inspector::<S>(&shell.viewer, viewer_of::<S>, right).build(&flat),
+        Some(right) => split
+            .inspector::<S>(&shell.viewer, viewer_of::<S>, right)
+            .build(&flat),
         None => split.build(&flat),
     };
     let menu: dropdown::At<S> = std::rc::Rc::new(|s: &mut S| &mut s.shell().chat.menu);
@@ -344,10 +493,21 @@ pub fn view<S: Host>(host: &S, k: &Kit, inset: f32) -> El {
     let issue_menu: dropdown::At<S> = std::rc::Rc::new(|s: &mut S| &mut s.shell().issues.menu);
     dropdown::overlay::<S>(k, &shell.issues.menu, &issue_menu, &mut layer);
     // One rule under the whole top band, drawn over the panes so none of them leaves a gap in it.
-    let rule = rune::el().absolute(0.0, super::header::BAND - 1.0).w_full().h(1.0).fill(k.c.border_base);
+    let rule = rune::el()
+        .absolute(0.0, super::header::BAND - 1.0)
+        .w_full()
+        .h(1.0)
+        .fill(k.c.border_base);
     // The kit's bands are taller than the window's: its layout hangs above the window by the
     // difference, and what shows of them is the band's height.
-    let hung = rune::el().pin(Some(0.0), Some(super::header::BAND - super::header::KIT_BAND), Some(0.0), Some(0.0)).child(root);
+    let hung = rune::el()
+        .pin(
+            Some(0.0),
+            Some(super::header::BAND - super::header::KIT_BAND),
+            Some(0.0),
+            Some(0.0),
+        )
+        .child(root);
     let mut stack = rune::el().w_full().h_full().child(hung).child(rule);
     // The viewer in the middle, the same way: from the sidebar's edge to the right pane's.
     let middle_pane = no_page && layout.side_open && (focus || layout.swapped);
@@ -355,11 +515,26 @@ pub fn view<S: Host>(host: &S, k: &Kit, inset: f32) -> El {
         let (left, edge, width) = if beside {
             (None, 0.0, Some((shell.viewer.shown_width() - 6.0).max(0.0)))
         } else {
-            (Some(if layout.left_open { shell.sidebar.shown_width() } else { 56.0 + inset }), shell.viewer.shown_width(), None)
+            (
+                Some(if layout.left_open {
+                    shell.sidebar.shown_width()
+                } else {
+                    56.0 + inset
+                }),
+                shell.viewer.shown_width(),
+                None,
+            )
         };
-        let divider = rune::el().absolute(-1.0, 0.0).w(1.0).h_full().fill(k.c.border_base);
+        let divider = rune::el()
+            .absolute(-1.0, 0.0)
+            .w(1.0)
+            .h_full()
+            .fill(k.c.border_base);
         // The content fills the box the pins make; pinned itself, its full width would run past the window.
-        let mut pane = rune::el().pin(left, Some(0.0), Some(edge), Some(0.0)).fill(k.c.bg_deep).child(viewer::<S>(shell, host, &layout, k));
+        let mut pane = rune::el()
+            .pin(left, Some(0.0), Some(edge), Some(0.0))
+            .fill(k.c.bg_deep)
+            .child(viewer::<S>(shell, host, &layout, k));
         if let Some(width) = width {
             pane = pane.w(width).child(divider);
         }
@@ -370,11 +545,30 @@ pub fn view<S: Host>(host: &S, k: &Kit, inset: f32) -> El {
     let root = rune_kit::root(stack, layer);
     // What is pasted while no field has the keyboard: files and images attach to the message being
     // written; plain text goes to the terminal, where it is showing.
-    root.on_drop_files(|s: &mut S, paths: &[std::path::PathBuf], _: &mut Tx| s.attach(paths.iter().cloned().map(crate::Source::Path).collect())).on_window_focus(|s: &mut S, focused: bool, _: &mut Tx| s.set_active(focused)).on_paste_content(|s: &mut S, content: &rune::ClipboardContent, _: &mut Tx| {
+    root.on_drop_files(|s: &mut S, paths: &[std::path::PathBuf], _: &mut Tx| {
+        s.attach(
+            paths
+                .iter()
+                .cloned()
+                .map(crate::session::thread::Source::Path)
+                .collect(),
+        )
+    })
+    .on_window_focus(|s: &mut S, focused: bool, _: &mut Tx| s.set_active(focused))
+    .on_paste_content(|s: &mut S, content: &rune::ClipboardContent, _: &mut Tx| {
         if !content.files().is_empty() {
-            s.attach(content.files().iter().cloned().map(crate::Source::Path).collect());
+            s.attach(
+                content
+                    .files()
+                    .iter()
+                    .cloned()
+                    .map(crate::session::thread::Source::Path)
+                    .collect(),
+            );
         } else if let Some(image) = content.image() {
-            s.attach(vec![crate::Source::Bytes(image.png().to_vec())]);
+            s.attach(vec![crate::session::thread::Source::Bytes(
+                image.png().to_vec(),
+            )]);
         } else if s.layout().terminal_shown
             && let Some(term) = s.terminal_mut()
         {
@@ -411,7 +605,7 @@ mod tests {
             None
         }
         fn set_active(&mut self, _: bool) {}
-        fn attach(&mut self, _: Vec<crate::Source>) {}
+        fn attach(&mut self, _: Vec<crate::session::thread::Source>) {}
     }
     fn view(s: &App, _: &mut Cx<App>) -> El {
         super::view::<App>(s, &s.kit, 0.0)
@@ -419,13 +613,47 @@ mod tests {
 
     fn app() -> Runtime<App> {
         let mut shell = Shell::default();
-        let thread = Thread { project: 1, id: 2, label: "Fix it".into(), name: "Fix it".into(), mark: Mark::Idle, selected: true, controlled: false, ago: None, closing: false };
-        shell.sidebar_feed.value = Snapshot { projects: vec![Project { id: 1, name: "po".into(), active: true, collapsed: false, closable: false, threads: vec![thread], fold: None }], ..Default::default() };
+        let thread = Thread {
+            project: 1,
+            id: 2,
+            label: "Fix it".into(),
+            name: "Fix it".into(),
+            mark: Mark::Idle,
+            selected: true,
+            controlled: false,
+            ago: None,
+            closing: false,
+        };
+        shell.sidebar_feed.value = Snapshot {
+            projects: vec![Project {
+                id: 1,
+                name: "po".into(),
+                active: true,
+                collapsed: false,
+                closable: false,
+                threads: vec![thread],
+                fold: None,
+            }],
+            ..Default::default()
+        };
         shell.chat_feed.value.title = "Fix it".into();
         shell.chat_feed.value.thread = (1, 2);
         shell.chat.draft.focused = true;
-        let layout = Layout { left_open: true, agent_open: true, ..Default::default() };
-        let mut rt = Runtime::new(App { shell, kit: Kit::neutral(true), layout }, view, (1000.0, 700.0), Env::new(true, 1.0));
+        let layout = Layout {
+            left_open: true,
+            agent_open: true,
+            ..Default::default()
+        };
+        let mut rt = Runtime::new(
+            App {
+                shell,
+                kit: Kit::neutral(true),
+                layout,
+            },
+            view,
+            (1000.0, 700.0),
+            Env::new(true, 1.0),
+        );
         rt.frame(0.0);
         rt.frame(1.0);
         rt
@@ -440,11 +668,19 @@ mod tests {
     }
 
     fn fields(rt: &Runtime<App>) -> Vec<[f32; 4]> {
-        rt.elements().into_iter().filter(|e| e.key.as_deref() == Some("rename")).map(|e| e.rect).collect()
+        rt.elements()
+            .into_iter()
+            .filter(|e| e.key.as_deref() == Some("rename"))
+            .map(|e| e.rect)
+            .collect()
     }
 
     fn rect(rt: &Runtime<App>, key: &str) -> [f32; 4] {
-        rt.elements().into_iter().find(|e| e.key.as_deref() == Some(key)).expect(key).rect
+        rt.elements()
+            .into_iter()
+            .find(|e| e.key.as_deref() == Some(key))
+            .expect(key)
+            .rect
     }
 
     /// As the window does: what `settle` changes is drawn again.
@@ -458,14 +694,23 @@ mod tests {
     }
 
     fn stays(rt: &mut Runtime<App>) {
-        assert!(rt.state.shell.side.rename.editing.is_some(), "the line opened");
+        assert!(
+            rt.state.shell.side.rename.editing.is_some(),
+            "the line opened"
+        );
         settle(rt);
         assert!(rt.state.shell.side.rename.editing.is_some(), "and stayed");
         assert_eq!(fields(rt).len(), 1, "in one place");
         assert!(rt.state.shell.side.rename.edit.focused, "with the keyboard");
-        rt.key(rune::KeyEvent { key: rune::Key::Text("Z".into()), mods: Default::default() });
+        rt.key(rune::KeyEvent {
+            key: rune::Key::Text("Z".into()),
+            mods: Default::default(),
+        });
         rt.frame(1.0 / 60.0);
-        assert_eq!(rt.state.shell.side.rename.edit.text, "Z", "what is typed replaces the name");
+        assert_eq!(
+            rt.state.shell.side.rename.edit.text, "Z",
+            "what is typed replaces the name"
+        );
     }
 
     fn from_the_sidebar() -> Runtime<App> {
@@ -497,7 +742,11 @@ mod tests {
         // Across the band between the sidebar and the window's edge, less the margins the kit keeps
         // clear of the controls at its sides.
         let band = rect(&rt, "toolbar");
-        assert!(fields(&rt)[0][2] > band[2] - 2.0 * 96.0 - 8.0, "{:?} in {band:?}", fields(&rt));
+        assert!(
+            fields(&rt)[0][2] > band[2] - 2.0 * 96.0 - 8.0,
+            "{:?} in {band:?}",
+            fields(&rt)
+        );
     }
 
     #[test]

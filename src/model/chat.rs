@@ -1,5 +1,5 @@
 //! What the conversation screen is given and what it sends back: the types [`Snapshot`] is made of,
-//! the channel [`crate::Reader`] publishes it through, and the commands the user's actions become.
+//! the channel [`crate::reader::state::Reader`] publishes it through, and the commands the user's actions become.
 //! No view code, so a screen on any toolkit can use it.
 use std::sync::{Arc, LazyLock};
 
@@ -36,7 +36,11 @@ pub struct Grant {
 
 impl Default for Grant {
     fn default() -> Self {
-        Self { scope: Scope::Viewer, read: false, approvals: false }
+        Self {
+            scope: Scope::Viewer,
+            read: false,
+            approvals: false,
+        }
     }
 }
 
@@ -76,7 +80,10 @@ pub struct Queued {
 impl Setting {
     /// The name of the choice in effect, or its value when the agent gave no name for it.
     pub fn current_name(&self) -> String {
-        self.choices.iter().find(|(value, _)| *value == self.current).map_or(self.current.clone(), |(_, name)| name.clone())
+        self.choices
+            .iter()
+            .find(|(value, _)| *value == self.current)
+            .map_or(self.current.clone(), |(_, name)| name.clone())
     }
 }
 
@@ -106,7 +113,14 @@ pub enum Kind {
 
 impl Kind {
     /// The order the line counts them in.
-    pub(crate) const ALL: [Kind; 6] = [Kind::Read, Kind::Search, Kind::Edit, Kind::Command, Kind::Fetch, Kind::Other];
+    pub(crate) const ALL: [Kind; 6] = [
+        Kind::Read,
+        Kind::Search,
+        Kind::Edit,
+        Kind::Command,
+        Kind::Fetch,
+        Kind::Other,
+    ];
 
     /// `3 reads`, `1 search`: the count and what it counts.
     pub(crate) fn counted(self, n: usize) -> String {
@@ -164,9 +178,16 @@ pub enum Block {
     /// says the piece above it is the same text, which the two rows keep the room of a paragraph
     /// in (see [`crate::main`]'s paragraph splits of long text) instead of the room between the
     /// blocks the agent put side by side.
-    Markdown { text: Arc<str>, stitch: bool },
+    Markdown {
+        text: Arc<str>,
+        stitch: bool,
+    },
     /// Its reasoning, with whether it is expanded.
-    Thought { index: usize, text: String, open: bool },
+    Thought {
+        index: usize,
+        text: String,
+        open: bool,
+    },
     Tool(Tool),
     /// A stretch of the agent's work (its tool calls and thoughts between two pieces of text) folded to one line:
     /// how many blocks it keeps, how many of them are tool calls, how many of those failed, how it went, and where
@@ -174,13 +195,35 @@ pub enum Block {
     /// `task` is the plan entry it worked towards, which the row says in place of `Worked`; `took` is how long it
     /// took once it is over, `latest` the call it is at, `kinds` how many calls of each kind it made, and `edits` the
     /// files its edits touched.
-    Run { index: usize, count: usize, calls: usize, failed: usize, phase: Phase, folded: bool, task: Option<String>, took: Option<std::time::Duration>, latest: Option<String>, kinds: Vec<(Kind, usize)>, edits: Vec<String> },
+    Run {
+        index: usize,
+        count: usize,
+        calls: usize,
+        failed: usize,
+        phase: Phase,
+        folded: bool,
+        task: Option<String>,
+        took: Option<std::time::Duration>,
+        latest: Option<String>,
+        kinds: Vec<(Kind, usize)>,
+        edits: Vec<String>,
+    },
     Plan(Vec<Entry>),
     /// A permission request, with the ways it may be answered; answered, it says what went.
-    Ask { index: usize, title: String, options: Vec<AskOption>, answered: Option<String> },
+    Ask {
+        index: usize,
+        title: String,
+        options: Vec<AskOption>,
+        answered: Option<String>,
+    },
     /// Po's command, offered to be run: what would run, and the commands of it, both below the
     /// plain word of the user.
-    Approve { index: usize, question: String, lines: Vec<String>, answered: Option<String> },
+    Approve {
+        index: usize,
+        question: String,
+        lines: Vec<String>,
+        answered: Option<String>,
+    },
 }
 
 /// One message: the user's, or the agent's column of blocks. The agent's blocks are shared: a
@@ -188,8 +231,14 @@ pub enum Block {
 /// `chat_items`), and the engine's own comparisons of a message's blocks are bumps, not copies.
 #[derive(Clone, PartialEq, Debug)]
 pub enum Item {
-    User { text: String, pictures: Vec<Picture> },
-    Agent { index: usize, blocks: Arc<Vec<Block>> },
+    User {
+        text: String,
+        pictures: Vec<Picture>,
+    },
+    Agent {
+        index: usize,
+        blocks: Arc<Vec<Block>>,
+    },
 }
 
 /// What resuming a session shows: the sessions on offer, or why there are none.
@@ -264,7 +313,8 @@ pub struct Snapshot {
     pub follow_soft: u64,
 }
 
-pub(crate) static SNAPSHOT: LazyLock<watch::Sender<Snapshot>> = LazyLock::new(|| watch::Sender::new(Snapshot::default()));
+pub(crate) static SNAPSHOT: LazyLock<watch::Sender<Snapshot>> =
+    LazyLock::new(|| watch::Sender::new(Snapshot::default()));
 
 /// Shows `snapshot`; nothing is redrawn when it is what the screen already has.
 #[hotpath::measure]
@@ -285,7 +335,7 @@ pub fn shown() -> tokio::sync::watch::Ref<'static, Snapshot> {
     SNAPSHOT.borrow()
 }
 
-/// What the user did, for [`crate::Reader::run`].
+/// What the user did, for [`crate::reader::state::Reader::run`].
 #[derive(Clone, Debug, PartialEq)]
 pub enum Cmd {
     /// The draft changed.
@@ -307,15 +357,27 @@ pub enum Cmd {
     /// The note under the composer about what was left out is dismissed.
     DismissNote,
     /// The user gave the agent one of the ways of answering a permission request.
-    Answer { message: usize, block: usize, at: usize },
+    Answer {
+        message: usize,
+        block: usize,
+        at: usize,
+    },
     /// Po's command was approved (`yes`) or refused.
-    Approve { message: usize, block: usize, yes: bool },
+    Approve {
+        message: usize,
+        block: usize,
+        yes: bool,
+    },
     /// A tool card's call and result are shown or hidden.
     ToggleTool { message: usize, block: usize },
     /// A thought is shown or hidden.
     ToggleThought { message: usize, block: usize },
     /// A run of tool calls folds, or unfolds.
-    Fold { message: usize, block: usize, folded: bool },
+    Fold {
+        message: usize,
+        block: usize,
+        folded: bool,
+    },
     /// A tool call wrote or changed a file: it opens in the other pane.
     Open(String),
     /// Which session to resume.

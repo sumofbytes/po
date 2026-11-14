@@ -1,4 +1,4 @@
-//! The strip screen's data: what [`crate::Reader`] publishes. No view code.
+//! The strip screen's data: what [`crate::reader::state::Reader`] publishes. No view code.
 #![allow(unused_imports)]
 use std::sync::LazyLock;
 
@@ -13,7 +13,10 @@ pub enum Pr {
     Opened { label: String },
     /// Nothing open: a field for the PR's number or URL, whether opening one is running, and
     /// how the last attempt went (`Some` while it runs, and failed once it stopped).
-    Asking { status: Option<String>, opening: bool },
+    Asking {
+        status: Option<String>,
+        opening: bool,
+    },
 }
 
 /// The strip a worktree project shows: its branch, and the ways to finish it.
@@ -33,7 +36,8 @@ pub struct Snapshot {
     pub pr_reset: u64,
 }
 
-pub(crate) static SNAPSHOT: LazyLock<watch::Sender<Snapshot>> = LazyLock::new(|| watch::Sender::new(Snapshot::default()));
+pub(crate) static SNAPSHOT: LazyLock<watch::Sender<Snapshot>> =
+    LazyLock::new(|| watch::Sender::new(Snapshot::default()));
 
 /// Shows `snapshot`; nothing is redrawn when it is what the screen already has.
 pub fn publish(snapshot: Snapshot) {

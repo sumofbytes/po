@@ -1,4 +1,4 @@
-//! The source screen's data: what [`crate::Reader`] publishes and what it sends back. No view code.
+//! The source screen's data: what [`crate::reader::state::Reader`] publishes and what it sends back. No view code.
 #![allow(unused_imports)]
 use std::sync::{Arc, LazyLock};
 
@@ -24,7 +24,10 @@ pub enum Body {
     Hint(String),
     /// A file that can't be shown, and why.
     Notice(String),
-    Code { path: String, text: Shared },
+    Code {
+        path: String,
+        text: Shared,
+    },
     /// A markdown file, rendered.
     Markdown(Shared),
 }
@@ -45,11 +48,20 @@ pub struct Snapshot {
 
 impl Default for Snapshot {
     fn default() -> Self {
-        Self { title: String::new(), lead: vec![], trail: vec![], language: String::new(), preview: None, body: Body::Hint(String::new()), reveal: None }
+        Self {
+            title: String::new(),
+            lead: vec![],
+            trail: vec![],
+            language: String::new(),
+            preview: None,
+            body: Body::Hint(String::new()),
+            reveal: None,
+        }
     }
 }
 
-pub(crate) static SNAPSHOT: LazyLock<watch::Sender<Snapshot>> = LazyLock::new(|| watch::Sender::new(Snapshot::default()));
+pub(crate) static SNAPSHOT: LazyLock<watch::Sender<Snapshot>> =
+    LazyLock::new(|| watch::Sender::new(Snapshot::default()));
 
 /// Shows `snapshot`; nothing is redrawn when it is what the screen already has.
 #[hotpath::measure]

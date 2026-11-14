@@ -1,14 +1,22 @@
 //! What Home, the issues page and the epics share: how an issue's status and priority look.
-use rune::{Color, El, col, text};
 use rune::tok::TextStyle;
+use rune::{Color, El, col, text};
 use rune_kit::Kit;
 
 use crate::issues::{Priority, Status};
 
-pub fn body_style() -> TextStyle { crate::fonts::ui(13.0, 400.0) }
-pub fn small_style() -> TextStyle { crate::fonts::ui(12.0, 400.0) }
-pub fn title_style() -> TextStyle { crate::fonts::ui(22.0, 600.0) }
-pub fn heading_style() -> TextStyle { crate::fonts::ui(14.0, 600.0) }
+pub fn body_style() -> TextStyle {
+    crate::config::fonts::ui(13.0, 400.0)
+}
+pub fn small_style() -> TextStyle {
+    crate::config::fonts::ui(12.0, 400.0)
+}
+pub fn title_style() -> TextStyle {
+    crate::config::fonts::ui(22.0, 600.0)
+}
+pub fn heading_style() -> TextStyle {
+    crate::config::fonts::ui(14.0, 600.0)
+}
 
 pub fn status_tint(k: &Kit, status: Status) -> Color {
     match status {
@@ -42,7 +50,17 @@ pub fn priority_tint(k: &Kit, priority: Priority) -> Color {
 
 /// A bordered card with a title, to put rows in.
 pub fn card(k: &Kit, title: &str) -> El {
-    col().w_full().gap(8.0).padding(16.0).radius(10.0).border(1.0, k.c.border_base).child(text(title.to_string()).font(heading_style()).color(k.c.text_base))
+    col()
+        .w_full()
+        .gap(8.0)
+        .padding(16.0)
+        .radius(10.0)
+        .border(1.0, k.c.border_base)
+        .child(
+            text(title.to_string())
+                .font(heading_style())
+                .color(k.c.text_base),
+        )
 }
 
 pub fn muted(k: &Kit, s: impl Into<String>) -> El {
@@ -51,6 +69,17 @@ pub fn muted(k: &Kit, s: impl Into<String>) -> El {
 
 /// A number with what it counts, in a box.
 pub fn metric(k: &Kit, label: &str, value: usize, tint: Color) -> El {
-    col().grow(1.0).min_w(0.0).px(16.0).py(12.0).radius(10.0).border(1.0, k.c.border_base).child(text(value.to_string()).font(crate::fonts::ui(24.0, 600.0)).color(tint)).child(muted(k, label))
+    col()
+        .grow(1.0)
+        .min_w(0.0)
+        .px(16.0)
+        .py(12.0)
+        .radius(10.0)
+        .border(1.0, k.c.border_base)
+        .child(
+            text(value.to_string())
+                .font(crate::config::fonts::ui(24.0, 600.0))
+                .color(tint),
+        )
+        .child(muted(k, label))
 }
-

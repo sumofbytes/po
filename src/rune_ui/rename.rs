@@ -45,7 +45,9 @@ impl Rename {
 
     /// Ends the edit and asks for the new name if it differs. Ending twice asks once.
     pub fn commit(&mut self) {
-        let Some((project, thread)) = self.editing.take() else { return };
+        let Some((project, thread)) = self.editing.take() else {
+            return;
+        };
         if self.edit.text != self.from {
             send(Cmd::RenameThread(project, thread, self.edit.text.clone()));
         }
@@ -105,20 +107,43 @@ pub fn input<S: 'static>(k: &Kit, state: &Rename, at: At<S>, font: TextStyle) ->
 /// The line for `thread`'s title, if that is where the name is being typed. It fills what it is
 /// put in, so the toolbar seats it across the band, not in its title slot, which is only as wide
 /// as the name was.
-pub fn line<S: 'static>(k: &Kit, state: &Rename, at: At<S>, thread: (u64, u64), font: TextStyle) -> Option<El> {
-    state.open_at(thread, Place::Title).then(|| row().w_full().items_center().child(input::<S>(k, state, at, font)))
+pub fn line<S: 'static>(
+    k: &Kit,
+    state: &Rename,
+    at: At<S>,
+    thread: (u64, u64),
+    font: TextStyle,
+) -> Option<El> {
+    state.open_at(thread, Place::Title).then(|| {
+        row()
+            .w_full()
+            .items_center()
+            .child(input::<S>(k, state, at, font))
+    })
 }
 
 /// A thread's title in a header: the name, which a double press turns into the line while
 /// `thread` is the one being renamed.
-pub fn title<S: 'static>(k: &Kit, state: &Rename, at: At<S>, thread: (u64, u64), name: &str, font: TextStyle) -> El {
+pub fn title<S: 'static>(
+    k: &Kit,
+    state: &Rename,
+    at: At<S>,
+    thread: (u64, u64),
+    name: &str,
+    font: TextStyle,
+) -> El {
     if let Some(line) = line::<S>(k, state, at, thread, font) {
-        return row().grow(1.0).min_w(0.0).items_center().child(line);
+        return row().grow(1.0).shrink().items_center().child(line);
     }
     let shown = name.to_string();
     let label = name.to_string();
     let body = text(label).font(font).color(k.c.text_base).truncate();
-    row().key("thread-title").grow(1.0).min_w(0.0).child(body).on_double_press(move |s: &mut S| at(s).start(thread, &shown, Place::Title))
+    row()
+        .key("thread-title")
+        .grow(1.0)
+        .shrink()
+        .child(body)
+        .on_double_press(move |s: &mut S| at(s).start(thread, &shown, Place::Title))
 }
 
 #[cfg(test)]
@@ -132,12 +157,26 @@ mod tests {
 
     fn view(s: &App, _: &mut Cx<App>) -> El {
         let kit = Kit::neutral(true);
-        row().w_full().h(44.0).child(title::<App>(&kit, &s.rename, |s| &mut s.rename, (1, 2), "A name", TextStyle::new(14.0, 400.0)))
+        row().w_full().h(44.0).child(title::<App>(
+            &kit,
+            &s.rename,
+            |s| &mut s.rename,
+            (1, 2),
+            "A name",
+            TextStyle::new(14.0, 400.0),
+        ))
     }
 
     #[test]
     fn a_double_press_on_the_title_keeps_the_line_open() {
-        let mut rt = Runtime::new(App { rename: Rename::default() }, view, (400.0, 44.0), Env::new(true, 1.0));
+        let mut rt = Runtime::new(
+            App {
+                rename: Rename::default(),
+            },
+            view,
+            (400.0, 44.0),
+            Env::new(true, 1.0),
+        );
         rt.frame(0.0);
         let (x, y) = rt.find("thread-title").unwrap();
         for _ in 0..2 {
@@ -172,7 +211,10 @@ mod tests {
         rename.follow(false, Some((1, 2)));
         assert!(rename.editing.is_some(), "the title is still up");
         rename.follow(true, Some((1, 3)));
-        assert!(rename.editing.is_none(), "another thread's title took its place");
+        assert!(
+            rename.editing.is_none(),
+            "another thread's title took its place"
+        );
 
         rename.start((1, 2), "A name", Place::Sidebar);
         rename.follow(true, None);

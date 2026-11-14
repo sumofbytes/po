@@ -5,16 +5,22 @@ use std::sync::Arc;
 
 use rune::tok::TextStyle;
 use rune::{El, ScrollSpec, col, row, text};
-use rune_kit::syntax::{self, Highlight, SyntaxTheme};
 use rune_kit::Kit;
 use rune_kit::markdown::Markdown;
+use rune_kit::syntax::{self, Highlight, SyntaxTheme};
 
 use crate::model::bus::{Cmd, send};
 use crate::model::source::{Body, Snapshot};
 
-fn mono_style() -> TextStyle { crate::fonts::mono(13.0, 19.0) }
-fn caption_style() -> TextStyle { crate::fonts::ui(12.0, 400.0) }
-fn name_style() -> TextStyle { crate::fonts::ui(13.0, 400.0) }
+fn mono_style() -> TextStyle {
+    crate::config::fonts::mono(13.0, 19.0)
+}
+fn caption_style() -> TextStyle {
+    crate::config::fonts::ui(12.0, 400.0)
+}
+fn name_style() -> TextStyle {
+    crate::config::fonts::ui(13.0, 400.0)
+}
 const LINE: f32 = 19.0;
 
 /// A file split into lines, each with the colours of its own bytes: made once when the file
@@ -51,7 +57,11 @@ impl Lines {
                 from = end;
             }
         }
-        Self { text, starts, marks }
+        Self {
+            text,
+            starts,
+            marks,
+        }
     }
 
     pub fn len(&self) -> usize {
@@ -74,7 +84,11 @@ impl State {
     pub fn follow(&mut self, snapshot: &Snapshot) {
         match &snapshot.body {
             Body::Code { path, text } => {
-                if !self.shown.as_ref().is_some_and(|(held, _)| Arc::ptr_eq(held, &text.0)) {
+                if !self
+                    .shown
+                    .as_ref()
+                    .is_some_and(|(held, _)| Arc::ptr_eq(held, &text.0))
+                {
                     self.shown = Some((text.0.clone(), Rc::new(Lines::new(path, text.0.clone()))));
                 }
             }
@@ -84,55 +98,138 @@ impl State {
 }
 
 fn centered(k: &Kit, message: &str) -> El {
-    col().w_full().grow(1.0).center().padding(16.0).child(text(message.to_string()).font(caption_style()).color(k.c.text_muted))
+    col().w_full().grow(1.0).center().padding(16.0).child(
+        text(message.to_string())
+            .font(caption_style())
+            .color(k.c.text_muted),
+    )
 }
 
 fn pill<S: 'static>(k: &Kit, label: &'static str, key: &'static str, on: bool, cmd: Cmd) -> El {
-    let r = row().key(key).px(8.0).py(2.0).radius(6.0).child(text(label).font(caption_style()).color(k.c.text_base)).on_press(move |_: &mut S| send(cmd.clone()));
+    let r = row()
+        .key(key)
+        .px(8.0)
+        .py(2.0)
+        .radius(6.0)
+        .child(text(label).font(caption_style()).color(k.c.text_base))
+        .on_press(move |_: &mut S| send(cmd.clone()));
     k.interactive(if on { r.fill(k.c.layer_03) } else { r })
 }
 
 fn header<S: 'static>(k: &Kit, snapshot: &Snapshot) -> El {
-    let mut bar = row().w_full().h(super::header::BAND).items_center().gap(8.0).px(12.0).child(super::header::controls::<S>(k, &snapshot.lead));
-    bar = bar.child(row().grow(1.0).min_w(0.0).child(text(snapshot.title.clone()).font(name_style()).color(k.c.text_base)));
+    let mut bar = row()
+        .w_full()
+        .h(super::header::BAND)
+        .items_center()
+        .gap(8.0)
+        .px(12.0)
+        .child(super::header::controls::<S>(k, &snapshot.lead));
+    bar = bar.child(
+        row().grow(1.0).min_w(0.0).child(
+            text(snapshot.title.clone())
+                .font(name_style())
+                .color(k.c.text_base),
+        ),
+    );
     if !snapshot.language.is_empty() {
-        bar = bar.child(text(snapshot.language.clone()).font(caption_style()).color(k.c.text_muted));
+        bar = bar.child(
+            text(snapshot.language.clone())
+                .font(caption_style())
+                .color(k.c.text_muted),
+        );
     }
     if let Some(rendered) = snapshot.preview {
-        bar = bar.child(pill::<S>(k, if rendered { "Source" } else { "Preview" }, "preview", false, Cmd::ToggleRendered));
+        bar = bar.child(pill::<S>(
+            k,
+            if rendered { "Source" } else { "Preview" },
+            "preview",
+            false,
+            Cmd::ToggleRendered,
+        ));
     }
-    super::header::ruled(k, bar.child(super::header::controls::<S>(k, &snapshot.trail)))
+    super::header::ruled(
+        k,
+        bar.child(super::header::controls::<S>(k, &snapshot.trail)),
+    )
 }
 
 pub fn view<S: 'static>(snapshot: &Snapshot, state: &State, k: &Kit) -> El {
     let theme = SyntaxTheme::from_kit(k);
     let body = match (&snapshot.body, &state.shown) {
         (Body::Hint(message) | Body::Notice(message), _) => centered(k, message),
-        (Body::Markdown(source), _) => col()
-            .w_full()
-            .grow(1.0)
-            .min_h(0.0)
-            .child(k.scroll_bar(col().w_full().grow(1.0).min_h(0.0).scroll(ScrollSpec { stick_bottom: false }).padding(16.0).child(Markdown::new(source.0.to_string()).style(super::book_style(k)).selectable(true).build(k)))),
+        (Body::Markdown(source), _) => col().w_full().grow(1.0).min_h(0.0).child(
+            k.scroll_bar(
+                col()
+                    .w_full()
+                    .grow(1.0)
+                    .min_h(0.0)
+                    .scroll(ScrollSpec {
+                        stick_bottom: false,
+                    })
+                    .padding(16.0)
+                    .child(
+                        Markdown::new(source.0.to_string())
+                            .style(super::book_style(k))
+                            .selectable(true)
+                            .build(k),
+                    ),
+            ),
+        ),
         (Body::Code { .. }, Some((_, lines))) => {
             let lines = lines.clone();
             let width = lines.len().to_string().len() as f32 * 8.0 + 16.0;
             let (muted, base) = (k.c.text_muted, k.c.text_base);
-            let rows = col().key("source-lines").w_full().growth(rune::GrowthSpec::default()).virtual_rows(
-                lines.len(),
-                LINE,
-                |_: &S, i| i.to_string().into(),
-                move |_: &S, i| {
-                    let spans = theme.spans(&lines.marks[i], 0).into_iter().map(|s| s.mono()).collect::<Vec<_>>();
-                    row()
+            let rows = col()
+                .key("source-lines")
+                .w_full()
+                .growth(rune::GrowthSpec::default())
+                .virtual_rows(
+                    lines.len(),
+                    LINE,
+                    |_: &S, i| i.to_string().into(),
+                    move |_: &S, i| {
+                        let spans = theme
+                            .spans(&lines.marks[i], 0)
+                            .into_iter()
+                            .map(|s| s.mono())
+                            .collect::<Vec<_>>();
+                        row()
+                            .w_full()
+                            .h(LINE)
+                            .child(
+                                text((i + 1).to_string())
+                                    .font(mono_style())
+                                    .color(muted)
+                                    .w(width)
+                                    .px(4.0),
+                            )
+                            .child(
+                                text(lines.line(i).to_string())
+                                    .font(mono_style())
+                                    .color(base)
+                                    .spans(spans),
+                            )
+                    },
+                );
+            col().w_full().grow(1.0).min_h(0.0).child(
+                k.scroll_bar(
+                    col()
                         .w_full()
-                        .h(LINE)
-                        .child(text((i + 1).to_string()).font(mono_style()).color(muted).w(width).px(4.0))
-                        .child(text(lines.line(i).to_string()).font(mono_style()).color(base).spans(spans))
-                },
-            );
-            col().w_full().grow(1.0).min_h(0.0).child(k.scroll_bar(col().w_full().grow(1.0).min_h(0.0).scroll(ScrollSpec { stick_bottom: false }).child(rows)))
+                        .grow(1.0)
+                        .min_h(0.0)
+                        .scroll(ScrollSpec {
+                            stick_bottom: false,
+                        })
+                        .child(rows),
+                ),
+            )
         }
         (Body::Code { .. }, None) => centered(k, ""),
     };
-    col().w_full().h_full().min_h(0.0).child(header::<S>(k, snapshot)).child(body)
+    col()
+        .w_full()
+        .h_full()
+        .min_h(0.0)
+        .child(header::<S>(k, snapshot))
+        .child(body)
 }

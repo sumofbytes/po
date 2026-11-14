@@ -77,7 +77,7 @@ those that name both.
 ## The API
 
 Agents reach the issues through Po's control plane (`src/issues/api.rs`; the tools are in
-`src/mcp.rs`, the commands in `src/command.rs`), `po ctl` speaks the same commands as the user.
+`src/ipc/mcp.rs`, the commands in `src/ipc/command.rs`), `po ctl` speaks the same commands as the user.
 They work on the repo the caller's project belongs to; a worktree thread works on the primary
 checkout's issues.
 

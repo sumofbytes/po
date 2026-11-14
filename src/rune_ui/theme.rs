@@ -1,14 +1,14 @@
 //! Po's colour schemes as a Rune kit. The schemes are in
-//! [`crate::schemes`].
+//! [`crate::config::schemes`].
 use rune::{Color, color};
-use rune_kit::{Kit, PaletteFocus, PaletteSeed};
 use rune_kit::kit::StateColors;
+use rune_kit::{Kit, PaletteFocus, PaletteSeed};
 use serde_json::Value;
 
 /// What the theme was not given.
 pub const DEFAULT: &str = "Rose Pine";
 
-/// The kit for the scheme or theme file `theme` (a `colors` object like [`crate::schemes::load`]
+/// The kit for the scheme or theme file `theme` (a `colors` object like [`crate::config::schemes::load`]
 /// returns), and whether it is a dark one.
 pub fn kit(theme: &Value) -> (Kit, bool) {
     let colors = &theme["colors"];
@@ -19,7 +19,12 @@ pub fn kit(theme: &Value) -> (Kit, bool) {
     let mut kit = Kit::from_palette_focus(PaletteSeed { bg, fg, accent }, PaletteFocus::Accent);
     // The status roles come from the scheme's own red, green and yellow, not the kit's fixed ones.
     let role = |name: &str, old: StateColors| match get(&format!("{name}.background")) {
-        Some(c) => StateColors { bg: bg.mix(c, 0.12), fg: c, border: bg.mix(c, 0.35), icon: c },
+        Some(c) => StateColors {
+            bg: bg.mix(c, 0.12),
+            fg: c,
+            border: bg.mix(c, 0.35),
+            icon: c,
+        },
         None => old,
     };
     kit.c.success = role("success", kit.c.success);
@@ -32,12 +37,14 @@ pub fn kit(theme: &Value) -> (Kit, bool) {
     kit.c.submit_fg = on_accent;
     kit.c.submit_icon = on_accent;
     kit.c.bg_accent = accent;
-    crate::fonts::scale_type(&mut kit.ty);
+    crate::config::fonts::scale_type(&mut kit.ty);
     let dark = kit.dark;
     (kit, dark)
 }
 
 /// The bundled scheme `name`, else [`DEFAULT`].
 pub fn load(name: &str) -> Value {
-    crate::schemes::load(name).or_else(|| crate::schemes::load(DEFAULT)).expect("the default scheme is bundled")
+    crate::config::schemes::load(name)
+        .or_else(|| crate::config::schemes::load(DEFAULT))
+        .expect("the default scheme is bundled")
 }

@@ -1,12 +1,15 @@
 //! The settings page on Rune: the options of `config.json` as fields, written back on Save. What
-//! the fields hold and how they are written is [`crate::settings`]; this is the screen, and the
+//! the fields hold and how they are written is [`crate::config::settings`]; this is the screen, and the
 //! Rune counterpart of `src/nsh/settings.rs`.
 use rune::tok::TextStyle;
 use rune::{El, TextEdit, Tx, col, el, row, text};
-use rune_kit::{Button, ButtonVariant, ControlSize, IconButton, IconButtonVariant, Kit, SegmentedControl, Switch, TextInput};
+use rune_kit::{
+    Button, ButtonVariant, ControlSize, IconButton, IconButtonVariant, Kit, SegmentedControl,
+    Switch, TextInput,
+};
 
 use super::theme_pick;
-use crate::settings::{AgentForm, Form};
+use crate::config::settings::{AgentForm, Form};
 
 /// Where the host keeps the page: handlers reach it through this.
 pub type At<S> = fn(&mut S) -> &mut Page;
@@ -64,7 +67,16 @@ impl Page {
             max_live: edit(&form.max_live),
             notifications: form.notifications,
             viewer_left: form.viewer_left,
-            agents: form.agents.into_iter().map(|a| AgentRow { name: edit(&a.name), id: edit(&a.id), command: edit(&a.command), extra: a.extra }).collect(),
+            agents: form
+                .agents
+                .into_iter()
+                .map(|a| AgentRow {
+                    name: edit(&a.name),
+                    id: edit(&a.id),
+                    command: edit(&a.command),
+                    extra: a.extra,
+                })
+                .collect(),
             error: None,
             preview: None,
             outcome: None,
@@ -82,7 +94,16 @@ impl Page {
             max_live: self.max_live.text.clone(),
             notifications: self.notifications,
             viewer_left: self.viewer_left,
-            agents: self.agents.iter().map(|a| AgentForm { id: a.id.text.clone(), name: a.name.text.clone(), command: a.command.text.clone(), extra: a.extra.clone() }).collect(),
+            agents: self
+                .agents
+                .iter()
+                .map(|a| AgentForm {
+                    id: a.id.text.clone(),
+                    name: a.name.text.clone(),
+                    command: a.command.text.clone(),
+                    extra: a.extra.clone(),
+                })
+                .collect(),
         }
     }
 
@@ -98,19 +119,36 @@ impl Page {
     }
 
     fn add_agent(&mut self) {
-        self.agents.push(AgentRow { name: TextEdit::new(""), id: TextEdit::new(""), command: TextEdit::new(""), extra: Default::default() });
+        self.agents.push(AgentRow {
+            name: TextEdit::new(""),
+            id: TextEdit::new(""),
+            command: TextEdit::new(""),
+            extra: Default::default(),
+        });
     }
 }
 
-fn title_style() -> TextStyle { crate::fonts::ui(18.0, 600.0) }
-fn body_style() -> TextStyle { crate::fonts::ui(13.0, 400.0) }
-fn caption_style() -> TextStyle { crate::fonts::ui(12.0, 400.0) }
-fn eyebrow_style() -> TextStyle { crate::fonts::ui(11.0, 500.0) }
+fn title_style() -> TextStyle {
+    crate::config::fonts::ui(18.0, 600.0)
+}
+fn body_style() -> TextStyle {
+    crate::config::fonts::ui(13.0, 400.0)
+}
+fn caption_style() -> TextStyle {
+    crate::config::fonts::ui(12.0, 400.0)
+}
+fn eyebrow_style() -> TextStyle {
+    crate::config::fonts::ui(11.0, 500.0)
+}
 const PAD: f32 = 32.0;
 const CONTROL_WIDTH: f32 = 260.0;
 
 fn section(k: &Kit, title: &str) -> El {
-    col().pt(32.0).pb(4.0).child(text(title.to_uppercase()).font(eyebrow_style()).color(k.c.text_muted))
+    col().pt(32.0).pb(4.0).child(
+        text(title.to_uppercase())
+            .font(eyebrow_style())
+            .color(k.c.text_muted),
+    )
 }
 
 fn divider(k: &Kit) -> El {
@@ -124,52 +162,191 @@ fn setting(k: &Kit, label: &str, hint: &str, control: El) -> El {
         .items_center()
         .gap(24.0)
         .py(12.0)
-        .child(col().grow(1.0).min_w(0.0).gap(2.0).child(text(label).font(body_style()).color(k.c.text_base)).child(text(hint).font(caption_style()).color(k.c.text_muted)))
+        .child(
+            col()
+                .grow(1.0)
+                .min_w(0.0)
+                .gap(2.0)
+                .child(text(label).font(body_style()).color(k.c.text_base))
+                .child(text(hint).font(caption_style()).color(k.c.text_muted)),
+        )
         .child(row().w(CONTROL_WIDTH).justify_end().child(control))
 }
 
-fn input<S: 'static>(k: &Kit, label: &str, placeholder: &str, edit: &TextEdit, at: fn(&mut Page) -> &mut TextEdit, page: At<S>) -> El {
-    TextInput::new(edit).label(label).placeholder(placeholder).width(Some(CONTROL_WIDTH)).on_edit(move |s: &mut S| at(page(s))).build(k)
+fn input<S: 'static>(
+    k: &Kit,
+    label: &str,
+    placeholder: &str,
+    edit: &TextEdit,
+    at: fn(&mut Page) -> &mut TextEdit,
+    page: At<S>,
+) -> El {
+    TextInput::new(edit)
+        .label(label)
+        .placeholder(placeholder)
+        .width(Some(CONTROL_WIDTH))
+        .on_edit(move |s: &mut S| at(page(s)))
+        .build(k)
 }
 
 fn switch<S: 'static>(k: &Kit, label: &str, on: bool, flip: fn(&mut Page), page: At<S>) -> El {
-    Switch::new(on).label(label).hide_label().on_toggle(move |s: &mut S| flip(page(s))).build(k)
+    Switch::new(on)
+        .label(label)
+        .hide_label()
+        .on_toggle(move |s: &mut S| flip(page(s)))
+        .build(k)
 }
 
 /// The page, with its state reached through `page`.
 pub fn view<S: 'static>(p: &Page, k: &Kit, page: At<S>, layer: &mut Vec<El>) -> El {
-    let theme = setting(k, "Theme", "A colour scheme", theme_pick::view::<S>(k, &p.pick, p.theme.text.trim(), CONTROL_WIDTH, std::rc::Rc::new(move |s: &mut S| &mut page(s).pick), std::rc::Rc::new(move |s: &mut S, name: &str| { let page = page(s); page.theme = TextEdit::new(name); page.preview = Some(name.to_string()); }), layer));
+    let theme = setting(
+        k,
+        "Theme",
+        "A colour scheme",
+        theme_pick::view::<S>(
+            k,
+            &p.pick,
+            p.theme.text.trim(),
+            CONTROL_WIDTH,
+            std::rc::Rc::new(move |s: &mut S| &mut page(s).pick),
+            std::rc::Rc::new(move |s: &mut S, name: &str| {
+                let page = page(s);
+                page.theme = TextEdit::new(name);
+                page.preview = Some(name.to_string());
+            }),
+            layer,
+        ),
+    );
 
     let appearance = col()
         .w_full()
         .child(theme)
         .child(divider(k))
-        .child(setting(k, "UI font", "Names tried in order, comma separated; read when po starts", input(k, "UI font", crate::fonts::BUNDLED_UI_FAMILY, &p.font_family, |p| &mut p.font_family, page)))
+        .child(setting(
+            k,
+            "UI font",
+            "Names tried in order, comma separated; read when po starts",
+            input(
+                k,
+                "UI font",
+                crate::config::fonts::BUNDLED_UI_FAMILY,
+                &p.font_family,
+                |p| &mut p.font_family,
+                page,
+            ),
+        ))
         .child(divider(k))
-        .child(setting(k, "UI font size", "Scales all text; applies on Save", input(k, "UI font size", "14", &p.font_size, |p| &mut p.font_size, page)))
+        .child(setting(
+            k,
+            "UI font size",
+            "Scales all text; applies on Save",
+            input(
+                k,
+                "UI font size",
+                "14",
+                &p.font_size,
+                |p| &mut p.font_size,
+                page,
+            ),
+        ))
         .child(divider(k))
-        .child(setting(k, "Monospace font", "Names tried in order, comma separated; read when po starts", input(k, "Monospace font", crate::fonts::BUNDLED_MONO_FAMILY, &p.mono_family, |p| &mut p.mono_family, page)))
+        .child(setting(
+            k,
+            "Monospace font",
+            "Names tried in order, comma separated; read when po starts",
+            input(
+                k,
+                "Monospace font",
+                crate::config::fonts::BUNDLED_MONO_FAMILY,
+                &p.mono_family,
+                |p| &mut p.mono_family,
+                page,
+            ),
+        ))
         .child(divider(k))
-        .child(setting(k, "Monospace font size", "Code, diffs and the terminal; applies on Save", input(k, "Monospace font size", "13", &p.mono_size, |p| &mut p.mono_size, page)));
+        .child(setting(
+            k,
+            "Monospace font size",
+            "Code, diffs and the terminal; applies on Save",
+            input(
+                k,
+                "Monospace font size",
+                "13",
+                &p.mono_size,
+                |p| &mut p.mono_size,
+                page,
+            ),
+        ));
 
     let picked = SegmentedControl::new(&["Left", "Right"], Some(if p.viewer_left { 0 } else { 1 }))
         .label("Viewer position")
         .on_pick(move |s: &mut S, i: usize, _: &mut Tx| page(s).viewer_left = i == 0)
         .build(k);
-    let layout = setting(k, "Viewer position", "Which side of the conversation (Ctrl+Shift+S)", picked);
+    let layout = setting(
+        k,
+        "Viewer position",
+        "Which side of the conversation (Ctrl+Shift+S)",
+        picked,
+    );
 
     let behavior = col()
         .w_full()
-        .child(setting(k, "Notifications", "When a thread needs you in the background", switch(k, "Notifications", p.notifications, |p| p.notifications = !p.notifications, page)))
+        .child(setting(
+            k,
+            "Notifications",
+            "When a thread needs you in the background",
+            switch(
+                k,
+                "Notifications",
+                p.notifications,
+                |p| p.notifications = !p.notifications,
+                page,
+            ),
+        ))
         .child(divider(k))
-        .child(setting(k, "Idle minutes", "Stop an idle agent after this long; 0 never", input(k, "Idle minutes", "15", &p.idle_minutes, |p| &mut p.idle_minutes, page)))
+        .child(setting(
+            k,
+            "Idle minutes",
+            "Stop an idle agent after this long; 0 never",
+            input(
+                k,
+                "Idle minutes",
+                "15",
+                &p.idle_minutes,
+                |p| &mut p.idle_minutes,
+                page,
+            ),
+        ))
         .child(divider(k))
-        .child(setting(k, "Max live agents", "Longest idle agents stop beyond this many", input(k, "Max live agents", "8", &p.max_live, |p| &mut p.max_live, page)));
+        .child(setting(
+            k,
+            "Max live agents",
+            "Longest idle agents stop beyond this many",
+            input(
+                k,
+                "Max live agents",
+                "8",
+                &p.max_live,
+                |p| &mut p.max_live,
+                page,
+            ),
+        ));
 
     let mut agents = col().w_full().gap(8.0);
     for (i, a) in p.agents.iter().enumerate() {
-        let field = |label: &'static str, placeholder: &str, edit: &TextEdit, pick: fn(&mut AgentRow) -> &mut TextEdit, grow: f32| {
-            row().grow(grow).min_w(0.0).child(TextInput::new(edit).label(label).placeholder(placeholder).width(None).on_edit(move |s: &mut S| pick(&mut page(s).agents[i])).build(k))
+        let field = |label: &'static str,
+                     placeholder: &str,
+                     edit: &TextEdit,
+                     pick: fn(&mut AgentRow) -> &mut TextEdit,
+                     grow: f32| {
+            row().grow(grow).min_w(0.0).child(
+                TextInput::new(edit)
+                    .label(label)
+                    .placeholder(placeholder)
+                    .width(None)
+                    .on_edit(move |s: &mut S| pick(&mut page(s).agents[i]))
+                    .build(k),
+            )
         };
         agents = agents.child(
             row()
@@ -178,20 +355,50 @@ pub fn view<S: 'static>(p: &Page, k: &Kit, page: At<S>, layer: &mut Vec<El>) -> 
                 .gap(8.0)
                 .child(field("Name", "Name", &a.name, |a| &mut a.name, 2.0))
                 .child(field("ID", "ID", &a.id, |a| &mut a.id, 2.0))
-                .child(field("Command", "command --acp", &a.command, |a| &mut a.command, 5.0))
-                .child(Button::new("Remove").variant(ButtonVariant::Ghost).on_press(move |s: &mut S| drop(page(s).agents.remove(i))).build(k)),
+                .child(field(
+                    "Command",
+                    "command --acp",
+                    &a.command,
+                    |a| &mut a.command,
+                    5.0,
+                ))
+                .child(
+                    Button::new("Remove")
+                        .variant(ButtonVariant::Ghost)
+                        .on_press(move |s: &mut S| drop(page(s).agents.remove(i)))
+                        .build(k),
+                ),
         );
     }
-    let add = Button::new("Add agent").on_press(move |s: &mut S| page(s).add_agent()).build(k);
+    let add = Button::new("Add agent")
+        .on_press(move |s: &mut S| page(s).add_agent())
+        .build(k);
 
-    let close = IconButton::new(k.glyph.close).control_size(ControlSize::Regular).variant(IconButtonVariant::GhostMuted).label("Close settings").help("Close (Esc)").on_press(move |s: &mut S| page(s).outcome = Some(Outcome::Close)).build(k);
+    let close = IconButton::new(k.glyph.close)
+        .control_size(ControlSize::Regular)
+        .variant(IconButtonVariant::GhostMuted)
+        .label("Close settings")
+        .help("Close (Esc)")
+        .on_press(move |s: &mut S| page(s).outcome = Some(Outcome::Close))
+        .build(k);
     let header = row()
         .px(PAD)
         .pt(24.0)
         .pb(16.0)
         .gap(8.0)
         .items_start()
-        .child(col().grow(1.0).min_w(0.0).gap(2.0).child(text("Settings").font(title_style()).color(k.c.text_base)).child(text("How Po looks and behaves").font(caption_style()).color(k.c.text_muted)))
+        .child(
+            col()
+                .grow(1.0)
+                .min_w(0.0)
+                .gap(2.0)
+                .child(text("Settings").font(title_style()).color(k.c.text_base))
+                .child(
+                    text("How Po looks and behaves")
+                        .font(caption_style())
+                        .color(k.c.text_muted),
+                ),
+        )
         .child(close);
 
     let body = col()
@@ -209,8 +416,14 @@ pub fn view<S: 'static>(p: &Page, k: &Kit, page: At<S>, layer: &mut Vec<El>) -> 
         .child(row().pt(8.0).child(add));
 
     let status = match &p.error {
-        Some(message) => text(message.clone()).font(caption_style()).color(k.c.danger.fg),
-        None => text("Saved to config.json; other keys in it are kept. MCP servers are edited there.").font(caption_style()).color(k.c.text_muted),
+        Some(message) => text(message.clone())
+            .font(caption_style())
+            .color(k.c.danger.fg),
+        None => {
+            text("Saved to config.json; other keys in it are kept. MCP servers are edited there.")
+                .font(caption_style())
+                .color(k.c.text_muted)
+        }
     };
     let footer = row()
         .px(PAD)
@@ -218,8 +431,17 @@ pub fn view<S: 'static>(p: &Page, k: &Kit, page: At<S>, layer: &mut Vec<El>) -> 
         .items_center()
         .gap(8.0)
         .child(row().grow(1.0).min_w(0.0).child(status))
-        .child(Button::new("Close").on_press(move |s: &mut S| page(s).outcome = Some(Outcome::Close)).build(k))
-        .child(Button::new("Save").variant(ButtonVariant::Submit).on_press(move |s: &mut S| page(s).save()).build(k));
+        .child(
+            Button::new("Close")
+                .on_press(move |s: &mut S| page(s).outcome = Some(Outcome::Close))
+                .build(k),
+        )
+        .child(
+            Button::new("Save")
+                .variant(ButtonVariant::Submit)
+                .on_press(move |s: &mut S| page(s).save())
+                .build(k),
+        );
 
     col()
         .w_full()
@@ -227,7 +449,19 @@ pub fn view<S: 'static>(p: &Page, k: &Kit, page: At<S>, layer: &mut Vec<El>) -> 
         .min_h(0.0)
         .child(header)
         .child(divider(k))
-        .child(col().grow(1.0).min_h(0.0).child(k.scroll_bar(col().grow(1.0).min_h(0.0).scroll(rune::ScrollSpec { stick_bottom: false }).child(body))))
+        .child(
+            col().grow(1.0).min_h(0.0).child(
+                k.scroll_bar(
+                    col()
+                        .grow(1.0)
+                        .min_h(0.0)
+                        .scroll(rune::ScrollSpec {
+                            stick_bottom: false,
+                        })
+                        .child(body),
+                ),
+            ),
+        )
         .child(divider(k))
         .child(footer)
 }
