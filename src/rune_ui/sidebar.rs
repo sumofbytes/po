@@ -298,7 +298,7 @@ fn thread_row<S: 'static>(
 /// What a row's title does not get of the sidebar's width: the insets and gutter, the row's own
 /// padding, its mark and the slot at its end. Over-counted a little, so that a title that fits
 /// here fits the row and Rune never has to cut it again.
-const TITLE_RESERVE: f32 = 112.0;
+const TITLE_RESERVE: f32 = 96.0;
 
 /// `text` if `width` says it fits `room`, else its longest run of whole words with "…" after it
 /// that does. When not even the first word fits, `text` as it is, for Rune to cut.
@@ -658,7 +658,10 @@ pub fn view<S: 'static>(
                 .on_select(|_: &mut S, _: &mut Tx| send(Cmd::ToggleIssues))
                 .build(k)
                 .key("issues"),
-        );
+        )
+        // The search and what narrows it, right under the pages with the same step between rows, above the
+        // threads they act on.
+        .child(finder::<S>(k, snapshot, search, at));
 
     let mut bar = Sidebar::new()
         .label("Projects")
@@ -667,9 +670,6 @@ pub fn view<S: 'static>(
         .header_padding(12.0, 8.0)
         .row_gap(4.0)
         .header(pages);
-
-    // The search and what narrows it sit above the threads they act on, not among the pages.
-    bar = bar.header(finder::<S>(k, snapshot, search, at));
 
     if !snapshot.suggestions.is_empty() {
         let mut list = col().w_full().gap(4.0).py(4.0);
