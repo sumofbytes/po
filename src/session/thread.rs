@@ -777,3 +777,393 @@ impl Thread {
         self.generation += 1;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    
+    
+    
+    
+    
+    
+    
+
+    #[test]
+    fn a_thread_keeps_its_sidebar_row_while_its_agent_works() {
+        let now = 1_800_000_000_000;
+        let day = 24 * 3_600_000;
+        let mut thread = Thread::blank(1);
+        thread.active_at = now;
+        // On screen: keeps its row whatever it is doing. Folded and idle: only the agent's doing
+        // keeps it there, so idle with no agent folds however fresh it is.
+        assert!(listed(now, 1, &thread));
+        assert!(!listed(now, 0, &thread));
+        thread.busy = true;
+        thread.active_at = now - 2 * day;
+        // Running keeps even an old one on the list.
+        assert!(listed(now, 0, &thread));
+        let mut old = Thread::blank(2);
+        old.active_at = now - day - 1;
+        // Idle past a day: search and the history find it; the fold doesn't.
+        assert!(!listed(now, 0, &old));
+        // The one on screen is the exception.
+        assert!(listed(now, 2, &old));
+    }
+
+    #[test]
+    fn a_thread_title_opens_with_a_capital_unless_it_is_code() {
+        let cap = |t: &str| capitalized(t.to_string());
+        assert_eq!(cap("fix the build"), "Fix the build");
+        assert_eq!(cap("why, though?"), "Why, though?");
+        assert_eq!(cap("Already fine"), "Already fine");
+        for as_typed in [
+            "src/main.rs is slow",
+            "cargo test fails",
+            "snake_case rename",
+            "v2 plan",
+            "#115 review",
+            "…",
+            "",
+        ] {
+            assert_eq!(cap(as_typed), as_typed);
+        }
+    }
+
+    #[test]
+    fn the_sidebar_says_how_long_ago_in_a_word() {
+        let now = 1_800_000_000_000;
+        let before = |ms: u64| ago(now, now - ms);
+        assert_eq!(before(30_000), None);
+        assert_eq!(before(5 * 60_000).as_deref(), Some("5m"));
+        assert_eq!(before(3 * 3_600_000).as_deref(), Some("3h"));
+        assert_eq!(before(2 * 86_400_000).as_deref(), Some("2d"));
+        assert_eq!(before(21 * 86_400_000).as_deref(), Some("3w"));
+        assert_eq!(before(120 * 86_400_000).as_deref(), Some("4mo"));
+        // A counter from before the time was kept, and a time in the future, say nothing.
+        assert_eq!(ago(now, 7), None);
+        assert_eq!(ago(now, now + 1), None);
+    }
+
+    #[test]
+    fn a_thread_idle_for_more_than_a_day_is_stale() {
+        let now = 1_800_000_000_000;
+        assert!(!stale(now, now - 23 * 3_600_000));
+        assert!(!stale(now, now - STALE_MS));
+        assert!(stale(now, now - STALE_MS - 1));
+        // A counter from before the time was kept is old; a time in the future is not.
+        assert!(stale(now, 7));
+        assert!(!stale(now, now + 1));
+    }
+
+    #[test]
+    fn a_project_remembers_the_threads_closed_in_it_newest_first_once_each_and_not_too_many() {
+        let mut project = Reader::build_project(std::path::PathBuf::from("/x"), None, vec![]);
+        let state = |session: &str| crate::session::workspace::ThreadState {
+            agent: "a".into(),
+            session: session.into(),
+            title: String::new(),
+            active_at: 0,
+            parent_session: None,
+            renamed: false,
+        };
+        for n in 0..15 {
+            project.remember(state(&format!("s{n}")));
+        }
+        project.remember(state("s10"));
+        assert_eq!(project.closed.len(), crate::session::workspace::CLOSED_KEPT);
+        assert_eq!(project.closed[0].session, "s10");
+        assert_eq!(
+            project.closed.iter().filter(|c| c.session == "s10").count(),
+            1
+        );
+        assert_eq!(project.closed[1].session, "s14");
+    }
+
+    #[test]
+    fn a_blank_thread_or_one_without_a_session_is_not_remembered_when_closed() {
+        let mut thread = Thread::blank(1);
+        assert!(thread.closed_state().is_none(), "blank");
+        thread.blank = false;
+        thread.agent = Some("a".into());
+        assert!(thread.closed_state().is_none(), "no session");
+        thread.session = Some("s".into());
+        assert_eq!(
+            thread.closed_state().map(|c| c.session),
+            Some("s".to_string())
+        );
+    }
+
+    #[test]
+    fn a_name_the_user_gave_stands_in_place_of_the_first_message() {
+        let mut thread = started_thread();
+        assert_eq!(thread.title(), "fix it");
+        assert!(!thread.closed_state().unwrap().renamed);
+        thread.renamed = Some("the retry bug".into());
+        assert_eq!(thread.title(), "the retry bug");
+        let kept = thread.closed_state().unwrap();
+        assert_eq!((kept.title.as_str(), kept.renamed), ("the retry bug", true));
+        thread.renamed = None;
+        assert_eq!(
+            thread.title(),
+            "fix it",
+            "taking the name away gives the first message back"
+        );
+    }
+
+    fn started_thread() -> Thread {
+        let mut thread = Thread::blank(1);
+        thread.blank = false;
+        thread.agent = Some("a".into());
+        thread.session = Some("s".into());
+        thread.messages.push(Msg::User("fix it".into(), vec![]));
+        thread
+            .messages
+            .push(Msg::Agent(vec![Block::Text("fixed".into())]));
+        thread
+    }
+
+    // A resumed session replays its history as updates while `loading`, and a turn on a parked
+    // thread records while nothing shows: an update is recorded either way.
+    #[test]
+    fn an_update_is_recorded_while_the_history_replays_or_off_screen() {
+        let mut thread = started_thread();
+        thread.loading = true;
+        let earlier = record(
+            &mut thread,
+            &serde_json::json!({
+                "sessionUpdate": "tool_call",
+                "toolCallId": "t1",
+                "title": "Edit src/a.rs",
+                "status": "in_progress",
+                "rawInput": { "path": "src/a.rs" }
+            }),
+        );
+        assert_eq!(earlier, None, "a tool call starts its own message");
+        let mut thread = thread;
+        record(
+            &mut thread,
+            &serde_json::json!({
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "t1",
+                "status": "failed"
+            }),
+        );
+        let Some(Msg::Agent(blocks)) = thread.messages.last() else {
+            unreachable!("agent work")
+        };
+        let Some(Block::Tool(tool)) = blocks
+            .iter()
+            .find(|b| matches!(b, Block::Tool(t) if t.id == "t1"))
+        else {
+            unreachable!("the call was recorded")
+        };
+        assert!(
+            matches!(tool.status, Step::Failed),
+            "the settled status was taken in"
+        );
+        assert_eq!(
+            tool.path.as_deref(),
+            Some("src/a.rs"),
+            "the file the call touches is known for the chip"
+        );
+        record(
+            &mut thread,
+            &serde_json::json!({ "sessionUpdate": "usage_update", "used": 100, "size": 1000 }),
+        );
+        assert_eq!(
+            thread.usage,
+            Some(crate::session::state::Usage {
+                used: 100,
+                size: 1000
+            })
+        );
+    }
+
+    #[test]
+    fn a_thread_switches_agent_only_with_nothing_under_way_and_something_to_pass_on() {
+        assert!(started_thread().can_switch_agent());
+        assert!(
+            !Thread::blank(1).can_switch_agent(),
+            "blank: picking starts it instead"
+        );
+        let mut busy = started_thread();
+        busy.busy = true;
+        assert!(!busy.can_switch_agent());
+        let mut unloaded = started_thread();
+        unloaded.messages.clear();
+        assert!(
+            !unloaded.can_switch_agent(),
+            "its conversation hasn't been replayed"
+        );
+        let mut no_session = started_thread();
+        no_session.session = None;
+        assert!(!no_session.can_switch_agent());
+    }
+
+    #[test]
+    fn a_switch_the_new_agent_has_not_heard_of_comes_back_to_the_agent_it_left() {
+        let mut thread = started_thread();
+        thread.switch = Some(Switch {
+            agent: "a".into(),
+            session: "s".into(),
+            earlier: String::new(),
+        });
+        thread.agent = Some("b".into());
+        thread.session = Some("empty".into());
+        assert_eq!(
+            thread.closed_state().map(|c| (c.agent, c.session)),
+            Some(("a".to_string(), "s".to_string()))
+        );
+        thread.session = None;
+        assert_eq!(
+            thread.resumes_from(),
+            Some(("a", "s")),
+            "kept even if the new agent failed to start"
+        );
+        assert!(thread.can_switch_agent(), "and the user can pick again");
+        thread.switch = None;
+        assert_eq!(thread.resumes_from(), None);
+    }
+
+    #[test]
+    fn a_replayed_handoff_brings_the_earlier_messages_back() {
+        let mut said = started_thread();
+        said.messages
+            .push(Msg::Agent(vec![Block::Text("*Switched to B.*".into())]));
+        let earlier = crate::agent::handoff::write(&said.said());
+        let mut thread = Thread::blank(1);
+        thread.blank = false;
+        thread.loading = true;
+        let prompt = format!("{earlier}[The user has `a.rs` open in the viewer.]\n\nand now?");
+        thread.update(&serde_json::json!({ "sessionUpdate": "user_message_chunk", "content": { "type": "text", "text": prompt } }));
+        let users: Vec<&str> = thread
+            .messages
+            .iter()
+            .filter_map(|msg| match msg {
+                Msg::User(text, _) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(users, ["fix it", "and now?"]);
+        assert_eq!(
+            thread.messages.len(),
+            4,
+            "the two messages, the note and the new message"
+        );
+        assert_eq!(
+            thread.title(),
+            "fix it",
+            "still named for what it was first asked"
+        );
+    }
+
+    #[test]
+    fn a_handoff_replayed_in_pieces_is_unfolded_when_the_session_is_ready() {
+        let mut said = started_thread();
+        said.messages.push(Msg::User("again".into(), vec![]));
+        let prompt = format!("{}and now?", crate::agent::handoff::write(&said.said()));
+        let mut thread = Thread::blank(1);
+        thread.blank = false;
+        thread.loading = true;
+        for piece in prompt.as_bytes().chunks(7) {
+            let piece = String::from_utf8_lossy(piece).to_string();
+            thread.update(&serde_json::json!({ "sessionUpdate": "user_message_chunk", "content": { "type": "text", "text": piece } }));
+        }
+        thread.unfold_handoffs();
+        let users: Vec<&str> = thread
+            .messages
+            .iter()
+            .filter_map(|msg| match msg {
+                Msg::User(text, _) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(users, ["fix it", "again", "and now?"]);
+        assert_eq!(thread.title(), "fix it");
+    }
+
+    // A stand-in agent that copies what it is sent to a file, to see that a running thread's
+    // agent is asked to stop before it is killed, and that an idle one is simply let go.
+    fn closed_with(busy: bool) -> String {
+        let path = std::env::temp_dir().join(format!("po-retire-{}-{busy}", std::process::id()));
+        std::fs::write(&path, "").unwrap();
+        let (client, _events) = crate::agent::acp::Client::spawn(
+            &format!("tee {}", path.display()),
+            &std::env::temp_dir(),
+            false,
+            None,
+            |_| vec![],
+        )
+        .expect("spawns tee");
+        client.load("s1");
+        let mut thread = Thread::blank(1);
+        thread.busy = busy;
+        thread.client = Some(crate::agent::Client::Acp(client));
+        Thread::retire(thread);
+        // Waits for the cancel to arrive; when none is expected, long enough to have seen it.
+        let deadline = std::time::Instant::now()
+            + std::time::Duration::from_millis(if busy { 3000 } else { 400 });
+        while std::time::Instant::now() < deadline
+            && !(busy
+                && std::fs::read_to_string(&path)
+                    .unwrap()
+                    .contains("session/cancel"))
+        {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let sent = std::fs::read_to_string(&path).unwrap();
+        std::fs::remove_file(&path).ok();
+        sent
+    }
+
+    #[test]
+    fn a_running_thread_is_asked_to_stop_when_closed_and_an_idle_one_is_not() {
+        assert!(closed_with(true).contains("session/cancel"));
+        assert!(!closed_with(false).contains("session/cancel"));
+    }
+
+    #[test]
+    fn only_a_thread_with_work_to_lose_asks_before_closing() {
+        let mut thread = Thread::blank(1);
+        assert!(!thread.at_risk(), "blank");
+        thread.blank = false;
+        assert!(!thread.at_risk(), "idle");
+        thread.busy = true;
+        assert!(thread.at_risk(), "running");
+        thread.busy = false;
+        thread.queue.push(Queued {
+            out: Outgoing {
+                text: "next".into(),
+                origin: Origin::User,
+                images: vec![],
+            },
+            kind: None,
+        });
+        assert!(thread.at_risk(), "queued");
+    }
+
+    #[test]
+    fn a_parent_never_told_is_told_now_and_one_just_told_waits() {
+        use std::time::Duration;
+        assert_eq!(notice_wait(None), None);
+        assert_eq!(notice_wait(Some(NOTICE_RATE)), None);
+        assert_eq!(
+            notice_wait(Some(NOTICE_RATE + Duration::from_secs(1))),
+            None
+        );
+        assert_eq!(notice_wait(Some(Duration::ZERO)), Some(NOTICE_RATE));
+        assert_eq!(
+            notice_wait(Some(Duration::from_secs(4))),
+            Some(NOTICE_RATE - Duration::from_secs(4))
+        );
+    }
+
+    #[test]
+    fn only_a_question_or_an_unseen_turn_needs_you() {
+        assert!(Activity::Asking.needs_you(false) && Activity::Unread.needs_you(false));
+        assert!(!Activity::Running.needs_you(false) && !Activity::Idle.needs_you(false));
+        // A child's parent picks up its finished turn; a question is still the user's.
+        assert!(!Activity::Unread.needs_you(true) && Activity::Asking.needs_you(true));
+    }
+}

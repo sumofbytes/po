@@ -145,3 +145,46 @@ impl Project {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    
+    
+    
+    
+    
+    
+    
+
+    #[test]
+    fn an_empty_viewer_says_how_to_get_the_tree_back() {
+        use crate::session::project::pick_hint;
+        assert_eq!(pick_hint("a file", true), "Pick a file in the tree");
+        assert!(pick_hint("a file", false).ends_with("back to the explorer"));
+    }
+
+    #[test]
+    fn file_matches_rank_names_before_paths() {
+        let files = vec![
+            "src/none.txt".to_string(),
+            "needle/lib/a.rs".to_string(),
+            "needle.rs".to_string(),
+            "deep/needlemod.rs".to_string(),
+            "src/Needle-ish.rs".to_string(),
+        ];
+        // Name hits first (shorter names first), then path-only hits, each in walk order.
+        assert_eq!(
+            match_files(&files, "needle"),
+            vec![
+                "needle.rs",
+                "deep/needlemod.rs",
+                "src/Needle-ish.rs",
+                "needle/lib/a.rs"
+            ]
+        );
+        assert!(match_files(&files, "needs").is_empty());
+        // An empty query lists everything in walk order.
+        assert_eq!(match_files(&files, ""), files);
+    }
+}

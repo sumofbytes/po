@@ -970,3 +970,468 @@ mod file_url_tests {
         assert_eq!(file_of("https://example.com/a.png"), None);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent::acp::PermissionOption;
+    
+    
+    
+    
+    
+    
+
+    #[test]
+    fn a_text_shorter_than_a_piece_is_one_piece_and_long_ones_split_at_paragraphs_only() {
+        let one = "## Title\n\nRust gives every value a single owner.\n";
+        assert_eq!(pieces_of(one), [one]);
+        // Paragraphs, headings, lists and a fenced block, then more prose: splits land at blank
+        // lines outside a fence, and the pieces back, joined, give back the text.
+        let mut long = String::new();
+        for part in 0..40 {
+            long.push_str("## Part\n\nA paragraph about a value and who owns it meanwhile.\n\n- A value has one owner\n- Borrows are checked\n\n");
+            if part == 10 {
+                long.push_str("```rust\nfn longest<'a>(a: &'a str, b: &'a str) -> &'a str { a }\n\n\n\nfn other() {}\n```\n\n");
+            }
+        }
+        let pieces = pieces_of(&long);
+        assert!(pieces.len() > 4, "pieces: {}", pieces.len());
+        assert_eq!(pieces.concat(), long);
+        assert!(
+            pieces.iter().all(|piece| piece.len() < 2 * PIECE),
+            "a piece is not a small run of paragraphs, longest was {}",
+            pieces.iter().map(|p| p.len()).max().unwrap_or(0)
+        );
+        // No piece sits inside a fence: every fence a piece opens, that piece also shuts.
+        for piece in &pieces {
+            let opens = piece.match_indices("```rust\n").count();
+            let shuts = piece
+                .lines()
+                .filter(|line| line.trim_end() == "```")
+                .count();
+            assert_eq!(
+                shuts, opens,
+                "a piece holds a fence not its other: {:?}",
+                piece
+            );
+        }
+    }
+
+    #[test]
+    fn pieces_keep_what_markdown_reads_across_a_blank_line_together() {
+        let filler =
+            "A paragraph about a value and who owns it meanwhile, long enough to count.\n\n"
+                .repeat(10);
+        let kept = |block: &str| {
+            let text = format!("{filler}{block}{filler}");
+            let pieces = pieces_of(&text);
+            assert_eq!(pieces.concat(), text);
+            assert!(pieces.len() > 1, "the text was not split at all");
+            assert!(
+                pieces.iter().any(|piece| piece.contains(block)),
+                "a piece cut {block:?}"
+            );
+        };
+        kept("~~~\nfn a() {}\n\n\nfn b() {}\n~~~\n\n");
+        kept("````md\n```\n\nnested\n```\n````\n\n");
+        kept("1. a\n\n2. b\n\n3. c\n\n");
+        kept("> quoted\n\n> on\n\n");
+        // Blank lines of CRLF text and of spaces end a paragraph all the same.
+        let crlf = "A paragraph about a value and who owns it meanwhile.\r\n\r\n".repeat(40);
+        assert!(pieces_of(&crlf).len() > 1);
+        let spaced = "A paragraph about a value and who owns it meanwhile.\n  \n".repeat(40);
+        assert!(pieces_of(&spaced).len() > 1);
+        // A reference may be defined after the piece that uses it, so the text is not split.
+        let linked =
+            format!("See [the book].\n\n{filler}[the book]: https://doc.rust-lang.org/book/\n");
+        assert_eq!(pieces_of(&linked), [linked.as_str()]);
+    }
+
+    fn thought_flag(b: &mut Block) -> Option<&mut bool> {
+        if let Block::Thought(_, shown) = b {
+            Some(shown)
+        } else {
+            None
+        }
+    }
+
+    #[test]
+    fn toggling_opens_all_then_folds_all() {
+        let mut messages = vec![
+            Msg::User("hi".into(), vec![]),
+            Msg::Agent(vec![
+                Block::Thought("a".into(), true),
+                Block::Text("t".into()),
+            ]),
+            Msg::Agent(vec![Block::Thought("b".into(), false)]),
+        ];
+        assert_eq!(toggle_all(&mut messages, thought_flag), Some(2));
+        assert!(matches!(&messages[1], Msg::Agent(b) if matches!(b[0], Block::Thought(_, true))));
+        assert!(matches!(&messages[2], Msg::Agent(b) if matches!(b[0], Block::Thought(_, true))));
+        assert_eq!(toggle_all(&mut messages, thought_flag), Some(1));
+        assert!(matches!(&messages[1], Msg::Agent(b) if matches!(b[0], Block::Thought(_, false))));
+        assert_eq!(
+            toggle_all(&mut [Msg::User("x".into(), vec![])], thought_flag),
+            None
+        );
+    }
+
+    fn option(name: &str, kind: &str) -> PermissionOption {
+        PermissionOption {
+            id: name.to_lowercase(),
+            name: name.into(),
+            kind: kind.into(),
+        }
+    }
+
+    // “Always allow” listed first is not the first way of saying yes: the once-option is.
+    #[test]
+    fn allow_always_first_is_not_primary() {
+        let options = vec![
+            option("Always allow", "allow_always"),
+            option("Allow once", "allow_once"),
+            option("Deny", "reject_once"),
+        ];
+        assert_eq!(primary_option(&options), Some(1));
+    }
+
+    #[test]
+    fn first_of_several_allow_once_wins() {
+        let options = vec![
+            option("Allow once", "allow_once"),
+            option("Allow once (this project)", "allow_once"),
+            option("Deny", "reject_once"),
+        ];
+        assert_eq!(primary_option(&options), Some(0));
+    }
+
+    // No option says yes once, so nothing is primary and all buttons stay plain.
+    #[test]
+    fn kinds_without_allow_once_leave_nothing_primary() {
+        let options = vec![
+            option("Always allow", "allow_always"),
+            option("Deny once", "reject_once"),
+            option("Always deny", "reject_always"),
+        ];
+        assert_eq!(primary_option(&options), None);
+    }
+
+    // Agents from before `kind` was in the protocol describe options in names only.
+    #[test]
+    fn names_only_fall_back_to_the_first_allow() {
+        let options = vec![
+            option("Allow once", ""),
+            option("Allow for session", ""),
+            option("Deny", ""),
+        ];
+        assert_eq!(primary_option(&options), Some(0));
+    }
+
+    fn tool_for(task: Option<&str>) -> Block {
+        Block::Tool(ToolBlock {
+            id: String::new(),
+            title: "call".into(),
+            status: Step::Done,
+            kind: String::new(),
+            started: std::time::Instant::now(),
+            ended: None,
+            open: false,
+            fold: None,
+            task: task.map(str::to_string),
+            arguments: String::new(),
+            result: String::new(),
+            path: None,
+        })
+    }
+
+    #[test]
+    fn a_run_is_named_by_the_one_task_its_calls_work_towards() {
+        assert_eq!(
+            run_task(&[
+                tool_for(None),
+                tool_for(Some("Fix it")),
+                tool_for(Some("Fix it"))
+            ]),
+            Some("Fix it".to_string())
+        );
+        assert_eq!(run_task(&[tool_for(None), tool_for(None)]), None);
+        assert_eq!(
+            run_task(&[
+                tool_for(Some("A")),
+                tool_for(Some("B")),
+                tool_for(Some("B"))
+            ]),
+            None
+        );
+    }
+
+    #[test]
+    fn a_call_takes_the_task_in_progress_in_the_latest_plan() {
+        let mut messages = vec![Msg::Agent(vec![Block::Plan(vec![
+            ("Read".into(), Step::Done),
+            ("Fix it".into(), Step::Working),
+        ])])];
+        assert_eq!(task_in_progress(&messages), Some("Fix it".to_string()));
+        messages.push(Msg::User("go on".into(), vec![]));
+        messages.push(Msg::Agent(vec![Block::Plan(vec![(
+            "Fix it".into(),
+            Step::Done,
+        )])]));
+        assert_eq!(task_in_progress(&messages), None);
+        assert_eq!(task_in_progress(&[]), None);
+    }
+
+    fn tool(title: &str, status: Step) -> Block {
+        Block::Tool(ToolBlock {
+            id: String::new(),
+            title: title.into(),
+            status,
+            kind: String::new(),
+            started: std::time::Instant::now(),
+            ended: None,
+            open: false,
+            fold: None,
+            task: None,
+            arguments: String::new(),
+            result: String::new(),
+            path: None,
+        })
+    }
+
+    #[test]
+    fn a_run_of_calls_starts_folded_even_while_it_runs_or_fails() {
+        let run = vec![
+            tool("a", Step::Done),
+            tool("b", Step::Done),
+            tool("c", Step::Done),
+        ];
+        assert!(run_folded(&run, false));
+        let failed = vec![
+            tool("a", Step::Done),
+            tool("b", Step::Failed),
+            tool("c", Step::Done),
+        ];
+        assert!(run_folded(&failed, false));
+        let running = vec![
+            tool("a", Step::Done),
+            tool("b", Step::Working),
+            tool("c", Step::Waiting),
+        ];
+        assert!(run_folded(&running, false));
+    }
+
+    #[test]
+    fn a_click_on_a_run_overrides_the_default() {
+        let mut run = vec![
+            tool("a", Step::Done),
+            tool("b", Step::Done),
+            tool("c", Step::Done),
+        ];
+        let Block::Tool(first) = &mut run[0] else {
+            unreachable!()
+        };
+        first.fold = Some(false);
+        assert!(!run_folded(&run, false));
+        let mut failed = vec![
+            tool("a", Step::Failed),
+            tool("b", Step::Done),
+            tool("c", Step::Done),
+        ];
+        let Block::Tool(first) = &mut failed[0] else {
+            unreachable!()
+        };
+        first.fold = Some(true);
+        assert!(run_folded(&failed, false));
+    }
+
+    #[test]
+    fn only_runs_of_two_or_more_are_found_folded() {
+        let blocks = vec![
+            tool("a", Step::Done),
+            Block::Text("x".into()),
+            tool("b", Step::Done),
+            tool("c", Step::Done),
+        ];
+        assert_eq!(folded_runs(&blocks, false), vec![2]);
+    }
+
+    #[test]
+    fn thoughts_between_calls_fold_into_the_run_and_text_ends_it() {
+        let thought = || Block::Thought("hm".into(), false);
+        let blocks = vec![
+            thought(),
+            tool("a", Step::Done),
+            thought(),
+            tool("b", Step::Done),
+            Block::Text("x".into()),
+            thought(),
+            thought(),
+            thought(),
+        ];
+        assert_eq!(folded_runs(&blocks, false), vec![0]);
+        let out = chat_blocks(&blocks, false, &[]);
+        assert!(matches!(
+            out[0],
+            crate::model::chat::Block::Run {
+                index: 0,
+                count: 4,
+                calls: 2,
+                ..
+            }
+        ));
+        assert_eq!(
+            out.iter()
+                .filter(|b| matches!(b, crate::model::chat::Block::Run { .. }))
+                .count(),
+            1
+        );
+        // Thoughts alone have no call to keep the fold, so they stay as they are.
+        assert_eq!(
+            out.iter()
+                .filter(|b| matches!(b, crate::model::chat::Block::Thought { .. }))
+                .count(),
+            5
+        );
+    }
+
+    #[test]
+    fn calls_are_counted_by_the_kind_the_agent_gave_or_their_title() {
+        use crate::model::chat::Kind;
+        let call = |title: &str, kind: &str, path: Option<&str>| {
+            let Block::Tool(mut t) = tool(title, Step::Done) else {
+                unreachable!()
+            };
+            t.kind = kind.into();
+            t.path = path.map(str::to_string);
+            Block::Tool(t)
+        };
+        let run = vec![
+            call("Read a.rs", "read", Some("a.rs")),
+            call("grep foo", "other", None),
+            call("bash ls", "", None),
+            call("Edit b.rs", "edit", Some("b.rs")),
+            call("Edit b.rs again", "edit", Some("b.rs")),
+            call("mystery", "", None),
+        ];
+        let (kinds, edits) = run_kinds(&run);
+        assert_eq!(
+            kinds,
+            vec![
+                (Kind::Read, 1),
+                (Kind::Search, 1),
+                (Kind::Command, 1),
+                (Kind::Edit, 2),
+                (Kind::Other, 1)
+            ]
+        );
+        // A file read (it has a path too) is no edit, and one edited twice is chipped once.
+        assert_eq!(edits, vec!["b.rs".to_string()]);
+    }
+
+    /// The phase and fold of the one run in `blocks`.
+    fn run_row(blocks: &[Block], live: bool) -> (crate::model::chat::Phase, bool) {
+        chat_blocks(blocks, live, &[])
+            .iter()
+            .find_map(|b| match b {
+                crate::model::chat::Block::Run { phase, folded, .. } => Some((*phase, *folded)),
+                _ => None,
+            })
+            .expect("the blocks hold a run")
+    }
+
+    #[test]
+    fn a_run_is_still_working_between_its_calls() {
+        use crate::model::chat::Phase;
+        let blocks = vec![tool("a", Step::Done), tool("b", Step::Done)];
+        assert_eq!(run_row(&blocks, true).0, Phase::Working);
+        // The turn over, it is done, with no call having changed.
+        assert_eq!(run_row(&blocks, false).0, Phase::Done);
+    }
+
+    #[test]
+    fn a_failure_moves_no_rows_until_the_run_ends_in_it() {
+        use crate::model::chat::Phase;
+        let blocks = vec![tool("a", Step::Done), tool("b", Step::Failed)];
+        assert_eq!(run_row(&blocks, true), (Phase::Working, true));
+        assert_eq!(folded_runs(&blocks, true), vec![0]);
+        assert_eq!(run_row(&blocks, false), (Phase::Failed, false));
+        assert_eq!(folded_runs(&blocks, false), Vec::<usize>::new());
+    }
+
+    #[test]
+    fn a_click_holds_on_a_run_still_going() {
+        let mut run = vec![tool("a", Step::Done), tool("b", Step::Done)];
+        let Block::Tool(first) = &mut run[0] else {
+            unreachable!()
+        };
+        first.fold = Some(false);
+        assert!(!run_folded(&run, true));
+    }
+
+    #[test]
+    fn only_the_last_message_of_a_busy_thread_has_a_run_going() {
+        use crate::model::chat::{Item, Phase};
+        let run = || Msg::Agent(vec![tool("a", Step::Done), tool("b", Step::Done)]);
+        let phases = |busy| -> Vec<Phase> {
+            chat_items(&[run(), run()], busy)
+                .iter()
+                .map(|item| {
+                    let Item::Agent { blocks, .. } = item else {
+                        unreachable!()
+                    };
+                    let crate::model::chat::Block::Run { phase, .. } = blocks[0] else {
+                        unreachable!()
+                    };
+                    phase
+                })
+                .collect()
+        };
+        assert_eq!(phases(true), [Phase::Done, Phase::Working]);
+        assert_eq!(phases(false), [Phase::Done, Phase::Done]);
+    }
+
+    #[test]
+    fn a_run_followed_by_text_folds_in_the_latest_message() {
+        let blocks = vec![
+            tool("a", Step::Done),
+            tool("b", Step::Done),
+            tool("c", Step::Done),
+            Block::Text("x".into()),
+        ];
+        assert_eq!(folded_runs(&blocks, false), vec![0]);
+        assert_eq!(folded_runs(&blocks[..3], false), vec![0]);
+    }
+
+    #[test]
+    fn a_running_tool_is_the_preview_even_when_text_follows_it() {
+        let messages = vec![Msg::Agent(vec![
+            tool("Run tests", Step::Working),
+            Block::Text("Looking at the output\n".into()),
+        ])];
+        assert_eq!(preview_of(&messages, true), "Run tests");
+    }
+
+    #[test]
+    fn the_preview_falls_back_to_the_last_line_then_to_working() {
+        let said = vec![Msg::Agent(vec![
+            tool("Read", Step::Done),
+            Block::Text("first\n\nlast line  \n\n".into()),
+        ])];
+        assert_eq!(preview_of(&said, true), "last line");
+        let silent = vec![Msg::Agent(vec![tool("Read", Step::Done)])];
+        assert_eq!(preview_of(&silent, true), "Working…");
+        assert_eq!(preview_of(&silent, false), "");
+    }
+
+    #[test]
+    fn text_after_a_run_ends_it_while_the_turn_goes_on() {
+        use crate::model::chat::Phase;
+        let blocks = vec![
+            tool("a", Step::Done),
+            tool("b", Step::Done),
+            Block::Text("x".into()),
+        ];
+        assert_eq!(run_row(&blocks, true).0, Phase::Done);
+    }
+}
