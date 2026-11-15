@@ -177,11 +177,29 @@ fn save<S: 'static>(s: &mut S, at: At<S>) {
     send(Cmd::SaveFile(path.clone(), edit.text.clone()));
 }
 
-/// The colours of the text being edited.
+/// The bytes of `text` to colour with the caret at `focus`: all of it when small, else the
+/// chunk the caret is in and the next, cut at line ends.
+fn window(text: &str, focus: usize) -> (usize, usize) {
+    if text.len() <= CHUNK * 2 {
+        return (0, text.len());
+    }
+    let bytes = text.as_bytes();
+    let a = focus.min(text.len()) / CHUNK * CHUNK;
+    let b = (a + CHUNK * 2).min(text.len());
+    let from = bytes[..a].iter().rposition(|&c| c == b'\n').map_or(0, |i| i + 1);
+    let to = bytes[b..].iter().position(|&c| c == b'\n').map_or(text.len(), |i| b + i + 1);
+    (from, to)
+}
+
+/// The colours of the text being edited. A big file is coloured only near the caret, in the
+/// chunks it is in and the next, cut at line ends: the window moves by chunk, so the
+/// highlighter's cache holds while the caret moves within one.
 fn edit_spans(path: &str, edit: &TextEdit, theme: &SyntaxTheme) -> Vec<rune::Span> {
+    let text = edit.text.as_str();
     let extension = path.rsplit('.').next().filter(|e| *e != path);
-    let marks = syntax::highlight(extension, &edit.text);
-    theme.spans(&marks, 0).into_iter().map(|s| s.mono()).collect()
+    let (from, to) = window(text, edit.focus);
+    let marks = syntax::highlight(extension, &text[from..to]);
+    theme.spans(&marks, from).into_iter().map(|s| s.mono()).collect()
 }
 
 fn centered(k: &Kit, message: &str) -> El {
@@ -243,7 +261,11 @@ fn header<S: 'static>(k: &Kit, snapshot: &Snapshot, state: &State, at: At<S>) ->
             None => {
                 let (path, shown) = (path.clone(), shown.0.clone());
                 bar = bar.child(action::<S>(k, "Edit", "edit", false, move |s| {
-                    at(s).editing = Some((path.clone(), TextEdit::new(shown.to_string())));
+                    // The caret starts at the top, where the file is drawn from.
+                    let mut edit = TextEdit::new(shown.to_string());
+                    edit.anchor = 0;
+                    edit.focus = 0;
+                    at(s).editing = Some((path.clone(), edit));
                 }));
             }
             Some((_, edit)) => {
@@ -436,5 +458,33 @@ mod tests {
         assert!(!marks[0].is_empty() && !marks[1].is_empty());
         assert_eq!(marks[0][0].0, 0..6);
         assert_eq!(marks[1][0].0, 0..6);
+    }
+
+    #[test]
+    fn a_small_text_is_coloured_whole() {
+        let text = rust(100);
+        assert_eq!(window(&text, 40), (0, text.len()));
+    }
+
+    #[test]
+    fn a_big_text_is_coloured_in_two_chunks_from_a_line_start_to_a_line_end() {
+        let text = rust(20_000);
+        let (from, to) = window(&text, CHUNK * 2 + 5);
+        assert!(from > 0 && to < text.len());
+        assert_eq!(text.as_bytes()[from - 1], b'\n');
+        assert_eq!(text.as_bytes()[to - 1], b'\n');
+        assert!(from <= CHUNK * 2 && to >= CHUNK * 4);
+        // Within a chunk the window holds still, so the highlighter's cache does.
+        assert_eq!(window(&text, CHUNK * 2 + 9_000), (from, to));
+        // The end of the text clamps.
+        let (_, to) = window(&text, text.len());
+        assert_eq!(to, text.len());
+    }
+
+    #[test]
+    fn a_window_over_multibyte_text_stays_on_characters() {
+        let text = "héllo wörld ✓\n".repeat(20_000);
+        let (from, to) = window(&text, CHUNK * 3 + 1);
+        assert!(text.is_char_boundary(from) && text.is_char_boundary(to));
     }
 }
