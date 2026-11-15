@@ -97,6 +97,8 @@ pub(crate) struct Project {
     pub(crate) notice: Option<String>,
     /// Why the last save of the open file failed.
     pub(crate) save_error: Option<String>,
+    /// A save of the open file is being written.
+    pub(crate) saving: bool,
     /// Every file, folders closed until the user opens them.
     pub(crate) files_tree: FileTree,
     /// Set when this is a thread's own checkout, made from another project's repository.

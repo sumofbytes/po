@@ -46,6 +46,7 @@ impl Reader {
             is_markdown: false,
             notice: None,
             save_error: None,
+            saving: false,
             files_tree,
             worktree: None,
             terminal: None,
@@ -785,6 +786,11 @@ impl Reader {
     pub(crate) fn open(&mut self, path: &str, _window: &mut Window, cx: &mut Context<Self>) {
         self.browse = false;
         self.project.save_error = None;
+        self.read_open(path, cx);
+    }
+
+    /// Reads `path` as the open file.
+    pub(crate) fn read_open(&mut self, path: &str, cx: &mut Context<Self>) {
         let full = self.project.root.join(path);
         let too_big = std::fs::metadata(&full).is_ok_and(|m| m.len() > 4 * 1024 * 1024);
         // A file too big to show isn't read at all.
@@ -819,28 +825,46 @@ impl Reader {
         cx.notify();
     }
 
-    /// Writes `text` to the file open in the viewer, then reads it back so what is shown is what
-    /// is on disk. Only the open file can be saved, so a stale command names nothing else.
-    pub(crate) fn save_file(
-        &mut self,
-        path: &str,
-        text: &str,
-        base: &str,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.project.current.as_deref() != Some(path) {
+    /// Writes `text` to the file open in the viewer, off the UI thread and without ever leaving
+    /// it half written, then reads it back so what is shown is what is on disk. Only the open
+    /// file can be saved, and one save runs at a time: a second asked meanwhile is dropped, and
+    /// the editor still shows its text as unsaved.
+    pub(crate) fn save_file(&mut self, path: &str, text: &str, cx: &mut Context<Self>) {
+        if self.project.current.as_deref() != Some(path) || self.project.saving {
             return;
         }
-        let full = self.project.root.join(path);
-        match write_unless_changed(&full, text, base) {
-            Ok(()) => self.open(path, window, cx),
-            Err(error) => {
-                log::warn!("save {path}: {error}");
-                self.project.save_error = Some(format!("Could not save: {error}"));
-                cx.notify();
-            }
-        }
+        self.project.saving = true;
+        self.project.save_error = None;
+        let (path, text) = (path.to_string(), text.to_string());
+        let full = self.project.root.join(&path);
+        cx.spawn(async move |this, cx| {
+            let target = full.clone();
+            let written = cx
+                .background_executor()
+                .spawn(async move { crate::files::write::write_atomic(&target, &text) })
+                .await;
+            this.update(cx, |reader, cx| {
+                reader.project.saving = false;
+                match written {
+                    // Another file may be open by now; it is not what was saved.
+                    Ok(())
+                        if reader.project.root.join(&path) == full
+                            && reader.project.current.as_deref() == Some(&path) =>
+                    {
+                        reader.read_open(&path, cx)
+                    }
+                    Ok(()) => {}
+                    Err(error) => {
+                        log::warn!("save {path}: {error}");
+                        reader.project.save_error = Some(format!("Could not save: {error}"));
+                        cx.notify();
+                    }
+                }
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
     }
 
     /// The file tree beside the viewer, drawn by NSH from what it publishes. `lead` and `trail` are
@@ -963,26 +987,4 @@ impl Reader {
     pub(crate) fn pick_hint(&self, what: &str) -> String {
         pick_hint(what, self.tree_visible())
     }
-}
-
-/// Replaces `full` with `text` through a temp file and a rename, so a failed write leaves the
-/// file whole; refuses when the file no longer holds `base`, what editing began from.
-fn write_unless_changed(full: &std::path::Path, text: &str, base: &str) -> std::io::Result<()> {
-    use std::io::{Error, ErrorKind};
-    if std::fs::read_to_string(full).is_ok_and(|now| now != base) {
-        return Err(Error::new(
-            ErrorKind::Other,
-            "the file changed on disk since editing began",
-        ));
-    }
-    let mut name = full.file_name().unwrap_or_default().to_os_string();
-    name.push(".po-save");
-    let temp = full.with_file_name(name);
-    let written = std::fs::write(&temp, text)
-        .and_then(|()| std::fs::set_permissions(&temp, std::fs::metadata(full)?.permissions()))
-        .and_then(|()| std::fs::rename(&temp, full));
-    if written.is_err() {
-        std::fs::remove_file(&temp).ok();
-    }
-    written
 }
