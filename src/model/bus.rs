@@ -65,6 +65,8 @@ pub enum Cmd {
     ToggleRendered,
     /// The file open in the viewer, saved with this text.
     SaveFile(String, String),
+    /// The message of a failed save is dismissed.
+    ClearSaveError,
     /// A tab of the viewer: an agent's view or form, closing one.
     ShowView(String),
     CloseView(String),
