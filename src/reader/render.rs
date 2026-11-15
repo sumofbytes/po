@@ -743,6 +743,10 @@ impl Reader {
             Cmd::Terminal => self.toggle_terminal_on(window, cx),
             Cmd::ToggleRendered => self.toggle_rendered(cx),
             Cmd::SaveFile(path, text, base) => self.save_file(&path, &text, &base, window, cx),
+            Cmd::DismissSaveError => {
+                self.project.save_error = None;
+                cx.notify();
+            }
             Cmd::SetSplit(split) => self.set_split(split, cx),
             Cmd::ShowView(id) => self.show_agent_view(&id, cx),
             Cmd::CloseView(id) => self.close_agent_view(&id, cx),

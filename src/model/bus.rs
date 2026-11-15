@@ -66,6 +66,8 @@ pub enum Cmd {
     /// The file open in the viewer, saved with this text; the third is the text it had when
     /// editing began, so a change on disk since is not overwritten.
     SaveFile(String, String, String),
+    /// Forgets why the last save failed.
+    DismissSaveError,
     /// A tab of the viewer: an agent's view or form, closing one.
     ShowView(String),
     CloseView(String),
