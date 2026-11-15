@@ -1485,7 +1485,12 @@ impl Reader {
 
     /// Opens a blank thread in project `pid`.
     /// Moves the blank thread on screen, with its draft, to project `pid`.
-    pub(crate) fn move_blank_thread(&mut self, pid: u64, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn move_blank_thread(
+        &mut self,
+        pid: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if pid == self.project_id || !self.thread.blank {
             return;
         }

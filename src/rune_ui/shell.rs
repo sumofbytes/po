@@ -254,6 +254,10 @@ fn diff_mut<S: Host>(s: &mut S) -> &mut diff::State {
     &mut s.shell().diff
 }
 
+fn source_of<S: Host>(s: &mut S) -> &mut source::State {
+    &mut s.shell().source
+}
+
 fn agent_of<S: Host>(s: &mut S) -> &mut agent::State {
     &mut s.shell().agent
 }
@@ -319,7 +323,7 @@ fn viewer_content<S: Host>(shell: &Shell, host: &S, layout: &Layout, k: &Kit) ->
             diff_mut::<S>,
         )
     } else {
-        source::view::<S>(&shell.source_feed.value, &shell.source, k)
+        source::view::<S>(&shell.source_feed.value, &shell.source, k, source_of::<S>)
     };
     // The files on the left, what is open on the right, as an editor lays them out.
     // It takes a share of the viewer's width, within bounds, so a wide viewer (the sidebar closed)
@@ -538,9 +542,11 @@ pub fn view<S: Host>(host: &S, k: &Kit, inset: f32) -> El {
             .h_full()
             .fill(k.c.border_base);
         // The content fills the box the pins make; pinned itself, its full width would run past the window.
+        // It is a main pane, so its band and its content take the main pane's background; the
+        // sidebar's is the window's own.
         let mut pane = rune::el()
             .pin(left, Some(0.0), Some(edge), Some(0.0))
-            .fill(k.c.bg_deep)
+            .fill(k.c.bg_base)
             .child(viewer::<S>(shell, host, &layout, k));
         if let Some(width) = width {
             pane = pane.w(width).child(divider);

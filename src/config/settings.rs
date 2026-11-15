@@ -23,6 +23,8 @@ pub struct Form {
     pub font_size: String,
     pub mono_family: String,
     pub mono_size: String,
+    pub book_family: String,
+    pub book_size: String,
     pub idle_minutes: String,
     pub max_live: String,
     pub notifications: bool,
@@ -154,6 +156,8 @@ impl Form {
             font_size: text(&font["size"]),
             mono_family: names_line(&font["mono_family"]),
             mono_size: text(&font["mono_size"]),
+            book_family: names_line(&font["book_family"]),
+            book_size: text(&font["book_size"]),
             idle_minutes: text(&config["idle_minutes"]),
             max_live: text(&config["max_live_agents"]),
             notifications: config["notifications"].as_bool().unwrap_or(true),
@@ -172,7 +176,13 @@ impl Form {
         let read = |text: &str| text.trim().to_string();
         let sizes = f64::from(*fonts::SIZES.start())..=f64::from(*fonts::SIZES.end());
         let font_size = number("Font size", &read(&self.font_size), sizes.clone(), false)?;
-        let mono_size = number("Mono font size", &read(&self.mono_size), sizes, false)?;
+        let mono_size = number(
+            "Mono font size",
+            &read(&self.mono_size),
+            sizes.clone(),
+            false,
+        )?;
+        let book_size = number("Reading font size", &read(&self.book_size), sizes, false)?;
         let idle = number(
             "Idle minutes",
             &read(&self.idle_minutes),
@@ -180,10 +190,11 @@ impl Form {
             true,
         )?;
         let max_live = number("Max live agents", &read(&self.max_live), 1.0..=1000., true)?;
-        let (theme, font_family, mono_family) = (
+        let (theme, font_family, mono_family, book_family) = (
             read(&self.theme),
             names_value(&read(&self.font_family)),
             names_value(&read(&self.mono_family)),
+            names_value(&read(&self.book_family)),
         );
         let (notifications, viewer_left) = (self.notifications, self.viewer_left);
         let mut agents = Vec::new();
@@ -212,6 +223,8 @@ impl Form {
             put(&mut font, "size", font_size.map(json_number));
             put(&mut font, "mono_family", mono_family);
             put(&mut font, "mono_size", mono_size.map(json_number));
+            put(&mut font, "book_family", book_family);
+            put(&mut font, "book_size", book_size.map(json_number));
             put(
                 config,
                 "font",
@@ -274,6 +287,8 @@ mod tests {
             font_size: String::new(),
             mono_family: String::new(),
             mono_size: String::new(),
+            book_family: String::new(),
+            book_size: String::new(),
             idle_minutes: String::new(),
             max_live: String::new(),
             notifications: true,

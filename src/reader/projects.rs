@@ -45,6 +45,7 @@ impl Reader {
             code: None,
             is_markdown: false,
             notice: None,
+            save_error: None,
             files_tree,
             worktree: None,
             terminal: None,
@@ -783,6 +784,7 @@ impl Reader {
     #[hotpath::measure(impl_type = "Reader")]
     pub(crate) fn open(&mut self, path: &str, _window: &mut Window, cx: &mut Context<Self>) {
         self.browse = false;
+        self.project.save_error = None;
         let full = self.project.root.join(path);
         let too_big = std::fs::metadata(&full).is_ok_and(|m| m.len() > 4 * 1024 * 1024);
         // A file too big to show isn't read at all.
@@ -815,6 +817,29 @@ impl Reader {
         self.project.stamp = stamp(&full);
         self.project.files_tree.select(path);
         cx.notify();
+    }
+
+    /// Writes `text` to the file open in the viewer, then reads it back so what is shown is what
+    /// is on disk. Only the open file can be saved, so a stale command names nothing else.
+    pub(crate) fn save_file(
+        &mut self,
+        path: &str,
+        text: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.project.current.as_deref() != Some(path) {
+            return;
+        }
+        let full = self.project.root.join(path);
+        match std::fs::write(&full, text) {
+            Ok(()) => self.open(path, window, cx),
+            Err(error) => {
+                log::warn!("save {path}: {error}");
+                self.project.save_error = Some(format!("Could not save: {error}"));
+                cx.notify();
+            }
+        }
     }
 
     /// The file tree beside the viewer, drawn by NSH from what it publishes. `lead` and `trail` are
