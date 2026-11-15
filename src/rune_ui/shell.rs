@@ -542,9 +542,11 @@ pub fn view<S: Host>(host: &S, k: &Kit, inset: f32) -> El {
             .h_full()
             .fill(k.c.border_base);
         // The content fills the box the pins make; pinned itself, its full width would run past the window.
+        // It is a main pane, so its band and its content take the main pane's background; the
+        // sidebar's is the window's own.
         let mut pane = rune::el()
             .pin(left, Some(0.0), Some(edge), Some(0.0))
-            .fill(k.c.bg_deep)
+            .fill(k.c.bg_base)
             .child(viewer::<S>(shell, host, &layout, k));
         if let Some(width) = width {
             pane = pane.w(width).child(divider);

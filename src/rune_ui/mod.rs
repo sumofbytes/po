@@ -24,10 +24,10 @@ pub mod work;
 /// open leading. Code keeps its monospace, which the style sets apart from these.
 pub fn book_style(k: &rune_kit::Kit) -> rune_kit::markdown::MarkdownStyle {
     use rune::tok::{Family, TextStyle};
-    let body = k.ty.body.size + 1.0;
+    let body = crate::config::fonts::book_size().unwrap_or(k.ty.body.size + 1.0);
     let serif = |size: f32, weight: f32, leading: f32| {
         TextStyle::new(size, weight)
-            .family(Family::Named(crate::config::fonts::BUNDLED_BOOK_FAMILY))
+            .family(Family::Named(crate::config::fonts::book_family()))
             .lh((size * leading).round())
     };
     rune_kit::markdown::MarkdownStyle::from_kit(k)
