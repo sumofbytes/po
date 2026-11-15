@@ -45,6 +45,8 @@ impl Reader {
             code: None,
             is_markdown: false,
             notice: None,
+            save_error: None,
+            saving: false,
             files_tree,
             worktree: None,
             terminal: None,
@@ -783,6 +785,12 @@ impl Reader {
     #[hotpath::measure(impl_type = "Reader")]
     pub(crate) fn open(&mut self, path: &str, _window: &mut Window, cx: &mut Context<Self>) {
         self.browse = false;
+        self.project.save_error = None;
+        self.read_open(path, cx);
+    }
+
+    /// Reads `path` as the open file.
+    pub(crate) fn read_open(&mut self, path: &str, cx: &mut Context<Self>) {
         let full = self.project.root.join(path);
         let too_big = std::fs::metadata(&full).is_ok_and(|m| m.len() > 4 * 1024 * 1024);
         // A file too big to show isn't read at all.
@@ -814,6 +822,48 @@ impl Reader {
         self.project.current = Some(path.to_string());
         self.project.stamp = stamp(&full);
         self.project.files_tree.select(path);
+        cx.notify();
+    }
+
+    /// Writes `text` to the file open in the viewer, off the UI thread and without ever leaving
+    /// it half written, then reads it back so what is shown is what is on disk. Only the open
+    /// file can be saved, and one save runs at a time: a second asked meanwhile is dropped, and
+    /// the editor still shows its text as unsaved.
+    pub(crate) fn save_file(&mut self, path: &str, text: &str, cx: &mut Context<Self>) {
+        if self.project.current.as_deref() != Some(path) || self.project.saving {
+            return;
+        }
+        self.project.saving = true;
+        self.project.save_error = None;
+        let (path, text) = (path.to_string(), text.to_string());
+        let full = self.project.root.join(&path);
+        cx.spawn(async move |this, cx| {
+            let target = full.clone();
+            let written = cx
+                .background_executor()
+                .spawn(async move { crate::files::write::write_atomic(&target, &text) })
+                .await;
+            this.update(cx, |reader, cx| {
+                reader.project.saving = false;
+                match written {
+                    // Another file may be open by now; it is not what was saved.
+                    Ok(())
+                        if reader.project.root.join(&path) == full
+                            && reader.project.current.as_deref() == Some(&path) =>
+                    {
+                        reader.read_open(&path, cx)
+                    }
+                    Ok(()) => {}
+                    Err(error) => {
+                        log::warn!("save {path}: {error}");
+                        reader.project.save_error = Some(format!("Could not save: {error}"));
+                        cx.notify();
+                    }
+                }
+            })
+            .ok();
+        })
+        .detach();
         cx.notify();
     }
 
