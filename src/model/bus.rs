@@ -63,8 +63,9 @@ pub enum Cmd {
     Terminal,
     /// Markdown shown rendered, or as its source.
     ToggleRendered,
-    /// The file open in the viewer, saved with this text.
-    SaveFile(String, String),
+    /// The file open in the viewer, saved with this text; the third is the text it had when
+    /// editing began, so a change on disk since is not overwritten.
+    SaveFile(String, String, String),
     /// A tab of the viewer: an agent's view or form, closing one.
     ShowView(String),
     CloseView(String),

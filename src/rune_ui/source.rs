@@ -128,8 +128,9 @@ impl Lines {
 #[derive(Default)]
 pub struct State {
     shown: Option<(Arc<str>, Rc<Lines>)>,
-    /// The file being edited, and what is typed into it. `None` while the file is only read.
-    editing: Option<(String, TextEdit)>,
+    /// The file being edited, what is typed into it, and the text it had when editing began.
+    /// `None` while the file is only read.
+    editing: Option<(String, TextEdit, Arc<str>)>,
 }
 
 pub type At<S> = fn(&mut S) -> &mut State;
@@ -138,11 +139,16 @@ impl State {
     /// Follows a new snapshot, splitting its file when it is a different one.
     pub fn follow(&mut self, snapshot: &Snapshot) {
         // Editing goes on while the file is on screen, and ends when another is opened. What is
-        // typed is kept when the file changes on disk beneath it.
-        if let Some((editing, _)) = &self.editing
-            && !matches!(&snapshot.body, Body::Code { path, .. } if path == editing)
-        {
-            self.editing = None;
+        // typed is kept when the file changes on disk beneath it, and when the file is briefly
+        // not shown as code (a failed read, say); only an untouched buffer is let go then.
+        if let Some((editing, edit, _)) = &self.editing {
+            let other = match &snapshot.body {
+                Body::Code { path, .. } => path != editing,
+                _ => self.shown.as_ref().is_none_or(|(held, _)| edit.text == **held),
+            };
+            if other {
+                self.editing = None;
+            }
         }
         match &snapshot.body {
             Body::Code { path, text } => {
@@ -161,17 +167,17 @@ impl State {
 
 impl State {
     fn edit(&mut self) -> &mut TextEdit {
-        &mut self.editing.get_or_insert_with(Default::default).1
+        &mut self.editing.as_mut().expect("an edit in progress").1
     }
 }
 
 /// Saves what is typed, when it differs from the file.
 fn save<S: 'static>(s: &mut S, at: At<S>) {
     let state = at(s);
-    let Some((path, edit)) = &state.editing else {
+    let Some((path, edit, base)) = &state.editing else {
         return;
     };
-    send(Cmd::SaveFile(path.clone(), edit.text.clone()));
+    send(Cmd::SaveFile(path.clone(), edit.text.clone(), base.to_string()));
 }
 
 /// The bytes of `text` to colour with the caret at `focus`: all of it when small, else the
@@ -262,10 +268,10 @@ fn header<S: 'static>(k: &Kit, snapshot: &Snapshot, state: &State, at: At<S>) ->
                     let mut edit = TextEdit::new(shown.to_string());
                     edit.anchor = 0;
                     edit.focus = 0;
-                    at(s).editing = Some((path.clone(), edit));
+                    at(s).editing = Some((path.clone(), edit, shown.clone()));
                 }));
             }
-            Some((_, edit)) => {
+            Some((_, edit, _)) => {
                 let dirty = edit.text != *shown.0;
                 bar = bar.child(action::<S>(
                     k,
@@ -318,7 +324,7 @@ pub fn view<S: 'static>(snapshot: &Snapshot, state: &State, k: &Kit, at: At<S>) 
             ),
         ),
         (Body::Code { .. }, _) if state.editing.is_some() => {
-            let (path, edit) = state.editing.as_ref().unwrap();
+            let (path, edit, _) = state.editing.as_ref().unwrap();
             let spans = edit_spans(path, edit, &theme);
             let field = rune::text_input(edit, mono_style())
                 .spans(spans)

@@ -825,6 +825,7 @@ impl Reader {
         &mut self,
         path: &str,
         text: &str,
+        base: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -832,7 +833,7 @@ impl Reader {
             return;
         }
         let full = self.project.root.join(path);
-        match std::fs::write(&full, text) {
+        match write_unless_changed(&full, text, base) {
             Ok(()) => self.open(path, window, cx),
             Err(error) => {
                 log::warn!("save {path}: {error}");
@@ -962,4 +963,26 @@ impl Reader {
     pub(crate) fn pick_hint(&self, what: &str) -> String {
         pick_hint(what, self.tree_visible())
     }
+}
+
+/// Replaces `full` with `text` through a temp file and a rename, so a failed write leaves the
+/// file whole; refuses when the file no longer holds `base`, what editing began from.
+fn write_unless_changed(full: &std::path::Path, text: &str, base: &str) -> std::io::Result<()> {
+    use std::io::{Error, ErrorKind};
+    if std::fs::read_to_string(full).is_ok_and(|now| now != base) {
+        return Err(Error::new(
+            ErrorKind::Other,
+            "the file changed on disk since editing began",
+        ));
+    }
+    let mut name = full.file_name().unwrap_or_default().to_os_string();
+    name.push(".po-save");
+    let temp = full.with_file_name(name);
+    let written = std::fs::write(&temp, text)
+        .and_then(|()| std::fs::set_permissions(&temp, std::fs::metadata(full)?.permissions()))
+        .and_then(|()| std::fs::rename(&temp, full));
+    if written.is_err() {
+        std::fs::remove_file(&temp).ok();
+    }
+    written
 }
