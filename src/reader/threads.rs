@@ -1484,6 +1484,22 @@ impl Reader {
     }
 
     /// Opens a blank thread in project `pid`.
+    /// Moves the blank thread on screen, with its draft, to project `pid`.
+    pub(crate) fn move_blank_thread(&mut self, pid: u64, window: &mut Window, cx: &mut Context<Self>) {
+        if pid == self.project_id || !self.thread.blank {
+            return;
+        }
+        let draft = std::mem::take(&mut self.thread.draft);
+        let attachments = std::mem::take(&mut self.thread.attachments);
+        self.start_thread_in(pid, window, cx);
+        if self.project_id == pid {
+            self.thread.draft = draft;
+            self.thread.attachments = attachments;
+            self.chat_reset.set(self.chat_reset.get() + 1);
+        }
+        cx.notify();
+    }
+
     pub(crate) fn start_thread_in(
         &mut self,
         pid: u64,
@@ -1498,6 +1514,10 @@ impl Reader {
 
     /// Ends thread `id`, stopping its agent. Closing the one on screen brings up another.
     pub(crate) fn close_thread(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
+        // A blank thread with no other to show is what closing it would bring back: ignored.
+        if self.thread.id == id && self.thread.blank && self.parked.is_empty() {
+            return;
+        }
         // Whoever waited on it hears, as does its parent: while it is still here to be looked
         // up, since they find its parent by it.
         let before = self

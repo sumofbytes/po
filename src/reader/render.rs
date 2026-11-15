@@ -446,6 +446,10 @@ impl Reader {
                 .map(|agent| (agent.name.clone(), agent.id.clone()))
                 .collect(),
             chosen: thread.agent.clone().or_else(|| self.chosen_agent.clone()),
+            projects: std::iter::once((self.project.name(), self.project_id))
+                .chain(self.slots.iter().map(|slot| (slot.project.name(), slot.id)))
+                .collect(),
+            project: self.project_id,
             switchable: thread.can_switch_agent(),
             settings: Thread::ordered(thread.options.iter().collect())
                 .into_iter()
@@ -563,6 +567,7 @@ impl Reader {
             Chat::Open(path) => self.reveal(&path, window, cx),
             Chat::Resume(id) => self.resume_session(&id, window, cx),
             Chat::PickAgent(id) => self.pick_agent(id, window, cx),
+            Chat::PickProject(id) => self.move_blank_thread(id, window, cx),
             Chat::Setting { id, value } => self.choose_option(&id, &value, cx),
             Chat::ClosePicker => {
                 self.thread.drop_agent();
