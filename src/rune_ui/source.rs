@@ -1,5 +1,6 @@
 //! The viewer's source pane on Rune: the open file as numbered lines coloured by rune-kit's
 //! scanners, or a markdown file rendered. Counterpart of `src/nsh/source.rs`.
+use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -23,13 +24,26 @@ fn name_style() -> TextStyle {
 }
 const LINE: f32 = 19.0;
 
-/// A file split into lines, each with the colours of its own bytes: made once when the file
-/// arrives, so drawing a row costs a slice.
+/// Bytes a chunk of lines is coloured over: under the highlighter's own limit, which leaves
+/// what is past it plain.
+const CHUNK: usize = 64 * 1024;
+
+/// The colours of each line of a chunk of lines.
+type Chunk = Vec<Vec<Highlight>>;
+
+/// A file split into lines. Colours are made a chunk of lines at a time, when a row in it is
+/// first drawn, so a big file is coloured where it is looked at and not only at its top. Code
+/// is coloured from the start of its chunk, so a comment or string that began in an earlier
+/// chunk is not known to it.
 pub struct Lines {
     text: Arc<str>,
+    extension: Option<String>,
     /// Where each line starts, and a last entry where the text ends.
     starts: Vec<usize>,
-    marks: Vec<Vec<Highlight>>,
+    /// The first line of each chunk, and a last entry for the line count.
+    chunks: Vec<usize>,
+    /// What each chunk's lines are coloured with, once made.
+    marks: RefCell<Vec<Option<Rc<Chunk>>>>,
 }
 
 impl Lines {
@@ -41,35 +55,75 @@ impl Lines {
             starts.pop();
         }
         starts.push(text.len());
-        let extension = path.rsplit('.').next().filter(|e| *e != path);
-        let found = syntax::highlight(extension, &text);
-        let mut marks = vec![Vec::new(); starts.len() - 1];
-        let mut line = 0;
-        for (range, paint) in found.iter() {
-            // Highlights come in order; one that crosses lines is cut at each.
-            let mut from = range.start;
-            while from < range.end {
-                while line + 1 < marks.len() && starts[line + 1] <= from {
-                    line += 1;
-                }
-                let end = range.end.min(starts[line + 1]);
-                marks[line].push((from - starts[line]..end - starts[line], *paint));
-                from = end;
+        let lines = starts.len() - 1;
+        let mut chunks = vec![0];
+        for line in 1..lines {
+            if starts[line] - starts[*chunks.last().unwrap()] >= CHUNK {
+                chunks.push(line);
             }
         }
+        chunks.push(lines);
+        let extension = path
+            .rsplit('.')
+            .next()
+            .filter(|e| *e != path)
+            .map(str::to_string);
         Self {
             text,
+            extension,
+            marks: RefCell::new(vec![None; chunks.len() - 1]),
             starts,
-            marks,
+            chunks,
         }
     }
 
     pub fn len(&self) -> usize {
-        self.marks.len()
+        self.starts.len() - 1
     }
 
     fn line(&self, i: usize) -> &str {
         self.text[self.starts[i]..self.starts[i + 1]].trim_end_matches(['\n', '\r'])
+    }
+
+    /// The colours of line `i`, made with the rest of its chunk if they are not yet.
+    fn spans(&self, i: usize, theme: &SyntaxTheme) -> Vec<rune::Span> {
+        let chunk = self.chunks.partition_point(|&first| first <= i) - 1;
+        let made = self.marks.borrow()[chunk].clone();
+        let made = made.unwrap_or_else(|| {
+            let made = Rc::new(self.colour(chunk));
+            self.marks.borrow_mut()[chunk] = Some(made.clone());
+            made
+        });
+        theme
+            .spans(&made[i - self.chunks[chunk]], 0)
+            .into_iter()
+            .map(|s| s.mono())
+            .collect()
+    }
+
+    /// The colours of each line of `chunk`, from the code of the chunk alone.
+    fn colour(&self, chunk: usize) -> Chunk {
+        let (first, end) = (self.chunks[chunk], self.chunks[chunk + 1]);
+        let base = self.starts[first];
+        let code = &self.text[base..self.starts[end]];
+        let found = syntax::highlight(self.extension.as_deref(), code);
+        let mut marks = vec![Vec::new(); end - first];
+        let mut line = first;
+        for (range, paint) in found.iter() {
+            // Highlights come in order; one that crosses lines is cut at each.
+            let mut from = range.start + base;
+            let stop = range.end + base;
+            while from < stop {
+                while line + 1 < end && self.starts[line + 1] <= from {
+                    line += 1;
+                }
+                let cut = stop.min(self.starts[line + 1]);
+                marks[line - first]
+                    .push((from - self.starts[line]..cut - self.starts[line], *paint));
+                from = cut;
+            }
+        }
+        marks
     }
 }
 
@@ -188,11 +242,7 @@ pub fn view<S: 'static>(snapshot: &Snapshot, state: &State, k: &Kit) -> El {
                     LINE,
                     |_: &S, i| i.to_string().into(),
                     move |_: &S, i| {
-                        let spans = theme
-                            .spans(&lines.marks[i], 0)
-                            .into_iter()
-                            .map(|s| s.mono())
-                            .collect::<Vec<_>>();
+                        let spans = lines.spans(i, &theme);
                         row()
                             .w_full()
                             .h(LINE)
@@ -232,4 +282,58 @@ pub fn view<S: 'static>(snapshot: &Snapshot, state: &State, k: &Kit) -> El {
         .min_h(0.0)
         .child(header::<S>(k, snapshot))
         .child(body)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rust(lines: usize) -> String {
+        (0..lines).map(|i| format!("fn f{i}() {{}}\n")).collect()
+    }
+
+    #[test]
+    fn a_small_file_is_one_chunk() {
+        let lines = Lines::new("a.rs", Arc::from(rust(10)));
+        assert_eq!(lines.len(), 10);
+        assert_eq!(lines.chunks, vec![0, 10]);
+        assert_eq!(lines.line(3), "fn f3() {}");
+    }
+
+    #[test]
+    fn a_big_file_is_cut_into_chunks_that_cover_every_line_once() {
+        let text = rust(20_000);
+        let lines = Lines::new("a.rs", Arc::from(text.as_str()));
+        assert_eq!(lines.len(), 20_000);
+        assert!(lines.chunks.len() > 3, "{:?}", lines.chunks);
+        assert_eq!((lines.chunks[0], *lines.chunks.last().unwrap()), (0, 20_000));
+        assert!(lines.chunks.windows(2).all(|w| w[0] < w[1]));
+        for w in lines.chunks.windows(2) {
+            assert!(lines.starts[w[1]] - lines.starts[w[0]] <= CHUNK + 32);
+        }
+    }
+
+    #[test]
+    fn a_chunk_far_down_is_coloured_on_its_own() {
+        let lines = Lines::new("a.rs", Arc::from(rust(20_000)));
+        let last = lines.chunks.len() - 2;
+        let marks = lines.colour(last);
+        assert_eq!(marks.len(), lines.chunks[last + 1] - lines.chunks[last]);
+        assert!(marks.iter().all(|line| !line.is_empty()));
+        for (n, line) in marks.iter().enumerate() {
+            let len = lines.line(lines.chunks[last] + n).len();
+            assert!(line.iter().all(|(range, _)| range.end <= len));
+        }
+        // Nothing was made for the chunks not asked for.
+        assert!(lines.marks.borrow().iter().all(Option::is_none));
+    }
+
+    #[test]
+    fn a_comment_across_lines_is_cut_at_each() {
+        let lines = Lines::new("a.rs", Arc::from("/* one\ntwo */\nfn a() {}\n"));
+        let marks = lines.colour(0);
+        assert!(!marks[0].is_empty() && !marks[1].is_empty());
+        assert_eq!(marks[0][0].0, 0..6);
+        assert_eq!(marks[1][0].0, 0..6);
+    }
 }
