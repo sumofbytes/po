@@ -95,6 +95,8 @@ pub(crate) struct Project {
     /// What the current file is: the markdown flag of it, loaded elsewhere.
     pub(crate) is_markdown: bool,
     pub(crate) notice: Option<String>,
+    /// Why the last save of the open file failed.
+    pub(crate) save_error: Option<String>,
     /// Every file, folders closed until the user opens them.
     pub(crate) files_tree: FileTree,
     /// Set when this is a thread's own checkout, made from another project's repository.

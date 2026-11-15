@@ -254,6 +254,10 @@ fn diff_mut<S: Host>(s: &mut S) -> &mut diff::State {
     &mut s.shell().diff
 }
 
+fn source_of<S: Host>(s: &mut S) -> &mut source::State {
+    &mut s.shell().source
+}
+
 fn agent_of<S: Host>(s: &mut S) -> &mut agent::State {
     &mut s.shell().agent
 }
@@ -319,7 +323,7 @@ fn viewer_content<S: Host>(shell: &Shell, host: &S, layout: &Layout, k: &Kit) ->
             diff_mut::<S>,
         )
     } else {
-        source::view::<S>(&shell.source_feed.value, &shell.source, k)
+        source::view::<S>(&shell.source_feed.value, &shell.source, k, source_of::<S>)
     };
     // The files on the left, what is open on the right, as an editor lays them out.
     // It takes a share of the viewer's width, within bounds, so a wide viewer (the sidebar closed)

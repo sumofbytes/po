@@ -5,7 +5,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use rune::tok::TextStyle;
-use rune::{El, ScrollSpec, col, row, text};
+use rune::{El, KeyEvent, ScrollSpec, TextEdit, Tx, col, row, text};
 use rune_kit::Kit;
 use rune_kit::markdown::Markdown;
 use rune_kit::syntax::{self, Highlight, SyntaxTheme};
@@ -131,11 +131,22 @@ impl Lines {
 #[derive(Default)]
 pub struct State {
     shown: Option<(Arc<str>, Rc<Lines>)>,
+    /// The file being edited, and what is typed into it. `None` while the file is only read.
+    editing: Option<(String, TextEdit)>,
 }
+
+pub type At<S> = fn(&mut S) -> &mut State;
 
 impl State {
     /// Follows a new snapshot, splitting its file when it is a different one.
     pub fn follow(&mut self, snapshot: &Snapshot) {
+        // Editing goes on while the file is on screen, and ends when another is opened. What is
+        // typed is kept when the file changes on disk beneath it.
+        if let Some((editing, _)) = &self.editing
+            && !matches!(&snapshot.body, Body::Code { path, .. } if path == editing)
+        {
+            self.editing = None;
+        }
         match &snapshot.body {
             Body::Code { path, text } => {
                 if !self
@@ -151,6 +162,28 @@ impl State {
     }
 }
 
+impl State {
+    fn edit(&mut self) -> &mut TextEdit {
+        &mut self.editing.get_or_insert_with(Default::default).1
+    }
+}
+
+/// Saves what is typed, when it differs from the file.
+fn save<S: 'static>(s: &mut S, at: At<S>) {
+    let state = at(s);
+    let Some((path, edit)) = &state.editing else {
+        return;
+    };
+    send(Cmd::SaveFile(path.clone(), edit.text.clone()));
+}
+
+/// The colours of the text being edited.
+fn edit_spans(path: &str, edit: &TextEdit, theme: &SyntaxTheme) -> Vec<rune::Span> {
+    let extension = path.rsplit('.').next().filter(|e| *e != path);
+    let marks = syntax::highlight(extension, &edit.text);
+    theme.spans(&marks, 0).into_iter().map(|s| s.mono()).collect()
+}
+
 fn centered(k: &Kit, message: &str) -> El {
     col().w_full().grow(1.0).center().padding(16.0).child(
         text(message.to_string())
@@ -160,17 +193,27 @@ fn centered(k: &Kit, message: &str) -> El {
 }
 
 fn pill<S: 'static>(k: &Kit, label: &'static str, key: &'static str, on: bool, cmd: Cmd) -> El {
+    action::<S>(k, label, key, on, move |_| send(cmd.clone()))
+}
+
+fn action<S: 'static>(
+    k: &Kit,
+    label: &'static str,
+    key: &'static str,
+    on: bool,
+    press: impl Fn(&mut S) + 'static,
+) -> El {
     let r = row()
         .key(key)
         .px(8.0)
         .py(2.0)
         .radius(6.0)
         .child(text(label).font(caption_style()).color(k.c.text_base))
-        .on_press(move |_: &mut S| send(cmd.clone()));
+        .on_press(press);
     k.interactive(if on { r.fill(k.c.layer_03) } else { r })
 }
 
-fn header<S: 'static>(k: &Kit, snapshot: &Snapshot) -> El {
+fn header<S: 'static>(k: &Kit, snapshot: &Snapshot, state: &State, at: At<S>) -> El {
     let mut bar = row()
         .w_full()
         .h(super::header::BAND)
@@ -192,6 +235,32 @@ fn header<S: 'static>(k: &Kit, snapshot: &Snapshot) -> El {
                 .color(k.c.text_muted),
         );
     }
+    if let Some(problem) = &snapshot.problem {
+        bar = bar.child(text(problem.clone()).font(caption_style()).color(k.c.text_muted));
+    }
+    if let Body::Code { path, text: shown } = &snapshot.body {
+        match &state.editing {
+            None => {
+                let (path, shown) = (path.clone(), shown.0.clone());
+                bar = bar.child(action::<S>(k, "Edit", "edit", false, move |s| {
+                    at(s).editing = Some((path.clone(), TextEdit::new(shown.to_string())));
+                }));
+            }
+            Some((_, edit)) => {
+                let dirty = edit.text != *shown.0;
+                bar = bar.child(action::<S>(
+                    k,
+                    if dirty { "Discard" } else { "Done" },
+                    "stop-edit",
+                    false,
+                    move |s| at(s).editing = None,
+                ));
+                if dirty {
+                    bar = bar.child(action::<S>(k, "Save", "save", true, move |s| save(s, at)));
+                }
+            }
+        }
+    }
     if let Some(rendered) = snapshot.preview {
         bar = bar.child(pill::<S>(
             k,
@@ -207,7 +276,7 @@ fn header<S: 'static>(k: &Kit, snapshot: &Snapshot) -> El {
     )
 }
 
-pub fn view<S: 'static>(snapshot: &Snapshot, state: &State, k: &Kit) -> El {
+pub fn view<S: 'static>(snapshot: &Snapshot, state: &State, k: &Kit, at: At<S>) -> El {
     let theme = SyntaxTheme::from_kit(k);
     let body = match (&snapshot.body, &state.shown) {
         (Body::Hint(message) | Body::Notice(message), _) => centered(k, message),
@@ -229,6 +298,38 @@ pub fn view<S: 'static>(snapshot: &Snapshot, state: &State, k: &Kit) -> El {
                     ),
             ),
         ),
+        (Body::Code { .. }, _) if state.editing.is_some() => {
+            let (path, edit) = state.editing.as_ref().unwrap();
+            let spans = edit_spans(path, edit, &theme);
+            let field = rune::text_input(edit, mono_style())
+                .spans(spans)
+                .key("source-edit")
+                .w_full()
+                .color(k.c.text_base)
+                .caret(k.c.text_base, k.selection())
+                .label("File contents")
+                .on_edit(move |s: &mut S| at(s).edit())
+                .on_input_key(move |s: &mut S, event: &KeyEvent, _: &mut Tx| {
+                    if event.is_command('s') {
+                        save(s, at);
+                        return true;
+                    }
+                    false
+                });
+            col().w_full().grow(1.0).min_h(0.0).child(
+                k.scroll_bar(
+                    col()
+                        .w_full()
+                        .grow(1.0)
+                        .min_h(0.0)
+                        .scroll(ScrollSpec {
+                            stick_bottom: false,
+                        })
+                        .padding(8.0)
+                        .child(field),
+                ),
+            )
+        }
         (Body::Code { .. }, Some((_, lines))) => {
             let lines = lines.clone();
             let width = lines.len().to_string().len() as f32 * 8.0 + 16.0;
@@ -280,7 +381,7 @@ pub fn view<S: 'static>(snapshot: &Snapshot, state: &State, k: &Kit) -> El {
         .w_full()
         .h_full()
         .min_h(0.0)
-        .child(header::<S>(k, snapshot))
+        .child(header::<S>(k, snapshot, state, at))
         .child(body)
 }
 
