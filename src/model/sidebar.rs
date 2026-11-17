@@ -53,6 +53,30 @@ pub struct Project {
     pub fold: Option<(bool, usize)>,
 }
 
+/// How the sidebar lists threads: one list by recent use across projects, or a folder per project.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Layout {
+    #[default]
+    Activity,
+    Project,
+}
+
+/// How long ago a thread was last used, coarsely, for the heading it sits under in the flat list.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Age {
+    Day,
+    Week,
+    Earlier,
+}
+
+/// A thread in the flat list, with the project it is in.
+#[derive(Clone, PartialEq, Debug)]
+pub struct Recent {
+    pub thread: Thread,
+    pub project: String,
+    pub age: Age,
+}
+
 /// A thread waiting on the user, with the project it is in.
 #[derive(Clone, PartialEq, Debug)]
 pub struct Waiting {
@@ -72,6 +96,14 @@ pub struct Suggestion {
 pub struct Snapshot {
     pub waiting: Vec<Waiting>,
     pub projects: Vec<Project>,
+    pub layout: Layout,
+    /// The flat list, most recently used first; empty in the project layout.
+    pub recent: Vec<Recent>,
+    /// A fold under the flat list: `(expanded, how many are hidden)`.
+    pub recent_fold: Option<(bool, usize)>,
+    /// The projects the list can be narrowed to, and the one it is.
+    pub choices: Vec<(u64, String)>,
+    pub filter: Option<u64>,
     pub suggestions: Vec<Suggestion>,
     /// What a worktree is doing, under the Projects header.
     pub status: Option<String>,

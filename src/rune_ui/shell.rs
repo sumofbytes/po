@@ -254,6 +254,10 @@ fn diff_mut<S: Host>(s: &mut S) -> &mut diff::State {
     &mut s.shell().diff
 }
 
+fn source_of<S: Host>(s: &mut S) -> &mut source::State {
+    &mut s.shell().source
+}
+
 fn agent_of<S: Host>(s: &mut S) -> &mut agent::State {
     &mut s.shell().agent
 }
@@ -319,7 +323,7 @@ fn viewer_content<S: Host>(shell: &Shell, host: &S, layout: &Layout, k: &Kit) ->
             diff_mut::<S>,
         )
     } else {
-        source::view::<S>(&shell.source_feed.value, &shell.source, k)
+        source::view::<S>(&shell.source_feed.value, &shell.source, k, source_of::<S>)
     };
     // The files on the left, what is open on the right, as an editor lays them out.
     // It takes a share of the viewer's width, within bounds, so a wide viewer (the sidebar closed)
@@ -445,8 +449,10 @@ pub fn view<S: Host>(host: &S, k: &Kit, inset: f32) -> El {
             )
         });
     // The toolbar, and the toggle that floats over it, start past the window's buttons.
+    // The toolbar belongs to the main pane, so it takes the pane's background, not the sidebar's.
     let mut split = SplitView::new(middle)
         .frame_inset(0.0)
+        .toolbar_in_panel()
         .titlebar_inset(inset);
     if let Some(toolbar) = toolbar {
         split = split.toolbar(toolbar);
@@ -474,7 +480,10 @@ pub fn view<S: Host>(host: &S, k: &Kit, inset: f32) -> El {
                 side_of::<S>,
                 rename_of::<S>,
                 layout.settings_open,
-                inset,
+                sidebar::Edge {
+                    inset,
+                    width: shell.sidebar.width(),
+                },
             )),
     );
     // The kit draws the main pane as a bordered, rounded card; Po's panes sit flush, told apart by
@@ -492,6 +501,8 @@ pub fn view<S: Host>(host: &S, k: &Kit, inset: f32) -> El {
     dropdown::overlay::<S>(k, &shell.chat.menu, &menu, &mut layer);
     let issue_menu: dropdown::At<S> = std::rc::Rc::new(|s: &mut S| &mut s.shell().issues.menu);
     dropdown::overlay::<S>(k, &shell.issues.menu, &issue_menu, &mut layer);
+    let side_menu: dropdown::At<S> = std::rc::Rc::new(|s: &mut S| &mut s.shell().side.menu);
+    dropdown::overlay::<S>(k, &shell.side.menu, &side_menu, &mut layer);
     // One rule under the whole top band, drawn over the panes so none of them leaves a gap in it.
     let rule = rune::el()
         .absolute(0.0, super::header::BAND - 1.0)
@@ -531,9 +542,11 @@ pub fn view<S: Host>(host: &S, k: &Kit, inset: f32) -> El {
             .h_full()
             .fill(k.c.border_base);
         // The content fills the box the pins make; pinned itself, its full width would run past the window.
+        // It is a main pane, so its band and its content take the main pane's background; the
+        // sidebar's is the window's own.
         let mut pane = rune::el()
             .pin(left, Some(0.0), Some(edge), Some(0.0))
-            .fill(k.c.bg_deep)
+            .fill(k.c.bg_base)
             .child(viewer::<S>(shell, host, &layout, k));
         if let Some(width) = width {
             pane = pane.w(width).child(divider);

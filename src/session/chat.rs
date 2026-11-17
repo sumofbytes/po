@@ -975,12 +975,6 @@ mod file_url_tests {
 mod tests {
     use super::*;
     use crate::agent::acp::PermissionOption;
-    
-    
-    
-    
-    
-    
 
     #[test]
     fn a_text_shorter_than_a_piece_is_one_piece_and_long_ones_split_at_paragraphs_only() {

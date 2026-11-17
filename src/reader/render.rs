@@ -51,6 +51,44 @@ pub(crate) fn form_view_snapshot(form: &crate::ipc::command::AgentForm) -> model
     }
 }
 
+/// The heading a thread last used at `used_at` (ms since the epoch) sits under in the flat list: within the
+/// day a thread keeps its row, within a week of it, or older. A time never recorded is the oldest.
+fn age_of(now: u64, used_at: u64) -> model::sidebar::Age {
+    use model::sidebar::Age;
+    if used_at < 1_000_000_000_000 {
+        Age::Earlier
+    } else if !stale(now, used_at) {
+        Age::Day
+    } else if now.saturating_sub(used_at) <= 7 * STALE_MS {
+        Age::Week
+    } else {
+        Age::Earlier
+    }
+}
+
+#[cfg(test)]
+mod age_tests {
+    use super::*;
+    use model::sidebar::Age;
+
+    #[test]
+    fn a_thread_sits_under_the_heading_of_when_it_was_used() {
+        let now = 1_800_000_000_000;
+        let hours = |h: u64| now - h * 3_600_000;
+        assert_eq!(age_of(now, hours(1)), Age::Day);
+        assert_eq!(age_of(now, hours(30)), Age::Week);
+        assert_eq!(age_of(now, hours(24 * 6)), Age::Week);
+        assert_eq!(age_of(now, hours(24 * 9)), Age::Earlier);
+    }
+
+    #[test]
+    fn a_time_never_recorded_is_the_oldest() {
+        assert_eq!(age_of(1_800_000_000_000, 0), Age::Earlier);
+        // A counter from before the time was kept.
+        assert_eq!(age_of(1_800_000_000_000, 42), Age::Earlier);
+    }
+}
+
 /// The threads a project always lists, most recent first, before the rest fold under "more".
 const MIN_THREADS: usize = 3;
 
@@ -68,6 +106,12 @@ impl Reader {
         let many = views.len() > 1;
         let (active_project, active_thread) = (self.project_id, self.thread.id);
         let now = now_ms();
+        let layout = self.side_layout;
+        // Narrowed to a project that is gone, it shows them all again.
+        let filter = self
+            .side_project
+            .filter(|id| views.iter().any(|view| view.id == *id));
+        let in_scope = |view: &View<'_>| filter.is_none_or(|id| id == view.id);
         let thread_row = |pid: u64, thread: &Thread| side::Thread {
             project: pid,
             id: thread.id,
@@ -95,6 +139,7 @@ impl Reader {
         let mut waiting: Vec<(&View<'_>, &Thread)> = views
             .iter()
             .flat_map(|view| view.threads.iter().map(move |thread| (view, *thread)))
+            .filter(|(view, _)| in_scope(view))
             .filter(|(view, thread)| self.waits_on_user(view.id, thread))
             .filter(|(view, thread)| {
                 !searching || project_hit(view) || self.matches_query(thread, &query)
@@ -111,6 +156,7 @@ impl Reader {
 
         let projects = views
             .iter()
+            .filter(|view| layout == model::sidebar::Layout::Project && in_scope(view))
             .filter(|view| {
                 !searching
                     || project_hit(view)
@@ -174,6 +220,55 @@ impl Reader {
             })
             .collect();
 
+        // The flat list: every thread that keeps a row, the most recently used first, whatever its project.
+        let mut flat: Vec<(&View<'_>, &Thread)> = if layout == model::sidebar::Layout::Activity {
+            views
+                .iter()
+                .filter(|view| in_scope(view))
+                .flat_map(|view| view.threads.iter().map(move |thread| (view, *thread)))
+                .filter(|(view, t)| {
+                    (!t.blank || t.id == view.shown) && !self.waits_on_user(view.id, t)
+                })
+                .filter(|(view, t)| {
+                    !searching || project_hit(view) || self.matches_query(t, &query)
+                })
+                .collect()
+        } else {
+            vec![]
+        };
+        flat.sort_by_key(|(_, t)| (std::cmp::Reverse(t.used_at), std::cmp::Reverse(t.id)));
+        let recent_total = flat.len();
+        let recent_expanded = self.recent_expanded || searching;
+        let kept =
+            |i: usize, view: &View<'_>, t: &Thread| i < MIN_THREADS || listed(now, view.shown, t);
+        let kept_count = flat
+            .iter()
+            .enumerate()
+            .filter(|(i, (view, t))| kept(*i, view, t))
+            .count();
+        let hidden = recent_total - kept_count;
+        if !recent_expanded {
+            let mut i = 0;
+            flat.retain(|(view, t)| {
+                i += 1;
+                kept(i - 1, view, t)
+            });
+        }
+        // A search shows every match, so there is nothing to fold or unfold.
+        let recent_fold = (hidden > 0 && !searching).then_some((recent_expanded, hidden));
+        let recent = flat
+            .into_iter()
+            .map(|(view, t)| side::Recent {
+                thread: thread_row(view.id, t),
+                project: view.project.name(),
+                age: age_of(now, t.used_at),
+            })
+            .collect();
+        let choices = views
+            .iter()
+            .map(|view| (view.id, view.project.name()))
+            .collect();
+
         let suggestions = self
             .suggestions
             .iter()
@@ -225,6 +320,11 @@ impl Reader {
         side::Snapshot {
             waiting,
             projects,
+            layout,
+            recent,
+            recent_fold,
+            choices,
+            filter,
             suggestions,
             status: self.worktree_status.clone(),
             searching,
@@ -346,6 +446,10 @@ impl Reader {
                 .map(|agent| (agent.name.clone(), agent.id.clone()))
                 .collect(),
             chosen: thread.agent.clone().or_else(|| self.chosen_agent.clone()),
+            projects: std::iter::once((self.project.name(), self.project_id))
+                .chain(self.slots.iter().map(|slot| (slot.project.name(), slot.id)))
+                .collect(),
+            project: self.project_id,
             switchable: thread.can_switch_agent(),
             settings: Thread::ordered(thread.options.iter().collect())
                 .into_iter()
@@ -463,6 +567,7 @@ impl Reader {
             Chat::Open(path) => self.reveal(&path, window, cx),
             Chat::Resume(id) => self.resume_session(&id, window, cx),
             Chat::PickAgent(id) => self.pick_agent(id, window, cx),
+            Chat::PickProject(id) => self.move_blank_thread(id, window, cx),
             Chat::Setting { id, value } => self.choose_option(&id, &value, cx),
             Chat::ClosePicker => {
                 self.thread.drop_agent();
@@ -564,6 +669,18 @@ impl Reader {
                 self.side_query = query;
                 cx.notify();
             }
+            Cmd::SideLayout(layout) => {
+                self.side_layout = layout;
+                cx.notify();
+            }
+            Cmd::SideProject(project) => {
+                self.side_project = project;
+                cx.notify();
+            }
+            Cmd::ToggleMoreRecent => {
+                self.recent_expanded = !self.recent_expanded;
+                cx.notify();
+            }
             Cmd::ToggleProject(pid) => {
                 let expanding = !self.projects_collapsed.insert(pid);
                 if expanding {
@@ -625,6 +742,11 @@ impl Reader {
             }
             Cmd::Terminal => self.toggle_terminal_on(window, cx),
             Cmd::ToggleRendered => self.toggle_rendered(cx),
+            Cmd::SaveFile(path, text) => self.save_file(&path, &text, cx),
+            Cmd::ClearSaveError => {
+                self.project.save_error = None;
+                cx.notify();
+            }
             Cmd::SetSplit(split) => self.set_split(split, cx),
             Cmd::ShowView(id) => self.show_agent_view(&id, cx),
             Cmd::CloseView(id) => self.close_agent_view(&id, cx),
@@ -763,6 +885,7 @@ impl Reader {
             preview: markdown.then_some(self.rendered),
             body,
             reveal: self.reveal,
+            problem: self.project.save_error.clone(),
         }
     }
 

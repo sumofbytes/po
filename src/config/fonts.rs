@@ -1,6 +1,7 @@
 //! Which fonts po draws with: the bundled Geist and Geist Mono are the default and the last
 //! resort, so po looks the same whatever is installed.
 
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use rune::{Family, TextStyle};
@@ -35,6 +36,12 @@ pub const BASE_UI_SIZE: f32 = 14.0;
 /// The same for `font.mono_size`.
 pub const BASE_MONO_SIZE: f32 = 13.0;
 
+/// The family `font.book_family` names, or the bundled serif; what [`book_family`] hands out.
+static BOOK_FAMILY: Mutex<&'static str> = Mutex::new("Literata, serif");
+
+/// `font.book_size` as bits; zero when the config doesn't name one.
+static BOOK_SIZE: AtomicU32 = AtomicU32::new(0);
+
 static UI_SCALE: AtomicU32 = AtomicU32::new(1.0f32.to_bits());
 static MONO_SCALE: AtomicU32 = AtomicU32::new(1.0f32.to_bits());
 
@@ -45,6 +52,47 @@ pub fn set_sizes(config: &Value) {
     let (ui, mono) = scales(config);
     UI_SCALE.store(ui.to_bits(), Ordering::Relaxed);
     MONO_SCALE.store(mono.to_bits(), Ordering::Relaxed);
+    set_book_family(config);
+    set_book_size(config);
+}
+
+/// `font.book_size`, or none when the config names none or one outside [`SIZES`].
+fn book_size_of(config: &Value) -> Option<f32> {
+    config["font"]["book_size"]
+        .as_f64()
+        .map(|n| n as f32)
+        .filter(|n| SIZES.contains(n))
+}
+
+fn set_book_size(config: &Value) {
+    let book = book_size_of(config);
+    BOOK_SIZE.store(book.unwrap_or(0.0).to_bits(), Ordering::Relaxed);
+}
+
+/// The size markdown is read at, in points, when `font.book_size` names one.
+pub fn book_size() -> Option<f32> {
+    Some(f32::from_bits(BOOK_SIZE.load(Ordering::Relaxed))).filter(|n| *n > 0.0)
+}
+
+/// The families `font.book_family` names as one list, over the bundled serif and the system's,
+/// so a name that isn't installed falls through to them. Same shape as the UI's.
+fn book_family_of(config: &Value) -> String {
+    family_list(&config["font"]["book_family"], BUNDLED_BOOK_FAMILY, "serif")
+}
+
+/// Takes `font.book_family`, the faces the transcript's markdown is read in. The list is leaked
+/// only when it changes.
+fn set_book_family(config: &Value) {
+    let list = book_family_of(config);
+    let mut current = BOOK_FAMILY.lock().expect("book family");
+    if list != *current {
+        *current = Box::leak(list.into_boxed_str());
+    }
+}
+
+/// The family markdown is read in.
+pub fn book_family() -> &'static str {
+    *BOOK_FAMILY.lock().expect("book family")
 }
 
 /// The UI and the monospace scale the config's sizes make.
@@ -159,6 +207,26 @@ mod tests {
             family_list(&Value::Null, "Geist", "system-ui"),
             "Geist, system-ui"
         );
+    }
+
+    #[test]
+    fn the_book_family_is_the_names_given_over_the_bundled_serif() {
+        assert_eq!(
+            book_family_of(&json!({ "font": { "book_family": ["Geist", "X"] } })),
+            "Geist, X, Literata, serif"
+        );
+        assert_eq!(
+            book_family_of(&json!({ "font": { "book_family": " Iosevka " } })),
+            "Iosevka, Literata, serif"
+        );
+        assert_eq!(book_family_of(&json!({})), "Literata, serif");
+    }
+
+    #[test]
+    fn the_book_size_is_only_taken_in_range() {
+        assert_eq!(book_size_of(&json!({ "font": { "book_size": 17 } })), Some(17.0));
+        assert_eq!(book_size_of(&json!({ "font": { "book_size": 99 } })), None);
+        assert_eq!(book_size_of(&json!({})), None);
     }
 
     #[test]

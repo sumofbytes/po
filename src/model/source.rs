@@ -44,6 +44,8 @@ pub struct Snapshot {
     pub body: Body,
     /// A line to scroll to (from 0), and a number that changes each time one is asked for.
     pub reveal: Option<(u32, u64)>,
+    /// Why the last save failed.
+    pub problem: Option<String>,
 }
 
 impl Default for Snapshot {
@@ -56,6 +58,7 @@ impl Default for Snapshot {
             preview: None,
             body: Body::Hint(String::new()),
             reveal: None,
+            problem: None,
         }
     }
 }

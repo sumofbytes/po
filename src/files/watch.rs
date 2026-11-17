@@ -137,13 +137,6 @@ pub(crate) fn language(path: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
-    
-    
-    
-    
-    
-    
 
     #[test]
     fn elixir_files_are_named() {

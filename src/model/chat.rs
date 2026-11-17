@@ -285,6 +285,9 @@ pub struct Snapshot {
     pub agents: Vec<(String, String)>,
     /// The agent picked for a thread that hasn't started.
     pub chosen: Option<String>,
+    /// The projects a blank thread can start in, `(name, id)`, and the one it is in.
+    pub projects: Vec<(String, u64)>,
+    pub project: u64,
     pub settings: Vec<Setting>,
     /// Whether the thread can start in a git worktree of its own (`None`: not in a repository).
     pub isolate: Option<bool>,
@@ -384,6 +387,8 @@ pub enum Cmd {
     Resume(String),
     /// The agent a new thread starts with, and the one on screen switches to.
     PickAgent(String),
+    /// The project a blank thread starts in.
+    PickProject(u64),
     /// A setting of the session is changed.
     Setting { id: String, value: String },
     /// Whether a new thread gets a git worktree of its own.

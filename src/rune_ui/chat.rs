@@ -1065,6 +1065,32 @@ fn chips<S: 'static>(k: &Kit, snapshot: &Snapshot, at: At<S>) -> El {
     } else if let Some(name) = chosen {
         bar = bar.child(still_chip(k, name));
     }
+    if snapshot.blank && snapshot.projects.len() > 1 {
+        let name = snapshot
+            .projects
+            .iter()
+            .find(|(_, id)| *id == snapshot.project)
+            .map_or_else(|| "Project".to_string(), |(n, _)| n.clone());
+        let lines = snapshot
+            .projects
+            .iter()
+            .map(|(name, id)| {
+                Line::choice(
+                    name.as_str(),
+                    *id == snapshot.project,
+                    Bus::Chat(Cmd::PickProject(*id)),
+                )
+            })
+            .collect();
+        bar = bar.child(dropdown::chip::<S>(
+            k,
+            "project-pick",
+            name,
+            lines,
+            vec![],
+            menu.clone(),
+        ));
+    }
     for setting in &snapshot.settings {
         let label = setting.current_name().to_string();
         if snapshot.busy || setting.choices.len() < 2 {

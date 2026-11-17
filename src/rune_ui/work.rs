@@ -71,7 +71,7 @@ pub fn muted(k: &Kit, s: impl Into<String>) -> El {
 pub fn metric(k: &Kit, label: &str, value: usize, tint: Color) -> El {
     col()
         .grow(1.0)
-        .min_w(0.0)
+        .min_w(140.0)
         .px(16.0)
         .py(12.0)
         .radius(10.0)

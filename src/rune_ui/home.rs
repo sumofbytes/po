@@ -90,7 +90,14 @@ fn task_row<S: 'static>(k: &Kit, task: &Task, today: Date, armed: bool, at: At<S
                 .on_press(move |_: &mut S| send(Cmd::WorkOnIssue(work.clone(), number)))
                 .build(k),
         )
-        .child(muted(k, task.project.clone()))
+        .child(
+            row().shrink().max_w(120.0).child(
+                text(task.project.clone())
+                    .font(small_style())
+                    .color(k.c.text_muted)
+                    .truncate(),
+            ),
+        )
         .child(
             row()
                 .w(64.0)
@@ -188,6 +195,7 @@ pub fn view<S: 'static>(model: &Model, state: &State, k: &Kit, at: At<S>) -> El 
     }
     let side = col()
         .w(340.0)
+        .shrink()
         .gap(16.0)
         .child(
             card(k, "Start").child(
@@ -210,7 +218,8 @@ pub fn view<S: 'static>(model: &Model, state: &State, k: &Kit, at: At<S>) -> El 
         .child(threads);
     let metrics = row()
         .w_full()
-        .gap(12.0)
+        .flex_wrap()
+        .gaps(12.0, 12.0)
         .child(metric(k, "Due today", model.due_today, k.c.text_base))
         .child(metric(
             k,
@@ -249,9 +258,10 @@ pub fn view<S: 'static>(model: &Model, state: &State, k: &Kit, at: At<S>) -> El 
         .child(
             row()
                 .w_full()
-                .gap(16.0)
+                .flex_wrap()
+                .gaps(16.0, 16.0)
                 .items_start()
-                .child(col().grow(1.0).min_w(0.0).child(tasks))
+                .child(col().grow(1.0).min_w(380.0).child(tasks))
                 .child(side),
         );
     col().w_full().h_full().min_h(0.0).child(

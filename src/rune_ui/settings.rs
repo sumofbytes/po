@@ -39,6 +39,8 @@ pub struct Page {
     pub font_size: TextEdit,
     pub mono_family: TextEdit,
     pub mono_size: TextEdit,
+    pub book_family: TextEdit,
+    pub book_size: TextEdit,
     pub idle_minutes: TextEdit,
     pub max_live: TextEdit,
     pub notifications: bool,
@@ -63,6 +65,8 @@ impl Page {
             font_size: edit(&form.font_size),
             mono_family: edit(&form.mono_family),
             mono_size: edit(&form.mono_size),
+            book_family: edit(&form.book_family),
+            book_size: edit(&form.book_size),
             idle_minutes: edit(&form.idle_minutes),
             max_live: edit(&form.max_live),
             notifications: form.notifications,
@@ -90,6 +94,8 @@ impl Page {
             font_size: self.font_size.text.clone(),
             mono_family: self.mono_family.text.clone(),
             mono_size: self.mono_size.text.clone(),
+            book_family: self.book_family.text.clone(),
+            book_size: self.book_size.text.clone(),
             idle_minutes: self.idle_minutes.text.clone(),
             max_live: self.max_live.text.clone(),
             notifications: self.notifications,
@@ -246,6 +252,34 @@ pub fn view<S: 'static>(p: &Page, k: &Kit, page: At<S>, layer: &mut Vec<El>) -> 
                 "14",
                 &p.font_size,
                 |p| &mut p.font_size,
+                page,
+            ),
+        ))
+        .child(divider(k))
+        .child(setting(
+            k,
+            "Reading font",
+            "The transcript and rendered markdown; applies on Save",
+            input(
+                k,
+                "Reading font",
+                crate::config::fonts::BUNDLED_BOOK_FAMILY,
+                &p.book_family,
+                |p| &mut p.book_family,
+                page,
+            ),
+        ))
+        .child(divider(k))
+        .child(setting(
+            k,
+            "Reading font size",
+            "The transcript's text; empty is the UI size plus one; applies on Save",
+            input(
+                k,
+                "Reading font size",
+                "15",
+                &p.book_size,
+                |p| &mut p.book_size,
                 page,
             ),
         ))
