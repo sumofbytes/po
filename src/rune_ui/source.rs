@@ -68,11 +68,7 @@ impl Lines {
             }
         }
         chunks.push(lines);
-        let extension = path
-            .rsplit('.')
-            .next()
-            .filter(|e| *e != path)
-            .map(str::to_string);
+        let extension = extension_of(path).map(str::to_string);
         Self {
             text,
             extension,
@@ -298,10 +294,21 @@ fn window(text: &str, focus: usize) -> (usize, usize) {
     (from, to)
 }
 
+/// The language to colour `path` as, by its extension. Rune has no Odin lexer, so Odin is
+/// coloured as Go, the closest one it has: C-style comments, strings and keywords.
+fn extension_of(path: &str) -> Option<&str> {
+    let ext = path.rsplit('.').next().filter(|e| *e != path)?;
+    Some(if ext.eq_ignore_ascii_case("odin") {
+        "go"
+    } else {
+        ext
+    })
+}
+
 /// The colours of the text being edited. A big file is coloured only near the caret.
 fn edit_spans(path: &str, edit: &TextEdit, theme: &SyntaxTheme) -> Vec<rune::Span> {
     let text = edit.text.as_str();
-    let extension = path.rsplit('.').next().filter(|e| *e != path);
+    let extension = extension_of(path);
     let (from, to) = window(text, edit.focus);
     let marks = syntax::highlight(extension, &text[from..to]);
     theme
@@ -538,6 +545,18 @@ mod tests {
 
     fn rust(lines: usize) -> String {
         (0..lines).map(|i| format!("fn f{i}() {{}}\n")).collect()
+    }
+
+    #[test]
+    fn odin_is_coloured_as_go_and_zig_as_itself() {
+        assert_eq!(extension_of("src/main.odin"), Some("go"));
+        assert_eq!(extension_of("build.zig"), Some("zig"));
+        assert_eq!(extension_of("Makefile"), None);
+        assert!(
+            !syntax::highlight(extension_of("a.odin"), "package main\nmain :: proc() {}\n")
+                .is_empty()
+        );
+        assert!(!syntax::highlight(extension_of("a.zig"), "const x: u8 = 1;\n").is_empty());
     }
 
     #[test]
