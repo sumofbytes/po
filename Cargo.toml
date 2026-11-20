@@ -9,8 +9,8 @@ repository = "https://github.com/sumofbytes/po"
 
 [dependencies]
 # The UI: Rune. Pin a `dev` rev; `dev` is never rewritten.
-rune = { features = ["native-file-dialog"], git = "https://github.com/anomalyco/rune", rev = "b3aab6ed31d0679b61b4910fa8b73daaf3e10277" }
-rune-kit = { features = ["mermaid"], git = "https://github.com/anomalyco/rune", rev = "b3aab6ed31d0679b61b4910fa8b73daaf3e10277" }
+rune = { features = ["native-file-dialog"], git = "https://github.com/anomalyco/rune", rev = "07f1ddde9a1d61def92e69f89beb28319a56bc17" }
+rune-kit = { features = ["mermaid"], git = "https://github.com/anomalyco/rune", rev = "07f1ddde9a1d61def92e69f89beb28319a56bc17" }
 env_logger = "0.11"
 log = "0.4"
 libc = "0.2"
@@ -21,14 +21,14 @@ notify = "8"
 ignore = "0.4"
 # TLS is only for `po update`: the daemon is plain HTTP to localhost.
 ureq = { version = "3", default-features = false, features = ["json", "rustls"] }
-base64 = "0.22"
+base64 = "0.23"
 # The issues store the window's NSH screen and the sidebar share.
 tokio = { version = "1", default-features = false, features = ["sync"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif"] }
 # The terminal: libghostty-vt's emulator, built from source with Zig 0.15.2 (see mise.toml).
 libghostty-vt = { version = "0.2.2", default-features = false }
 # Profiling, off unless built with a `hotpath` feature below; see docs/profiling.md.
-hotpath = { version = "0.30", default-features = false }
+hotpath = { version = "0.32", default-features = false }
 
 [features]
 # `cargo run --features hotpath -- -f .` times the measured functions, channels and locks and
@@ -39,10 +39,18 @@ hotpath-alloc = ["hotpath", "hotpath/hotpath-alloc"]
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }
 
+# Rune's own patched crates (its [patch] does not reach an app that builds it): winit, sctk-adwaita,
+# parley_engine, accesskit_*, taken from the same pinned rev. Bump with the rune rev.
+#
 # wgpu-hal 30 needs gpu-allocator on windows 0.62, but crates.io's 0.28.0 pins windows 0.57, which
 # breaks the DX12 build. Upstream main accepts 0.62 (still version 0.28.0), so build from it.
 # Drop this once a gpu-allocator release supports windows 0.62.
 [patch.crates-io]
+winit = { git = "https://github.com/anomalyco/rune", rev = "07f1ddde9a1d61def92e69f89beb28319a56bc17" }
+sctk-adwaita = { git = "https://github.com/anomalyco/rune", rev = "07f1ddde9a1d61def92e69f89beb28319a56bc17" }
+accesskit_windows = { git = "https://github.com/anomalyco/rune", rev = "07f1ddde9a1d61def92e69f89beb28319a56bc17" }
+accesskit_macos = { git = "https://github.com/anomalyco/rune", rev = "07f1ddde9a1d61def92e69f89beb28319a56bc17" }
+parley_engine = { git = "https://github.com/anomalyco/rune", rev = "07f1ddde9a1d61def92e69f89beb28319a56bc17" }
 gpu-allocator = { git = "https://github.com/Traverse-Research/gpu-allocator", rev = "5d8be6b0b68376d12c392a822fcee89ec22e995b" }
 
 [profile.dev]
