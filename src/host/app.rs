@@ -49,6 +49,8 @@ struct State {
     live: Option<Live>,
     /// The terminal was what the viewer showed, as of the last poll: it takes the keyboard on opening.
     terminal_was_shown: bool,
+    /// The generation of the transcript's terminals as of the last poll.
+    terminals_drawn: u64,
     /// The saved pane widths were handed to the panes.
     widths_applied: bool,
     /// The `PO_BENCH` fill ran once.
@@ -118,6 +120,7 @@ fn init() -> State {
         shell: Shell::default(),
         live: None,
         terminal_was_shown: false,
+        terminals_drawn: 0,
         widths_applied: false,
         bench_filled: false,
     }
@@ -135,6 +138,7 @@ fn setup(s: &mut State, waker: Waker) {
         return;
     };
     let wake: Wake = waker;
+    crate::agent::terminals::set_waker(wake.clone());
     let (host, inbox) = host::host::<Core>(wake);
     let mut window = Window::new(host.clone());
     let mut cx = Context::new(host.clone());
@@ -148,6 +152,7 @@ fn setup(s: &mut State, waker: Waker) {
     );
     let mut core = Core { reader, window };
     core.reader.term_theme = terminal_colors(&s.kit);
+    crate::agent::terminals::set_theme(core.reader.term_theme);
     s.live = Some(Live {
         core,
         host,
@@ -234,6 +239,7 @@ fn poll(s: &mut State, now: f64, tx: &mut Tx) -> bool {
     }
     if recolored {
         core.reader.term_theme = terminal_colors(&s.kit);
+        crate::agent::terminals::set_theme(core.reader.term_theme);
     }
     let mut stale = inbox.run(core) | recolored;
     let mut cx = Context::new(host.clone());
@@ -249,6 +255,13 @@ fn poll(s: &mut State, now: f64, tx: &mut Tx) -> bool {
     core.reader.publish_screens();
     if let Some(term) = core.reader.project.terminal.as_mut() {
         stale |= term.poll();
+    }
+    // A command in the transcript drew something.
+    let drawn = crate::agent::terminals::generation();
+    if std::mem::replace(&mut s.terminals_drawn, drawn) != drawn {
+        stale = true;
+        // One may have ended that an agent waits on.
+        core.reader.wake_terminals();
     }
     if now >= 2.0
         && !s.bench_filled

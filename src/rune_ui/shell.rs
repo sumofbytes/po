@@ -266,6 +266,10 @@ fn chat_of<S: Host>(s: &mut S) -> &mut chat::State {
     &mut s.shell().chat
 }
 
+fn chat_read<S: Host>(s: &S) -> &chat::State {
+    &s.shell_ref().chat
+}
+
 fn issues_of<S: Host>(s: &mut S) -> &mut issues::State {
     &mut s.shell().issues
 }
@@ -381,7 +385,7 @@ pub fn view<S: Host>(host: &S, k: &Kit, inset: f32) -> El {
             &shell.chat_feed.value,
             &shell.chat,
             k,
-            chat_of::<S>,
+            (chat_of::<S>, chat_read::<S>),
             framed,
             &shell.side.rename,
             rename_of::<S>,

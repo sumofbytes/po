@@ -34,6 +34,27 @@ pub(crate) struct ToolBlock {
     pub(crate) arguments: String,
     pub(crate) result: String,
     pub(crate) path: Option<String>,
+    /// The terminal the agent runs the call in, which the transcript shows live.
+    pub(crate) terminal: Option<String>,
+    /// The terminal the user ran the call's command in again, from its card.
+    pub(crate) rerun: Option<String>,
+    /// Which of the thread's runs by the user that was, like a notebook's `In [n]`.
+    pub(crate) count: Option<u32>,
+}
+
+impl ToolBlock {
+    /// The shell command the call runs, for a call that runs one: what its card offers to run.
+    pub(crate) fn command(&self) -> Option<String> {
+        if self.terminal.is_none() && self.kind != "execute" {
+            return None;
+        }
+        let input: Value = serde_json::from_str(&self.arguments).ok()?;
+        input["command"]
+            .as_str()
+            .map(str::trim)
+            .filter(|c| !c.is_empty())
+            .map(String::from)
+    }
 }
 
 #[derive(Clone)]
@@ -41,6 +62,8 @@ pub(crate) struct Ask {
     pub(crate) request: Value,
     pub(crate) title: String,
     pub(crate) options: Vec<PermissionOption>,
+    /// The shell command the request is to run, offered to be run by the user first.
+    pub(crate) command: Option<String>,
     pub(crate) answered: Option<String>,
 }
 
@@ -51,6 +74,14 @@ pub(crate) enum Block {
     Thought(String, bool),
     Tool(ToolBlock),
     Permission(Ask),
+    /// A command the agent asked the user to run through Po's MCP server (`terminal.run`): a cell
+    /// with a terminal the user types into, its run kept in [`Thread::shells`] as a command of the
+    /// text's is. `id` is what the agent's `terminal.wait` names it by.
+    Terminal {
+        id: String,
+        command: String,
+        why: Option<String>,
+    },
     /// Po wants to run an agent command that isn't one of its own, and waits to be told it may.
     /// `new_agent` is whether the agent's own command is the question; `mcp` are the config's MCP
     /// servers it would be handed.
@@ -194,6 +225,14 @@ pub(crate) fn transcript(thread: &Thread, full: bool) -> Vec<crate::session::sta
                         }),
                         // The user's click answers this; it is told of by the state.
                         Block::Approve { .. } => {}
+                        Block::Terminal { command, .. } => {
+                            tools.push(crate::session::state::ToolCall {
+                                title: format!("Terminal: {command}"),
+                                status: "waiting".into(),
+                                arguments: None,
+                                result: None,
+                            })
+                        }
                     }
                 }
                 out.push(crate::session::state::Entry {
@@ -255,6 +294,38 @@ pub(crate) fn without_context(text: &str) -> &str {
     text.strip_prefix("[The user has `")
         .and_then(|rest| rest.split_once("]\n\n"))
         .map_or(text, |(_, prompt)| prompt)
+}
+
+/// The terminal a tool call runs in, if its content or its `_meta` says so.
+pub(crate) fn terminal_of(update: &Value) -> Option<String> {
+    let content = update["content"].as_array().and_then(|items| {
+        items.iter().find(|item| item["type"] == "terminal")?["terminalId"].as_str()
+    });
+    content
+        .or(update["_meta"]["terminal_info"]["terminal_id"].as_str())
+        .map(String::from)
+}
+
+/// Hands the output an agent streams of a command it runs itself (`_meta.terminal_output`, which
+/// replaces what was shown, `terminal_output_delta`, which adds to it, and `terminal_exit`) to the
+/// display terminal of that command.
+pub(crate) fn feed_terminal(update: &Value) {
+    let meta = &update["_meta"];
+    if let Some(id) = meta["terminal_info"]["terminal_id"].as_str() {
+        crate::agent::terminals::announce(id);
+    }
+    for (key, replace) in [("terminal_output", true), ("terminal_output_delta", false)] {
+        let out = &meta[key];
+        if let (Some(id), Some(data)) = (out["terminal_id"].as_str(), out["data"].as_str()) {
+            crate::agent::terminals::feed(id, data, replace);
+        }
+    }
+    let exit = &meta["terminal_exit"];
+    if let Some(id) = exit["terminal_id"].as_str() {
+        // An exit without a code (an interrupted command) shows as ended, not as failed.
+        let code = exit["exit_code"].as_i64().unwrap_or(0) as i32;
+        crate::agent::terminals::finish(id, code);
+    }
 }
 
 /// The text a tool call carries: content blocks, diffs, then its raw output.
@@ -341,6 +412,85 @@ pub(crate) fn fence_after(fence: Option<(char, usize)>, line: &str) -> Option<(c
         None if run >= 3 => Some((mark, run)),
         None => None,
     }
+}
+
+/// The terminals of the shell commands in the agent's text the user ran, with which run each was
+/// (see [`Thread::shells`]): by message, block and the command's place in the block's text.
+pub(crate) type Shells = std::collections::HashMap<(usize, usize, usize), (String, u32)>;
+
+/// A part of the agent's text: prose, or a shell command the user is meant to run.
+#[derive(Debug, PartialEq)]
+pub(crate) enum Part<'a> {
+    Prose(&'a str),
+    Shell(String),
+}
+
+/// The agent's text cut at its closed fenced shell blocks (` ```bash `, `sh`, `shell`, `zsh`), which
+/// are commands for the user to run. A fence still open (the text is streaming) stays prose, so a
+/// command is offered once it is whole.
+pub(crate) fn shell_parts(text: &str) -> Vec<Part<'_>> {
+    let mut parts = Vec::new();
+    let (mut from, mut at) = (0, 0);
+    // Where the open fence's line began, and whether it is a shell one.
+    let mut open: Option<(usize, bool)> = None;
+    let mut fence: Option<(char, usize)> = None;
+    for line in text.split_inclusive('\n') {
+        let start = at;
+        at += line.len();
+        let before = fence;
+        fence = fence_after(fence, line);
+        match (before, fence) {
+            (None, Some(_)) => {
+                let info = line
+                    .trim_start_matches(' ')
+                    .trim_start_matches(['`', '~'])
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or_default();
+                open = Some((start, matches!(info, "bash" | "sh" | "shell" | "zsh")));
+            }
+            (Some(_), None) => {
+                let Some((begin, true)) = open.take() else {
+                    continue;
+                };
+                let body = &text[begin..start];
+                let body = body.split_once('\n').map_or("", |(_, rest)| rest);
+                let command = shell_command(body);
+                if command.is_empty() {
+                    continue;
+                }
+                if from < begin {
+                    parts.push(Part::Prose(&text[from..begin]));
+                }
+                parts.push(Part::Shell(command));
+                from = at;
+            }
+            _ => {}
+        }
+    }
+    if from < text.len() {
+        parts.push(Part::Prose(&text[from..]));
+    }
+    parts
+}
+
+/// The command a shell block holds: its lines, without a `$ ` prompt where every line has one.
+fn shell_command(body: &str) -> String {
+    let lines: Vec<&str> = body.lines().collect();
+    let prompted = lines
+        .iter()
+        .filter(|l| !l.trim().is_empty())
+        .all(|l| l.trim_start().starts_with("$ "));
+    lines
+        .iter()
+        .map(|l| match l.trim_start().strip_prefix("$ ") {
+            Some(rest) if prompted => rest,
+            _ => l,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_string()
 }
 
 /// Whether the line opens a block that stands alone, so a piece may begin with it: not an indented
@@ -533,7 +683,7 @@ pub(crate) fn file_of(uri: &str) -> Option<String> {
 
 /// The message of the conversation as the screen drawn by NSH shows it: the user's text with its
 /// pictures, or the agent's blocks. `busy` says the agent is at work, on the last message.
-pub(crate) fn chat_items(messages: &[Msg], busy: bool) -> Vec<model::chat::Item> {
+pub(crate) fn chat_items(messages: &[Msg], busy: bool, shells: &Shells) -> Vec<model::chat::Item> {
     // What the screen holds now: a message whose blocks would be built again exactly as they
     // stand keeps them, so a frame spends its rebuild on the message a chunk went into, not on
     // every message in the history (the engine compares each message's blocks itself, and the
@@ -560,10 +710,12 @@ pub(crate) fn chat_items(messages: &[Msg], busy: bool) -> Vec<model::chat::Item>
                 };
                 model::chat::Item::Agent {
                     index: ix,
-                    blocks: std::sync::Arc::new(chat_blocks(
+                    blocks: std::sync::Arc::new(chat_blocks_in(
                         blocks,
                         busy && ix + 1 == messages.len(),
                         held,
+                        ix,
+                        shells,
                     )),
                 }
             }
@@ -711,10 +863,22 @@ pub(crate) fn run_task(run: &[Block]) -> Option<String> {
 /// One agent message's blocks for the conversation drawn by NSH. Runs of [`MIN_RUN`] or more steps
 /// (tool calls and thoughts) that hold a call also carry the row that folds them; the steps stay in place
 /// either way, so the indexes their answers are told by hold. `live` as in [`run_open`].
+#[cfg(test)]
 pub(crate) fn chat_blocks(
     blocks: &[Block],
     live: bool,
     held: &[model::chat::Block],
+) -> Vec<model::chat::Block> {
+    chat_blocks_in(blocks, live, held, 0, &Shells::new())
+}
+
+/// [`chat_blocks`] for message `msg`, whose shell commands the user ran are in `shells`.
+pub(crate) fn chat_blocks_in(
+    blocks: &[Block],
+    live: bool,
+    held: &[model::chat::Block],
+    msg: usize,
+    shells: &Shells,
 ) -> Vec<model::chat::Block> {
     let mut out: Vec<model::chat::Block> = Vec::with_capacity(blocks.len());
     let mut n = 0;
@@ -761,24 +925,43 @@ pub(crate) fn chat_blocks(
             n += len;
             continue;
         }
+        let mut after = None;
         out.push(match &blocks[n] {
             Block::Text(text) => {
                 // A piece of long text is a row of its own, so the one being written is the only
                 // one the engine makes again while a reply streams (see [`pieces_of`]). A piece
                 // that could be built again exactly as it is keeps `held`'s (see `chat_items`).
-                for (stitch, piece) in pieces_of(text).into_iter().enumerate() {
-                    let piece_text = match held.get(out.len()) {
-                        Some(model::chat::Block::Markdown { text, .. })
-                            if text.as_ref() == piece =>
-                        {
-                            text.clone()
+                let mut ord = 0;
+                for part in shell_parts(text) {
+                    let prose = match part {
+                        Part::Prose(prose) => prose,
+                        Part::Shell(command) => {
+                            let run = shells.get(&(msg, n, ord));
+                            out.push(model::chat::Block::Shell {
+                                index: n,
+                                ord,
+                                command,
+                                run: run.map(|(id, _)| id.clone()),
+                                count: run.map(|(_, count)| *count),
+                            });
+                            ord += 1;
+                            continue;
                         }
-                        _ => piece.into(),
                     };
-                    out.push(model::chat::Block::Markdown {
-                        text: piece_text,
-                        stitch: stitch > 0,
-                    });
+                    for (stitch, piece) in pieces_of(prose).into_iter().enumerate() {
+                        let piece_text = match held.get(out.len()) {
+                            Some(model::chat::Block::Markdown { text, .. })
+                                if text.as_ref() == piece =>
+                            {
+                                text.clone()
+                            }
+                            _ => piece.into(),
+                        };
+                        out.push(model::chat::Block::Markdown {
+                            text: piece_text,
+                            stitch: stitch > 0,
+                        });
+                    }
                 }
                 n += 1;
                 continue;
@@ -791,6 +974,17 @@ pub(crate) fn chat_blocks(
             Block::Tool(tool) => model::chat::Block::Tool(chat_tool(n, tool)),
             Block::Permission(ask) => {
                 let primary = primary_option(&ask.options);
+                // The command it asks to run, to run first as the user, while it waits.
+                if let (Some(command), None) = (&ask.command, &ask.answered) {
+                    let run = shells.get(&(msg, n, 0));
+                    after = Some(model::chat::Block::Shell {
+                        index: n,
+                        ord: 0,
+                        command: command.clone(),
+                        run: run.map(|(id, _)| id.clone()),
+                        count: run.map(|(_, count)| *count),
+                    });
+                }
                 model::chat::Block::Ask {
                     index: n,
                     title: ask.title.clone(),
@@ -805,6 +999,27 @@ pub(crate) fn chat_blocks(
                         })
                         .collect(),
                     answered: ask.answered.clone(),
+                }
+            }
+            Block::Terminal { command, why, .. } => {
+                let run = shells.get(&(msg, n, 0));
+                let cell = model::chat::Block::Shell {
+                    index: n,
+                    ord: 0,
+                    command: command.clone(),
+                    run: run.map(|(id, _)| id.clone()),
+                    count: run.map(|(_, count)| *count),
+                };
+                match why {
+                    // Why the agent asks, above the command.
+                    Some(why) => {
+                        after = Some(cell);
+                        model::chat::Block::Markdown {
+                            text: why.as_str().into(),
+                            stitch: false,
+                        }
+                    }
+                    None => cell,
                 }
             }
             Block::Plan(entries) => model::chat::Block::Plan(
@@ -836,6 +1051,7 @@ pub(crate) fn chat_blocks(
                 }
             }
         });
+        out.extend(after);
         n += 1;
     }
     out
@@ -851,6 +1067,10 @@ pub(crate) fn chat_tool(at: usize, tool: &ToolBlock) -> model::chat::Tool {
         arguments: tool.arguments.clone(),
         result: tool.result.clone(),
         path: tool.path.clone(),
+        terminal: tool.terminal.clone(),
+        command: tool.command(),
+        rerun: tool.rerun.clone(),
+        count: tool.count,
     }
 }
 
@@ -1122,6 +1342,79 @@ mod tests {
         assert_eq!(primary_option(&options), Some(0));
     }
 
+    #[test]
+    fn a_command_asked_through_mcp_is_a_cell_with_its_reason_above() {
+        let blocks = vec![Block::Terminal {
+            id: "term-1".into(),
+            command: "sudo -k id".into(),
+            why: Some("Needs your password.".into()),
+        }];
+        let mut shells = Shells::new();
+        let out = chat_blocks_in(&blocks, false, &[], 3, &shells);
+        assert!(
+            matches!(&out[0], model::chat::Block::Markdown { text, .. } if &**text == "Needs your password.")
+        );
+        assert!(
+            matches!(&out[1], model::chat::Block::Shell { index: 0, ord: 0, command, run: None, .. } if command == "sudo -k id")
+        );
+        // Once the user ran it, the cell shows that run.
+        shells.insert((3, 0, 0), ("po-term-9".into(), 1));
+        let out = chat_blocks_in(&blocks, false, &[], 3, &shells);
+        assert!(
+            matches!(&out[1], model::chat::Block::Shell { run: Some(run), count: Some(1), .. } if run == "po-term-9")
+        );
+    }
+
+    #[test]
+    fn a_closed_shell_fence_is_a_command_to_run() {
+        let text = "Log in first:\n\n```bash\n$ gh auth login\n```\n\nThen ```x``` and:\n```rust\nfn a() {}\n```\n```sh\nls\npwd\n```\n```bash\nsleep 9\n";
+        let parts = shell_parts(text);
+        assert_eq!(
+            parts,
+            vec![
+                Part::Prose("Log in first:\n\n"),
+                Part::Shell("gh auth login".into()),
+                Part::Prose("\nThen ```x``` and:\n```rust\nfn a() {}\n```\n"),
+                Part::Shell("ls\npwd".into()),
+                // Still streaming: an open fence is prose until it closes.
+                Part::Prose("```bash\nsleep 9\n"),
+            ]
+        );
+        assert_eq!(shell_parts("plain"), vec![Part::Prose("plain")]);
+    }
+
+    #[test]
+    fn a_terminal_in_a_tool_call_is_found_by_its_id() {
+        let call = serde_json::json!({ "content": [
+            { "type": "content", "content": { "text": "x" } },
+            { "type": "terminal", "terminalId": "po-term-7" },
+        ]});
+        assert_eq!(terminal_of(&call).as_deref(), Some("po-term-7"));
+        assert_eq!(terminal_of(&serde_json::json!({ "content": [] })), None);
+        assert_eq!(terminal_of(&serde_json::json!({})), None);
+        let meta =
+            serde_json::json!({ "_meta": { "terminal_info": { "terminal_id": "toolu_1" } } });
+        assert_eq!(terminal_of(&meta).as_deref(), Some("toolu_1"));
+    }
+
+    #[test]
+    fn a_call_that_runs_a_command_offers_it_to_run() {
+        let Block::Tool(mut call) = tool("ls", Step::Done) else {
+            unreachable!()
+        };
+        call.arguments =
+            serde_json::json!({ "command": " ls -la ", "description": "x" }).to_string();
+        // Neither in a terminal nor of the `execute` kind: not a command.
+        assert_eq!(call.command(), None);
+        call.terminal = Some("toolu_1".into());
+        assert_eq!(call.command().as_deref(), Some("ls -la"));
+        call.terminal = None;
+        call.kind = "execute".into();
+        assert_eq!(call.command().as_deref(), Some("ls -la"));
+        call.arguments = "{}".into();
+        assert_eq!(call.command(), None);
+    }
+
     fn tool_for(task: Option<&str>) -> Block {
         Block::Tool(ToolBlock {
             id: String::new(),
@@ -1136,6 +1429,9 @@ mod tests {
             arguments: String::new(),
             result: String::new(),
             path: None,
+            terminal: None,
+            rerun: None,
+            count: None,
         })
     }
 
@@ -1190,6 +1486,9 @@ mod tests {
             arguments: String::new(),
             result: String::new(),
             path: None,
+            terminal: None,
+            rerun: None,
+            count: None,
         })
     }
 
@@ -1368,7 +1667,7 @@ mod tests {
         use crate::model::chat::{Item, Phase};
         let run = || Msg::Agent(vec![tool("a", Step::Done), tool("b", Step::Done)]);
         let phases = |busy| -> Vec<Phase> {
-            chat_items(&[run(), run()], busy)
+            chat_items(&[run(), run()], busy, &Shells::new())
                 .iter()
                 .map(|item| {
                     let Item::Agent { blocks, .. } = item else {

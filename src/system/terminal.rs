@@ -113,11 +113,46 @@ enum Msg {
     Stop,
 }
 
-/// A running shell. Dropping it stops the shell.
+/// A program to run in place of the shell.
+#[derive(Clone, Debug, Default)]
+pub struct Launch {
+    pub program: String,
+    pub args: Vec<String>,
+    pub env: Vec<(String, String)>,
+}
+
+/// The raw output of a program, kept to a limit: what is over it is dropped from the start.
+#[derive(Debug, Default)]
+pub struct Output {
+    bytes: std::collections::VecDeque<u8>,
+    limit: usize,
+    truncated: bool,
+}
+
+impl Output {
+    fn push(&mut self, data: &[u8]) {
+        self.bytes.extend(data);
+        if self.bytes.len() > self.limit {
+            let over = self.bytes.len() - self.limit;
+            self.bytes.drain(..over);
+            // Not in the middle of a character: skip its continuation bytes.
+            while self.bytes.front().is_some_and(|b| b & 0xC0 == 0x80) {
+                self.bytes.pop_front();
+            }
+            self.truncated = true;
+        }
+    }
+}
+
+/// A running shell, or the program it was started with. Dropping it stops it.
 pub struct Session {
     tx: watched::Sender<Msg>,
     frame: Arc<FrameLock<Arc<Frame>>>,
-    pty: pty::Pty,
+    /// None for a display terminal, which shows what it is fed and runs nothing.
+    pty: Option<pty::Pty>,
+    output: Arc<Mutex<Output>>,
+    /// Bytes sent to the emulator and not yet emulated.
+    backlog: Arc<AtomicUsize>,
 }
 
 impl Session {
@@ -129,8 +164,37 @@ impl Session {
         theme: (Rgb, Rgb),
         wake: impl Fn() + Send + 'static,
     ) -> io::Result<Self> {
+        Self::start(None, cwd, cols, rows, theme, usize::MAX, wake)
+    }
+
+    /// Starts `launch` in `cwd` instead of the shell, keeping at most `limit` bytes of its raw output.
+    pub fn spawn_command(
+        launch: &Launch,
+        cwd: &Path,
+        (cols, rows): (u16, u16),
+        theme: (Rgb, Rgb),
+        limit: usize,
+        wake: impl Fn() + Send + 'static,
+    ) -> io::Result<Self> {
+        Self::start(Some(launch), cwd, cols, rows, theme, limit, wake)
+    }
+
+    fn start(
+        launch: Option<&Launch>,
+        cwd: &Path,
+        cols: u16,
+        rows: u16,
+        theme: (Rgb, Rgb),
+        limit: usize,
+        wake: impl Fn() + Send + 'static,
+    ) -> io::Result<Self> {
         let (cols, rows) = (cols.max(1), rows.max(1));
-        let pty = pty::Pty::spawn(cwd, cols, rows)?;
+        let pty = pty::Pty::spawn(launch, cwd, cols, rows)?;
+        let captured = Arc::new(Mutex::new(Output {
+            limit,
+            ..Output::default()
+        }));
+        let kept = captured.clone();
         let (tx, rx) = hotpath::channel!(mpsc::channel(), label = "terminal input");
         let frame = Arc::new(hotpath::mutex!(
             Mutex::new(Arc::new(Frame::default())),
@@ -143,6 +207,7 @@ impl Session {
         // runaway program can't fill memory.
         let backlog = Arc::new(AtomicUsize::new(0));
         let reading = backlog.clone();
+        let pending = backlog.clone();
         std::thread::Builder::new()
             .name("terminal-read".into())
             .spawn({
@@ -163,6 +228,9 @@ impl Session {
                         }
                         while reading.load(Ordering::Acquire) > BACKLOG {
                             std::thread::sleep(Duration::from_millis(1));
+                        }
+                        if let Ok(mut out) = kept.lock() {
+                            out.push(&buf[..n]);
                         }
                         reading.fetch_add(n, Ordering::AcqRel);
                         if output.send(Msg::Output(buf[..n].to_vec())).is_err() {
@@ -201,12 +269,96 @@ impl Session {
                 // Its next send fails, which ends it.
                 released.store(0, Ordering::Release);
             })?;
-        Ok(Self { tx, frame, pty })
+        Ok(Self {
+            tx,
+            frame,
+            pty: Some(pty),
+            output: captured,
+            backlog: pending,
+        })
+    }
+
+    /// A terminal that runs nothing and shows the output it is [`fed`](Self::feed): a command an
+    /// agent runs itself, whose output it streams. Its lines may end in a newline alone.
+    pub fn display(
+        (cols, rows): (u16, u16),
+        theme: (Rgb, Rgb),
+        wake: impl Fn() + Send + 'static,
+    ) -> io::Result<Self> {
+        let (cols, rows) = (cols.max(1), rows.max(1));
+        let (tx, rx) = hotpath::channel!(mpsc::channel(), label = "terminal input");
+        let frame = Arc::new(hotpath::mutex!(
+            Mutex::new(Arc::new(Frame::default())),
+            label = "terminal frame"
+        ));
+        // The emulator's answers to queries go nowhere: there is no program to read them.
+        let (to_shell, _) = mpsc::channel::<Vec<u8>>();
+        let backlog = Arc::new(AtomicUsize::new(0));
+        let (shared, pending) = (frame.clone(), backlog.clone());
+        std::thread::Builder::new()
+            .name("terminal-display".into())
+            .spawn(move || emulate(rx, to_shell, pending, shared, (cols, rows), theme, wake))?;
+        Ok(Self {
+            tx,
+            frame,
+            pty: None,
+            output: Arc::default(),
+            backlog,
+        })
+    }
+
+    /// Shows more output on a display terminal, or (`replace`) this output in place of what it
+    /// showed.
+    pub fn feed(&self, text: &str, replace: bool) {
+        // Output that was not written to a terminal ends its lines in a newline alone, which a
+        // terminal takes as a move down without a return.
+        let mut bytes = Vec::with_capacity(text.len() + 8);
+        if replace {
+            // A full reset: the screen, the history and the styles.
+            bytes.extend_from_slice(b"\x1bc");
+        }
+        let mut last = 0u8;
+        for &b in text.as_bytes() {
+            if b == b'\n' && last != b'\r' {
+                bytes.push(b'\r');
+            }
+            bytes.push(b);
+            last = b;
+        }
+        self.backlog.fetch_add(bytes.len(), Ordering::AcqRel);
+        let _ = self.tx.send(Msg::Output(bytes));
+    }
+
+    /// A display terminal's command has ended, with `status`.
+    pub fn finish(&self, status: i32) {
+        let _ = self.tx.send(Msg::Exited(status));
     }
 
     /// The latest frame.
     pub fn frame(&self) -> Arc<Frame> {
         self.frame.lock().map(|f| f.clone()).unwrap_or_default()
+    }
+
+    /// What the program wrote so far, as text, and whether the start of it was dropped for the limit.
+    pub fn output(&self) -> (String, bool) {
+        let Ok(out) = self.output.lock() else {
+            return (String::new(), false);
+        };
+        let (a, b) = out.bytes.as_slices();
+        let bytes = [a, b].concat();
+        (String::from_utf8_lossy(&bytes).into_owned(), out.truncated)
+    }
+
+    /// Ends the program, leaving the session to show what it wrote.
+    pub fn kill(&self) {
+        let Some(pty) = self.pty.clone() else { return };
+        if std::thread::Builder::new()
+            .name("terminal-kill".into())
+            .spawn(move || pty.kill())
+            .is_err()
+        {
+            log::warn!("terminal: could not end the program");
+        }
     }
 
     pub fn key(&self, key: KeyInput) {
@@ -225,7 +377,9 @@ impl Session {
     /// The window is now `cols` by `rows` cells of `cell` pixels.
     pub fn resize(&self, cols: u16, rows: u16, cell: (u32, u32)) {
         let (cols, rows) = (cols.max(1), rows.max(1));
-        self.pty.resize(cols, rows);
+        if let Some(pty) = &self.pty {
+            pty.resize(cols, rows);
+        }
         let _ = self.tx.send(Msg::Resize { cols, rows, cell });
     }
 }
@@ -234,7 +388,7 @@ impl Drop for Session {
     fn drop(&mut self) {
         let _ = self.tx.send(Msg::Stop);
         // Ending the shell waits on it: not on the thread that draws.
-        let pty = self.pty.clone();
+        let Some(pty) = self.pty.clone() else { return };
         if std::thread::Builder::new()
             .name("terminal-kill".into())
             .spawn(move || pty.kill())
@@ -385,10 +539,18 @@ fn emulate(
         if dirty && (timed_out || exited.is_some() || last.elapsed() >= FRAME) {
             let name = title.lock().map(|t| t.clone()).unwrap_or_default();
             if let Some(frame) = snapshot(&terminal, &mut render, &mut cache, name, exited) {
-                if let Ok(mut slot) = shared.lock() {
-                    *slot = Arc::new(frame);
+                // A key the program read without showing anything (a password) changes nothing on
+                // screen: the frame stays, and nobody is woken to draw it again.
+                let changed = match shared.lock() {
+                    Ok(mut slot) if **slot != frame => {
+                        *slot = Arc::new(frame);
+                        true
+                    }
+                    _ => false,
+                };
+                if changed {
+                    wake();
                 }
-                wake();
             }
             (dirty, last) = (false, Instant::now());
         }
@@ -586,7 +748,12 @@ mod pty {
     }
 
     impl Pty {
-        pub fn spawn(cwd: &Path, cols: u16, rows: u16) -> io::Result<Self> {
+        pub fn spawn(
+            launch: Option<&super::Launch>,
+            cwd: &Path,
+            cols: u16,
+            rows: u16,
+        ) -> io::Result<Self> {
             let (mut master, mut slave) = (0, 0);
             let mut ws = size(cols, rows);
             // SAFETY: both fds are out parameters, owned right after.
@@ -617,7 +784,10 @@ mod pty {
                 .ok()
                 .filter(|s| !s.is_empty())
                 .unwrap_or_else(|| "/bin/sh".into());
-            let mut command = Command::new(&shell);
+            let mut command = Command::new(launch.map_or(shell.as_str(), |l| l.program.as_str()));
+            if let Some(launch) = launch {
+                command.args(&launch.args).envs(launch.env.iter().cloned());
+            }
             command
                 .current_dir(cwd)
                 .env("TERM", "xterm-256color")
@@ -788,7 +958,7 @@ mod pty {
     pub struct Pty;
 
     impl Pty {
-        pub fn spawn(_: &Path, _: u16, _: u16) -> io::Result<Self> {
+        pub fn spawn(_: Option<&super::Launch>, _: &Path, _: u16, _: u16) -> io::Result<Self> {
             Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 "the terminal needs a Unix pty",
@@ -966,5 +1136,69 @@ mod tests {
         });
         let _ = std::fs::remove_file(&marker);
         assert!(gone, "the background job outlived its terminal");
+    }
+
+    fn launched(script: &str, limit: usize) -> Session {
+        let launch = Launch {
+            program: "/bin/sh".into(),
+            args: vec!["-c".into(), script.into()],
+            env: vec![("PO_TEST".into(), "yes".into())],
+        };
+        Session::spawn_command(
+            &launch,
+            &std::env::temp_dir(),
+            (80, 24),
+            (Rgb(220, 220, 220), Rgb(0, 0, 0)),
+            limit,
+            || {},
+        )
+        .expect("the program starts")
+    }
+
+    #[test]
+    fn a_command_runs_to_its_status_and_keeps_its_output() {
+        let session = launched("echo hello $PO_TEST; exit 3", 1 << 20);
+        let frame = until(&session, |f| f.exited.is_some());
+        assert_eq!(frame.exited, Some(3));
+        let (out, truncated) = session.output();
+        assert!(out.contains("hello yes"), "{out:?}");
+        assert!(!truncated);
+    }
+
+    #[test]
+    fn a_command_keeps_the_end_of_output_over_the_limit() {
+        let session = launched("printf 'aaaaaaaaaabbbbbbbbbb'", 10);
+        until(&session, |f| f.exited.is_some());
+        let (out, truncated) = session.output();
+        assert_eq!(out, "bbbbbbbbbb");
+        assert!(truncated);
+    }
+
+    #[test]
+    fn a_command_can_be_killed() {
+        let session = launched("sleep 30", 1 << 20);
+        session.kill();
+        let frame = until(&session, |f| f.exited.is_some());
+        assert_ne!(frame.exited, Some(0));
+    }
+
+    #[test]
+    fn a_display_terminal_shows_what_it_is_fed() {
+        let session =
+            Session::display((40, 10), (Rgb(220, 220, 220), Rgb(0, 0, 0)), || {}).expect("starts");
+        session.feed("one\ntwo\n", false);
+        session.feed("\x1b[32mthree\x1b[0m", false);
+        let frame = until(&session, |f| text(f).contains("three"));
+        let shown: Vec<String> = text(&frame)
+            .lines()
+            .map(|l| l.trim_end().to_string())
+            .collect();
+        // Each line starts at the left: a newline alone is taken as a return too.
+        assert_eq!(shown[..3], ["one", "two", "three"], "{shown:?}");
+        session.feed("fresh", true);
+        let frame = until(&session, |f| text(f).contains("fresh"));
+        assert!(!text(&frame).contains("one"));
+        session.finish(2);
+        assert_eq!(until(&session, |f| f.exited.is_some()).exited, Some(2));
     }
 }

@@ -261,6 +261,9 @@ pub(crate) struct Reader {
     /// per caller, [`MAX_WAITS`] in all, so waits can't push the viewer tools out.
     pub(crate) waiters: Vec<Waiter>,
     pub(crate) next_waiter: u64,
+    /// The commands agents asked the user to run (`terminal.run`), by id: the thread that asked.
+    pub(crate) terminal_asks: std::collections::HashMap<String, u64>,
+    pub(crate) next_terminal: u64,
     /// What a parent hasn't been told about its children yet, one notice per parent: lines
     /// coalesce into it for [`NOTICE_COALESCE`], and the rate limit holds the flush back.
     pub(crate) notices: HashMap<u64, Notice>,
@@ -437,6 +440,8 @@ impl Reader {
             next_request: 1,
             waiters: vec![],
             next_waiter: 1,
+            terminal_asks: Default::default(),
+            next_terminal: 1,
             notices: HashMap::new(),
             notice_scheduled: HashSet::new(),
             notice_sent_at: HashMap::new(),

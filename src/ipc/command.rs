@@ -261,6 +261,17 @@ pub enum Command {
         id: String,
         timeout: Option<u64>,
     },
+    /// Puts a shell command in the caller's transcript, in a terminal the user runs and types
+    /// into (a password, a yes): what the agent's own shell, with no terminal, can't do.
+    TerminalRun {
+        command: String,
+        why: Option<String>,
+    },
+    /// Waits for the user's run of one of the caller's terminal commands to end, or the timeout.
+    TerminalWait {
+        id: String,
+        timeout: Option<u64>,
+    },
     /// Opens a file of the project in the viewer, at a line (from 1) if one is given.
     FileOpen {
         path: String,
@@ -492,6 +503,8 @@ impl Command {
             Self::ViewClose { .. } => "view.close",
             Self::FormShow { .. } => "form.show",
             Self::FormWait { .. } => "form.wait",
+            Self::TerminalRun { .. } => "terminal.run",
+            Self::TerminalWait { .. } => "terminal.wait",
             Self::FileOpen { .. } => "file.open",
             Self::DiffShow { .. } => "diff.show",
             Self::ViewerClose => "viewer.close",
@@ -530,11 +543,12 @@ impl Command {
             | Self::ViewUpdate { .. }
             | Self::ViewClose { .. }
             | Self::FormShow { .. }
+            | Self::TerminalRun { .. }
             | Self::FileOpen { .. }
             | Self::DiffShow { .. }
             | Self::ViewerClose => Family::View,
             // A form wait answers later, like a thread wait, so it is pumped with those.
-            Self::FormWait { .. } => Family::Thread,
+            Self::FormWait { .. } | Self::TerminalWait { .. } => Family::Thread,
             Self::ControlInfo => Family::Control,
             Self::WindowInfo | Self::AuditList { .. } | Self::EventsSubscribe => Family::Window,
             Self::AgentList => Family::Agent,
@@ -570,6 +584,8 @@ impl Command {
             | Self::ViewClose { .. }
             | Self::FormShow { .. }
             | Self::FormWait { .. }
+            | Self::TerminalRun { .. }
+            | Self::TerminalWait { .. }
             | Self::FileOpen { .. }
             | Self::DiffShow { .. }
             | Self::ViewerClose => Scope::Viewer,
@@ -665,6 +681,7 @@ impl Command {
             | Self::ViewUpdate { .. }
             | Self::ViewClose { .. }
             | Self::FormShow { .. }
+            | Self::TerminalRun { .. }
             | Self::FileOpen { .. }
             | Self::DiffShow { .. }
             | Self::ViewerClose => true,
@@ -694,6 +711,7 @@ impl Command {
             | Self::AuditList { .. }
             | Self::EventsSubscribe
             | Self::FormWait { .. }
+            | Self::TerminalWait { .. }
             | Self::ThreadWait { .. } => false,
         }
     }
@@ -703,7 +721,9 @@ impl Command {
     pub fn timeout(&self) -> std::time::Duration {
         const ANSWER: std::time::Duration = std::time::Duration::from_secs(10);
         match self {
-            Self::ThreadWait { timeout, .. } | Self::FormWait { timeout, .. } => {
+            Self::ThreadWait { timeout, .. }
+            | Self::FormWait { timeout, .. }
+            | Self::TerminalWait { timeout, .. } => {
                 std::time::Duration::from_secs(timeout.unwrap_or(25).min(50))
             }
             _ => ANSWER,
@@ -766,6 +786,21 @@ impl Command {
                 }
             }
             "form.wait" => Self::FormWait {
+                id: need("id")?,
+                timeout: number("timeout")?,
+            },
+            "terminal.run" => {
+                // The request's own `command` is its name, so the line is `line`.
+                let command = need("line")?;
+                if command.trim().is_empty() {
+                    return Err("`line` is empty".into());
+                }
+                Self::TerminalRun {
+                    command,
+                    why: opt("why"),
+                }
+            }
+            "terminal.wait" => Self::TerminalWait {
                 id: need("id")?,
                 timeout: number("timeout")?,
             },
@@ -1128,6 +1163,29 @@ mod tests {
             title: title.into(),
             body: body.into(),
         }
+    }
+
+    #[test]
+    fn a_terminal_command_is_a_viewers_and_waits_like_a_form() {
+        assert!(Command::parse(&json!({ "command": "terminal.run" })).is_err());
+        assert!(Command::parse(&json!({ "command": "terminal.run", "line": "  " })).is_err());
+        let run =
+            Command::parse(&json!({ "command": "terminal.run", "line": "sudo -k id", "why": "w" }));
+        assert_eq!(
+            run,
+            Ok(Command::TerminalRun {
+                command: "sudo -k id".into(),
+                why: Some("w".into())
+            })
+        );
+        assert!(run.expect("parses").writes());
+        let wait =
+            Command::parse(&json!({ "command": "terminal.wait", "id": "term-1", "timeout": 90 }))
+                .expect("parses");
+        assert_eq!(wait.scope(), Scope::Viewer);
+        assert!(!wait.writes());
+        assert_eq!(wait.timeout(), std::time::Duration::from_secs(50));
+        assert_eq!(wait.name(), "terminal.wait");
     }
 
     #[test]

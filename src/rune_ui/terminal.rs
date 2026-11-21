@@ -115,9 +115,15 @@ impl Term {
 
     /// Sends a key to the shell; false when there is none to take it.
     pub fn key(&self, event: &KeyEvent) -> bool {
-        let Some(session) = &self.session else {
-            return false;
-        };
+        self.session
+            .as_ref()
+            .is_some_and(|session| send_key(session, event))
+    }
+}
+
+/// Sends a key to a session; false when it is the window's (copy, paste) or none the shell takes.
+pub fn send_key(session: &Session, event: &KeyEvent) -> bool {
+    {
         let m = event.mods;
         // Copy and paste are the window's: Ctrl+Shift+C and V (or the platform key), where Ctrl+C
         // and Ctrl+V are the shell's.
@@ -218,7 +224,7 @@ fn key_of(ch: char) -> Key {
 
 /// One terminal row as text plus a span per styled run. Cells are placed by column, so a gap
 /// between runs becomes spaces.
-fn row(frame: &Frame, kit: &Kit, y: usize) -> El {
+fn row(frame: &Frame, kit: &Kit, y: usize, cursor: bool, selectable: bool) -> El {
     let mut line = String::new();
     let mut spans = vec![];
     let mut at = 0u16;
@@ -245,7 +251,11 @@ fn row(frame: &Frame, kit: &Kit, y: usize) -> El {
         }
         spans.push(span.mono());
     }
-    if let Some(cursor) = frame.cursor.as_ref().filter(|k| k.row as usize == y) {
+    if let Some(cursor) = frame
+        .cursor
+        .as_ref()
+        .filter(|k| cursor && k.row as usize == y)
+    {
         while at <= cursor.col {
             line.push(' ');
             at += 1;
@@ -264,7 +274,7 @@ fn row(frame: &Frame, kit: &Kit, y: usize) -> El {
         .font(font_style())
         .color(c(frame.foreground))
         .spans(spans)
-        .selectable(true)
+        .selectable(selectable)
         .h(font_style().line_height)
         .min_h(font_style().line_height)
 }
@@ -300,7 +310,7 @@ pub fn view<S: 'static>(term: &Term, kit: &Kit, at: At<S>) -> El {
         .on_wheel(move |s: &mut S, event: WheelEvent, _: &mut Tx| at(s).wheel(event.dy))
         .on_layout(move |s: &mut S, rect: [f32; 4]| at(s).fit(rect[2], rect[3]));
     for y in 0..term.size.1 as usize {
-        grid = grid.child(row(&term.frame, kit, y));
+        grid = grid.child(row(&term.frame, kit, y, true, true));
     }
     col()
         .w_full()
@@ -309,6 +319,53 @@ pub fn view<S: 'static>(term: &Term, kit: &Kit, at: At<S>) -> El {
         .fill(kit.c.bg_base)
         .px(12.0)
         .py(8.0)
+        .clip_soft(0.0)
+        .child(grid)
+}
+
+/// The most rows of a command's output the transcript shows at once: its last ones.
+const EMBEDDED_ROWS: usize = 16;
+
+/// What a command in the transcript shows: the used rows of its frame, the last few, without a
+/// cursor, on the terminal's own background.
+pub fn embedded(frame: &Frame, kit: &Kit) -> El {
+    embedded_in(frame, kit, false, true)
+}
+
+/// [`embedded`] for a command that is running and waits on the user: its text is not selectable,
+/// so a click on it reaches the box and not a selection that would take the keyboard.
+pub fn embedded_running(frame: &Frame, kit: &Kit) -> El {
+    embedded_in(frame, kit, false, false)
+}
+
+fn embedded_in(frame: &Frame, kit: &Kit, cursor: bool, selectable: bool) -> El {
+    let used = frame
+        .lines
+        .iter()
+        .rposition(|line| {
+            line.iter()
+                .any(|run| run.bg.is_some() || !run.text.trim().is_empty())
+        })
+        .map_or(0, |last| last + 1);
+    // The cursor's row shows too, though nothing is written on it yet.
+    let used = match frame.cursor.as_ref().filter(|_| cursor) {
+        Some(k) => used.max(k.row as usize + 1),
+        None => used,
+    };
+    let mut grid = col()
+        .w_full()
+        .min_w(0.0)
+        .selection_group(selectable)
+        .min_h(font_style().line_height);
+    for y in used.saturating_sub(EMBEDDED_ROWS)..used {
+        grid = grid.child(row(frame, kit, y, cursor, selectable));
+    }
+    col()
+        .w_full()
+        .fill(c(frame.background))
+        .radius(6.0)
+        .px(8.0)
+        .py(6.0)
         .clip_soft(0.0)
         .child(grid)
 }

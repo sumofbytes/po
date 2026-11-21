@@ -356,6 +356,47 @@ impl Reader {
         cx.notify();
     }
 
+    /// Runs a shell command of the agent's text, as the user, in the project: in a terminal under
+    /// the command, which takes the place of the one before.
+    pub(crate) fn run_shell(
+        &mut self,
+        msg: usize,
+        block: usize,
+        ord: usize,
+        command: String,
+        cx: &mut Context<Self>,
+    ) {
+        let command = command.trim().to_string();
+        if command.is_empty() {
+            return;
+        }
+        let key = (msg, block, ord);
+        if let Some((old, _)) = self.thread.shells.remove(&key) {
+            crate::agent::terminals::release(&old);
+        }
+        let shell = std::env::var("SHELL")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "/bin/sh".into());
+        let launch = crate::system::terminal::Launch {
+            program: shell,
+            args: vec!["-c".into(), command],
+            env: vec![],
+        };
+        match crate::agent::terminals::create(
+            &launch,
+            &self.project.root,
+            crate::agent::terminals::DEFAULT_LIMIT,
+        ) {
+            Ok(id) => {
+                self.thread.runs += 1;
+                self.thread.shells.insert(key, (id, self.thread.runs));
+            }
+            Err(error) => log::warn!("run command: {error}"),
+        }
+        cx.notify();
+    }
+
     /// Folds or unfolds the run of steps that starts at `block`.
     pub(crate) fn fold_run(
         &mut self,

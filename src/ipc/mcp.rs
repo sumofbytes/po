@@ -11,7 +11,10 @@ conversation next to a viewer of the project's files and changes. Use these tool
 of the user what you are talking about: open the file or diff you refer to, or show a plan or \
 summary as a markdown view. show_form goes further: a form of your own fields and choices the \
 user fills in, whose answers form_wait brings you — the form stays until they answer or close \
-it, so wait again after a timeout. The user decides what they look at: while they are typing or \
+it, so wait again after a timeout. Your own shell has no terminal, so a command that needs the \
+user (sudo's password, a login such as `gh auth login`, a yes/no prompt) fails there: hand it to \
+run_in_terminal instead, which puts it in your conversation for the user to run and type into, \
+and terminal_wait brings you how it ended. The user decides what they look at: while they are typing or \
 scrolling, a move of the viewer waits for a pause (the reply says `deferred`) and a new view is \
 offered rather than shown. Don't fight that by asking again.";
 
@@ -175,6 +178,43 @@ fn tools() -> Vec<(&'static str, &'static str, &'static str, Value, Scope)> {
                 "type": "object",
                 "properties": {
                     "id": string("The form, as show_form returned it."),
+                    "timeout": { "type": "integer", "description": "Give up after this many seconds; at most 50." },
+                },
+                "required": ["id"],
+            }),
+            Scope::Viewer,
+        ),
+        (
+            "run_in_terminal",
+            "terminal.run",
+            "Ask the user to run a shell command in a terminal of their own, in your conversation \
+             in Po: the command shows with a Run button, they run it in the project and type \
+             into it whatever it asks (a password, a yes). Use it for what your own shell can't \
+             do because it has no terminal or needs the user: sudo, logins (`gh auth login`, \
+             `npm login`), interactive prompts. Nothing runs until they press Run, and they may \
+             edit the command first. The reply carries an `id`, which terminal_wait takes; never \
+             ask for their password or secrets in the chat instead.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "line": string("The command line, as the user's shell runs it in the project's root."),
+                    "why": string("Why it is needed and what to type, in markdown, shown above the command."),
+                },
+                "required": ["line"],
+            }),
+            Scope::Viewer,
+        ),
+        (
+            "terminal_wait",
+            "terminal.wait",
+            "Wait for the user's run of a run_in_terminal command to end, at most 50 s; the \
+             reply carries its `exit_code` and the end of its `output` (what the user typed \
+             at a password prompt isn't in it). On a timeout they have not run it, or it still \
+             runs: wait again.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "id": string("The command, as run_in_terminal returned it."),
                     "timeout": { "type": "integer", "description": "Give up after this many seconds; at most 50." },
                 },
                 "required": ["id"],
@@ -680,8 +720,11 @@ fn parse_command(command: &str) -> Option<Command> {
         "form.show" => {
             request["title"] = json!("");
         }
-        "form.wait" => {
+        "form.wait" | "terminal.wait" => {
             request["id"] = json!("f");
+        }
+        "terminal.run" => {
+            request["line"] = json!("true");
         }
         "file.open" => {
             request["path"] = json!("a");

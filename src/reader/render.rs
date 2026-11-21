@@ -505,7 +505,7 @@ impl Reader {
             items: if thread.loading {
                 Vec::new()
             } else {
-                chat_items(&thread.messages, thread.busy)
+                chat_items(&thread.messages, thread.busy, &thread.shells)
             },
             picking,
             draft: thread.draft.clone(),
@@ -557,6 +557,16 @@ impl Reader {
                 block,
                 yes,
             } => self.answer_approval(message, block, yes, window, cx),
+            Chat::KillTerminal(id) => {
+                crate::agent::terminals::kill(&id);
+                cx.notify();
+            }
+            Chat::RunShell {
+                message,
+                block,
+                ord,
+                command,
+            } => self.run_shell(message, block, ord, command, cx),
             Chat::ToggleTool { message, block } => self.toggle_tool(message, block, cx),
             Chat::ToggleThought { message, block } => self.toggle_thought(message, block, cx),
             Chat::Fold {

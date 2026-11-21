@@ -1704,12 +1704,14 @@ impl Reader {
                 request,
                 title,
                 options,
+                command,
             } => {
                 self.alert(window, visible, &format!("Needs your approval: {title}"));
                 self.thread.blocks().push(Block::Permission(Ask {
                     request,
                     title,
                     options,
+                    command,
                     answered: None,
                 }));
             }
