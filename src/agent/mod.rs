@@ -4,6 +4,7 @@ pub(crate) mod acp;
 pub(crate) mod attach;
 pub(crate) mod dex;
 pub(crate) mod handoff;
+pub(crate) mod terminals;
 use std::{path::Path, sync::Arc};
 
 use anyhow::Result;

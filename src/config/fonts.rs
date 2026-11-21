@@ -224,7 +224,10 @@ mod tests {
 
     #[test]
     fn the_book_size_is_only_taken_in_range() {
-        assert_eq!(book_size_of(&json!({ "font": { "book_size": 17 } })), Some(17.0));
+        assert_eq!(
+            book_size_of(&json!({ "font": { "book_size": 17 } })),
+            Some(17.0)
+        );
         assert_eq!(book_size_of(&json!({ "font": { "book_size": 99 } })), None);
         assert_eq!(book_size_of(&json!({})), None);
     }

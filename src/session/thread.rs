@@ -92,6 +92,11 @@ pub(crate) struct Queued {
 /// One conversation with an agent: its messages, the process behind it and what is waiting to
 /// be sent to it.
 pub(crate) struct Thread {
+    /// The terminals of the shell commands in the agent's text the user ran, with which run each
+    /// was: by message, block and the command's place in the block's text.
+    pub(crate) shells: crate::session::chat::Shells,
+    /// How many commands the user ran from the transcript's cells: the next run is numbered after.
+    pub(crate) runs: u32,
     /// Documents the agent put on screen through Po's MCP server.
     pub(crate) views: crate::ipc::command::Views,
     /// Forms the agent put on screen through Po's MCP server, and the form of each.
@@ -304,6 +309,8 @@ impl Thread {
                 let task = task_in_progress(&self.messages);
                 let status = step(update["status"].as_str().unwrap_or("pending"));
                 let now = Instant::now();
+                feed_terminal(update);
+                let terminal = terminal_of(update);
                 self.blocks().push(Block::Tool(ToolBlock {
                     id: update["toolCallId"]
                         .as_str()
@@ -320,9 +327,13 @@ impl Thread {
                     arguments: pretty(&update["rawInput"]),
                     result: tool_result(update),
                     path: touched(update),
+                    terminal,
+                    rerun: None,
+                    count: None,
                 }))
             }
             Some("tool_call_update") => {
+                feed_terminal(update);
                 let id = update["toolCallId"].as_str().unwrap_or_default();
                 for msg in self.messages.iter_mut().rev() {
                     let Msg::Agent(blocks) = msg else { continue };
@@ -354,6 +365,9 @@ impl Thread {
                         }
                         if let Some(path) = touched(update) {
                             tool.path = Some(path);
+                        }
+                        if let Some(terminal) = terminal_of(update) {
+                            tool.terminal = Some(terminal);
                         }
                         break;
                     }
@@ -492,6 +506,8 @@ impl Thread {
     /// A thread with no session yet and nothing said.
     pub(crate) fn blank(id: u64) -> Self {
         Self {
+            shells: Default::default(),
+            runs: 0,
             id,
             parent: None,
             failed: false,
@@ -902,6 +918,52 @@ mod tests {
             "fix it",
             "taking the name away gives the first message back"
         );
+    }
+
+    // What claude-agent-acp sends for a Bash call to a client that shows display terminals: the
+    // call with its terminal, the input once complete, then the result with the output and exit.
+    #[test]
+    fn a_bash_call_of_claude_agent_acp_offers_its_command() {
+        let mut thread = started_thread();
+        let id = "toolu_bash_offer";
+        for update in [
+            serde_json::json!({
+                "sessionUpdate": "tool_call", "toolCallId": id, "status": "pending",
+                "title": "Terminal", "kind": "execute", "rawInput": {},
+                "content": [{ "type": "terminal", "terminalId": id }],
+                "_meta": { "terminal_info": { "terminal_id": id } }
+            }),
+            serde_json::json!({
+                "sessionUpdate": "tool_call_update", "toolCallId": id,
+                "title": "echo hi", "kind": "execute",
+                "rawInput": { "command": "echo hi", "description": "Say hi" }
+            }),
+            serde_json::json!({
+                "sessionUpdate": "tool_call_update", "toolCallId": id, "status": "completed",
+                "content": [{ "type": "terminal", "terminalId": id }],
+                "_meta": {
+                    "terminal_info": { "terminal_id": id },
+                    "terminal_output": { "terminal_id": id, "data": "hi\n" },
+                    "terminal_exit": { "terminal_id": id, "exit_code": 0, "signal": null }
+                }
+            }),
+        ] {
+            thread.update(&update);
+        }
+        let Some(Msg::Agent(blocks)) = thread.messages.last() else {
+            unreachable!("agent work")
+        };
+        let tool = blocks
+            .iter()
+            .find_map(|b| match b {
+                Block::Tool(t) if t.id == id => Some(t),
+                _ => None,
+            })
+            .expect("the call");
+        let card = chat_tool(0, tool);
+        assert_eq!(card.terminal.as_deref(), Some(id));
+        assert_eq!(card.command.as_deref(), Some("echo hi"));
+        crate::agent::terminals::release(id);
     }
 
     fn started_thread() -> Thread {

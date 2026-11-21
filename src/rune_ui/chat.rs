@@ -60,7 +60,15 @@ pub struct State {
     pub menu: super::dropdown::State,
     /// The picture shown large over the window, after its thumbnail was pressed.
     pub preview: Option<crate::model::chat::Picture>,
+    /// The commands of the transcript's cells as the user edits them, by thread, message and block.
+    pub cells: std::collections::HashMap<CellKey, TextEdit>,
+    /// How many times each running command's output was clicked, by the place of its reply line:
+    /// each click makes the line a new one, which takes the keyboard back.
+    pub pokes: std::collections::HashMap<CellKey, u32>,
 }
+
+/// A cell of the transcript: its thread, message and block.
+pub type CellKey = (u64, usize, usize);
 
 impl Default for State {
     fn default() -> Self {
@@ -73,11 +81,56 @@ impl Default for State {
             hover: None,
             menu: Default::default(),
             preview: None,
+            cells: Default::default(),
+            pokes: Default::default(),
         }
     }
 }
 
 pub type At<S> = fn(&mut S) -> &mut State;
+/// Where the host keeps the state, to read it while the rows build.
+pub type Read<S> = fn(&S) -> &State;
+
+/// What the cells of a message hold beyond their blocks: the thread they are of, the edits the
+/// screen keeps, and where it keeps them.
+struct Cells<'a, S> {
+    thread: u64,
+    state: &'a State,
+    at: At<S>,
+}
+
+/// The state of the edits to the cells of `message`, as one number: a row whose cells were typed
+/// in, or whose caret moved, is a new row, so what it draws is what the field holds. Focus is not
+/// in it: a field loses it on the press of a button beside it, and were the row a new one then, the
+/// release would land on a row that is gone and the press (Run, Stop) would be lost.
+fn edits_of(state: &State, thread: u64, message: usize) -> Option<u64> {
+    use std::hash::{Hash, Hasher};
+    // The line that answers a running command holds nothing (each key goes on to the command),
+    // and its focus is the window's: were it to make a new row, a press elsewhere in the cell
+    // (Stop) that takes the focus from it would land on a row that is gone. A click on the
+    // output that gives it the keyboard back is a poke.
+    let mut cells: Vec<_> = state
+        .cells
+        .iter()
+        .filter(|((t, m, slot), _)| *t == thread && *m == message && *slot < REPLY_SLOTS)
+        .collect();
+    let mut pokes: Vec<_> = state
+        .pokes
+        .iter()
+        .filter(|((t, m, _), _)| *t == thread && *m == message)
+        .collect();
+    if cells.is_empty() && pokes.is_empty() {
+        return None;
+    }
+    cells.sort_by_key(|(key, _)| key.2);
+    pokes.sort();
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    pokes.hash(&mut hash);
+    for ((_, _, block), edit) in cells {
+        (block, &edit.text, edit.anchor, edit.focus).hash(&mut hash);
+    }
+    Some(hash.finish())
+}
 
 impl State {
     /// Follows a new snapshot: the app's own writes to the draft take over what was typed.
@@ -280,6 +333,287 @@ fn thought<S: 'static>(k: &Kit, message: usize, at: usize, body: &str, open: boo
     }
 }
 
+/// A command for the user to run, in the agent's text or a request waiting on them: the command,
+/// which they may edit and run (the button, or Shift+Enter) or stop, and under it the terminal it
+/// runs in, live, with how it ended.
+fn cell<S: 'static>(
+    k: &Kit,
+    message: usize,
+    at: usize,
+    ord: usize,
+    original: &str,
+    run: Option<&str>,
+    cells: &Cells<S>,
+) -> El {
+    use crate::agent::terminals;
+    let frame = run.and_then(terminals::frame);
+    let running = frame.as_ref().is_some_and(|f| f.exited.is_none());
+    // Each command has a place of its own among the block's.
+    let key: CellKey = (cells.thread, message, 1_000_000 + at * 64 + ord);
+    let at_state = cells.at;
+    let thread = cells.thread;
+    let go = move |command: String| Cmd::RunShell {
+        message,
+        block: at,
+        ord,
+        command,
+    };
+    let seed = original.to_string();
+    let current = move |s: &mut S| {
+        at_state(s)
+            .cells
+            .get(&key)
+            .map_or_else(|| seed.clone(), |e| e.text.clone())
+    };
+    let edit = cells.state.cells.get(&key);
+    let edited = edit.is_some_and(|e| e.text != original);
+
+    let field = edit
+        .cloned()
+        .unwrap_or_else(|| TextEdit::new(original.to_string()));
+    let (seed, enter) = (original.to_string(), current.clone());
+    let input = rune::text_input(&field, mono_style())
+        .key(format!("cell-input-{message}-{at}-{ord}"))
+        .w_full()
+        .color(k.c.text_base)
+        .caret(k.c.text_base, k.selection())
+        .label("Command")
+        .description("")
+        .on_edit(move |s: &mut S| {
+            at_state(s)
+                .cells
+                .entry(key)
+                .or_insert_with(|| TextEdit::new(seed.clone()))
+        })
+        .on_input_key(move |s: &mut S, event: &KeyEvent, _: &mut Tx| {
+            // Shift+Enter (or Ctrl+Enter) runs; Enter is a new line.
+            if event.key == Key::Enter && (event.mods.shift || event.mods.ctrl) {
+                if !running {
+                    tell(go(enter(s)));
+                }
+                return true;
+            }
+            false
+        });
+    let prompt = row()
+        .grow(1.0)
+        .min_w(0.0)
+        .items_start()
+        .gap(8.0)
+        .px(10.0)
+        .py(6.0)
+        .radius(6.0)
+        .fill(k.c.layer_01)
+        .child(text("$").font(mono_style()).color(k.c.text_faint))
+        .child(
+            col()
+                .grow(1.0)
+                .min_w(0.0)
+                .child(rune::auto_grow(input, 1, 12)),
+        );
+
+    let button = match run {
+        Some(id) if running => {
+            let id = id.to_string();
+            Button::new("Stop")
+                .variant(ButtonVariant::Ghost)
+                .on_press(move |_: &mut S| tell(Cmd::KillTerminal(id.clone())))
+        }
+        _ => Button::new(if run.is_some() { "Run again" } else { "Run" })
+            .variant(if run.is_some() {
+                ButtonVariant::Ghost
+            } else {
+                ButtonVariant::Submit
+            })
+            .on_press(move |s: &mut S| {
+                // The run has the keyboard: what it asks for is typed at once.
+                let mut line = TextEdit::new("");
+                line.focused = true;
+                at_state(s)
+                    .cells
+                    .insert(reply_key(thread, message, at, ord), line);
+                tell(go(current(s)))
+            }),
+    };
+    let mut head = row()
+        .w_full()
+        .items_start()
+        .gap(8.0)
+        .child(prompt)
+        .child(button.build(k));
+    if edited {
+        head = head.child(
+            Button::new("Reset")
+                .variant(ButtonVariant::Ghost)
+                .on_press(move |s: &mut S| {
+                    at_state(s).cells.remove(&key);
+                })
+                .build(k),
+        );
+    }
+    let mut c = card(k, false).gap(8.0).child(head);
+    if let Some(f) = &frame {
+        let status = match f.exited {
+            None => "Running… type below to answer it".to_string(),
+            Some(0) => "Done".to_string(),
+            Some(code) => format!("Exited with {code}"),
+        };
+        let color = match f.exited {
+            Some(code) if code != 0 => k.c.danger.fg,
+            _ => k.c.text_muted,
+        };
+        let mut output = if running {
+            super::terminal::embedded_running(f, k)
+        } else {
+            super::terminal::embedded(f, k)
+        };
+        if let (true, Some(_)) = (running, run) {
+            // A click on what it printed gives the keyboard to the line that answers it, as a
+            // click on a terminal would.
+            let rkey = reply_key(thread, message, at, ord);
+            // On the press itself, not its release: the line the keyboard leaves is drawn again
+            // when it does, and a release on a row that was drawn again is no press.
+            output = output
+                .key(format!("cell-out-{message}-{at}-{ord}"))
+                .on_drag(move |s: &mut S, d: &mut rune::Drag, _: &mut Tx| {
+                    if d.phase != rune::Phase::Down {
+                        return;
+                    }
+                    let state = at_state(s);
+                    state
+                        .cells
+                        .entry(rkey)
+                        .or_insert_with(|| TextEdit::new(""))
+                        .focused = true;
+                    *state.pokes.entry(rkey).or_default() += 1;
+                });
+        }
+        c = c.child(output);
+        if let (true, Some(id)) = (running, run) {
+            c = c.child(reply::<S>(k, id, cells, (message, at, ord)));
+        }
+        c = c.child(text(status).font(small_style()).color(color));
+    }
+    c
+}
+
+/// Where the line the user answers a running command in is kept, by its cell's place.
+fn reply_key(thread: u64, message: usize, at: usize, ord: usize) -> CellKey {
+    (thread, message, REPLY_SLOTS + at * 64 + ord)
+}
+
+/// Where the reply lines' places start among a message's cells.
+const REPLY_SLOTS: usize = 2_000_000;
+
+/// The line under a running command's terminal that takes what the user types for it: every key
+/// goes to the command (a password, a yes), none stays in the line. The keyboard is the line's from
+/// the run on, held in the screen's state so a row drawn again keeps it.
+fn reply<S: 'static>(
+    k: &Kit,
+    id: &str,
+    cells: &Cells<S>,
+    (message, at, ord): (usize, usize, usize),
+) -> El {
+    let key = reply_key(cells.thread, message, at, ord);
+    let at_state = cells.at;
+    let field = cells
+        .state
+        .cells
+        .get(&key)
+        .cloned()
+        .unwrap_or_else(|| TextEdit::new(""));
+    let (keys, pasted, typed) = (id.to_string(), id.to_string(), id.to_string());
+    let input = rune::text_input(&field, mono_style())
+        .key(format!(
+            "cell-reply-{message}-{at}-{ord}-{}",
+            cells.state.pokes.get(&key).copied().unwrap_or(0)
+        ))
+        .w_full()
+        .color(k.c.text_base)
+        .placeholder("Type here to answer the command", k.c.text_faint)
+        .caret(k.c.text_base, k.selection())
+        .label("Input")
+        .description("")
+        .on_edit(move |s: &mut S| {
+            at_state(s)
+                .cells
+                .entry(key)
+                .or_insert_with(|| TextEdit::new(""))
+        })
+        .on_input_key(move |_: &mut S, event: &KeyEvent, _: &mut Tx| {
+            crate::agent::terminals::key(&keys, event)
+        })
+        .on_input_paste(
+            move |_: &mut S, content: &rune::ClipboardContent, _: &mut Tx| {
+                let text = content.text();
+                if text.is_empty() {
+                    return false;
+                }
+                crate::agent::terminals::paste(&pasted, text);
+                true
+            },
+        )
+        .on_input_change(move |s: &mut S, _: &mut Tx| {
+            // Text that came in by a way other than a key goes on, and the line stays empty.
+            let line = at_state(s)
+                .cells
+                .entry(key)
+                .or_insert_with(|| TextEdit::new(""));
+            if !line.text.is_empty() {
+                crate::agent::terminals::paste(&typed, &line.text);
+                line.text.clear();
+            }
+        });
+    row()
+        .w_full()
+        .px(10.0)
+        .py(6.0)
+        .radius(6.0)
+        .fill(k.c.layer_01)
+        .child(col().grow(1.0).min_w(0.0).child(input))
+}
+
+/// A command's terminal in the transcript: what it prints, live, and under it how it stands, with
+/// a way to end it while it runs when Po runs it. A call that settled has ended, whether or not
+/// the agent said how.
+fn terminal_block<S: 'static>(k: &Kit, id: &str, phase: Phase, result: &str) -> Option<El> {
+    // Released, or from an earlier run of Po: the text result stands in for it.
+    let frame = crate::agent::terminals::frame(id)?;
+    let settled = !matches!(phase, Phase::Waiting | Phase::Working);
+    let status = match frame.exited {
+        Some(0) => "exited".to_string(),
+        Some(code) => format!("exited with {code}"),
+        None if settled => "ended".to_string(),
+        None => "running".to_string(),
+    };
+    let mut foot = row()
+        .w_full()
+        .items_center()
+        .gap(8.0)
+        .child(text(status).font(small_style()).color(k.c.text_muted));
+    if frame.exited.is_none() && !settled && crate::agent::terminals::owned(id) {
+        let id = id.to_string();
+        foot = foot.child(
+            Button::new("Stop")
+                .variant(ButtonVariant::Ghost)
+                .on_press(move |_: &mut S| tell(Cmd::KillTerminal(id.clone())))
+                .build(k),
+        );
+    }
+    let empty = frame.lines.iter().all(|line| line.is_empty());
+    // Nothing streamed, but the result came as text: that is the output.
+    let body = if empty && settled && !result.is_empty() {
+        text(result.to_string())
+            .font(mono_style())
+            .color(k.c.text_base)
+            .wrap_anywhere()
+            .w_full()
+    } else {
+        super::terminal::embedded(&frame, k)
+    };
+    Some(col().w_full().gap(4.0).child(body).child(foot))
+}
+
 fn tool<S: 'static>(k: &Kit, message: usize, at: usize, t: &Tool) -> El {
     // Collapsed, a call is one line: the first of its title, cut off where it runs out of room.
     let first = t
@@ -330,8 +664,20 @@ fn tool<S: 'static>(k: &Kit, message: usize, at: usize, t: &Tool) -> El {
         if !t.arguments.is_empty() {
             detail = detail.child(wrapped(t.arguments.clone(), k.c.text_muted));
         }
-        if !t.result.is_empty() {
-            detail = detail.child(wrapped(t.result.clone(), k.c.text_base));
+        // The user's own run of the command shows in place of the agent's.
+        let live = match &t.rerun {
+            Some(id) => terminal_block::<S>(k, id, Phase::Working, ""),
+            None => t
+                .terminal
+                .as_deref()
+                .and_then(|id| terminal_block::<S>(k, id, t.phase, &t.result)),
+        };
+        match live {
+            Some(block) => detail = detail.child(block),
+            None if !t.result.is_empty() => {
+                detail = detail.child(wrapped(t.result.clone(), k.c.text_base));
+            }
+            None => {}
         }
         card = card.child(detail);
     }
@@ -616,7 +962,7 @@ fn approve<S: 'static>(
     c
 }
 
-fn block<S: 'static>(k: &Kit, message: usize, at: usize, b: &Block) -> El {
+fn block<S: 'static>(k: &Kit, message: usize, at: usize, b: &Block, cells: &Cells<S>) -> El {
     match b {
         Block::Markdown { text, .. } => Markdown::new(text.to_string())
             .style(super::book_style(k))
@@ -632,6 +978,13 @@ fn block<S: 'static>(k: &Kit, message: usize, at: usize, b: &Block) -> El {
             })
             .build(k),
         Block::Thought { index, text, open } => thought::<S>(k, message, *index, text, *open),
+        Block::Shell {
+            index,
+            ord,
+            command,
+            run,
+            count: _,
+        } => cell::<S>(k, message, *index, *ord, command, run.as_deref(), cells),
         Block::Tool(t) => tool::<S>(k, message, t.index, t),
         Block::Run {
             index,
@@ -682,7 +1035,7 @@ fn block<S: 'static>(k: &Kit, message: usize, at: usize, b: &Block) -> El {
 
 /// One message of the agent's: a row per block, a folded run's own row standing for the blocks it
 /// hides.
-fn agent<S: 'static>(k: &Kit, message: usize, blocks: &[Block]) -> El {
+fn agent<S: 'static>(k: &Kit, message: usize, blocks: &[Block], cells: &Cells<S>) -> El {
     let mut c = col().w_full().gap(8.0);
     let mut skip = 0;
     for (at, b) in blocks.iter().enumerate() {
@@ -698,7 +1051,7 @@ fn agent<S: 'static>(k: &Kit, message: usize, blocks: &[Block]) -> El {
         {
             skip = *count;
         }
-        c = c.child(block::<S>(k, message, at, b));
+        c = c.child(block::<S>(k, message, at, b, cells));
     }
     c
 }
@@ -706,12 +1059,36 @@ fn agent<S: 'static>(k: &Kit, message: usize, blocks: &[Block]) -> El {
 /// How many bars the rail holds at most; more and messages share one.
 const MAX_BARS: usize = 24;
 
-fn transcript<S: 'static>(k: &Kit, snapshot: &Snapshot, state: &State, at: At<S>) -> El {
+/// How many frames the terminals shown in the message drew, or None when it shows none.
+fn terminals_drawn(blocks: &[Block]) -> Option<u64> {
+    blocks
+        .iter()
+        .filter_map(|b| match b {
+            Block::Tool(t) if t.open => t
+                .rerun
+                .as_deref()
+                .or(t.terminal.as_deref())
+                .and_then(crate::agent::terminals::drawn),
+            Block::Shell { run: Some(id), .. } => crate::agent::terminals::drawn(id),
+            _ => None,
+        })
+        .reduce(u64::wrapping_add)
+}
+
+fn transcript<S: 'static>(
+    k: &Kit,
+    snapshot: &Snapshot,
+    state: &State,
+    at: At<S>,
+    read: Read<S>,
+) -> El {
+    let thread = snapshot.thread.1;
     let count = snapshot.items.len();
     // The rows build at layout, only those in the viewport (and two viewports either side), so a
     // long transcript costs the rows it shows: every row keyed by its place, built from the
     // snapshot this pass took.
     let items = snapshot.items.clone();
+    let keyed = items.clone();
     let kit = k.clone();
     let stack = col()
         .key("transcript")
@@ -720,11 +1097,28 @@ fn transcript<S: 'static>(k: &Kit, snapshot: &Snapshot, state: &State, at: At<S>
         .virtual_rows::<S>(
             count,
             96.0,
-            |_: &S, i| format!("item-{i}").into(),
-            move |_: &S, i| {
+            move |s: &S, i| match keyed.get(i) {
+                // A row showing a terminal is a new row with each frame the terminal draws, and one
+                // with a cell being edited with each edit.
+                Some(Item::Agent { index, blocks }) => {
+                    match (terminals_drawn(blocks), edits_of(read(s), thread, *index)) {
+                        (None, None) => format!("item-{i}").into(),
+                        (drawn, edits) => {
+                            format!("item-{i}-{}-{}", drawn.unwrap_or(0), edits.unwrap_or(0)).into()
+                        }
+                    }
+                }
+                _ => format!("item-{i}").into(),
+            },
+            move |s: &S, i| {
+                let cells = Cells {
+                    thread,
+                    state: read(s),
+                    at,
+                };
                 let inner = match items.get(i) {
                     Some(Item::User { text, pictures }) => user_row::<S>(&kit, text, pictures, at),
-                    Some(Item::Agent { index, blocks }) => agent::<S>(&kit, *index, blocks),
+                    Some(Item::Agent { index, blocks }) => agent::<S>(&kit, *index, blocks, &cells),
                     _ => col(),
                 };
                 // As far in as the composer's text, whatever the width, which also keeps it clear of the scroll bar.
@@ -1390,7 +1784,7 @@ pub fn view<S: 'static>(
     snapshot: &Snapshot,
     state: &State,
     k: &Kit,
-    at: At<S>,
+    (at, read): (At<S>, Read<S>),
     framed: bool,
     rename: &super::rename::Rename,
     rename_at: super::rename::At<S>,
@@ -1400,6 +1794,45 @@ pub fn view<S: 'static>(
         .h_full()
         .min_h(0.0)
         .children(framed.then(|| header::<S>(k, snapshot, rename, rename_at)))
-        .child(transcript::<S>(k, snapshot, state, at))
+        .child(transcript::<S>(k, snapshot, state, at, read))
         .child(composer::<S>(k, snapshot, state, at))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_row_with_an_edited_cell_changes_with_each_edit() {
+        let mut state = State::default();
+        assert_eq!(
+            edits_of(&state, 1, 4),
+            None,
+            "nothing edited: the row keeps its key"
+        );
+        state.cells.insert((1, 4, 2), TextEdit::new("ls"));
+        let first = edits_of(&state, 1, 4).expect("an edit");
+        state
+            .cells
+            .get_mut(&(1, 4, 2))
+            .unwrap()
+            .text
+            .push_str(" -la");
+        assert_ne!(edits_of(&state, 1, 4), Some(first), "typed");
+        let typed = edits_of(&state, 1, 4);
+        state.cells.get_mut(&(1, 4, 2)).unwrap().focused = false;
+        assert_eq!(
+            edits_of(&state, 1, 4),
+            typed,
+            "a field that lost the focus is the same row"
+        );
+        // The line that answers a running command is never the row's.
+        state
+            .cells
+            .insert((1, 4, reply_key(1, 4, 0, 0).2), TextEdit::new(""));
+        assert_eq!(edits_of(&state, 1, 4), typed);
+        // Another thread's or message's cells are not this row's.
+        assert_eq!(edits_of(&state, 2, 4), None);
+        assert_eq!(edits_of(&state, 1, 5), None);
+    }
 }

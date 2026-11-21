@@ -466,6 +466,7 @@ impl Mapper {
                     .map(|agent| format!("[{agent}] "))
                     .unwrap_or_default();
                 vec![Event::Permission {
+                    command: None,
                     request: json!({ "approval": data["request_id"] }),
                     title: format!(
                         "{who}{name}: {}",
@@ -508,6 +509,7 @@ impl Mapper {
                     .iter()
                     .enumerate()
                     .map(|(index, question)| Event::Permission {
+                        command: None,
                         request: json!({ "question": id, "index": index }),
                         title: question["question"]
                             .as_str()

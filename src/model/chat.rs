@@ -151,6 +151,14 @@ pub struct Tool {
     pub result: String,
     /// A file the call wrote or changed, which opens in the other pane.
     pub path: Option<String>,
+    /// The terminal its command runs in, drawn live in place of the text result.
+    pub terminal: Option<String>,
+    /// The shell command it runs, which its card can run again.
+    pub command: Option<String>,
+    /// The terminal the user ran the command in from the card, shown in place of the agent's.
+    pub rerun: Option<String>,
+    /// Which of the thread's runs by the user that was, like a notebook's `In [n]`.
+    pub count: Option<u32>,
 }
 
 /// One entry of the plan.
@@ -215,6 +223,16 @@ pub enum Block {
         title: String,
         options: Vec<AskOption>,
         answered: Option<String>,
+    },
+    /// A shell command in the agent's text (a fenced `bash` block): the user is meant to run it,
+    /// which a cell does in place, in a terminal under it. `ord` is which command of the block's
+    /// text it is, `run` the terminal the user ran it in, `count` which run of the thread's that was.
+    Shell {
+        index: usize,
+        ord: usize,
+        command: String,
+        run: Option<String>,
+        count: Option<u32>,
     },
     /// Po's command, offered to be run: what would run, and the commands of it, both below the
     /// plain word of the user.
@@ -370,6 +388,15 @@ pub enum Cmd {
         message: usize,
         block: usize,
         yes: bool,
+    },
+    /// A command running in a terminal of a tool card is ended.
+    KillTerminal(String),
+    /// A shell command of the agent's text is run by the user, in a terminal under it.
+    RunShell {
+        message: usize,
+        block: usize,
+        ord: usize,
+        command: String,
     },
     /// A tool card's call and result are shown or hidden.
     ToggleTool { message: usize, block: usize },

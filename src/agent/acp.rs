@@ -14,7 +14,9 @@ use anyhow::{Context, Result};
 use futures::channel::mpsc::unbounded;
 use serde_json::{Value, json};
 
+use crate::agent::terminals;
 use crate::dev::profile::{UnboundedReceiver, UnboundedSender};
+use crate::system::terminal::Launch;
 
 #[derive(Clone, Debug)]
 pub struct PermissionOption {
@@ -109,6 +111,8 @@ pub enum Event {
         request: Value,
         title: String,
         options: Vec<PermissionOption>,
+        /// The shell command the request is to run, which the user may run themselves first.
+        command: Option<String>,
     },
     Stopped(String),
     /// The agent took a steering or follow-up message into the turn (dex daemon only).
@@ -164,6 +168,8 @@ struct Shared {
     po_mcp: Option<Value>,
     /// Whether the agent said, at the handshake, that it takes images in a prompt.
     images: AtomicBool,
+    /// The terminals this agent made, released with it.
+    terminals: Mutex<Vec<String>>,
 }
 
 impl Shared {
@@ -235,7 +241,7 @@ impl Shared {
     }
 
     #[hotpath::measure(impl_type = "Shared")]
-    fn handle(&self, message: Value) {
+    fn handle(self: &Arc<Self>, message: Value) {
         let method = message
             .get("method")
             .and_then(Value::as_str)
@@ -279,7 +285,8 @@ impl Shared {
             if error["code"].as_i64() == Some(-32000) {
                 let agent = self.agent.lock().expect("agent lock").clone();
                 self.emit(Event::Failed(format!(
-                    "{agent} needs you to sign in. Run its login in a terminal (for Claude: `claude /login`), then start a new thread."
+                    "{agent} needs you to sign in. Run its login here, then start a new thread.\n\n```bash\n{}\n```",
+                    if agent.to_lowercase().contains("claude") { "claude /login" } else { "# run the agent's login command" }
                 )));
                 return;
             }
@@ -392,7 +399,7 @@ impl Shared {
         }
     }
 
-    fn on_request(&self, method: &str, id: Value, params: &Value) {
+    fn on_request(self: &Arc<Self>, method: &str, id: Value, params: &Value) {
         match method {
             "session/request_permission" => {
                 let options = params["options"]
@@ -413,18 +420,120 @@ impl Shared {
                     .as_str()
                     .unwrap_or("Run a tool")
                     .to_string();
+                let command = params["toolCall"]["rawInput"]["command"]
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|c| !c.is_empty())
+                    .map(String::from);
                 self.emit(Event::Permission {
                     request: id,
                     title,
                     options,
+                    command,
                 });
             }
             "fs/read_text_file" => match self.read_file(params) {
                 Ok(content) => self.respond(id, json!({ "content": content })),
                 Err(error) => self.respond_error(id, -32602, &format!("{error:#}")),
             },
+            "terminal/create" => match self.create_terminal(params) {
+                Ok(terminal) => self.respond(id, json!({ "terminalId": terminal })),
+                Err(error) => self.respond_error(id, -32602, &error),
+            },
+            "terminal/output" => match terminals::output(self.terminal_id(params)) {
+                Some((text, truncated, status)) => {
+                    let mut result = json!({ "output": plain(&text), "truncated": truncated });
+                    if let Some(code) = status {
+                        result["exitStatus"] = json!({ "exitCode": code, "signal": null });
+                    }
+                    self.respond(id, result);
+                }
+                None => self.respond_error(id, -32602, "no such terminal"),
+            },
+            "terminal/wait_for_exit" => {
+                // On a thread of its own: the reader must keep taking the agent's messages.
+                let terminal = self.terminal_id(params).to_string();
+                let shared = self.clone();
+                let wait = move || {
+                    loop {
+                        match terminals::output(&terminal) {
+                            None => return shared.respond_error(id, -32602, "no such terminal"),
+                            Some((_, _, Some(code))) => {
+                                return shared
+                                    .respond(id, json!({ "exitCode": code, "signal": null }));
+                            }
+                            Some(_) => std::thread::sleep(std::time::Duration::from_millis(25)),
+                        }
+                    }
+                };
+                if std::thread::Builder::new()
+                    .name("acp-wait".into())
+                    .spawn(wait)
+                    .is_err()
+                {
+                    log::warn!("acp: could not wait for a terminal");
+                }
+            }
+            "terminal/kill" => match terminals::kill(self.terminal_id(params)) {
+                true => self.respond(id, json!({})),
+                false => self.respond_error(id, -32602, "no such terminal"),
+            },
+            "terminal/release" => {
+                let terminal = self.terminal_id(params);
+                if let Ok(mut mine) = self.terminals.lock() {
+                    mine.retain(|t| t != terminal);
+                }
+                match terminals::release(terminal) {
+                    true => self.respond(id, json!({})),
+                    false => self.respond_error(id, -32602, "no such terminal"),
+                }
+            }
             _ => self.respond_error(id, -32601, "method not supported"),
         }
+    }
+
+    fn terminal_id<'a>(&self, params: &'a Value) -> &'a str {
+        params["terminalId"].as_str().unwrap_or_default()
+    }
+
+    /// `terminal/create`: runs the command, in the project or a folder inside it.
+    fn create_terminal(&self, params: &Value) -> Result<String, String> {
+        let program = params["command"].as_str().filter(|c| !c.is_empty());
+        let program = program.ok_or("no command")?;
+        let root = self.cwd.canonicalize().map_err(|_| "bad project root")?;
+        let cwd = match params["cwd"].as_str() {
+            Some(cwd) => Path::new(cwd)
+                .canonicalize()
+                .map_err(|_| "no such folder")?,
+            None => root.clone(),
+        };
+        if !cwd.starts_with(&root) {
+            return Err("outside the project".into());
+        }
+        let text = |v: &Value| v.as_str().map(String::from);
+        let launch = Launch {
+            program: program.to_string(),
+            args: params["args"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(text)
+                .collect(),
+            env: params["env"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|e| Some((text(&e["name"])?, text(&e["value"])?)))
+                .collect(),
+        };
+        let limit = params["outputByteLimit"]
+            .as_u64()
+            .map_or(terminals::DEFAULT_LIMIT, |l| l as usize);
+        let id = terminals::create(&launch, &cwd, limit)?;
+        if let Ok(mut mine) = self.terminals.lock() {
+            mine.push(id.clone());
+        }
+        Ok(id)
     }
 
     fn read_file(&self, params: &Value) -> Result<String> {
@@ -493,6 +602,7 @@ impl Client {
             wanted: wanted.filter(|_| resume).map(String::from),
             listed: Mutex::new(Vec::new()),
             images: AtomicBool::new(false),
+            terminals: Mutex::new(Vec::new()),
             po_mcp: if control.is_empty() {
                 None
             } else {
@@ -524,7 +634,13 @@ impl Client {
             "initialize",
             json!({
                 "protocolVersion": 1,
-                "clientCapabilities": { "fs": { "readTextFile": true, "writeTextFile": false } },
+                // `terminal` runs an agent's commands in Po; the `_meta` keys show the output of
+                // the commands an agent runs itself (claude-agent-acp's display terminals).
+                "clientCapabilities": {
+                    "fs": { "readTextFile": true, "writeTextFile": false },
+                    "terminal": true,
+                    "_meta": { "terminal_output": true, "terminal_output_delta": true },
+                },
                 "clientInfo": { "name": "po", "version": "0.1.0" }
             }),
             Pending::Init,
@@ -606,8 +722,54 @@ impl Client {
     }
 }
 
+/// What a program wrote, as an agent reads it: without the escapes that colour and move the cursor,
+/// and with lines ending in a newline alone.
+pub(crate) fn plain(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\x1b' => match chars.next() {
+                // A control sequence ends at a byte of 0x40..=0x7e after its parameters.
+                Some('[') => {
+                    for c in chars.by_ref() {
+                        if ('\x40'..='\x7e').contains(&c) {
+                            break;
+                        }
+                    }
+                }
+                // An operating system command ends at BEL or ESC \.
+                Some(']') => {
+                    while let Some(c) = chars.next() {
+                        if c == '\x07' {
+                            break;
+                        }
+                        if c == '\x1b' {
+                            chars.next();
+                            break;
+                        }
+                    }
+                }
+                _ => {}
+            },
+            '\r' if chars.peek() == Some(&'\n') => {}
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 impl Drop for Client {
     fn drop(&mut self) {
+        for id in self
+            .shared
+            .terminals
+            .lock()
+            .map(|t| t.clone())
+            .unwrap_or_default()
+        {
+            terminals::release(&id);
+        }
         let _ = self.child.lock().expect("child lock").kill();
     }
 }
@@ -615,6 +777,12 @@ impl Drop for Client {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn plain_drops_escapes_and_carriage_returns() {
+        assert_eq!(plain("\x1b[1;31mred\x1b[0m\r\nnext"), "red\nnext");
+        assert_eq!(plain("a\x1b]0;title\x07b\x1b]8;;x\x1b\\c"), "abc");
+    }
 
     #[test]
     fn parses_flat_and_grouped_select_options() {

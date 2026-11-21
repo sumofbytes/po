@@ -151,6 +151,11 @@ impl Reader {
         cx: &mut Context<Self>,
     ) -> crate::ipc::command::Reply {
         use crate::ipc::command::Command;
+        if let Command::TerminalRun { command, why } = command {
+            let reply = self.ask_terminal(id, command, why);
+            cx.notify();
+            return reply;
+        }
         let reply = if command.moves_viewer() {
             self.with_thread(id, |reader, visible| {
                 if !visible {
@@ -1057,6 +1062,10 @@ impl Reader {
                 id: form,
                 timeout: _,
             } => self.wait_on_form(caller, id, form, deadline),
+            Command::TerminalWait {
+                id: ask,
+                timeout: _,
+            } => self.wait_on_terminal(caller, id, ask, deadline),
             // The reads of threads (list, get, messages…) are answered from the state as it is.
             read => Answer::Now(self.run_read(caller, id, read)),
         }
@@ -1322,6 +1331,132 @@ impl Reader {
         }
     }
 
+    /// `terminal.run`: puts the command in thread `id`'s transcript as a cell the user runs, in a
+    /// terminal they can type into. Nothing runs until they press Run.
+    fn ask_terminal(
+        &mut self,
+        id: u64,
+        command: String,
+        why: Option<String>,
+    ) -> crate::ipc::command::Reply {
+        let ask = format!("term-{}", self.next_terminal);
+        let added = self.with_thread(id, |reader, _| {
+            reader
+                .thread
+                .blocks()
+                .push(crate::session::chat::Block::Terminal {
+                    id: ask.clone(),
+                    command,
+                    why,
+                });
+        });
+        if added.is_none() {
+            return Err("that thread is gone".into());
+        }
+        self.next_terminal += 1;
+        self.terminal_asks.insert(ask.clone(), id);
+        Ok(serde_json::json!({ "id": ask, "state": "waiting for the user to run it" }))
+    }
+
+    /// Where the user's run of command `ask` of the asking thread stands: None while they have
+    /// not run it, or it still runs; the reply for the agent once it ended.
+    fn terminal_result(&mut self, ask: &str) -> Result<Option<Value>, String> {
+        let Some(&owner) = self.terminal_asks.get(ask) else {
+            return Err(format!(
+                "no command `{ask}`; run_in_terminal returns its id"
+            ));
+        };
+        let run = self.with_thread(owner, |reader, _| {
+            let thread = &reader.thread;
+            thread.messages.iter().enumerate().find_map(|(msg, m)| {
+                let Msg::Agent(blocks) = m else { return None };
+                let block = blocks.iter().position(
+                    |b| matches!(b, crate::session::chat::Block::Terminal { id, .. } if id == ask),
+                )?;
+                Some(
+                    thread
+                        .shells
+                        .get(&(msg, block, 0))
+                        .map(|(term, _)| term.clone()),
+                )
+            })
+        });
+        let Some(Some(run)) = run else {
+            return Err(format!("the command `{ask}` is gone"));
+        };
+        let Some(term) = run else { return Ok(None) };
+        let Some((text, truncated, Some(code))) = crate::agent::terminals::output(&term) else {
+            return Ok(None);
+        };
+        // The end of what it printed is what tells: a long run is cut from the start.
+        const MAX: usize = 16 * 1024;
+        let text = crate::agent::acp::plain(&text);
+        let cut = text.len() > MAX;
+        let mut from = text.len().saturating_sub(MAX);
+        while !text.is_char_boundary(from) {
+            from += 1;
+        }
+        Ok(Some(serde_json::json!({
+            "id": ask,
+            "exit_code": code,
+            "output": &text[from..],
+            "truncated": truncated || cut,
+        })))
+    }
+
+    fn wait_on_terminal(
+        &mut self,
+        caller: crate::ipc::command::Caller,
+        id: u64,
+        ask: String,
+        deadline: std::time::Instant,
+    ) -> crate::ipc::command::Answer {
+        use crate::ipc::command::Answer;
+        if self.terminal_asks.get(&ask) != Some(&id) {
+            return Answer::Now(Err(format!("no command `{ask}` of yours")));
+        }
+        if let Err(why) = self.wait_room(caller) {
+            return Answer::Now(Err(why));
+        }
+        match self.terminal_result(&ask) {
+            Ok(Some(done)) => Answer::Now(Ok(done)),
+            Ok(None) => Answer::Later(crate::ipc::command::Wait {
+                threads: vec![],
+                until: vec![],
+                deadline,
+                form: Some(format!("{TERMINAL}{ask}")),
+            }),
+            Err(why) => Answer::Now(Err(why)),
+        }
+    }
+
+    /// Answers the waits on commands the user ran that have now ended. Called when a terminal
+    /// of the transcript drew something, which its end does.
+    pub(crate) fn wake_terminals(&mut self) {
+        let asks: Vec<String> = self
+            .waiters
+            .iter()
+            .filter_map(|w| w.form.as_deref()?.strip_prefix(TERMINAL).map(String::from))
+            .collect();
+        for ask in asks {
+            let reply = match self.terminal_result(&ask) {
+                Ok(None) => continue,
+                Ok(Some(done)) => Ok(done),
+                Err(why) => Err(why),
+            };
+            let key = format!("{TERMINAL}{ask}");
+            let mut kept = Vec::new();
+            for waiter in self.waiters.drain(..) {
+                if waiter.form.as_deref() == Some(key.as_str()) {
+                    waiter.reply.send(reply.clone()).ok();
+                } else {
+                    kept.push(waiter);
+                }
+            }
+            self.waiters = kept;
+        }
+    }
+
     /// Holds a wait the window answered later, and starts its timer.
     pub(crate) fn add_waiter(
         &mut self,
@@ -1446,7 +1581,9 @@ impl Reader {
         self.waiters = kept;
     }
 
-    /// Answers the waits on form `id` of thread `owner`, which the user just submitted.
+    /// Answers the waits on form `id` of thread `owner`, which the user just submitted. A wait on
+    /// a terminal command carries its id after [`TERMINAL`] and is answered by
+    /// [`Self::wake_terminals`].
     pub(crate) fn wake_form(&mut self, owner: u64, id: &str, reply: Value) {
         let mut kept = Vec::new();
         for waiter in self.waiters.drain(..) {
@@ -1668,6 +1805,7 @@ impl Reader {
                     request: _,
                     title,
                     options,
+                    command: _,
                     answered: None,
                 }) => Some(crate::session::state::AskInfo {
                     title: title.clone(),
@@ -1804,3 +1942,6 @@ impl Reader {
         self.background_threads().for_each(quiet);
     }
 }
+
+/// What marks a waiter's `form` as a wait on a terminal command (`terminal.wait`), not a form.
+const TERMINAL: &str = "terminal:";
